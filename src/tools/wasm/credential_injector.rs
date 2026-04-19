@@ -28,6 +28,7 @@ use std::sync::RwLock;
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
 };
+use crate::tools::wasm::OAuthRefreshConfig;
 
 /// Error during credential injection.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -67,6 +68,7 @@ impl From<SecretError> for InjectionError {
 /// `requires_approval` (sync) can query it without async.
 pub struct SharedCredentialRegistry {
     mappings: RwLock<Vec<CredentialMapping>>,
+    oauth_refresh: RwLock<HashMap<String, OAuthRefreshConfig>>,
 }
 
 impl SharedCredentialRegistry {
@@ -74,6 +76,7 @@ impl SharedCredentialRegistry {
     pub fn new() -> Self {
         Self {
             mappings: RwLock::new(Vec::new()),
+            oauth_refresh: RwLock::new(HashMap::new()),
         }
     }
 
@@ -93,6 +96,24 @@ impl SharedCredentialRegistry {
         }
     }
 
+    pub fn add_oauth_refresh_configs(
+        &self,
+        configs: impl IntoIterator<Item = (String, OAuthRefreshConfig)>,
+    ) {
+        match self.oauth_refresh.write() {
+            Ok(mut guard) => {
+                guard.extend(configs);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_oauth_refresh_configs; recovering"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.extend(configs);
+            }
+        }
+    }
+
     /// Remove all credential mappings whose `secret_name` matches any of the given names.
     ///
     /// Called when an extension is unregistered/deactivated so its credential
@@ -108,6 +129,34 @@ impl SharedCredentialRegistry {
             }
         };
         guard.retain(|m| !secret_names.contains(&m.secret_name));
+
+        let mut oauth_guard = match self.oauth_refresh.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during oauth config removal; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        oauth_guard.retain(|name, _| !secret_names.contains(name));
+    }
+
+    /// Check whether `secret_name` is registered. Used to validate
+    /// credential names extracted from tool error strings before treating
+    /// them as a real auth gate request — defends against tools fabricating
+    /// `credential_name` values to phish the user.
+    pub fn has_secret(&self, secret_name: &str) -> bool {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during has_secret; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.iter().any(|m| m.secret_name == secret_name)
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
@@ -150,6 +199,19 @@ impl SharedCredentialRegistry {
             })
             .cloned()
             .collect()
+    }
+
+    pub fn oauth_refresh_for_secret(&self, secret_name: &str) -> Option<OAuthRefreshConfig> {
+        let guard = match self.oauth_refresh.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during oauth_refresh_for_secret; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.get(secret_name).cloned()
     }
 }
 
@@ -315,6 +377,15 @@ pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
         return true;
     }
 
+    // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
+    // (parsed_url.host_str() strips the port, but credential specs may include it)
+    if let Some(pattern_host) = pattern.split(':').next()
+        && pattern.contains(':')
+        && pattern_host == host
+    {
+        return true;
+    }
+
     // Support wildcard: *.example.com matches sub.example.com
     if let Some(suffix) = pattern.strip_prefix("*.")
         && host.ends_with(suffix)
@@ -393,6 +464,19 @@ mod tests {
     }
 
     #[test]
+    fn test_host_matches_pattern_with_port() {
+        // Pattern includes port but host_str() returns without port
+        assert!(host_matches_pattern("127.0.0.1", "127.0.0.1:8080"));
+        assert!(host_matches_pattern("localhost", "localhost:3000"));
+        assert!(host_matches_pattern(
+            "api.example.com",
+            "api.example.com:443"
+        ));
+        // Should not match different hosts
+        assert!(!host_matches_pattern("other.com", "api.example.com:443"));
+    }
+
+    #[test]
     fn test_base64_encode() {
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
         assert_eq!(base64_encode(b"user:pass"), "dXNlcjpwYXNz");
@@ -416,6 +500,7 @@ mod tests {
                 secret_name: "openai_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
+                optional: false,
             },
         );
 
@@ -449,6 +534,7 @@ mod tests {
                     prefix: None,
                 },
                 host_patterns: vec!["*.example.com".to_string()],
+                optional: false,
             },
         );
 
@@ -481,6 +567,7 @@ mod tests {
                     username: "myuser".to_string(),
                 },
                 host_patterns: vec!["api.service.com".to_string()],
+                optional: false,
             },
         );
 
@@ -523,6 +610,7 @@ mod tests {
                 secret_name: "secret_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
+                optional: false,
             },
         );
 

@@ -210,14 +210,15 @@ interface channel-host {
         meta-json: string
     ) -> result<pairing-upsert-result, string>;
 
-    /// Check if a sender is allowed (in allowFrom store).
-    pairing-is-allowed: func(
+    /// Resolve the owner-id for a paired sender.
+    /// Returns the owner-id string if the sender is paired, or none if unknown.
+    pairing-resolve-identity: func(
         channel: string,
-        id: string,
-        username: option<string>
-    ) -> result<bool, string>;
+        external-id: string,
+    ) -> result<option<string>, string>;
 
-    /// Read the allowFrom list (for merging with config allowFrom).
+    /// Read paired external IDs for compatibility with legacy allowFrom-based
+    /// admission checks. New channels should prefer pairing-resolve-identity.
     pairing-read-allow-from: func(channel: string) -> result<list<string>, string>;
 }
 

@@ -23,7 +23,8 @@
 //! - App credentials (app_id, app_secret) are injected by the host into
 //!   the config JSON during startup for token exchange
 //! - Bearer token for API calls is obtained via token exchange and cached
-//! - Verification token validated by host for webhook requests
+//! - Webhook requests must be authenticated by the host or by a matching
+//!   Feishu verification token in the request body
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -32,6 +33,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 // Re-export generated types
 use exports::near::agent::channel::{
@@ -50,6 +52,7 @@ const ALLOW_FROM_PATH: &str = "allow_from";
 const API_BASE_PATH: &str = "api_base";
 const APP_ID_PATH: &str = "app_id";
 const APP_SECRET_PATH: &str = "app_secret";
+const VERIFICATION_TOKEN_PATH: &str = "verification_token";
 const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 
@@ -102,6 +105,10 @@ struct FeishuEventHeader {
     /// Tenant key.
     #[serde(default)]
     tenant_key: Option<String>,
+
+    /// Verification token for v2 event payloads.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// Message receive event payload (im.message.receive_v1).
@@ -251,6 +258,9 @@ struct FeishuConfig {
     /// Feishu App Secret (for token exchange).
     app_secret: Option<String>,
 
+    /// Feishu Event Subscription verification token.
+    verification_token: Option<String>,
+
     /// API base URL. Defaults to "https://open.feishu.cn" (use
     /// "https://open.larksuite.com" for Lark international).
     #[serde(default = "default_api_base")]
@@ -299,6 +309,9 @@ impl Guest for FeishuChannel {
         }
         if let Some(ref app_secret) = config.app_secret {
             let _ = channel_host::workspace_write(APP_SECRET_PATH, app_secret);
+        }
+        if let Some(ref verification_token) = config.verification_token {
+            let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, verification_token);
         }
 
         if let Some(owner_id) = &config.owner_id {
@@ -375,6 +388,23 @@ impl Guest for FeishuChannel {
                 return json_response(200, serde_json::json!({}));
             }
         };
+
+        let configured_token =
+            channel_host::workspace_read(VERIFICATION_TOKEN_PATH).filter(|token| !token.is_empty());
+        if !is_authenticated_webhook(
+            req.secret_validated,
+            configured_token.as_deref(),
+            request_verification_token(&event),
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Rejecting unauthenticated Feishu webhook request",
+            );
+            return json_response(
+                401,
+                serde_json::json!({"error": "Webhook authentication failed"}),
+            );
+        }
 
         // Handle URL verification challenge (initial webhook setup).
         if event.event_type.as_deref() == Some("url_verification") {
@@ -487,30 +517,57 @@ fn handle_message_event(event_data: &serde_json::Value) {
     // DM pairing check for p2p chats.
     let chat_type = msg_event.message.chat_type.as_deref().unwrap_or("unknown");
 
+    // Resolved user_id for the emitted message. Defaults to sender_id but
+    // is overwritten with the owner_id when the sender is paired, ensuring
+    // the message is scoped to the correct owner/tenant.
+    let mut user_id = sender_id.to_string();
+
     if chat_type == "p2p" {
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
         if dm_policy == "pairing" {
-            let sender_name = sender_id.to_string();
-            match channel_host::pairing_is_allowed("feishu", sender_id, Some(&sender_name)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    // Upsert a pairing request.
+            match channel_host::pairing_resolve_identity("feishu", sender_id) {
+                Ok(Some(owner_id)) => {
+                    // Sender is paired; scope message to owner.
+                    user_id = owner_id;
+                }
+                Ok(None) => {
+                    // Unknown sender — upsert a pairing request.
                     let meta = serde_json::json!({
                         "sender_id": sender_id,
                         "chat_id": msg_event.message.chat_id,
                         "chat_type": chat_type,
                     });
-                    let _ = channel_host::pairing_upsert_request(
+                    match channel_host::pairing_upsert_request(
                         "feishu",
                         sender_id,
                         &meta.to_string(),
-                    );
-                    channel_host::log(
-                        channel_host::LogLevel::Info,
-                        &format!("Pairing request created for {}", sender_id),
-                    );
+                    ) {
+                        Ok(result) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Info,
+                                &format!(
+                                    "Pairing request created for {}: {}",
+                                    sender_id, result.code
+                                ),
+                            );
+                            let _ = send_message(
+                                sender_id,
+                                "open_id",
+                                &format!(
+                                    "Enter this code in IronClaw to pair your feishu account: `{}`. CLI fallback: `ironclaw pairing approve feishu {}`",
+                                    result.code, result.code
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Error,
+                                &format!("Pairing upsert failed: {}", e),
+                            );
+                        }
+                    }
                     return;
                 }
                 Err(e) => {
@@ -556,7 +613,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
 
     // Emit message to the agent.
     channel_host::emit_message(&EmittedMessage {
-        user_id: sender_id.to_string(),
+        user_id,
         user_name: None,
         content: text,
         thread_id,
@@ -839,6 +896,31 @@ fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
     }
 }
 
+fn is_authenticated_webhook(
+    secret_validated: bool,
+    configured_token: Option<&str>,
+    request_token: Option<&str>,
+) -> bool {
+    if secret_validated {
+        return true;
+    }
+
+    match (configured_token, request_token) {
+        (Some(expected), Some(provided)) => {
+            bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+        }
+        _ => false,
+    }
+}
+
+fn request_verification_token(event: &FeishuEvent) -> Option<&str> {
+    event
+        .header
+        .as_ref()
+        .and_then(|header| header.token.as_deref())
+        .or(event.token.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,7 +944,10 @@ mod tests {
     fn parse_token_response_rejects_missing_token() {
         let json = r#"{"code": 0, "msg": "ok", "expire": 7200}"#;
         let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "should fail when tenant_access_token is missing");
+        assert!(
+            result.is_err(),
+            "should fail when tenant_access_token is missing"
+        );
     }
 
     #[test]
@@ -893,5 +978,65 @@ mod tests {
         let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.code, 10003);
         assert!(resp.tenant_access_token.is_empty());
+    }
+
+    #[test]
+    fn webhook_auth_requires_host_auth_or_matching_verification_token() {
+        assert!(
+            !is_authenticated_webhook(false, None, Some("token")),
+            "requests without any configured verification mechanism must be rejected"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), None),
+            "requests missing the Feishu token must be rejected when host auth did not pass"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), Some("wrong")),
+            "requests with the wrong Feishu token must be rejected"
+        );
+        assert!(
+            is_authenticated_webhook(false, Some("expected"), Some("expected")),
+            "matching Feishu verification token should authenticate the request"
+        );
+        assert!(
+            is_authenticated_webhook(true, None, None),
+            "host-authenticated requests should still be accepted"
+        );
+        assert!(
+            is_authenticated_webhook(true, Some("expected"), Some("wrong")),
+            "host authentication should take precedence over body token checks"
+        );
+    }
+
+    #[test]
+    fn request_verification_token_prefers_v2_header_token() {
+        let event: FeishuEvent = serde_json::from_str(
+            r#"{
+                "schema": "2.0",
+                "header": {
+                    "event_id": "evt_123",
+                    "event_type": "im.message.receive_v1",
+                    "token": "header-token"
+                },
+                "event": {}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(request_verification_token(&event), Some("header-token"));
+    }
+
+    #[test]
+    fn request_verification_token_falls_back_to_top_level_token() {
+        let event: FeishuEvent = serde_json::from_str(
+            r#"{
+                "type": "url_verification",
+                "challenge": "abc",
+                "token": "top-level-token"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(request_verification_token(&event), Some("top-level-token"));
     }
 }

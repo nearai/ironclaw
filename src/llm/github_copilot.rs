@@ -211,7 +211,9 @@ impl GithubCopilotProvider {
 #[async_trait]
 impl LlmProvider for GithubCopilotProvider {
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
         let messages = convert_messages(req.messages);
 
@@ -231,9 +233,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, _tool_calls) = extract_choice_content(&choice);
@@ -268,7 +269,9 @@ impl LlmProvider for GithubCopilotProvider {
         &self,
         mut req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
         let messages = convert_messages(req.messages);
 
@@ -309,9 +312,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, tool_calls) = extract_choice_content(&choice);

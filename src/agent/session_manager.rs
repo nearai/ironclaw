@@ -197,10 +197,31 @@ impl SessionManager {
             }
         }
 
-        // Create new thread (always create a new one for a new key)
+        // Create new thread (always create a new one for a new key).
+        // If the external_thread_id is a valid UUID AND it isn't already
+        // mapped to a different ThreadKey, adopt it as the internal thread ID
+        // so callers (e.g. the Responses API) can look up conversations by
+        // the same UUID they encoded in the response ID.
         let thread_id = {
+            // Check under read lock: only adopt ext_uuid if no other key
+            // maps to it (prevents aliasing two keys to the same thread).
+            let safe_ext_uuid = if let Some(uuid) = ext_uuid {
+                let thread_map = self.thread_map.read().await;
+                if thread_map.values().any(|&v| v == uuid) {
+                    None // Already mapped elsewhere — generate a new UUID
+                } else {
+                    Some(uuid)
+                }
+            } else {
+                None
+            };
+
             let mut sess = session.lock().await;
-            let thread = sess.create_thread();
+            let thread = if let Some(uuid) = safe_ext_uuid {
+                sess.create_thread_with_id(uuid, Some(channel))
+            } else {
+                sess.create_thread(Some(channel))
+            };
             thread.id
         };
 
@@ -476,7 +497,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-hydrate")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(thread_id, sess.id);
+            let thread = Thread::with_id(thread_id, sess.id, None);
             sess.threads.insert(thread_id, thread);
             sess.active_thread = Some(thread_id);
         }
@@ -600,7 +621,7 @@ mod tests {
         // Simulate hydration: create thread with a known UUID
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(known_uuid, session_id);
+            let thread = Thread::with_id(known_uuid, session_id, None);
             sess.threads.insert(known_uuid, thread);
         }
 
@@ -627,7 +648,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-idem")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
 
@@ -656,7 +677,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-undo")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
 
@@ -680,7 +701,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-new")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
 
@@ -788,7 +809,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-cross")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
 
@@ -815,7 +836,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-cross")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
 
@@ -966,7 +987,7 @@ mod tests {
         let adopted_id = Uuid::new_v4();
         {
             let mut sess = session1.lock().await;
-            let thread = Thread::with_id(adopted_id, sess.id);
+            let thread = Thread::with_id(adopted_id, sess.id, None);
             sess.threads.insert(adopted_id, thread);
         }
         // Resolve with the UUID as external_thread_id -- should adopt it
@@ -992,7 +1013,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("user-direct")));
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(tid, sess.id);
+            let thread = Thread::with_id(tid, sess.id, None);
             sess.threads.insert(tid, thread);
         }
         {
@@ -1030,7 +1051,7 @@ mod tests {
         let known_id = Uuid::new_v4();
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(known_id, sess.id);
+            let thread = Thread::with_id(known_id, sess.id, None);
             sess.threads.insert(known_id, thread);
         }
 
@@ -1057,7 +1078,7 @@ mod tests {
         let known_id = Uuid::new_v4();
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(known_id, sess.id);
+            let thread = Thread::with_id(known_id, sess.id, None);
             sess.threads.insert(known_id, thread);
         }
 
@@ -1081,7 +1102,7 @@ mod tests {
         let known_id = Uuid::new_v4();
         {
             let mut sess = session.lock().await;
-            let thread = Thread::with_id(known_id, sess.id);
+            let thread = Thread::with_id(known_id, sess.id, None);
             sess.threads.insert(known_id, thread);
         }
 
@@ -1100,6 +1121,21 @@ mod tests {
         assert_ne!(
             resolved, known_id,
             "should NOT adopt UUID when external_thread_id is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_thread_stores_source_channel() {
+        let manager = SessionManager::new();
+
+        let (session, thread_id) = manager.resolve_thread("user-1", "telegram", None).await;
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).unwrap();
+        assert_eq!(
+            thread.source_channel.as_deref(),
+            Some("telegram"),
+            "resolve_thread should store source_channel from the channel parameter"
         );
     }
 }

@@ -1,0 +1,375 @@
+---
+title: WebSocket & SSE Streaming
+sidebarTitle: WebSocket & SSE
+description: Real-time streaming via WebSocket and Server-Sent Events
+---
+
+IronClaw supports two real-time streaming protocols: **WebSocket** for bidirectional communication (chat, job updates) and **Server-Sent Events (SSE)** for unidirectional log and event streams.
+
+---
+
+## WebSocket
+
+### Endpoint
+
+```
+ws://localhost:3000/ws
+```
+
+For TLS-terminated deployments:
+
+```
+wss://ironclaw.yourdomain.com/ws
+```
+
+### Authentication
+
+WebSocket connections authenticate by sending an `auth` message immediately after connecting. The connection is rejected if authentication is not completed within 10 seconds.
+
+```json
+{
+  "type": "auth",
+  "token": "<GATEWAY_AUTH_TOKEN>"
+}
+```
+
+Successful authentication response:
+
+```json
+{
+  "type": "auth_ok",
+  "user_id": "default"
+}
+```
+
+Failed authentication:
+
+```json
+{
+  "type": "error",
+  "code": "auth_failed",
+  "message": "Invalid token"
+}
+```
+
+---
+
+### Message Types
+
+**Client → Server:**
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `auth` | Authenticate the connection | `{ "token": "..." }` |
+| `chat` | Send a message to the agent | `{ "message": "...", "session_id": "..." }` |
+| `cancel_job` | Cancel a running job | `{ "job_id": "..." }` |
+| `ping` | Keepalive ping | `{}` |
+
+**Server → Client:**
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `auth_ok` | Authentication succeeded | `{ "user_id": "..." }` |
+| `job_created` | A new job was created | `{ "job_id": "...", "status": "pending" }` |
+| `job_update` | Job state changed | `{ "job_id": "...", "status": "...", "output": "..." }` |
+| `job_complete` | Job finished successfully | `{ "job_id": "...", "result": "..." }` |
+| `job_failed` | Job failed | `{ "job_id": "...", "error": "..." }` |
+| `tool_call` | A tool is being invoked | `{ "job_id": "...", "tool": "...", "params": {} }` |
+| `stream_chunk` | Partial LLM response chunk | `{ "job_id": "...", "delta": "..." }` |
+| `error` | Protocol or server error | `{ "code": "...", "message": "..." }` |
+| `pong` | Keepalive pong | `{}` |
+
+---
+
+### JavaScript Example
+
+```javascript
+const TOKEN = 'your-gateway-auth-token';
+const ws = new WebSocket('ws://localhost:3000/ws');
+
+ws.onopen = () => {
+  // Step 1: authenticate
+  ws.send(JSON.stringify({ type: 'auth', token: TOKEN }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  switch (msg.type) {
+    case 'auth_ok':
+      console.log('Authenticated, user:', msg.user_id);
+      // Step 2: send a chat message
+      ws.send(JSON.stringify({
+        type: 'chat',
+        message: 'What jobs ran today?',
+        session_id: 'default',
+      }));
+      break;
+
+    case 'stream_chunk':
+      console.log(msg.delta); // stream the response
+      break;
+
+    case 'job_complete':
+      console.log('\nDone. Job:', msg.job_id);
+      break;
+
+    case 'job_failed':
+      console.error('Job failed:', msg.error);
+      break;
+
+    case 'error':
+      console.error('Error:', msg.code, msg.message);
+      break;
+  }
+};
+
+ws.onerror = (err) => console.error('WebSocket error:', err);
+ws.onclose = (event) => console.log('Closed:', event.code, event.reason);
+```
+
+---
+
+### Reconnection with Exponential Backoff
+
+WebSocket connections can drop due to network interruptions or server restarts. Implement reconnection with exponential backoff to avoid hammering the server:
+
+```javascript
+class IronclawSocket {
+  constructor(url, token) {
+    this.url = url;
+    this.token = token;
+    this.ws = null;
+    this.reconnectDelay = 1000; // start at 1 second
+    this.maxDelay = 30000;      // cap at 30 seconds
+    this.reconnectTimer = null;
+    this.connect();
+  }
+
+  connect() {
+    this.ws = new WebSocket(this.url);
+
+    this.ws.onopen = () => {
+      this.reconnectDelay = 1000; // reset on successful connect
+      this.ws.send(JSON.stringify({ type: 'auth', token: this.token }));
+    };
+
+    this.ws.onmessage = (event) => {
+      this.onMessage(JSON.parse(event.data));
+    };
+
+    this.ws.onclose = (event) => {
+      if (!event.wasClean) {
+        this.scheduleReconnect();
+      }
+    };
+
+    this.ws.onerror = () => {
+      this.ws.close();
+    };
+  }
+
+  scheduleReconnect() {
+    clearTimeout(this.reconnectTimer);
+    console.log(`Reconnecting in ${this.reconnectDelay / 1000}s...`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxDelay);
+      this.connect();
+    }, this.reconnectDelay);
+  }
+
+  send(msg) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  onMessage(msg) {
+    // Override in subclass or replace with your handler
+    console.log(msg);
+  }
+}
+
+// Usage
+const client = new IronclawSocket('ws://localhost:3000/ws', TOKEN);
+```
+
+---
+
+## Server-Sent Events (SSE)
+
+SSE provides a unidirectional stream from the server to the client over a standard HTTP connection. It is simpler than WebSocket for read-only use cases like log tailing and event monitoring.
+
+### Endpoint
+
+```
+GET /api/logs
+Accept: text/event-stream
+```
+
+### Authentication
+
+SSE uses the same bearer token in the `Authorization` header:
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/event-stream" \
+  http://localhost:3000/api/logs
+```
+
+### SSE Event Types
+
+Each SSE event has an `event` field indicating its type and a `data` field containing a JSON payload.
+
+| Event | Description | Data Fields |
+|-------|-------------|-------------|
+| `log` | A log line from the agent | `{ "level": "info", "message": "...", "module": "...", "ts": "..." }` |
+| `job_status` | Job state changed | `{ "job_id": "...", "status": "...", "ts": "..." }` |
+| `routine_fired` | A routine was triggered and executed | `{ "routine_id": "...", "name": "...", "ts": "..." }` |
+| `heartbeat` | Proactive heartbeat executed | `{ "findings": true, "summary": "...", "ts": "..." }` |
+| `tool_call` | A tool was invoked | `{ "job_id": "...", "tool": "...", "ts": "..." }` |
+| `error` | Server-side error in the stream | `{ "code": "...", "message": "..." }` |
+
+### Example SSE Stream
+
+```
+event: log
+data: {"level":"info","message":"Job job_01j9abc123 started","module":"ironclaw::agent","ts":"2024-01-15T10:30:00Z"}
+
+event: tool_call
+data: {"job_id":"job_01j9abc123","tool":"memory_search","ts":"2024-01-15T10:30:01Z"}
+
+event: job_status
+data: {"job_id":"job_01j9abc123","status":"completed","ts":"2024-01-15T10:30:03Z"}
+
+event: heartbeat
+data: {"findings":true,"summary":"3 pending items in checklist","ts":"2024-01-15T10:30:00Z"}
+```
+
+### JavaScript SSE Example
+
+```javascript
+const evtSource = new EventSource(
+  'http://localhost:3000/api/logs',
+  {
+    // EventSource doesn't support custom headers natively in browsers.
+    // Use a token query parameter as an alternative:
+    // 'http://localhost:3000/api/logs?token=...'
+    // Or use fetch with ReadableStream for header support (see below).
+  }
+);
+
+evtSource.addEventListener('log', (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`[${data.level.toUpperCase()}] ${data.message}`);
+});
+
+evtSource.addEventListener('job_status', (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`Job ${data.job_id} → ${data.status}`);
+});
+
+evtSource.addEventListener('heartbeat', (event) => {
+  const data = JSON.parse(event.data);
+  if (data.findings) console.warn('Heartbeat findings:', data.summary);
+});
+
+evtSource.onerror = () => {
+  console.error('SSE connection lost, browser will auto-reconnect');
+};
+```
+
+### SSE with Fetch (Header Authentication)
+
+The native `EventSource` API does not support custom headers. Use `fetch` with a `ReadableStream` for full header control:
+
+```javascript
+async function streamLogs(token) {
+  const response = await fetch('http://localhost:3000/api/logs', {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'text/event-stream',
+    },
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete line
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.slice(6));
+        console.log(data);
+      }
+    }
+  }
+}
+```
+
+---
+
+## Reverse Proxy Configuration for WebSocket
+
+WebSocket connections require specific proxy headers. Without them, the connection upgrade will fail.
+
+### nginx
+
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:3000/ws;
+    proxy_http_version 1.1;
+
+    # Required for WebSocket upgrade
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+
+    # Keep connections alive
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+    keepalive_timeout 86400s;
+}
+
+location /api/logs {
+    proxy_pass http://127.0.0.1:3000/api/logs;
+    proxy_http_version 1.1;
+
+    # Required for SSE
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 86400s;
+    chunked_transfer_encoding on;
+}
+```
+
+### Caddy
+
+Caddy handles WebSocket and SSE automatically — no special configuration needed. The `reverse_proxy` directive transparently proxies both protocols.
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="REST API Reference" icon="code" href="/ops/api">
+    All 40+ REST endpoints including jobs, memory, and routines
+  </Card>
+  <Card title="Logging" icon="file-text" href="/ops/logging">
+    RUST_LOG levels and structured log output
+  </Card>
+  <Card title="VPS Hardening" icon="shield" href="/platforms/vps">
+    nginx and Caddy reverse proxy configuration with TLS
+  </Card>
+</CardGroup>

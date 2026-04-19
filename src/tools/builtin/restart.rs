@@ -170,6 +170,8 @@ mod tests {
     fn enable_docker_env() {
         unsafe {
             std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+            // Keep restart tests from terminating the shared lib-test process.
+            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
         }
     }
 

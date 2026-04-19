@@ -268,7 +268,7 @@ async fn install_tool(
     println!("  Name: {}", tool_name);
     println!("  WASM: {}", target_wasm.display());
     println!("  Size: {} bytes", wasm_bytes.len());
-    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars
+    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars // safety: hex digest is ASCII.
 
     if target_caps.exists() {
         println!("  Caps: {}", target_caps.display());
@@ -878,12 +878,12 @@ async fn auth_tool_oauth(
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> anyhow::Result<()> {
-    use crate::cli::oauth_defaults;
+    use crate::auth::oauth;
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
     // Get client_id: capabilities file > runtime env var > built-in defaults
-    let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+    let builtin = oauth::builtin_credentials(&auth.secret_name);
 
     let client_id = oauth
         .client_id
@@ -901,9 +901,7 @@ async fn auth_tool_oauth(
                  Set {} env var",
                 oauth.client_id_env.as_deref().unwrap_or("the client_id")
             );
-            if let Some(override_env) =
-                oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
-            {
+            if let Some(override_env) = oauth::builtin_client_id_override_env(&auth.secret_name) {
                 message.push_str(&format!(", or build with {override_env}"));
             }
             message.push('.');
@@ -925,11 +923,11 @@ async fn auth_tool_oauth(
     println!("  Starting OAuth authentication...");
     println!();
 
-    let listener = oauth_defaults::bind_callback_listener().await?;
-    let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
+    let listener = oauth::bind_callback_listener().await?;
+    let redirect_uri = format!("{}/callback", oauth::callback_url());
 
     // Build authorization URL with PKCE and CSRF state
-    let oauth_result = oauth_defaults::build_oauth_url(
+    let oauth_result = oauth::build_oauth_url(
         &oauth.authorization_url,
         &client_id,
         &redirect_uri,
@@ -950,7 +948,7 @@ async fn auth_tool_oauth(
 
     println!("  Waiting for authorization...");
 
-    let code = oauth_defaults::wait_for_callback(
+    let code = oauth::wait_for_callback(
         listener,
         "/callback",
         "code",
@@ -963,7 +961,7 @@ async fn auth_tool_oauth(
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let token_response = oauth_defaults::exchange_oauth_code(
+    let token_response = oauth::exchange_oauth_code(
         &oauth.token_url,
         &client_id,
         client_secret.as_deref(),
@@ -975,7 +973,7 @@ async fn auth_tool_oauth(
     .await?;
 
     // Save tokens (access + refresh + scopes)
-    oauth_defaults::store_oauth_tokens(
+    oauth::store_oauth_tokens(
         store,
         user_id,
         &auth.secret_name,
@@ -1101,13 +1099,12 @@ fn read_hidden_input() -> anyhow::Result<String> {
                 KeyCode::Enter => {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if !input.is_empty() {
-                        input.pop();
-                        print!("\x08 \x08");
-                        std::io::stdout().flush()?;
-                    }
+                KeyCode::Backspace if !input.is_empty() => {
+                    input.pop();
+                    print!("\x08 \x08");
+                    std::io::stdout().flush()?;
                 }
+                KeyCode::Backspace => {}
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     return Err(anyhow::anyhow!("Interrupted"));
@@ -1133,7 +1130,7 @@ async fn validate_token(
     validation: &crate::tools::wasm::ValidationEndpointSchema,
     _secret_name: &str,
 ) -> anyhow::Result<()> {
-    crate::cli::oauth_defaults::validate_oauth_token(token, validation)
+    crate::auth::oauth::validate_oauth_token(token, validation)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
 }
@@ -1150,7 +1147,7 @@ async fn save_token(
     refresh_token: Option<&str>,
     expires_in: Option<u64>,
 ) -> anyhow::Result<()> {
-    crate::cli::oauth_defaults::store_oauth_tokens(
+    crate::auth::oauth::store_oauth_tokens(
         store,
         user_id,
         &auth.secret_name,

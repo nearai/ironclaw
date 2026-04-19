@@ -61,7 +61,7 @@
             "tool_calls": [
               {
                 "id": "call_ns_1",
-                "name": "mock-notion_notion-search",
+                "name": "mock_notion_notion-search",
                 "arguments": { "query": "recent notes" }
               }
             ],
@@ -76,7 +76,7 @@
             "tool_calls": [
               {
                 "id": "call_nf_1",
-                "name": "mock-notion_notion-fetch",
+                "name": "mock_notion_notion-fetch",
                 "arguments": { "query": "page-001" }
               }
             ],

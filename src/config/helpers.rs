@@ -186,6 +186,37 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Setting keys that influence LLM/embeddings provider base URLs.
+///
+/// These keys are validated with the operator policy (which allows
+/// private/loopback endpoints), so they must only be writable and
+/// resolvable for admin users. The settings HTTP handlers reject
+/// non-admin writes/imports of these keys; `strip_admin_only_llm_keys`
+/// is the matching defense for the read/resolve path so a non-admin
+/// user (or pre-existing legacy DB row) cannot reactivate a private
+/// endpoint after this restriction landed.
+pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
+    "llm_builtin_overrides",
+    "llm_custom_providers",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
+
+/// Remove admin-only LLM setting keys from a flat DB settings map.
+///
+/// Used by config resolution paths that load per-user DB settings for a
+/// non-operator user, to ensure they cannot inject private/loopback
+/// provider endpoints into the active LLM/embeddings configuration.
+pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Value>) {
+    map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BaseUrlPolicy {
+    StrictSsrf,
+    AllowPrivateNetwork,
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -196,7 +227,135 @@ pub(crate) fn parse_string_env(
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::StrictSsrf)
+}
+
+/// Validate an operator-configured model endpoint.
+///
+/// Unlike generic SSRF validation, this allows private/loopback LLM endpoints
+/// over both HTTP and HTTPS because they are explicitly configured by the
+/// operator. Public HTTP endpoints remain blocked to avoid sending credentials
+/// over plaintext transport.
+pub(crate) fn validate_operator_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::AllowPrivateNetwork)
+}
+
+fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
     use std::net::{IpAddr, Ipv4Addr};
+
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_link_local()
+                || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+            {
+                IpClass::AlwaysBlocked
+            } else if v4.is_private()
+                || v4.is_loopback()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                classify_ip(&IpAddr::V4(v4))
+            } else if v6.is_unspecified()
+                || v6.octets()[0] == 0xff
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
+                IpClass::AlwaysBlocked
+            } else if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
+                IpClass::PrivateOrLoopback
+            } else {
+                IpClass::Public
+            }
+        }
+    }
+}
+
+/// Time-to-live for the cached DNS probe result.
+///
+/// Re-probing every 5 minutes ensures that transient DNS unavailability at
+/// startup does not permanently disable SSRF validation for the process.
+const DNS_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cached DNS probe result with an expiration timestamp.
+struct DnsProbeCache {
+    available: bool,
+    expires_at: std::time::Instant,
+}
+
+/// Try to resolve `hostname` with a short timeout (2 s) on a background
+/// thread.  Returns `true` if the name resolved successfully.
+fn try_resolve_hostname(hostname: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    let owned = hostname.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (owned.as_str(), port).to_socket_addrs().is_ok();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or(false)
+}
+
+/// Check whether external DNS resolution is functional.
+///
+/// In some environments (sandboxed CI, containers behind an egress proxy),
+/// the process has no direct DNS resolution for external hostnames — all
+/// outbound traffic goes through an HTTP proxy that resolves on the
+/// caller's behalf. `to_socket_addrs()` will always fail for non-local
+/// hostnames in such environments.
+///
+/// The result is cached for [`DNS_PROBE_TTL`] (5 minutes) and then
+/// re-probed so that transient DNS outages at startup do not permanently
+/// disable SSRF validation.
+fn dns_probe_available() -> bool {
+    static PROBE: Mutex<Option<DnsProbeCache>> = Mutex::new(None);
+
+    let guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard
+        && std::time::Instant::now() < cached.expires_at
+    {
+        return cached.available;
+    }
+    // Drop the lock before doing the (potentially slow) probe.
+    drop(guard);
+
+    let result = try_resolve_hostname("one.one.one.one", 443);
+
+    let mut guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(DnsProbeCache {
+        available: result,
+        expires_at: std::time::Instant::now() + DNS_PROBE_TTL,
+    });
+    result
+}
+
+/// Try resolving the actual target hostname first.  If that succeeds, DNS
+/// is clearly available for this name and there is no need to fall back to
+/// the generic probe.  If it fails, consult the time-limited generic probe
+/// to decide whether DNS is globally unavailable (skip SSRF validation) or
+/// whether this specific name genuinely does not resolve (report an error).
+fn dns_available_for_host(host: &str, port: u16) -> bool {
+    if try_resolve_hostname(host, port) {
+        return true;
+    }
+    // The target itself did not resolve -- check the generic probe to
+    // distinguish "DNS is down" from "this hostname is invalid".
+    dns_probe_available()
+}
+
+fn validate_base_url_with_policy(
+    url: &str,
+    field_name: &str,
+    policy: BaseUrlPolicy,
+) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, ToSocketAddrs};
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -217,118 +376,248 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     })?;
 
     let host_lower = host.to_lowercase();
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
 
-    // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
-    // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
-    if scheme == "http" {
-        let is_localhost = host_lower == "localhost"
+    let is_localhost_name = || {
+        host_lower == "localhost"
             || host_lower == "127.0.0.1"
-            || host_lower == "::1"
-            || host_lower == "[::1]"
-            || host_lower.ends_with(".localhost");
-        if !is_localhost {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
+            || normalized_host == "::1"
+            || host_lower.ends_with(".localhost")
+    };
+
+    if scheme == "http" && policy == BaseUrlPolicy::StrictSsrf && !is_localhost_name() {
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
+                 Use HTTPS for remote endpoints.",
+                host
+            ),
+        });
+    }
+
+    let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        vec![ip]
+    } else if !dns_available_for_host(
+        host,
+        parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 }),
+    ) {
+        // When DNS resolution is entirely unavailable (e.g. sandboxed CI
+        // environments where an egress proxy handles DNS, or offline
+        // development), skip the DNS lookup and SSRF IP validation entirely.
+        // The syntactic checks above still apply, and runtime HTTP clients
+        // will resolve through the proxy anyway.
+        tracing::debug!(
+            host = %host,
+            field = %field_name,
+            "DNS resolution unavailable; skipping SSRF IP validation for base URL"
+        );
+        return Ok(());
+    } else {
+        let port = parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 });
+        // `to_socket_addrs` performs blocking DNS resolution. This helper is
+        // also called from async request handlers (e.g. the LLM utility
+        // routes), so wrap the lookup in `block_in_place` when running on a
+        // multi-threaded tokio worker to avoid stalling other tasks. The
+        // `try_current()` check keeps sync callers (config bootstrap, CLI)
+        // working unchanged.
+        let resolve = || -> std::io::Result<Vec<IpAddr>> {
+            Ok((host, port)
+                .to_socket_addrs()?
+                .map(|addr| addr.ip())
+                .collect())
+        };
+        let lookup = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(resolve)
+            }
+            _ => resolve(),
+        };
+        lookup.map_err(|e| ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!(
+                "failed to resolve hostname '{}': {}. \
+                 Base URLs must be resolvable at config time.",
+                host, e
+            ),
+        })?
+    };
+
+    if scheme == "http" {
+        if is_localhost_name() {
+            return Ok(());
+        }
+
+        let all_private = !resolved_ips.is_empty()
+            && resolved_ips
+                .iter()
+                .all(|ip| matches!(classify_ip(ip), IpClass::PrivateOrLoopback));
+        let any_blocked = resolved_ips
+            .iter()
+            .any(|ip| matches!(classify_ip(ip), IpClass::AlwaysBlocked));
+
+        if policy == BaseUrlPolicy::AllowPrivateNetwork && all_private && !any_blocked {
+            return Ok(());
+        }
+
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: if policy == BaseUrlPolicy::AllowPrivateNetwork {
+                format!(
+                    "HTTP (non-TLS) is only allowed for localhost or private/internal endpoints, got '{}'. \
+                     Use HTTPS for public endpoints.",
+                    host
+                )
+            } else {
+                format!(
                     "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
                      Use HTTPS for remote endpoints.",
                     host
-                ),
-            });
-        }
-        return Ok(());
+                )
+            },
+        });
     }
 
-    // Check whether an IP is in a blocked range (private, loopback,
-    // link-local, multicast, metadata, CGN, ULA).
-    let is_dangerous_ip = |ip: &IpAddr| -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_unspecified()
-                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-            }
-            IpAddr::V6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    v4.is_private()
-                        || v4.is_loopback()
-                        || v4.is_link_local()
-                        || v4.is_multicast()
-                        || v4.is_unspecified()
-                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
-                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-                } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
-                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
-                        || v6.octets()[0] == 0xff // multicast (ff00::/8)
-                }
-            }
-        }
-    };
-
-    // For HTTPS, reject private/loopback/link-local/metadata IPs.
-    // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_dangerous_ip(&ip) {
-            return Err(ConfigError::InvalidValue {
-                key: field_name.to_string(),
-                message: format!(
-                    "URL points to a private/internal IP '{}'. \
-                     This is blocked to prevent SSRF attacks.",
-                    ip
-                ),
-            });
-        }
-    } else {
-        // Hostname — resolve and check all resulting IPs as defense-in-depth.
-        // NOTE: This does NOT fully prevent DNS rebinding attacks (the hostname
-        // could resolve to a different IP at request time). Full protection
-        // would require pinning the resolved IP in the HTTP client's connector.
-        // This validation catches the common case of misconfigured or malicious URLs.
-        //
-        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
-        // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
-        use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
-                        return Err(ConfigError::InvalidValue {
-                            key: field_name.to_string(),
-                            message: format!(
-                                "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
-                                host,
-                                addr.ip()
-                            ),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
+    for ip in resolved_ips {
+        match classify_ip(&ip) {
+            IpClass::AlwaysBlocked => {
                 return Err(ConfigError::InvalidValue {
                     key: field_name.to_string(),
                     message: format!(
-                        "failed to resolve hostname '{}': {}. \
-                         Base URLs must be resolvable at config time.",
-                        host, e
+                        "URL points to a blocked IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
                     ),
                 });
             }
+            IpClass::PrivateOrLoopback if policy == BaseUrlPolicy::StrictSsrf => {
+                let message = if normalized_host.parse::<IpAddr>().is_ok() {
+                    format!(
+                        "URL points to a private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        ip
+                    )
+                } else {
+                    format!(
+                        "hostname '{}' resolves to private/internal IP '{}'. \
+                         This is blocked to prevent SSRF attacks.",
+                        host, ip
+                    )
+                };
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message,
+                });
+            }
+            _ => {}
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IpClass {
+    Public,
+    PrivateOrLoopback,
+    AlwaysBlocked,
+}
+
+// ---------------------------------------------------------------------------
+// DB-first resolution helpers (DB > env > default)
+// ---------------------------------------------------------------------------
+
+/// Log a warning when a DB/TOML setting shadows a set env var.
+///
+/// Only checks real env vars (`std::env::var`), not runtime overrides or
+/// injected vars — those are internal and don't warrant operator warnings.
+/// Values are intentionally NOT logged to avoid leaking sensitive data.
+fn warn_if_db_shadows_env(env_key: &str) {
+    if std::env::var(env_key).is_ok_and(|v| !v.is_empty()) {
+        tracing::warn!(
+            env_key = %env_key,
+            "{env_key} env var is set but a DB or TOML setting takes priority. \
+             Remove the setting from DB/TOML to use the env var."
+        );
+    }
+}
+
+/// Resolve with DB > env > default priority for concrete settings fields.
+///
+/// If `settings_val != default_val`, the settings value wins (it was explicitly
+/// set in DB or TOML). Otherwise falls back to `optional_env(env_key)`, then
+/// `default_val`.
+///
+/// **Limitation:** Uses `settings_val != default_val` as a heuristic for
+/// "was this field explicitly set." If a user deliberately sets a DB value
+/// equal to the default, it's indistinguishable from "unset" and the env
+/// var will win. This matches `merge_from()` semantics and is acceptable
+/// since setting a value to its default is effectively a no-op.
+pub(crate) fn db_first_or_default<T>(
+    settings_val: &T,
+    default_val: &T,
+    env_key: &str,
+) -> Result<T, ConfigError>
+where
+    T: std::str::FromStr + Clone + PartialEq + std::fmt::Display,
+    T::Err: std::fmt::Display,
+{
+    if settings_val != default_val {
+        warn_if_db_shadows_env(env_key);
+        return Ok(settings_val.clone());
+    }
+    parse_optional_env(env_key, default_val.clone())
+}
+
+/// Resolve a bool with DB > env > default priority.
+pub(crate) fn db_first_bool(
+    settings_val: bool,
+    default_val: bool,
+    env_key: &str,
+) -> Result<bool, ConfigError> {
+    if settings_val != default_val {
+        warn_if_db_shadows_env(env_key);
+        return Ok(settings_val);
+    }
+    parse_bool_env(env_key, default_val)
+}
+
+/// Resolve an `Option<String>` with DB > env priority (no hardcoded default).
+///
+/// Non-empty `Some` means DB set it; `None` or empty falls back to env.
+pub(crate) fn db_first_optional_string(
+    settings_val: &Option<String>,
+    env_key: &str,
+) -> Result<Option<String>, ConfigError> {
+    if let Some(val) = settings_val
+        && !val.is_empty()
+    {
+        warn_if_db_shadows_env(env_key);
+        return Ok(Some(val.clone()));
+    }
+    optional_env(env_key)
+}
+
+/// Resolve an `Option<T>` with DB > env priority (no hardcoded default).
+///
+/// `Some(v)` means DB set it; `None` falls back to env.
+pub(crate) fn db_first_option<T>(
+    settings_val: &Option<T>,
+    env_key: &str,
+) -> Result<Option<T>, ConfigError>
+where
+    T: std::str::FromStr + Clone + std::fmt::Display,
+    T::Err: std::fmt::Display,
+{
+    if let Some(val) = settings_val {
+        warn_if_db_shadows_env(env_key);
+        return Ok(Some(val.clone()));
+    }
+    parse_option_env(env_key)
 }
 
 #[cfg(test)]
@@ -425,6 +714,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_base_url_rejects_http_remote_without_dns_resolution() {
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("only allowed for localhost"),
+            "strict HTTP validation should short-circuit before DNS lookup: {err}"
+        );
+        assert!(
+            !err.contains("failed to resolve"),
+            "strict HTTP validation should not require DNS resolution: {err}"
+        );
+    }
+
+    #[test]
     fn validate_base_url_rejects_non_http_schemes() {
         assert!(validate_base_url("file:///etc/passwd", "TEST").is_err());
         assert!(validate_base_url("ftp://evil.com", "TEST").is_err());
@@ -508,8 +811,34 @@ mod tests {
         assert!(validate_base_url("https://[::]", "TEST").is_err());
     }
 
+    /// Some local DNS resolvers (ISP/router-level captive portals, ad-injecting
+    /// providers) hijack lookups for non-existent domains and return a public
+    /// IP instead of NXDOMAIN. On those networks, RFC 6761 ".invalid" lookups
+    /// succeed even though they shouldn't, which makes any test that asserts
+    /// "DNS resolution failure" unreliable. Detect that case and skip the test.
+    fn invalid_tld_resolves_locally() -> bool {
+        use std::net::ToSocketAddrs;
+        ("ironclaw-dns-hijack-probe.invalid", 443u16)
+            .to_socket_addrs()
+            .is_ok()
+    }
+
     #[test]
     fn validate_base_url_rejects_dns_failure() {
+        if !super::dns_probe_available() {
+            eprintln!(
+                "skipping validate_base_url_rejects_dns_failure: \
+                 external DNS resolution is unavailable"
+            );
+            return;
+        }
+        if invalid_tld_resolves_locally() {
+            eprintln!(
+                "skipping validate_base_url_rejects_dns_failure: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         // .invalid TLD is guaranteed to never resolve (RFC 6761)
         let result = validate_base_url("https://ssrf-test.invalid", "TEST");
         assert!(result.is_err());
@@ -518,5 +847,253 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_https_private_ips() {
+        assert!(validate_operator_base_url("https://100.64.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://127.0.0.1/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("https://[::1]/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_allows_http_private_ips() {
+        assert!(validate_operator_base_url("http://100.64.0.1:8000/v1", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.50:8000/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_operator_base_url_still_rejects_public_http_and_metadata() {
+        assert!(validate_operator_base_url("http://8.8.8.8/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://169.254.169.254/v1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_operator_base_url_rejects_link_local_ips() {
+        assert!(validate_operator_base_url("http://169.254.1.10:8000/v1", "TEST").is_err());
+        assert!(validate_operator_base_url("https://[fe80::1]/v1", "TEST").is_err());
+    }
+
+    // --- db_first_* helper tests ---
+
+    #[test]
+    fn db_first_or_default_prefers_settings_over_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_1";
+        // SAFETY: under ENV_MUTEX
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let result: String =
+            db_first_or_default(&"from-db".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(result, "from-db", "DB value should win over env");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_or_default_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_2";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        // settings_val == default_val → treated as "unset"
+        let result: String =
+            db_first_or_default(&"default".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(
+            result, "from-env",
+            "env should win when settings at default"
+        );
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_or_default_uses_default_when_neither_set() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_3";
+        unsafe { std::env::remove_var(key) };
+
+        let result: String =
+            db_first_or_default(&"default".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(result, "default");
+    }
+
+    #[test]
+    fn db_first_bool_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_BOOL_1";
+        unsafe { std::env::set_var(key, "false") };
+
+        let result = db_first_bool(true, false, key).expect("should resolve");
+        assert!(result, "DB true should win over env false");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_bool_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_BOOL_2";
+        unsafe { std::env::set_var(key, "true") };
+
+        // settings == default → falls back to env
+        let result = db_first_bool(false, false, key).expect("should resolve");
+        assert!(result, "env should win when settings at default");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_1";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let val = Some("from-db".to_string());
+        let result = db_first_optional_string(&val, key).expect("should resolve");
+        assert_eq!(result, Some("from-db".to_string()));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_2";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let result = db_first_optional_string(&None, key).expect("should resolve");
+        assert_eq!(result, Some("from-env".to_string()));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_empty_treated_as_unset() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_3";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let val = Some(String::new());
+        let result = db_first_optional_string(&val, key).expect("should resolve");
+        assert_eq!(
+            result,
+            Some("from-env".to_string()),
+            "empty string should be treated as unset"
+        );
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_option_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_T_1";
+        unsafe { std::env::set_var(key, "99") };
+
+        let val: Option<u64> = Some(42);
+        let result = db_first_option(&val, key).expect("should resolve");
+        assert_eq!(result, Some(42));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_option_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_T_2";
+        unsafe { std::env::set_var(key, "99") };
+
+        let val: Option<u64> = None;
+        let result = db_first_option(&val, key).expect("should resolve");
+        assert_eq!(result, Some(99));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    // --- admin-only LLM key stripping (defense-in-depth for #1955) ---
+
+    #[test]
+    fn strip_admin_only_llm_keys_removes_all_known_keys() {
+        let mut map = HashMap::new();
+        map.insert(
+            "llm_builtin_overrides".to_string(),
+            serde_json::json!({"openai": {"base_url": "http://10.0.0.5"}}),
+        );
+        map.insert(
+            "llm_custom_providers".to_string(),
+            serde_json::json!([{"id": "x"}]),
+        );
+        map.insert(
+            "ollama_base_url".to_string(),
+            serde_json::json!("http://192.168.1.20:11434"),
+        );
+        map.insert(
+            "openai_compatible_base_url".to_string(),
+            serde_json::json!("http://100.64.0.1"),
+        );
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("agent.name".to_string(), serde_json::json!("Iron"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert!(!map.contains_key("llm_builtin_overrides"));
+        assert!(!map.contains_key("llm_custom_providers"));
+        assert!(!map.contains_key("ollama_base_url"));
+        assert!(!map.contains_key("openai_compatible_base_url"));
+        // Non-admin keys must survive.
+        assert_eq!(
+            map.get("selected_model"),
+            Some(&serde_json::json!("gpt-4o"))
+        );
+        assert_eq!(map.get("agent.name"), Some(&serde_json::json!("Iron")));
+    }
+
+    #[test]
+    fn strip_admin_only_llm_keys_is_a_no_op_for_clean_map() {
+        let mut map = HashMap::new();
+        map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
+        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+
+        strip_admin_only_llm_keys(&mut map);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("selected_model"));
+        assert!(map.contains_key("llm_backend"));
+    }
+
+    // --- async DNS regression (#1955: don't stall the tokio worker) ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_base_url_safe_to_call_from_async_handler() {
+        // Regression test: validate_base_url_with_policy used to call the
+        // blocking `to_socket_addrs()` directly, which can stall a tokio
+        // worker thread when invoked from an async handler. The function
+        // now wraps the lookup in `block_in_place` on multi-threaded
+        // runtimes, so calling it from an async context must not panic
+        // and must produce a deterministic error.
+        let result = validate_base_url("http://ssrf-test.invalid", "TEST");
+        let err = result.expect_err("invalid host should fail validation");
+        let msg = err.to_string();
+        // Strict policy short-circuits before DNS, so we should get the
+        // localhost-only message rather than a DNS error.
+        assert!(
+            msg.contains("only allowed for localhost"),
+            "expected strict short-circuit, got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_operator_base_url_safe_to_call_from_async_handler() {
+        // The operator policy must also tolerate being called from async
+        // handlers (it is reachable from /api/llm/test_connection and
+        // /api/llm/list_models). Use IP literals so we don't depend on
+        // a working resolver.
+        assert!(validate_operator_base_url("http://127.0.0.1:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://192.168.1.10:11434", "TEST").is_ok());
+        assert!(validate_operator_base_url("http://169.254.169.254", "TEST").is_err());
     }
 }

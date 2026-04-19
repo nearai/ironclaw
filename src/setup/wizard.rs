@@ -44,6 +44,8 @@ use crate::setup::prompts::{
 // const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
+const QUICK_PROFILE_LOCAL: &str = "local";
+const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,9 @@ pub enum SetupError {
 
     #[error("User cancelled")]
     Cancelled,
+
+    #[error("Sandbox error: {0}")]
+    Sandbox(#[from] crate::sandbox::error::SandboxError),
 }
 
 impl From<crate::setup::channels::ChannelSetupError> for SetupError {
@@ -92,6 +97,7 @@ pub struct SetupConfig {
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    selected_deployment_profile: Option<String>,
     owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup, postgres only).
@@ -120,6 +126,7 @@ impl SetupWizard {
         Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id: "default".to_string(),
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -139,6 +146,7 @@ impl SetupWizard {
         Ok(Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id,
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -257,7 +265,15 @@ impl SetupWizard {
             self.persist_after_step().await;
         } else if self.config.quick {
             // Quick mode: auto-default database + security, only ask for
-            // LLM provider + model. Designed for first-run experience.
+            // the local usage profile (on true first run), LLM provider,
+            // and model. Designed for first-run experience.
+
+            // Profile selection runs first so that `apply_profile()` can set
+            // `database_backend` before `auto_setup_database()` connects.
+            // The subsequent clone → try_load → merge_from cycle preserves
+            // these wizard-chosen values over any stale DB values.
+            self.step_quick_local_profile()?;
+
             self.auto_setup_database().await?;
 
             // Load existing settings from DB (if any prior partial run)
@@ -887,12 +903,15 @@ impl SetupWizard {
     }
 
     /// Run PostgreSQL migrations.
+    ///
+    /// Delegates to `crate::db::migration_fixup::run_postgres_migrations_with_fixup`,
+    /// which acquires the migration advisory lock, realigns any historically
+    /// diverged checksums (issue #1328), then runs refinery's embedded
+    /// migrations. Bundled into a single helper so this call site cannot
+    /// drift from `Store::run_migrations` (see PR #2101 review).
     #[cfg(feature = "postgres")]
     async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
         if let Some(ref pool) = self.db_pool {
-            use refinery::embed_migrations;
-            embed_migrations!("migrations");
-
             if !self.config.quick {
                 print_info("Running migrations...");
             }
@@ -903,8 +922,7 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
 
-            migrations::runner()
-                .run_async(&mut **client)
+            crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
@@ -1032,7 +1050,10 @@ impl SetupWizard {
                 self.settings.secrets_master_key_hex = Some(key_hex.clone());
 
                 println!();
-                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
+                print_info(&format!(
+                    "Master key generated and will be saved to {}",
+                    crate::bootstrap::ironclaw_env_path().display()
+                ));
                 println!();
                 println!("  SECRETS_MASTER_KEY={}", key_hex);
                 println!();
@@ -1125,62 +1146,95 @@ impl SetupWizard {
         }
     }
 
+    /// Quick first-run local deployment profile selection.
+    ///
+    /// Existing `IRONCLAW_PROFILE` values are respected because
+    /// `load_bootstrap_settings()` has already applied them before the wizard
+    /// starts. This prompt only fills in the missing first-run local default.
+    fn step_quick_local_profile(&mut self) -> Result<(), SetupError> {
+        if crate::config::env_or_override("IRONCLAW_PROFILE").is_some() {
+            return Ok(());
+        }
+
+        let options = [
+            "Local (TUI + background tasks, no Docker sandbox)",
+            "Local sandbox (TUI + background tasks + Docker sandbox)",
+        ];
+        let choice = select_one("How should IronClaw run on this machine?", &options)
+            .map_err(SetupError::Io)?;
+        let profile = match choice {
+            0 => QUICK_PROFILE_LOCAL,
+            1 => QUICK_PROFILE_LOCAL_SANDBOX,
+            _ => unreachable!("select_one only returns 0 or 1 for a two-option menu"),
+        };
+
+        self.apply_quick_local_profile(profile)?;
+        print_success(&format!("Using '{profile}' deployment profile"));
+        Ok(())
+    }
+
+    fn apply_quick_local_profile(&mut self, profile: &str) -> Result<(), SetupError> {
+        match profile {
+            QUICK_PROFILE_LOCAL | QUICK_PROFILE_LOCAL_SANDBOX => {}
+            other => {
+                return Err(SetupError::Config(format!(
+                    "unsupported quick local profile: {other}"
+                )));
+            }
+        }
+
+        crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
+        crate::config::profile::apply_profile(&mut self.settings)
+            .map_err(|e| SetupError::Config(e.to_string()))?;
+
+        self.selected_deployment_profile = Some(profile.to_string());
+        Ok(())
+    }
+
     /// Auto-setup security with zero prompts (quick mode).
     ///
-    /// Silently configures the master key: uses existing env var or keychain
-    /// key if available, otherwise generates and stores one automatically
-    /// (keychain on macOS, env var fallback).
+    /// Thin caller over [`SecretsConfig::resolve`], which owns the
+    /// env-var → keychain → generate-and-persist chain. The wizard's
+    /// only remaining responsibilities here are building the
+    /// `SecretsCrypto` instance that subsequent wizard steps use to
+    /// encrypt credentials before the DB is available, mirroring the
+    /// resolved source into settings so `write_bootstrap_env()` picks
+    /// up the hex when in env-var mode, and printing a user-visible
+    /// status line.
     async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
-        // Check env var first
-        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-            self.settings.secrets_master_key_source = KeySource::Env;
-            print_success("Security configured (env var)");
-            return Ok(());
-        }
-
-        // Try existing keychain key (no prompts — get_master_key may show
-        // OS dialogs on macOS, but that's unavoidable for keychain access)
-        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
-            let key_hex: String = keychain_key_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Security configured (keychain)");
-            return Ok(());
-        }
-
-        // No existing key — generate one
-        // Try keychain first (preferred on macOS)
-        let key = crate::secrets::keychain::generate_master_key();
-        if crate::secrets::keychain::store_master_key(&key)
+        let cfg = crate::config::SecretsConfig::resolve()
             .await
-            .is_ok()
-        {
-            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Master key stored in OS keychain");
-            return Ok(());
-        }
+            .map_err(|e| SetupError::Config(e.to_string()))?;
 
-        // Keychain unavailable — fall back to env var mode
-        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        let master_key = cfg.master_key.clone().ok_or_else(|| {
+            SetupError::Config("secrets resolve returned no master key".to_string())
+        })?;
+
         self.secrets_crypto = Some(Arc::new(
-            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+            SecretsCrypto::new(master_key.clone())
                 .map_err(|e| SetupError::Config(e.to_string()))?,
         ));
-        crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
-        self.settings.secrets_master_key_hex = Some(key_hex);
-        self.settings.secrets_master_key_source = KeySource::Env;
-        print_success("Master key stored in ~/.ironclaw/.env");
+        self.settings.secrets_master_key_source = cfg.source;
+
+        // In env-var mode the hex is needed by `bootstrap_env_vars()` so
+        // that the wizard's idempotent final `.env` write includes
+        // `SECRETS_MASTER_KEY=…` alongside the rest of the bootstrap
+        // vars. `resolve()` has already persisted the key on its own,
+        // but the wizard's full-set rewrite happens after DB settings
+        // merge in and must carry the key forward.
+        if matches!(cfg.source, KeySource::Env) {
+            self.settings.secrets_master_key_hex = Some(master_key.expose_secret().to_string());
+        }
+
+        let msg = match cfg.source {
+            KeySource::Env => format!(
+                "Master key stored in {}",
+                crate::bootstrap::ironclaw_env_path().display()
+            ),
+            KeySource::Keychain => "Master key stored in OS keychain".to_string(),
+            KeySource::None => "Security not configured".to_string(),
+        };
+        print_success(&msg);
         Ok(())
     }
 
@@ -2314,6 +2368,7 @@ impl SetupWizard {
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
         let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let has_bedrock = backend == "bedrock";
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         if backend == "openai" && has_openai_key {
@@ -2324,28 +2379,38 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
+        if backend == "bedrock" {
+            self.settings.embeddings.enabled = true;
+            self.settings.embeddings.provider = "bedrock".to_string();
+            self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+            print_success("Embeddings enabled via AWS Bedrock");
+            return Ok(());
+        }
+
+        // If no NEAR AI session, Bedrock config, or OpenAI key, embeddings aren't available.
+        if !has_nearai && !has_bedrock && !has_openai_key {
             print_info("No NEAR AI session or OpenAI key found for embeddings.");
             print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
 
-        let mut options = Vec::new();
+        let mut provider_options = Vec::new();
         if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
+            provider_options.push(("nearai", "NEAR AI (uses same auth, no extra cost)"));
         }
-        options.push("OpenAI (requires API key)");
+        if has_bedrock {
+            provider_options.push(("bedrock", "AWS Bedrock (uses AWS auth and region)"));
+        }
+        provider_options.push(("openai", "OpenAI (requires API key)"));
 
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
-        } else {
-            "openai"
-        };
+        let display_options: Vec<&str> = provider_options
+            .iter()
+            .map(|(_, display)| *display)
+            .collect();
+        let choice =
+            select_one("Select embeddings provider:", &display_options).map_err(SetupError::Io)?;
+        let provider = provider_options[choice].0;
 
         match provider {
             "nearai" => {
@@ -2353,6 +2418,12 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "nearai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
+            }
+            "bedrock" => {
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "bedrock".to_string();
+                self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+                print_success("Embeddings enabled via AWS Bedrock");
             }
             _ => {
                 if !has_openai_key {
@@ -2859,6 +2930,9 @@ impl SetupWizard {
             crate::sandbox::detect::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
                 print_success("Docker is installed and running. Sandbox enabled.");
+
+                // Check if the worker image exists
+                self.ensure_worker_image().await?;
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -2888,6 +2962,8 @@ impl SetupWizard {
                         } else {
                             "Docker is now running. Sandbox enabled."
                         });
+                        // Check if the worker image exists
+                        self.ensure_worker_image().await?;
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
@@ -2969,6 +3045,113 @@ impl SetupWizard {
                 self.settings.sandbox.claude_code_enabled = false;
                 print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
             }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure the sandbox worker Docker image exists, building it if necessary.
+    async fn ensure_worker_image(&mut self) -> Result<(), SetupError> {
+        use crate::sandbox::container::{ContainerRunner, connect_docker};
+
+        let image_name = self.settings.sandbox.image.clone();
+        let docker = match connect_docker().await {
+            Ok(d) => d,
+            Err(e) => {
+                // check_docker() may report Available (via CLI fallback) even when
+                // connect_docker() fails (e.g. on Windows). Don't hard-fail setup.
+                print_info(&format!(
+                    "Could not connect to Docker API to verify image: {}",
+                    e
+                ));
+                print_info("Image check skipped. The image will be pulled at first job run.");
+                return Ok(());
+            }
+        };
+        let runner = ContainerRunner::for_image_ops(docker, image_name.clone());
+
+        if runner.image_exists().await {
+            print_success(&format!("Worker image '{}' found.", image_name));
+            return Ok(());
+        }
+
+        println!();
+        print_info(&format!("Worker image '{}' not found.", image_name));
+        print_info("This image is required for sandboxed job execution.");
+        println!();
+
+        // Images that contain '/' look like registry references (e.g.
+        // "ghcr.io/nearai/ironclaw-worker:v1"). For those, or when
+        // auto_pull_image is enabled, attempt a pull before offering a
+        // local build — the runtime would do the same thing via
+        // SandboxManager::ensure_ready().
+        let is_registry_image = image_name.contains('/');
+        if is_registry_image || self.settings.sandbox.auto_pull_image {
+            print_info(&format!("Attempting to pull '{}'...", image_name));
+            match runner.pull_image().await {
+                Ok(()) => {
+                    print_success(&format!("Successfully pulled image '{}'.", image_name));
+                    return Ok(());
+                }
+                Err(e) => {
+                    if is_registry_image {
+                        // Registry image that can't be pulled — don't offer local build.
+                        print_error(&format!("Failed to pull image: {}", e));
+                        print_info("Ensure the image is published and accessible, or set");
+                        print_info("SANDBOX_IMAGE to a local image name and try again.");
+                        return Ok(());
+                    }
+                    print_info(&format!(
+                        "Pull failed ({}). Checking for local Dockerfile...",
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Only offer local build for default-style local images.
+        let dockerfile_path = std::path::PathBuf::from("Dockerfile.worker");
+
+        if dockerfile_path.exists() {
+            print_info(&format!(
+                "Found Dockerfile at: {}",
+                dockerfile_path.display()
+            ));
+            if confirm(
+                "Build the worker image now? (this may take a few minutes)",
+                true,
+            )
+            .map_err(SetupError::Io)?
+            {
+                print_info("Building worker image... This may take a few minutes.");
+                match runner.build_image(&dockerfile_path).await {
+                    Ok(()) => {
+                        print_success(&format!("Successfully built image '{}'.", image_name));
+                    }
+                    Err(e) => {
+                        print_error(&format!("Failed to build image: {}", e));
+                        print_info("You can build it manually later with:");
+                        print_info(&format!(
+                            "  docker build -f Dockerfile.worker -t {} .",
+                            image_name
+                        ));
+                    }
+                }
+            } else {
+                print_info("Skipped image build. Build it manually with:");
+                print_info(&format!(
+                    "  docker build -f Dockerfile.worker -t {} .",
+                    image_name
+                ));
+            }
+        } else {
+            print_info("No Dockerfile.worker found in current directory.");
+            print_info("To use Docker sandbox, build the worker image manually:");
+            print_info(&format!(
+                "  docker build -f Dockerfile.worker -t {} .",
+                image_name
+            ));
+            print_info("or clone the IronClaw repository and build from source.");
         }
 
         Ok(())
@@ -3063,8 +3246,8 @@ impl SetupWizard {
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
     /// Only true chicken-and-egg settings are written here — things needed
-    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
-    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// before the database is connected: `IRONCLAW_PROFILE`, `DATABASE_BACKEND`,
+    /// `DATABASE_URL`, `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
     /// channel config vars (Signal, Claude Code sandbox).
     ///
     /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
@@ -3072,8 +3255,12 @@ impl SetupWizard {
     /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
     /// API keys live only in the encrypted secrets DB and are injected via
     /// `inject_llm_keys_from_secrets()` after DB init.
-    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+    fn bootstrap_env_vars(&self) -> Vec<(String, String)> {
         let mut env_vars: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref profile) = self.selected_deployment_profile {
+            env_vars.push(("IRONCLAW_PROFILE".to_string(), profile.clone()));
+        }
 
         if let Some(ref backend) = self.settings.database_backend {
             env_vars.push(("DATABASE_BACKEND".to_string(), backend.clone()));
@@ -3138,6 +3325,12 @@ impl SetupWizard {
             ));
         }
 
+        env_vars
+    }
+
+    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+        let env_vars = self.bootstrap_env_vars();
+
         if !env_vars.is_empty() {
             let pairs: Vec<(&str, &str)> = env_vars
                 .iter()
@@ -3154,16 +3347,17 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Persist the NEAR AI session token to the database.
+    /// Persist the NEAR AI session token to encrypted secrets and the database.
     ///
     /// The session manager writes to disk during `ensure_authenticated()` but
     /// doesn't have a DB store attached during onboarding. This reads the
-    /// session file from disk and stores it under the `nearai.session_token`
-    /// key so the runtime's `attach_store()` finds it without fallback.
+    /// session file from disk and stores it under `nearai_session_token` in the
+    /// encrypted secrets store. Falls back to the plaintext settings table
+    /// only when no secrets store is available.
     ///
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
-    async fn persist_session_to_db(&self) {
+    async fn persist_session_to_db(&mut self) {
         let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
@@ -3174,6 +3368,23 @@ impl SetupWizard {
             Err(_) => return,
         };
 
+        // Try to persist to encrypted secrets store (preferred).
+        if let Ok(ctx) = self.init_secrets_context().await {
+            if let Err(e) = ctx
+                .save_secret(
+                    "nearai_session_token",
+                    &secrecy::SecretString::from(data.clone()),
+                )
+                .await
+            {
+                tracing::debug!("Could not persist session token to secrets store: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to encrypted secrets store");
+                return;
+            }
+        }
+
+        // Fallback: persist to plaintext settings table.
         #[cfg(feature = "postgres")]
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
@@ -3231,7 +3442,12 @@ impl SetupWizard {
     /// via `self.settings.merge_from(&step_settings)`, since `merge_from`
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
-    async fn try_load_existing_settings(&mut self) {
+    async fn try_load_existing_settings(&mut self) -> bool {
+        // NB: `loaded` starts false and is only reassigned inside feature-gated
+        // blocks below.  When *neither* `postgres` nor `libsql` is enabled the
+        // function always returns false (no DB backend → nothing to load).
+        // Each block shadows `loaded` via `let loaded = …` so the compiler
+        // sees a use on every path; this is intentional, not accidental shadowing.
         let loaded = false;
 
         #[cfg(feature = "postgres")]
@@ -3282,8 +3498,7 @@ impl SetupWizard {
             loaded
         };
 
-        // Suppress unused variable warning when only one backend is compiled.
-        let _ = loaded;
+        loaded
     }
 
     /// Save settings to the database and `~/.ironclaw/.env`, then print
@@ -3778,6 +3993,105 @@ mod tests {
         let wizard = SetupWizard::try_with_config_and_toml(Default::default(), Some(&path))
             .expect("wizard should load owner_id from TOML"); // safety: test-only assertion
         assert_eq!(wizard.owner_id(), "toml-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_bootstrap_env_vars_include_selected_deployment_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        wizard.selected_deployment_profile = Some(QUICK_PROFILE_LOCAL_SANDBOX.to_string());
+        wizard.settings.database_backend = Some("libsql".to_string());
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            vars.iter().any(|(key, value)| {
+                key == "IRONCLAW_PROFILE" && value == QUICK_PROFILE_LOCAL_SANDBOX
+            }),
+            "selected deployment profile should be persisted to bootstrap env"
+        );
+        assert!(
+            vars.iter()
+                .any(|(key, value)| key == "DATABASE_BACKEND" && value == "libsql"),
+            "existing bootstrap vars should still be written"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_env_vars_do_not_persist_unselected_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::set("IRONCLAW_PROFILE", QUICK_PROFILE_LOCAL);
+        let wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            !vars.iter().any(|(key, _)| key == "IRONCLAW_PROFILE"),
+            "only a wizard-selected profile should be written back"
+        );
+    }
+
+    #[test]
+    fn test_apply_quick_local_profile_sets_profile_and_preserves_db_config_on_merge() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        // Simulate a pre-existing database_url chosen earlier in the wizard
+        // (e.g. by auto_setup_database before profile selection was reordered).
+        wizard.settings.database_url = Some("postgres://my-host/db".to_string());
+        wizard.settings.database_backend = Some("postgres".to_string());
+
+        // Snapshot settings *before* profile application — mimics the
+        // `let step1_settings = self.settings.clone()` line in quick mode.
+        let step1_settings = wizard.settings.clone();
+
+        wizard
+            .apply_quick_local_profile(QUICK_PROFILE_LOCAL)
+            .expect("apply_quick_local_profile should succeed");
+
+        // Profile applies its own database_backend (libsql) which overwrites
+        // the wizard-chosen value.
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("libsql"),
+            "profile should overwrite database_backend"
+        );
+
+        // After merge_from, the wizard-chosen values should win back.
+        wizard.settings.merge_from(&step1_settings);
+
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("postgres"),
+            "merge_from should restore the wizard-chosen database_backend"
+        );
+        assert_eq!(
+            wizard.settings.database_url.as_deref(),
+            Some("postgres://my-host/db"),
+            "merge_from should restore the wizard-chosen database_url"
+        );
+        // Profile-applied non-DB settings should still be present since
+        // step1_settings had defaults for them.
+        assert!(
+            wizard.settings.heartbeat.enabled,
+            "profile-set heartbeat.enabled should survive merge"
+        );
+        assert_eq!(
+            wizard.selected_deployment_profile.as_deref(),
+            Some("local"),
+            "selected_deployment_profile should be set"
+        );
     }
 
     #[test]

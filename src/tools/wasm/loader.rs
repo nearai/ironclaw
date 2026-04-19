@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::db::UserStore;
 use crate::secrets::SecretsStore;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
@@ -82,6 +83,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    role_lookup: Option<Arc<dyn UserStore>>,
 }
 
 impl WasmToolLoader {
@@ -91,12 +93,18 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            role_lookup: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
         self
     }
 
@@ -124,50 +132,54 @@ impl WasmToolLoader {
         let wasm_bytes = fs::read(wasm_path).await?;
 
         // Read capabilities (optional) and extract OAuth refresh config
-        // and tool description. Parameter schema is auto-derived from the
-        // WASM module's schema() export (see WasmToolSchemas::compact_schema).
-        let (capabilities, oauth_refresh, description) = if let Some(cap_path) = capabilities_path {
-            if cap_path.exists() {
-                let cap_bytes = fs::read(cap_path).await?;
-                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                cap_file.validate(name);
+        // and tool description. Parameter schema is NOT read from the
+        // capabilities file — it is auto-derived from the WASM module's
+        // schema() export at prepare time (see WasmToolSchemas::compact_schema),
+        // so no schema override is needed here.
+        let (capabilities, oauth_refresh, description, discovery_summary) =
+            if let Some(cap_path) = capabilities_path {
+                if cap_path.exists() {
+                    let cap_bytes = fs::read(cap_path).await?;
+                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate(name);
 
-                // Check WIT version compatibility
-                check_wit_version_compat(
-                    name,
-                    cap_file.wit_version.as_deref(),
-                    crate::tools::wasm::WIT_TOOL_VERSION,
-                )?;
+                    // Check WIT version compatibility
+                    check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_TOOL_VERSION,
+                    )?;
 
-                let caps = cap_file.to_capabilities();
-                let oauth = resolve_oauth_refresh_config(&cap_file);
-                let desc = cap_file.description.clone();
-                if desc.is_none() {
+                    let caps = cap_file.to_capabilities();
+                    let oauth = resolve_oauth_refresh_config(&cap_file);
+                    let desc = cap_file.description.clone();
+                    let summary = cap_file.discovery_summary.clone();
+                    if desc.is_none() {
+                        tracing::warn!(
+                            tool = name,
+                            path = %cap_path.display(),
+                            "Capabilities file missing \"description\" field; \
+                             tool will use generic fallback description"
+                        );
+                    }
+                    (caps, oauth, desc, summary)
+                } else {
                     tracing::warn!(
                         tool = name,
                         path = %cap_path.display(),
-                        "Capabilities file missing \"description\" field; \
-                         tool will use generic fallback description"
+                        "Capabilities file not found, using default (no permissions)"
                     );
+                    (Capabilities::default(), None, None, None)
                 }
-                (caps, oauth, desc)
             } else {
                 tracing::warn!(
                     tool = name,
-                    path = %cap_path.display(),
-                    "Capabilities file not found, using default (no permissions)"
-                );
-                (Capabilities::default(), None, None)
-            }
-        } else {
-            tracing::warn!(
-                tool = name,
-                "No capabilities file for WASM tool; \
+                    "No capabilities file for WASM tool; \
                      tool will use generic fallback description"
-            );
-            (Capabilities::default(), None, None)
-        };
+                );
+                (Capabilities::default(), None, None, None)
+            };
 
         // Register the tool
         self.registry
@@ -179,7 +191,9 @@ impl WasmToolLoader {
                 limits: None,
                 description: description.as_deref(),
                 schema: None,
+                discovery_summary,
                 secrets_store: self.secrets_store.clone(),
+                role_lookup: self.role_lookup.clone(),
                 oauth_refresh,
             })
             .await?;
@@ -244,7 +258,7 @@ impl WasmToolLoader {
             }
 
             let name = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(n) => n.to_string(),
+                Some(n) => n.replace('-', "_"),
                 None => {
                     results.errors.push((
                         path.clone(),
@@ -254,6 +268,8 @@ impl WasmToolLoader {
                 }
             };
 
+            // Look up capabilities using the original filename (before
+            // hyphen normalization) so existing sidecar files are found.
             let cap_path = path.with_extension("capabilities.json");
             let has_cap = cap_path.exists();
             tool_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
@@ -417,8 +433,8 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
     let auth = cap_file.auth.as_ref()?;
     let oauth = auth.oauth.as_ref()?;
 
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
-    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
+    let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
+    let exchange_proxy_url = crate::auth::oauth::exchange_proxy_url();
 
     let client_id = oauth
         .client_id
@@ -441,23 +457,24 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
                 .and_then(|env| std::env::var(env).ok())
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+    let client_secret = crate::auth::oauth::hosted_proxy_client_secret(
         &client_secret,
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
     );
-    let gateway_token = crate::config::helpers::env_or_override("GATEWAY_AUTH_TOKEN")
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty());
+    let oauth_proxy_auth_token = crate::auth::oauth::oauth_proxy_auth_token();
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),
         client_id,
         client_secret,
         exchange_proxy_url,
-        gateway_token,
+        gateway_token: oauth_proxy_auth_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
+        // TODO: extend WASM tool capabilities so auth.oauth can declare custom
+        // refresh endpoints/params like skills' ProviderRefreshStrategy::Custom.
+        extra_refresh_params: HashMap::new(),
     })
 }
 
@@ -534,7 +551,7 @@ fn tools_src_dir() -> PathBuf {
 /// - `tools-src/<name>/target/wasm32-wasip2/release/<crate_name>_tool.wasm`
 /// - `tools-src/<name>/<name>-tool.capabilities.json`
 ///
-/// Returns a map of install-name (e.g. "gmail-tool") to paths.
+/// Returns a map of install-name (e.g. "gmail_tool") to paths.
 pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std::io::Error> {
     let src_dir = tools_src_dir();
     let mut tools = HashMap::new();
@@ -557,7 +574,7 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
 
         // Convention: crate name uses underscores, directory uses hyphens
         let crate_name = dir_name.replace('-', "_");
-        let install_name = format!("{}-tool", dir_name);
+        let install_name = format!("{}_tool", crate_name);
 
         let wasm_path = wasm_artifact_path(&path, &format!("{}_tool", crate_name));
 
@@ -684,7 +701,7 @@ pub async fn discover_tools(dir: &Path) -> Result<HashMap<String, DiscoveredTool
         }
 
         let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) => n.to_string(),
+            Some(n) => n.replace('-', "_"),
             None => continue,
         };
 
@@ -870,11 +887,11 @@ mod tests {
         // If build artifacts exist, they should be discovered.
         let tools = super::discover_dev_tools().await.unwrap();
 
-        // If any tools have been built, they should appear with "-tool" suffix
+        // If any tools have been built, they should appear with "_tool" suffix
         for (name, discovered) in &tools {
             assert!(
-                name.ends_with("-tool"),
-                "Dev tool name should end with -tool: {}",
+                name.ends_with("_tool"),
+                "Dev tool name should end with _tool: {}",
                 name
             );
             assert!(
@@ -890,6 +907,11 @@ mod tests {
         use crate::tools::wasm::capabilities_schema::{
             AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
         };
+
+        let _guard = lock_env();
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
 
         let caps = CapabilitiesFile {
             auth: Some(AuthCapabilitySchema {
@@ -982,6 +1004,7 @@ mod tests {
         let _guard = lock_env();
         let _proxy_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
 
         // google_oauth_token should fall back to built-in credentials
         let caps = CapabilitiesFile {
@@ -1021,6 +1044,7 @@ mod tests {
             Some("https://compose-api.example.com"),
         );
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
 
@@ -1061,6 +1085,7 @@ mod tests {
             Some("https://compose-api.example.com"),
         );
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
         let _client_secret_guard =
@@ -1093,6 +1118,47 @@ mod tests {
             Some("https://compose-api.example.com")
         );
         assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
+    }
+
+    #[test]
+    fn test_resolve_oauth_refresh_config_hosted_proxy_prefers_dedicated_proxy_auth_token() {
+        use crate::tools::wasm::capabilities_schema::{
+            AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
+        };
+
+        let _guard = lock_env();
+        let _proxy_guard = set_env_var(
+            "IRONCLAW_OAUTH_EXCHANGE_URL",
+            Some("https://compose-api.example.com"),
+        );
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("shared-oauth-proxy-secret"),
+        );
+        let _client_id_guard =
+            set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
+
+        let caps = CapabilitiesFile {
+            auth: Some(AuthCapabilitySchema {
+                secret_name: "google_oauth_token".to_string(),
+                provider: Some("google".to_string()),
+                oauth: Some(OAuthConfigSchema {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id_env: Some("GOOGLE_OAUTH_CLIENT_ID".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = super::resolve_oauth_refresh_config(&caps).expect("hosted oauth config");
+        assert_eq!(
+            config.gateway_token.as_deref(),
+            Some("shared-oauth-proxy-secret")
+        );
     }
 
     // ---------------------------------------------------------------

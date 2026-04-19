@@ -56,13 +56,24 @@ fn validate_webhook_secret(
 /// by the per-routine webhook secret sent via the `X-Webhook-Secret` header.
 ///
 /// **Single-user/backward-compatible**: looks up routines by path across all
-/// users. For multi-tenant isolation, use the user-scoped endpoint at
+/// users. Disabled in multi-tenant mode — use the user-scoped endpoint at
 /// `/api/webhooks/u/{user_id}/{path}` instead.
 pub async fn webhook_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // In multi-tenant mode, reject unscoped webhooks to prevent cross-user
+    // routine triggering. The per-routine secret provides some protection,
+    // but tenant isolation requires scoping by user_id.
+    // Use workspace_pool as the multi-tenant indicator — it's only set when
+    // has_any_users() was true at startup (not just when a DB exists).
+    if state.workspace_pool.is_some() {
+        return Err((
+            StatusCode::GONE,
+            "Unscoped webhooks disabled in multi-tenant mode. Use /api/webhooks/u/{user_id}/{path} instead.".to_string(),
+        ));
+    }
     fire_webhook_inner(state, &path, None, &headers).await
 }
 

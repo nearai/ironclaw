@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::ownership::Owned;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -25,6 +26,18 @@ fn format_count(n: u64, suffix: &str) -> String {
     } else {
         format!("{} {}", n, suffix)
     }
+}
+
+fn format_vertical_list(title: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{}:\n  (none)", title);
+    }
+
+    let mut out = format!("{}:\n", title);
+    for item in items {
+        out.push_str(&format!("  {}\n", item));
+    }
+    out.trim_end().to_string()
 }
 
 impl Agent {
@@ -134,7 +147,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != tenant.user_id() {
+                if !ctx.is_owned_by(tenant.user_id()) {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -202,7 +215,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -282,7 +295,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -472,6 +485,114 @@ impl Agent {
         }
     }
 
+    /// Handle `/expected <description>` — capture expected behavior and fire into
+    /// the self-improvement pipeline.
+    ///
+    /// Collects recent conversation turns (user input, tool calls, responses) and
+    /// packages them with the user's description of what should have happened.
+    /// This fires a `user_feedback:expected_behavior` system event that the
+    /// expected-behavior learning mission picks up.
+    pub(super) async fn process_expected(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        description: &str,
+        user_id: &str,
+    ) -> Result<SubmissionResult, Error> {
+        // Extract recent turns from the session (last 5 turns for context)
+        let recent_context = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            let turns: Vec<serde_json::Value> = thread
+                .turns
+                .iter()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|turn| {
+                    let tool_calls: Vec<serde_json::Value> = turn
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "tool": tc.name,
+                                "error": tc.error,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "user_input": turn.user_input,
+                        "response": turn.response,
+                        "tool_calls": tool_calls,
+                        "state": format!("{:?}", turn.state),
+                        "error": turn.error,
+                    })
+                })
+                .collect();
+            turns
+        };
+
+        if recent_context.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No conversation history to attach feedback to.",
+            ));
+        }
+
+        let payload = serde_json::json!({
+            "expected_behavior": description,
+            "thread_id": thread_id.to_string(),
+            "recent_turns": recent_context,
+        });
+
+        // Fire into v2 mission manager (learning missions)
+        let mut fired: usize = 0;
+        if let Some(mgr) = self.mission_manager().await {
+            match mgr
+                .fire_on_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    user_id,
+                    Some(payload.clone()),
+                )
+                .await
+            {
+                Ok(ids) => fired += ids.len(),
+                Err(e) => {
+                    tracing::debug!("failed to fire expected-behavior mission: {e}");
+                }
+            }
+        }
+
+        // Also fire through v1 routine engine (if routines listen for this)
+        if let Some(engine) = self.routine_engine().await {
+            fired += engine
+                .emit_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    &payload,
+                    Some(user_id),
+                )
+                .await;
+        }
+
+        if fired > 0 {
+            Ok(SubmissionResult::ok_with_message(format!(
+                "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
+            )))
+        } else {
+            Ok(SubmissionResult::ok_with_message(
+                "Feedback noted but no self-improvement missions are configured to handle it. \
+                 The engine will use this context in future learning cycles.",
+            ))
+        }
+    }
+
     /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
     pub(super) async fn handle_reasoning_command(
         &self,
@@ -585,6 +706,13 @@ impl Agent {
                 "  /cancel <id>      Cancel a job\n",
                 "  /list             List all jobs\n",
                 "\n",
+                "Plans:\n",
+                "  /plan <desc>      Create an execution plan\n",
+                "  /plan approve [ref] Approve and start execution\n",
+                "  /plan status [ref]  Check plan progress\n",
+                "  /plan revise [ref]  Revise with feedback\n",
+                "  /plan list        List all plans\n",
+                "\n",
                 "Session:\n",
                 "  /undo             Undo last turn\n",
                 "  /redo             Redo undone turn\n",
@@ -593,7 +721,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
+                "  /resume           Resume a previous conversation\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",
@@ -680,9 +808,9 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(SubmissionResult::response(format!(
-                    "Available tools: {}",
-                    tools.join(", ")
+                Ok(SubmissionResult::response(format_vertical_list(
+                    "Available tools",
+                    &tools,
                 )))
             }
 
@@ -947,6 +1075,12 @@ impl Agent {
     /// Best-effort: logs warnings on failure but does not propagate errors,
     /// since the in-memory model switch already succeeded.
     ///
+    /// The DB setting is the primary persistence layer. For LLM settings the
+    /// resolution priority is `DB > env > TOML > default`, so writing to DB
+    /// is sufficient for the change to survive restarts. The `.env` and TOML
+    /// files are only updated as a courtesy when they already contain a model
+    /// var, to avoid user confusion.
+    ///
     /// In multi-tenant mode, only the per-user DB setting is written — global
     /// .env and TOML files are shared across users and must not be mutated.
     async fn persist_selected_model(&self, tenant: &crate::tenant::TenantCtx, model: &str) {
@@ -972,22 +1106,18 @@ impl Agent {
             return;
         }
 
-        // 3. Update .env and TOML config file (sync I/O in spawn_blocking).
+        // 3. Best-effort update of .env and TOML if they already contain a
+        //    model var. DB is authoritative (DB > env > TOML), but keeping
+        //    these in sync avoids confusion when users inspect the files.
         let model_owned = model.to_string();
         let backend = self.deps.llm_backend.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
-            // 2a. Update the backend-specific model env var in ~/.ironclaw/.env.
-            //
-            // Env vars have the HIGHEST priority in LlmConfig::resolve_model()
-            // (env var > TOML > DB > default). If the .env file has e.g.
-            // NEARAI_MODEL=old-model, it shadows everything else. We must
-            // update this var or the /model change is invisible on restart.
+            // 3a. Update the backend-specific model env var in ~/.ironclaw/.env
+            //     only if the var already exists (don't inject new vars).
             let registry = crate::llm::ProviderRegistry::load();
             let model_env = registry.model_env_var(&backend);
             let env_var_prefix = format!("{}=", model_env);
 
-            // Only update the .env file if the var is actually set there
-            // (avoid injecting new vars the user never configured).
             let env_path = crate::bootstrap::ironclaw_env_path();
             let env_has_var = std::fs::read_to_string(&env_path)
                 .ok()
@@ -1005,10 +1135,8 @@ impl Agent {
                 }
             }
 
-            // 2b. Update (or create) the TOML config file.
-            //
-            // The TOML overlay has higher priority than DB settings on
-            // startup, so it MUST stay in sync with the DB.
+            // 3b. Update TOML config file if it already exists.
+            //     Don't create a new one — DB persistence is sufficient.
             let toml_path = crate::settings::Settings::default_toml_path();
             match crate::settings::Settings::load_toml(&toml_path) {
                 Ok(Some(mut settings)) => {
@@ -1018,15 +1146,7 @@ impl Agent {
                     }
                 }
                 Ok(None) => {
-                    // No config file yet — create one so the model choice
-                    // survives restarts even when the DB is unavailable.
-                    let settings = crate::settings::Settings {
-                        selected_model: Some(model_owned),
-                        ..Default::default()
-                    };
-                    if let Err(e) = settings.save_toml(&toml_path) {
-                        tracing::warn!("Failed to create config.toml for model persistence: {}", e);
-                    }
+                    // No config file on disk; DB persistence is sufficient.
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load config.toml for model persistence: {}", e);
@@ -1037,5 +1157,24 @@ impl Agent {
         {
             tracing::warn!("Model persistence task failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_vertical_list;
+
+    #[test]
+    fn format_vertical_list_renders_one_item_per_line() {
+        let formatted = format_vertical_list(
+            "Available tools",
+            &[
+                "time".to_string(),
+                "shell".to_string(),
+                "github".to_string(),
+            ],
+        );
+
+        assert_eq!(formatted, "Available tools:\n  time\n  shell\n  github");
     }
 }

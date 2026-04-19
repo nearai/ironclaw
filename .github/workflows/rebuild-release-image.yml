@@ -1,0 +1,120 @@
+name: Rebuild Release Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Tag or branch to build from"
+        required: true
+        type: string
+      tag:
+        description: "Docker image tag to publish"
+        required: true
+        type: string
+
+env:
+  IMAGE_NAME: nearaidev/ironclaw
+
+jobs:
+  build:
+    name: Rebuild Historical Image
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${VERSION}"
+
+      - name: Verify requested tag matches source version
+        env:
+          EXPECTED_TAG: ${{ inputs.tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          EXPECTED_REF="ironclaw-v${EXPECTED_TAG}"
+          if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
+            exit 1
+          fi
+
+          if [[ "${EXPECTED_TAG}" != "${SOURCE_VERSION}" ]]; then
+            echo "::error::Requested tag '${EXPECTED_TAG}' does not match source version '${SOURCE_VERSION}'"
+            exit 1
+          fi
+
+          EXPECTED_COMMIT=$(git rev-list -n1 "${EXPECTED_REF}")
+          ACTUAL_COMMIT=$(git rev-parse HEAD)
+          if [[ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Checked out commit '${ACTUAL_COMMIT}' does not match release tag '${EXPECTED_REF}' (${EXPECTED_COMMIT})"
+            exit 1
+          fi
+
+      - name: Compute source SHA
+        id: source
+        run: |
+          echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ vars.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Detect runtime stage
+        id: target
+        run: |
+          if grep -Eiq '^[[:space:]]*FROM[[:space:]].+[[:space:]]AS[[:space:]]+runtime([[:space:]]|$)' Dockerfile; then
+            echo "has_runtime_stage=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_runtime_stage=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push (runtime target)
+        if: steps.target.outputs.has_runtime_stage == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+          target: runtime
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (final stage)
+        if: steps.target.outputs.has_runtime_stage != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "## Rebuilt Docker Image"
+            echo ""
+            echo "- source ref: \`${{ inputs.source_ref }}\`"
+            echo "- source sha: \`${{ steps.source.outputs.sha }}\`"
+            echo "- version: \`${{ steps.version.outputs.version }}\`"
+            echo "- runtime stage detected: \`${{ steps.target.outputs.has_runtime_stage }}\`"
+            echo "- image: \`${{ env.IMAGE_NAME }}:${{ inputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,76 @@
+---
+title: 任务与并行执行
+sidebarTitle: 任务
+description: 并行任务调度与任务状态机
+---
+
+在 IronClaw 中，每一个工作单元都是一个**任务**。任务会并行运行、彼此隔离上下文，并沿着定义好的状态机推进，直到完成、失败或被恢复。
+
+---
+
+## 配置
+
+```bash
+# 最大并行任务数
+MAX_PARALLEL_JOBS=5
+
+# 沙箱超时（影响任务何时会被视为卡住）
+SANDBOX_TIMEOUT_SECS=1800
+```
+
+---
+
+## 任务状态机
+
+```
+Pending
+    ↓
+InProgress ──────────────┬──► Completed
+    ↑                    │
+    │  (self-repair)     └──► Failed
+    │
+  Stuck ────────────────────► Failed (if unrecoverable)
+```
+
+### 状态
+
+| 状态 | 描述 | 下一状态 |
+|------|------|----------|
+| **Pending** | 任务已创建，正在等待可用 worker 槽位 | InProgress |
+| **InProgress** | Worker 正在执行任务，例如调用 LLM 或运行工具 | Completed、Failed、Stuck |
+| **Completed** | 任务已成功完成 | 终态 |
+| **Failed** | 发生不可恢复错误，或任务被显式取消 | 终态 |
+| **Stuck** | 在超时窗口内未检测到任何进展 | InProgress（恢复）、Failed |
+
+### 状态流转
+
+当自修复系统发现一个 **InProgress** 任务在超过配置超时时间后仍没有任何活动时，任务会进入 **Stuck**。系统随后会尝试使用新的 worker 重新进入 **InProgress** 来恢复任务。如果多次恢复都失败，任务就会进入 **Failed**。
+
+---
+
+## 并行执行
+
+IronClaw 可以同时运行多个任务。每个任务都拥有自己的隔离上下文，包括记忆、工具调用历史和会话状态。
+
+| 配置变量 | 默认值 | 描述 |
+|----------|--------|------|
+| `MAX_PARALLEL_JOBS` | `5` | 每个实例允许的最大并发任务数 |
+
+当所有任务槽位都被占满时，新任务会以 **Pending** 状态排队，直到有空闲槽位为止。调度器会按创建时间顺序分发排队任务。
+
+<Note>
+提高 `MAX_PARALLEL_JOBS` 会增加对 LLM API 的并发压力。请根据您的 API 限额和机器资源来设置该值。
+</Note>
+
+---
+
+## 任务工具
+
+有四个内置工具可供智能体在运行时管理任务：
+
+| 工具 | 描述 |
+|------|------|
+| `create_job` | 创建一个带有描述和可选上下文的新任务 |
+| `list_jobs` | 列出所有活动任务及其当前状态和元数据 |
+| `job_status` | 获取指定任务 ID 的详细状态 |
+| `cancel_job` | 取消一个 InProgress 或 Pending 状态的任务 |

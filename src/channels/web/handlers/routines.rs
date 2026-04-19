@@ -10,11 +10,15 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::agent::routine::{Trigger, next_cron_fire};
+use crate::agent::routine::{
+    RoutineDisplayStatus, RoutineVerificationStatus, Trigger, next_cron_fire,
+    routine_display_status_for_verification, routine_verification_status,
+};
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
+use crate::ownership::Owned;
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -30,7 +34,18 @@ pub async fn routines_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let items: Vec<RoutineInfo> = routines.iter().map(RoutineInfo::from_routine).collect();
+    let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
+    let last_run_statuses = store
+        .batch_get_last_run_status(&routine_ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items: Vec<RoutineInfo> = routines
+        .iter()
+        .map(|routine| {
+            RoutineInfo::from_routine(routine, last_run_statuses.get(&routine.id).copied())
+        })
+        .collect();
 
     Ok(Json(RoutineListResponse { routines: items }))
 }
@@ -49,13 +64,39 @@ pub async fn routines_summary_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
+    let last_run_statuses = store
+        .batch_get_last_run_status(&routine_ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let total = routines.len() as u64;
-    let enabled = routines.iter().filter(|r| r.enabled).count() as u64;
-    let disabled = total - enabled;
-    let failing = routines
-        .iter()
-        .filter(|r| r.consecutive_failures > 0)
-        .count() as u64;
+    let mut enabled = 0u64;
+    let mut disabled = 0u64;
+    let mut unverified = 0u64;
+    let mut failing = 0u64;
+
+    for routine in &routines {
+        let verification_status = routine_verification_status(routine);
+        if routine.enabled {
+            enabled += 1;
+        } else {
+            disabled += 1;
+        }
+
+        if verification_status == RoutineVerificationStatus::Unverified {
+            unverified += 1;
+        }
+
+        if routine_display_status_for_verification(
+            routine,
+            verification_status,
+            last_run_statuses.get(&routine.id).copied(),
+        ) == RoutineDisplayStatus::Failing
+        {
+            failing += 1;
+        }
+    }
 
     let today_start = chrono::Utc::now()
         .date_naive()
@@ -74,6 +115,7 @@ pub async fn routines_summary_handler(
         total,
         enabled,
         disabled,
+        unverified,
         failing,
         runs_today,
     }))
@@ -98,7 +140,7 @@ pub async fn routines_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -120,7 +162,17 @@ pub async fn routines_detail_handler(
             job_id: run.job_id,
         })
         .collect();
-    let routine_info = RoutineInfo::from_routine(&routine);
+    let routine_info = RoutineInfo::from_routine(&routine, runs.first().map(|run| run.status));
+
+    // Read-only lookup — do not create a conversation on a GET request.
+    // The conversation is created lazily when the routine first executes.
+    let conversation_id = store
+        .find_routine_conversation(routine.id, &routine.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(routine_id = %routine.id, error = %e, "Failed to look up routine conversation");
+            None
+        });
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
@@ -138,7 +190,10 @@ pub async fn routines_detail_handler(
         next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
+        status: routine_info.status.clone(),
+        verification_status: routine_info.verification_status.clone(),
         created_at: routine.created_at.to_rfc3339(),
+        conversation_id,
         recent_runs,
     }))
 }
@@ -159,6 +214,20 @@ pub async fn routines_trigger_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    // Verify ownership before triggering.
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if !routine.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let run_id = engine
         .fire_manual(routine_id, Some(&user.user_id))
@@ -197,7 +266,7 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -232,7 +301,9 @@ pub async fn routines_toggle_handler(
 
     // Refresh the in-memory event trigger cache so event/system_event
     // routines reflect the new enabled state immediately (issue #1076).
-    if let Some(engine) = state.routine_engine.read().await.as_ref() {
+    // Extract into a block so the RwLockReadGuard is dropped before the async call.
+    let engine = { state.routine_engine.read().await.as_ref().cloned() };
+    if let Some(engine) = engine {
         engine.refresh_event_cache().await;
     }
 
@@ -262,7 +333,7 @@ pub async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -274,7 +345,9 @@ pub async fn routines_delete_handler(
     if deleted {
         // Refresh the in-memory event trigger cache so deleted event/system_event
         // routines stop firing immediately (issue #1076).
-        if let Some(engine) = state.routine_engine.read().await.as_ref() {
+        // Extract into a block so the RwLockReadGuard is dropped before the async call.
+        let engine = { state.routine_engine.read().await.as_ref().cloned() };
+        if let Some(engine) = engine {
             engine.refresh_event_cache().await;
         }
 
@@ -308,7 +381,7 @@ pub async fn routines_runs_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    if routine.user_id != user.user_id {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 

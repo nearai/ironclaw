@@ -223,24 +223,38 @@ impl GatewayWorkflowHarness {
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
             owner_id: user_id.clone(),
-            default_sender_id: user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
+            auth_manager: None,
             chat_rate_limiter: PerUserRateLimiter::new(120, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
             active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         });
 
         let mut agent = Agent::new(
@@ -248,6 +262,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,
@@ -258,12 +273,14 @@ impl GatewayWorkflowHarness {
                 skill_catalog: components.skill_catalog,
                 skills_config: components.config.skills.clone(),
                 hooks: components.hooks,
+                auth_manager: None,
                 cost_guard: components.cost_guard,
                 sse_tx: None,
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
-                sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
+                sandbox_readiness:
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
@@ -299,7 +316,7 @@ impl GatewayWorkflowHarness {
         let addr = start_server(
             "127.0.0.1:0".parse().expect("valid localhost addr"),
             Arc::clone(&gateway_state),
-            auth,
+            auth.into(),
         )
         .await
         .expect("failed to start gateway server");
@@ -484,6 +501,15 @@ impl GatewayWorkflowHarness {
             .json::<serde_json::Value>()
             .await
             .expect("invalid routine runs response")
+    }
+
+    pub async fn register_tool(&self, tool: Arc<dyn Tool>) {
+        let registry = self
+            .gateway_state
+            .tool_registry
+            .as_ref()
+            .expect("tool registry should be available");
+        registry.register(tool).await;
     }
 
     pub async fn github_webhook(

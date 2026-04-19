@@ -2,7 +2,7 @@ name: Staging CI (Batched)
 
 on:
   schedule:
-    - cron: "0 * * * *"            # Every 60 minutes
+    - cron: "*/10 * * * *"         # Every 10 minutes (down from 60)
   workflow_dispatch:
     inputs:
       force:
@@ -15,10 +15,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  checks: read
+  contents: read
 
 concurrency:
   group: staging-ci
@@ -29,6 +26,9 @@ jobs:
   resolve-promotion-base:
     name: Resolve promotion base
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       promotion_base: ${{ steps.resolve.outputs.promotion_base }}
     steps:
@@ -55,16 +55,19 @@ jobs:
     name: Check for new commits
     needs: resolve-promotion-base
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
       current_head: ${{ steps.check.outputs.current_head }}
       diff_range: ${{ steps.check.outputs.diff_range }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: staging
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Check for changes since last tested
         id: check
@@ -117,6 +120,8 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.has_changes == 'true'
     uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.check-changes.outputs.current_head }}
 
   # ── Run E2E browser tests ────────────────────────────────────────
   e2e:
@@ -124,6 +129,8 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.has_changes == 'true'
     uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ needs.check-changes.outputs.current_head }}
 
   # ── Create promotion PR (triggers claude-review.yml on the PR) ──
   create-promotion-pr:
@@ -131,21 +138,25 @@ jobs:
     needs: [resolve-promotion-base, check-changes]
     if: needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
       promotion_branch: ${{ steps.branch.outputs.branch }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: staging
-          fetch-depth: 0
-
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.check-changes.outputs.current_head }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Set token
         id: token
@@ -163,7 +174,7 @@ jobs:
           PROMOTION_BASE: ${{ needs.resolve-promotion-base.outputs.promotion_base }}
         run: |
           git fetch origin "${PROMOTION_BASE}"
-          AHEAD=$(git rev-list --count "origin/${PROMOTION_BASE}..origin/staging")
+          AHEAD=$(git rev-list --count "origin/${PROMOTION_BASE}..HEAD")
           echo "commits_ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "$AHEAD" -eq 0 ]; then
             echo "Staging is not ahead of ${PROMOTION_BASE}. Nothing to promote."
@@ -247,18 +258,24 @@ jobs:
       needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: read
     outputs:
       gate_passed: ${{ steps.evaluate.outputs.passed }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: staging
           # Need full history to recompute the final promoted range before merge.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
@@ -489,11 +506,14 @@ jobs:
       needs.e2e.result == 'success' &&
       needs.create-promotion-pr.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: staging
           fetch-depth: 0
+          # persist-credentials kept enabled — job pushes the staging-tested tag.
 
       - name: Update staging-tested tag
         run: |
@@ -507,6 +527,8 @@ jobs:
     needs: [check-changes, tests, e2e, create-promotion-pr, gate, update-tag]
     if: always() && needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Summary
         run: |

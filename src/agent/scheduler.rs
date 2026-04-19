@@ -15,13 +15,13 @@ use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
+use ironclaw_safety::SafetyLayer;
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ struct ScheduledSubtask {
 pub struct SchedulerDeps {
     pub tools: Arc<ToolRegistry>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
 }
 
@@ -64,7 +64,7 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    store: Option<AdminScope>,
+    store: Option<SystemScope>,
     hooks: Arc<HookRegistry>,
     /// SSE manager for live job event streaming.
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
@@ -197,26 +197,28 @@ impl Scheduler {
             })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply both metadata and token budget in one closure (Issue #813: atomic update).
-        // Use update_context_and_get to ensure atomicity: no gap where concurrent workers
-        // can modify the context between update and DB persist (Issue #807).
-        let ctx = if let Some(meta) = metadata {
+        // Apply metadata, token budget, and approval context in one closure
+        // (Issue #813: atomic update). Use update_context_and_get to ensure atomicity:
+        // no gap where concurrent workers can modify the context between update and
+        // DB persist (Issue #807).
+        let needs_update = metadata.is_some() || max_tokens > 0 || approval_context.is_some();
+        let ctx = if needs_update {
             self.context_manager
                 .update_context_and_get(job_id, |ctx| {
-                    ctx.metadata = meta;
+                    if let Some(meta) = metadata {
+                        ctx.metadata = meta;
+                    }
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
-                })
-                .await?
-        } else if max_tokens > 0 {
-            self.context_manager
-                .update_context_and_get(job_id, |ctx| {
-                    ctx.max_tokens = max_tokens;
+                    if let Some(ref approval) = approval_context {
+                        ctx.approval_context = Some(approval.clone());
+                    }
                 })
                 .await?
         } else {
-            // No metadata or token budget to set; get the initial context
+            // Currently unreachable via dispatch_job() which always provides
+            // Some(approval_context), but kept as a safe fallback.
             self.context_manager.get_context(job_id).await?
         };
 
@@ -267,6 +269,20 @@ impl Scheduler {
                 });
             }
 
+            // Per-user concurrency check — only count jobs consuming a parallel
+            // execution slot (Pending/InProgress/Stuck), not Completed/Submitted.
+            if let Some(max_per_user) = self.config.max_jobs_per_user
+                && let Ok(ctx) = self.context_manager.get_context(job_id).await
+            {
+                let user_blocking = self
+                    .context_manager
+                    .parallel_blocking_count_for(&ctx.user_id)
+                    .await;
+                if user_blocking >= max_per_user {
+                    return Err(JobError::MaxJobsExceeded { max: max_per_user });
+                }
+            }
+
             // Transition job to in_progress
             self.context_manager
                 .update_context(job_id, |ctx| {
@@ -297,6 +313,7 @@ impl Scheduler {
                 sse_tx: self.sse_tx.clone(),
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
+                multi_tenant: self.config.multi_tenant,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -731,8 +748,8 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
     use rust_decimal_macros::dec;
 
     /// Minimal LLM provider stub for scheduler tests that don't exercise LLM calls.
@@ -784,10 +801,12 @@ mod tests {
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_jobs_per_user: None,
             max_tokens_per_job,
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
+            engine_v2: false,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

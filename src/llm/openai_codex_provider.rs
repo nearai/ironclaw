@@ -259,7 +259,9 @@ impl LlmProvider for OpenAiCodexProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let body = self.build_request_body(&request.messages, None);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(&messages, None);
         let parsed = self.send_request(body).await?;
 
         Ok(CompletionResponse {
@@ -276,8 +278,36 @@ impl LlmProvider for OpenAiCodexProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let body = self.build_request_body(&request.messages, Some(&request.tools));
-        let parsed = self.send_request(body).await?;
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+
+        // Build a reverse map so we can translate sanitized names back to originals.
+        // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
+        let name_map: std::collections::HashMap<String, String> = request
+            .tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let body = self.build_request_body(&messages, Some(&request.tools));
+        let mut parsed = self.send_request(body).await?;
+
+        // Reverse-map sanitized tool names back to originals so the caller
+        // can look them up in the tool registry.
+        if !name_map.is_empty() {
+            for tc in &mut parsed.tool_calls {
+                if let Some(original) = name_map.get(&tc.name) {
+                    tc.name = original.clone();
+                }
+            }
+        }
 
         let finish_reason = if !parsed.tool_calls.is_empty() {
             FinishReason::ToolUse
@@ -421,7 +451,7 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
                         serde_json::json!({
                             "type": "function_call",
                             "call_id": tc.id,
-                            "name": tc.name,
+                            "name": sanitize_tool_name(&tc.name),
                             "arguments": args_str,
                         })
                     })
@@ -452,18 +482,39 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
     }
 }
 
+/// Sanitize a tool name to match the OpenAI Responses API pattern `^[a-zA-Z0-9_-]+$`.
+/// Replaces any invalid character (e.g. dots in MCP tool names) with underscores.
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert a `ToolDefinition` to Responses API tool format.
 ///
-/// Applies strict-mode schema normalization (same as OpenAI Chat Completions):
-/// `additionalProperties: false`, all properties required, optional fields nullable.
+/// Both transforms — strict-mode object normalization and the top-level
+/// union flatten that the Responses API requires — live inside
+/// `normalize_schema_strict`, which is shared with `RigAdapter::convert_tools`
+/// so every rig-based provider gets the same treatment. The flatten can
+/// append a hint to the tool description, so we pass an owned clone through
+/// and read it back.
 fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
     use crate::llm::rig_adapter::normalize_schema_strict;
 
+    let mut description = tool.description.clone();
+    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
+
     serde_json::json!({
         "type": "function",
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": normalize_schema_strict(&tool.parameters),
+        "name": sanitize_tool_name(&tool.name),
+        "description": description,
+        "parameters": parameters,
     })
 }
 
@@ -873,6 +924,67 @@ mod tests {
         assert_eq!(json["description"], "Does things");
     }
 
+    /// Caller-level regression test: drives `convert_tool_definition` end to
+    /// end with a GitHub-Copilot-shaped MCP tool definition and asserts that
+    /// the resulting Responses API JSON would no longer trip the 400. This
+    /// is the test that would have caught the original failure mode. The
+    /// helper-level tests for the underlying flatten live next to the
+    /// helper itself in `rig_adapter.rs`.
+    #[test]
+    fn test_convert_tool_definition_handles_top_level_oneof_dispatcher() {
+        let tool = ToolDefinition {
+            name: "github".to_string(),
+            description: "GitHub MCP umbrella tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "oneOf": [
+                    {
+                        "properties": {
+                            "action": { "const": "create_issue" },
+                            "title":  { "type": "string" },
+                            "body":   { "type": "string" }
+                        },
+                        "required": ["action", "title"]
+                    },
+                    {
+                        "properties": {
+                            "action": { "const": "list_issues" },
+                            "repo":   { "type": "string" }
+                        },
+                        "required": ["action", "repo"]
+                    }
+                ]
+            }),
+        };
+        let json = convert_tool_definition(&tool);
+
+        let params = &json["parameters"];
+        assert_eq!(params["type"], "object", "top-level type must be object");
+        assert!(
+            params.get("oneOf").is_none(),
+            "top-level oneOf must not survive into the request body"
+        );
+        assert!(
+            params.get("anyOf").is_none() && params.get("allOf").is_none(),
+            "no other top-level union keywords either"
+        );
+        assert_eq!(params["additionalProperties"], true);
+
+        let description = json["description"].as_str().unwrap();
+        assert!(
+            description.starts_with("GitHub MCP umbrella tool"),
+            "original description must come first"
+        );
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "advisory hint must be appended"
+        );
+        assert!(
+            description.contains("create_issue") && description.contains("list_issues"),
+            "variant info must be retained in the hint so the LLM can choose"
+        );
+    }
+
     #[test]
     fn test_parse_sse_text_response() {
         let sse_body = r#"data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_1"}}
@@ -1092,5 +1204,151 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assert_eq!(parsed.tool_calls[1].id, "call_2");
         assert_eq!(parsed.tool_calls[1].name, "read_file");
         assert_eq!(parsed.finish_reason, FinishReason::ToolUse);
+    }
+
+    /// Regression test: tool names with dots (e.g. MCP tools) must be sanitized
+    /// to match OpenAI's `^[a-zA-Z0-9_-]+$` pattern.
+    #[test]
+    fn test_sanitize_tool_name_replaces_dots() {
+        assert_eq!(super::sanitize_tool_name("memory_search"), "memory_search");
+        assert_eq!(
+            super::sanitize_tool_name("mcp.server.tool"),
+            "mcp_server_tool"
+        );
+        assert_eq!(super::sanitize_tool_name("tool@v2"), "tool_v2");
+        assert_eq!(super::sanitize_tool_name("my-tool"), "my-tool");
+    }
+
+    /// Regression test: convert_tool_definition sanitizes the name.
+    #[test]
+    fn test_convert_tool_definition_sanitizes_name() {
+        let tool = ToolDefinition {
+            name: "mcp.server.search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        };
+        let json = super::convert_tool_definition(&tool);
+        assert_eq!(json["name"], "mcp_server_search");
+    }
+
+    /// Regression test: function_call items sanitize tool names.
+    #[test]
+    fn test_convert_message_sanitizes_tool_call_name() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp.server.search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
+        }];
+        let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
+        let items = super::convert_message(&msg, 0);
+        assert_eq!(items[0]["name"], "mcp_server_search");
+    }
+
+    /// Regression: sanitized tool names in API responses must be reverse-mapped
+    /// back to original names so the tool registry can look them up.
+    #[test]
+    fn test_sanitized_name_reverse_mapping() {
+        use std::collections::HashMap;
+
+        let tools = [
+            ToolDefinition {
+                name: "mcp.server.search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "Memory".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+        ];
+
+        // Build name map (same logic as complete_with_tools)
+        let name_map: HashMap<String, String> = tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = super::sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Only the MCP tool should appear (its name changed)
+        assert_eq!(name_map.len(), 1);
+        assert_eq!(
+            name_map.get("mcp_server_search"),
+            Some(&"mcp.server.search".to_string())
+        );
+
+        // Simulate a tool call coming back with the sanitized name
+        let mut tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp_server_search".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+        if let Some(original) = name_map.get(&tc.name) {
+            tc.name = original.clone();
+        }
+        assert_eq!(tc.name, "mcp.server.search");
+    }
+
+    /// Regression test for #1969: orphaned tool results must be sanitized
+    /// before building the request body, otherwise the Responses API returns
+    /// HTTP 400 because function_call_output references a non-existent call_id.
+    #[test]
+    fn test_build_request_sanitizes_orphaned_tool_results() {
+        use crate::llm::provider::sanitize_tool_messages;
+
+        // An orphaned tool result: no preceding assistant message with a
+        // matching tool_call for "call_orphan".
+        let mut messages = vec![
+            ChatMessage::system("You are helpful"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("I'll use a tool"),
+            ChatMessage::tool_result("call_orphan", "search", "found 3 results"),
+        ];
+
+        // Before sanitization the message is Role::Tool with a tool_call_id.
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[3].tool_call_id, Some("call_orphan".to_string()));
+
+        sanitize_tool_messages(&mut messages);
+
+        // After sanitization it must be rewritten to a user message.
+        assert_eq!(messages[3].role, Role::User);
+        assert!(messages[3].content.contains("[Tool `search` returned:"));
+        assert!(messages[3].content.contains("found 3 results"));
+        assert!(messages[3].tool_call_id.is_none());
+        assert!(messages[3].name.is_none());
+
+        // Verify the rewritten message converts to a user input item (not
+        // a function_call_output that would cause HTTP 400).
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new(
+            "gpt-5.3-codex",
+            "https://chatgpt.com/backend-api/codex",
+            &jwt,
+            300,
+        )
+        .unwrap();
+
+        let body = provider.build_request_body(&messages, None);
+        let input = body["input"].as_array().unwrap();
+
+        // Should have 3 non-system items: user, assistant, rewritten-user
+        assert_eq!(input.len(), 3);
+        // The last item must be a user message, not a function_call_output
+        assert_eq!(input[2]["role"], "user");
+        assert!(
+            input[2]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[Tool `search` returned:")
+        );
     }
 }

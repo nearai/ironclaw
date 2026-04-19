@@ -53,7 +53,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_chat.py` | Send message, SSE streaming, response rendering |
 | `test_skills.py` | ClawHub search, skill install/remove |
 | `test_tool_approval.py` | Tool approval overlay (approve, deny, always, params toggle) |
-| `test_sse_reconnect.py` | SSE reconnection handling |
+| `test_sse_reconnect.py` | SSE reconnection handling, keepalive comments, restart recovery, stale reconnect IDs, and connection-limit coverage |
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 
@@ -63,6 +63,11 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 2. Use the `page` fixture for a fresh browser page
 3. Use selectors from `helpers.py` (update `SEL` dict if new elements are needed)
 4. Keep tests deterministic -- use the mock LLM, not real providers
+
+## Live Persona Failure Notes
+
+For the live 20+ turn persona workflows and recurring tool-misuse patterns seen
+there, see [`LIVE_TOOL_FAILURES.md`](./LIVE_TOOL_FAILURES.md).
 
 ## Mocking API responses with `page.route()`
 

@@ -48,24 +48,38 @@ async fn start_test_server() -> (
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
         owner_id: "test-user".to_string(),
-        default_sender_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -73,7 +87,7 @@ async fn start_test_server() -> (
         "test-user".to_string(),
     );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), auth)
+    let bound_addr = start_server(addr, state.clone(), auth.into())
         .await
         .expect("Failed to start test server");
 
@@ -317,6 +331,8 @@ async fn test_ws_multiple_events_in_sequence() {
     });
     state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
+        detail: None,
+        call_id: Some("call_shell_1".to_string()),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {
@@ -324,6 +340,8 @@ async fn test_ws_multiple_events_in_sequence() {
         success: true,
         error: None,
         parameters: None,
+        call_id: Some("call_shell_1".to_string()),
+        duration_ms: Some(42),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::Response {
@@ -344,7 +362,10 @@ async fn test_ws_multiple_events_in_sequence() {
 
     assert_eq!(p1["event_type"], "thinking");
     assert_eq!(p2["event_type"], "tool_started");
+    assert_eq!(p2["data"]["call_id"], "call_shell_1");
     assert_eq!(p3["event_type"], "tool_completed");
+    assert_eq!(p3["data"]["call_id"], "call_shell_1");
+    assert_eq!(p3["data"]["duration_ms"], 42);
     assert_eq!(p4["event_type"], "response");
 
     ws.close(None).await.unwrap();

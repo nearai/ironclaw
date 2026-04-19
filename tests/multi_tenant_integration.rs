@@ -42,8 +42,6 @@ const ALICE_USER_ID: &str = "alice";
 const BOB_USER_ID: &str = "bob";
 const OWNER_TOKEN: &str = "tok-owner-secret";
 const OWNER_SCOPE_ID: &str = "owner-scope";
-const GATEWAY_SENDER_ID: &str = "gateway-sender";
-
 /// Build a MultiAuthState with two users.
 fn two_user_auth() -> MultiAuthState {
     let mut tokens = HashMap::new();
@@ -51,6 +49,7 @@ fn two_user_auth() -> MultiAuthState {
         ALICE_TOKEN.to_string(),
         UserIdentity {
             user_id: ALICE_USER_ID.to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -58,6 +57,7 @@ fn two_user_auth() -> MultiAuthState {
         BOB_TOKEN.to_string(),
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );
@@ -79,7 +79,10 @@ fn user_echo_app(auth: MultiAuthState) -> Router {
         .route("/api/whoami/scopes", get(echo_user_with_scopes))
         .route("/api/action", post(echo_user))
         .route("/api/chat/events", get(echo_user)) // SSE endpoint (allows query token)
-        .layer(middleware::from_fn_with_state(auth, auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            ironclaw::channels::web::auth::CombinedAuthState::from(auth),
+            auth_middleware,
+        ))
 }
 
 // ===========================================================================
@@ -540,28 +543,41 @@ fn gateway_state_has_multi_tenant_fields() {
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
         owner_id: "fallback".to_string(),
-        default_sender_id: "fallback".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60), // Multi-tenant: per-user
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         active_config: Default::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     };
 
     assert_eq!(state.owner_id, "fallback");
-    assert_eq!(state.default_sender_id, "fallback");
     assert!(state.workspace_pool.is_none());
 }
 
@@ -592,6 +608,7 @@ async fn start_owner_scoped_sender_server() -> (
         OWNER_TOKEN.to_string(),
         UserIdentity {
             user_id: OWNER_SCOPE_ID.to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -599,6 +616,7 @@ async fn start_owner_scoped_sender_server() -> (
         BOB_TOKEN.to_string(),
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
+            role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -614,27 +632,41 @@ async fn start_owner_scoped_sender_server() -> (
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
         owner_id: OWNER_SCOPE_ID.to_string(),
-        default_sender_id: GATEWAY_SENDER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: Default::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
-    let auth = MultiAuthState::multi(tokens);
+    let auth = MultiAuthState::multi(tokens).into();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let bound = start_server(addr, state.clone(), auth)
         .await
@@ -769,7 +801,7 @@ async fn full_server_chat_send_rewrites_sender_only_for_owner_scope_rebind() {
         .expect("Timed out waiting for owner message")
         .expect("Agent channel closed");
     assert_eq!(owner_msg.user_id, OWNER_SCOPE_ID);
-    assert_eq!(owner_msg.sender_id, GATEWAY_SENDER_ID);
+    assert_eq!(owner_msg.sender_id, OWNER_SCOPE_ID);
     assert_eq!(owner_msg.content, "hello from owner");
 
     let other_resp = client
@@ -999,28 +1031,42 @@ async fn start_multi_user_server_with_db() -> (
         extension_manager: None,
         tool_registry: None,
         store: Some(Arc::clone(&db)),
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
         owner_id: ALICE_USER_ID.to_string(),
-        default_sender_id: ALICE_USER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
+        auth_manager: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         active_config: Default::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth)
+    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into())
         .await
         .expect("Failed to start server with DB");
 

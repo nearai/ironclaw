@@ -74,24 +74,38 @@ impl TestGatewayBuilder {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),
-            default_sender_id: self.user_id,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         })
     }
 
@@ -106,7 +120,7 @@ impl TestGatewayBuilder {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("hard-coded address must parse"); // safety: constant literal
-        let bound = start_server(addr, state.clone(), auth).await?;
+        let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
 
@@ -120,7 +134,7 @@ impl TestGatewayBuilder {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("hard-coded address must parse"); // safety: constant literal
-        let bound = start_server(addr, state.clone(), auth).await?;
+        let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
 }
