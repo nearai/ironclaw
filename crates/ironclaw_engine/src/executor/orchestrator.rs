@@ -652,8 +652,8 @@ async fn handle_llm_complete(
         Ok(output) => output,
         Err(EngineError::TokenLimitExceeded { used, limit }) => {
             let retry_messages = compact_thread_messages_for_retry(&messages);
-            let tokens_before = super::compaction::estimate_tokens(&messages);
-            let tokens_after = super::compaction::estimate_tokens(&retry_messages);
+            let tokens_before = estimate_retry_tokens(&messages);
+            let tokens_after = estimate_retry_tokens(&retry_messages);
             if !has_explicit_messages
                 || (retry_messages.len() >= messages.len() && tokens_after >= tokens_before)
             {
@@ -2406,6 +2406,21 @@ fn compact_thread_messages_for_retry(messages: &[ThreadMessage]) -> Vec<ThreadMe
     }
 
     compacted
+}
+
+/// Rough token estimate for retry-compaction decisions.
+///
+/// Mirrors `executor::compaction::estimate_tokens()` locally so the
+/// orchestrator retry path does not depend on that sibling module being
+/// available in every feature-gated build mode.
+fn estimate_retry_tokens(messages: &[ThreadMessage]) -> usize {
+    const CHARS_PER_TOKEN: usize = 4;
+
+    let total_chars: usize = messages
+        .iter()
+        .map(|m| m.content.len() + m.action_name.as_ref().map_or(0, |n| n.len()) + 4)
+        .sum();
+    total_chars.div_ceil(CHARS_PER_TOKEN)
 }
 
 /// Extract the last `n` characters from `s`.
