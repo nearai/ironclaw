@@ -14,8 +14,8 @@ if [ -d "channels-src/telegram" ]; then
 fi
 
 echo ""
-echo "Building IronClaw..."
-cargo build --release
+echo "Building IronClaw (full feature set)..."
+cargo build --release --no-default-features --features full
 
 echo ""
 echo "Done. Binary: target/release/ironclaw"

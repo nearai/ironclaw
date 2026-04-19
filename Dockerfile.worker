@@ -14,8 +14,8 @@ FROM rust:1.92-bookworm AS builder
 WORKDIR /build
 COPY . .
 
-# Build only the ironclaw binary (release mode)
-RUN cargo build --release --bin ironclaw
+# Build the ironclaw binary with the full release feature set.
+RUN cargo build --release --bin ironclaw --no-default-features --features full
 
 # ---
 

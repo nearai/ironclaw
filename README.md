@@ -135,8 +135,11 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 
-# Build
-cargo build --release
+# Build the default local profile (channels + web UI + Monty + libsql)
+cargo build
+
+# Build the full release profile
+cargo build --release --no-default-features --features full
 
 # Run tests
 cargo test
@@ -290,8 +293,11 @@ External content passes through multiple security layers:
 # First-time setup (configures database, auth, etc.)
 ironclaw onboard
 
-# Start interactive REPL
+# Start interactive REPL (default local profile)
 cargo run
+
+# Start interactive REPL with the optional TUI enabled
+cargo run --features local-tui
 
 # With debug logging
 RUST_LOG=ironclaw=debug cargo run
@@ -306,9 +312,11 @@ cargo fmt
 # Lint
 cargo clippy --all --benches --tests --examples --all-features
 
-# Run tests
-createdb ironclaw_test
+# Run tests (default suite uses libsql temp DB)
 cargo test
+
+# Run PostgreSQL-backed integration tests when needed
+cargo test --features postgres,integration
 
 # Run specific test
 cargo test test_name
@@ -316,6 +324,7 @@ cargo test test_name
 
 - **Channels**: See [docs/channels/overview.mdx](docs/channels/overview.mdx) for setup of Telegram, Discord, and other channels.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
+- **Feature profiles**: `cargo run` uses the slim local profile by default; use `--features local-tui` for the TUI or `--no-default-features --features full` for release-style builds.
 
 ## OpenClaw Heritage
 
