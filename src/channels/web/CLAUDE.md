@@ -188,7 +188,7 @@ Current consolidation points:
 - `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
 - `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
 - `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
-- `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+- `crates/ironclaw_gateway/static/js/core/onboarding.js`: `handleOnboardingState(...)` as the canonical client entrypoint (the old monolithic `app.js` has been split into per-concern modules under `static/js/`; `APP_JS` in `crates/ironclaw_gateway/src/assets.rs` concatenates them at compile time)
 
 All three of the backend wrappers above delegate to the canonical resolver
 or return `Option<ExtensionName>`; they must not duplicate its logic.
@@ -197,7 +197,7 @@ Legacy cleanup note:
 
 - The only remaining browser compatibility path for engine v1 auth mode is `pending_auth` token submit/cancel through `/api/chat/auth-token` and `/api/chat/auth-cancel`.
 - That path exists solely for prompts that do not carry a gate `request_id`.
-- Do not expand it. When v1 auth mode is removed, delete these endpoints and the corresponding no-`request_id` branch in `static/app.js`.
+- Do not expand it. When v1 auth mode is removed, delete these endpoints and the corresponding no-`request_id` branch in `static/js/core/onboarding.js`.
 
 ### Routines
 | Method | Path | Description |
