@@ -43,6 +43,12 @@ use crate::tools::{
 use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 
+/// Maximum age (hours) for an orphaned dispatched routine run whose linked job
+/// is still in a non-terminal state (Pending / InProgress). After this
+/// threshold `sync_dispatched_runs` force-fails the run so the routine can
+/// fire again rather than being permanently blocked by a stuck worker.
+const DISPATCH_RUN_TIMEOUT_HOURS: i64 = 1;
+
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
@@ -575,14 +581,41 @@ impl RoutineEngine {
                 }
             };
 
-            // Map job state to final run status
+            // Map job state to final run status.
+            //
+            // `Stuck` is treated as terminal failure here: self_repair already
+            // uses it as its diagnostic for "exceeded stuck_threshold / timed
+            // out", and the original watcher process that might have recovered
+            // it is gone. Finalising as Failed lets the routine fire again
+            // instead of being permanently blocked.
             let final_status = match job.state {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                // Pending, InProgress, Stuck — still running
-                _ => None,
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => {
+                    Some(RunStatus::Failed)
+                }
+                // Pending / InProgress — job is still running or waiting for a
+                // worker. Apply a wall-clock escape hatch: if the run is older
+                // than DISPATCH_RUN_TIMEOUT_HOURS force-fail it so that a
+                // permanent scheduler wedge (worker crash before the job ever
+                // started) cannot block the routine indefinitely.
+                _ => {
+                    let age = Utc::now().signed_duration_since(run.started_at);
+                    if age > chrono::Duration::hours(DISPATCH_RUN_TIMEOUT_HOURS) {
+                        tracing::warn!(
+                            run_id = %run.id,
+                            job_id = %job_id,
+                            job_state = %job.state,
+                            age_hours = age.num_hours(),
+                            "Orphaned routine run exceeded dispatch timeout; force-failing \
+                             (job stuck in non-terminal state)"
+                        );
+                        Some(RunStatus::Failed)
+                    } else {
+                        None
+                    }
+                }
             };
 
             let status = match final_status {
@@ -2731,56 +2764,56 @@ mod tests {
     }
 
     /// Verify that job state to run status mapping covers all expected cases.
+    ///
+    /// Regression test for #2655: JobState::Stuck must map to RunStatus::Failed
+    /// (not be treated as an active state) so that orphaned runs whose linked
+    /// job was diagnosed as stuck by self_repair are finalised on the next tick
+    /// rather than blocking the routine forever.
     #[test]
     fn test_job_state_to_run_status_mapping() {
         use crate::context::JobState;
 
-        // Success states
-        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
-            let status = match state {
+        // Helper that mirrors the logic in sync_dispatched_runs (excluding the
+        // wall-clock timeout branch which is tested separately).
+        let map = |state: &JobState| -> Option<RunStatus> {
+            match state {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                // Stuck is now treated as terminal failure (#2655).
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => {
+                    Some(RunStatus::Failed)
+                }
                 _ => None,
-            };
+            }
+        };
+
+        // Success states
+        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
             assert_eq!(
-                status,
+                map(&state),
                 Some(RunStatus::Ok),
                 "{:?} should map to RunStatus::Ok",
                 state
             );
         }
 
-        // Failure states
-        for state in [JobState::Failed, JobState::Cancelled] {
-            let status = match state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                    Some(RunStatus::Ok)
-                }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                _ => None,
-            };
+        // Failure states — including Stuck (regression for #2655)
+        for state in [JobState::Failed, JobState::Cancelled, JobState::Stuck] {
             assert_eq!(
-                status,
+                map(&state),
                 Some(RunStatus::Failed),
                 "{:?} should map to RunStatus::Failed",
                 state
             );
         }
 
-        // Active states (should not finalize)
-        for state in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
-            let status = match state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                    Some(RunStatus::Ok)
-                }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                _ => None,
-            };
+        // Active states (should not finalize without wall-clock timeout)
+        for state in [JobState::Pending, JobState::InProgress] {
             assert_eq!(
-                status, None,
-                "{:?} should not finalize the routine run",
+                map(&state),
+                None,
+                "{:?} should not finalize the routine run (without timeout)",
                 state
             );
         }
