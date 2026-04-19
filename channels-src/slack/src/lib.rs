@@ -476,9 +476,6 @@ fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
 fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
     let attachments = extract_slack_attachments(&event.files);
 
-    // Download and store file attachments for host-side processing
-    download_and_store_slack_files(&attachments);
-
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
@@ -492,6 +489,8 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
+                // Only download attachments for messages we will actually process.
+                download_and_store_slack_files(&attachments);
                 emit_message(
                     user,
                     text,
@@ -527,6 +526,8 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                     if !check_sender_permission(&user, &channel, is_dm) {
                         return;
                     }
+                    // Only download attachments for messages we will actually process.
+                    download_and_store_slack_files(&attachments);
                     emit_message(
                         user,
                         text,
@@ -709,8 +710,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed =
-        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
 
     if is_allowed {
         return true;
@@ -728,10 +728,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(channel_id, &result.code);

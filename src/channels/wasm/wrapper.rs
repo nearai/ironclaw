@@ -1713,7 +1713,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1724,6 +1724,7 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         let user_id = user_id.to_string();
         let content = content.to_string();
@@ -1775,8 +1776,9 @@ impl WasmChannel {
                     });
                 }
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_broadcast WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -3488,6 +3490,32 @@ mod tests {
             Some(
                 r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string()
             )
+        );
+    }
+
+    #[test]
+    fn test_inject_workspace_reader_supports_broadcast_callback_state_reads() {
+        use crate::channels::wasm::host::{
+            ChannelHostState, ChannelWorkspaceStore, PendingWorkspaceWrite,
+        };
+
+        let workspace_store = Arc::new(ChannelWorkspaceStore::new());
+        workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/feishu/state/api_base".to_string(),
+            content: "https://open.feishu.cn".to_string(),
+        }]);
+
+        let callback_caps = WasmChannel::inject_workspace_reader(
+            &ChannelCapabilities::for_channel("feishu"),
+            &workspace_store,
+        );
+        let callback_state = ChannelHostState::new("feishu", callback_caps);
+
+        assert_eq!(
+            callback_state
+                .workspace_read("state/api_base")
+                .expect("callback read should not fail"),
+            Some("https://open.feishu.cn".to_string())
         );
     }
 
