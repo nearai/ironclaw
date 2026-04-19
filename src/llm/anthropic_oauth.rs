@@ -241,7 +241,9 @@ impl AnthropicOAuthProvider {
 #[async_trait]
 impl LlmProvider for AnthropicOAuthProvider {
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
@@ -279,7 +281,9 @@ impl LlmProvider for AnthropicOAuthProvider {
         &self,
         mut req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
@@ -575,6 +579,7 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     id: id.clone(),
                     name: name.clone(),
                     arguments: input.clone(),
+                    reasoning: None,
                 });
             }
         }
@@ -623,6 +628,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         }];
         let messages = vec![
             ChatMessage::user("Search for test"),

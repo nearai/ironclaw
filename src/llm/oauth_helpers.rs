@@ -1,9 +1,8 @@
 //! OAuth callback infrastructure used by the NEAR AI session login flow.
 //!
 //! These utilities (callback server, landing pages, hostname detection) were
-//! originally in `cli/oauth_defaults.rs` and are moved here so the `llm`
-//! module is self-contained. `cli/oauth_defaults` re-exports everything for
-//! backward compatibility.
+//! originally in the old CLI OAuth module and are moved here so the `llm`
+//! module is self-contained.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -361,7 +360,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn loopback_detection() {
@@ -390,7 +389,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv4() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "0.0.0.0") };
@@ -414,7 +413,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv6() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "::") };

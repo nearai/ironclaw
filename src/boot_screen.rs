@@ -1,8 +1,11 @@
 //! Boot screen displayed after all initialization completes.
 //!
-//! Shows a polished ANSI-styled status panel summarizing the agent's runtime
-//! state: model, database, tool count, enabled features, active channels,
-//! and the gateway URL.
+//! Shows a compact ANSI-styled status panel with three tiers:
+//! - **Tier 1 (always):** Name + version, model + backend.
+//! - **Tier 2 (conditional):** Gateway URL, tunnel URL, non-default channels.
+//! - **Tier 3 (removed):** Database, tool count, features → use `ironclaw status`.
+
+use crate::cli::fmt;
 
 /// All displayable fields for the boot screen.
 pub struct BootInfo {
@@ -22,6 +25,7 @@ pub struct BootInfo {
     pub sandbox_enabled: bool,
     pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
+    pub acp_enabled: bool,
     pub routines_enabled: bool,
     pub skills_enabled: bool,
     pub channels: Vec<String>,
@@ -29,112 +33,76 @@ pub struct BootInfo {
     pub tunnel_url: Option<String>,
     /// Provider name for the managed tunnel (e.g., "ngrok").
     pub tunnel_provider: Option<String>,
+    /// Time elapsed during startup. Shown at the bottom when present.
+    pub startup_elapsed: Option<std::time::Duration>,
 }
 
-/// Print the boot screen to stdout.
-pub fn print_boot_screen(info: &BootInfo) {
-    // ANSI codes matching existing REPL palette
-    let bold = "\x1b[1m";
-    let cyan = "\x1b[36m";
-    let dim = "\x1b[90m";
-    let yellow = "\x1b[33m";
-    let yellow_underline = "\x1b[33;4m";
-    let reset = "\x1b[0m";
+const KW: usize = 10;
 
-    let border = format!("  {dim}{}{reset}", "\u{2576}".repeat(58));
+/// Print the boot screen to stdout.
+///
+/// **Tier 1 (always):** Name + version, model + backend.
+/// **Tier 2 (conditional):** Gateway URL, tunnel URL, non-default channels.
+/// **Tier 3 (removed):** Database, tool count, features — use `ironclaw status`.
+pub fn print_boot_screen(info: &BootInfo) {
+    let border = format!("  {}", fmt::separator(58));
 
     println!();
     println!("{border}");
     println!();
-    println!("  {bold}{}{reset} v{}", info.agent_name, info.version);
+
+    // ── Tier 1: always shown ──────────────────────────────────────────
+
+    println!(
+        "  {}{}{} v{}",
+        fmt::bold(),
+        info.agent_name,
+        fmt::reset(),
+        info.version
+    );
     println!();
 
     // Model line
     let model_display = if let Some(ref cheap) = info.cheap_model {
         format!(
-            "{cyan}{}{reset}  {dim}cheap{reset} {cyan}{}{reset}",
-            info.llm_model, cheap
+            "{}{}{}  {}cheap{} {}{}{}",
+            fmt::accent(),
+            info.llm_model,
+            fmt::reset(),
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            cheap,
+            fmt::reset(),
         )
     } else {
-        format!("{cyan}{}{reset}", info.llm_model)
+        format!("{}{}{}", fmt::accent(), info.llm_model, fmt::reset())
     };
     println!(
-        "  {dim}model{reset}     {model_display}  {dim}via {}{reset}",
-        info.llm_backend
+        "  {}{:<width$}{}  {model_display}  {}via {}{}",
+        fmt::dim(),
+        "model",
+        fmt::reset(),
+        fmt::dim(),
+        info.llm_backend,
+        fmt::reset(),
+        width = KW,
     );
 
-    // Database line
-    let db_status = if info.db_connected {
-        "connected"
-    } else {
-        "none"
-    };
-    println!(
-        "  {dim}database{reset}  {cyan}{}{reset} {dim}({db_status}){reset}",
-        info.db_backend
-    );
+    // ── Tier 2: conditional ───────────────────────────────────────────
 
-    // Tools line
-    println!(
-        "  {dim}tools{reset}     {cyan}{}{reset} {dim}registered{reset}",
-        info.tool_count
-    );
-
-    // Features line
-    let mut features = Vec::new();
-    if info.embeddings_enabled {
-        if let Some(ref provider) = info.embeddings_provider {
-            features.push(format!("embeddings ({provider})"));
-        } else {
-            features.push("embeddings".to_string());
-        }
-    }
-    if info.heartbeat_enabled {
-        let mins = info.heartbeat_interval_secs / 60;
-        features.push(format!("heartbeat ({mins}m)"));
-    }
-    match info.docker_status {
-        crate::sandbox::detect::DockerStatus::Available => {
-            features.push("sandbox".to_string());
-        }
-        crate::sandbox::detect::DockerStatus::NotInstalled => {
-            features.push(format!("{yellow}sandbox (docker not installed){reset}"));
-        }
-        crate::sandbox::detect::DockerStatus::NotRunning => {
-            features.push(format!("{yellow}sandbox (docker not running){reset}"));
-        }
-        crate::sandbox::detect::DockerStatus::Disabled => {
-            // Don't show sandbox when disabled
-        }
-    }
-    if info.claude_code_enabled {
-        features.push("claude-code".to_string());
-    }
-    if info.routines_enabled {
-        features.push("routines".to_string());
-    }
-    if info.skills_enabled {
-        features.push("skills".to_string());
-    }
-    if !features.is_empty() {
-        println!(
-            "  {dim}features{reset}  {cyan}{}{reset}",
-            features.join("  ")
-        );
-    }
-
-    // Channels line
-    if !info.channels.is_empty() {
-        println!(
-            "  {dim}channels{reset}  {cyan}{}{reset}",
-            info.channels.join("  ")
-        );
-    }
-
-    // Gateway URL (highlighted)
+    // Gateway URL
     if let Some(ref url) = info.gateway_url {
-        println!();
-        println!("  {dim}gateway{reset}   {yellow_underline}{url}{reset}");
+        println!(
+            "  {}{:<width$}{}  {}{}{}",
+            fmt::dim(),
+            "gateway",
+            fmt::reset(),
+            fmt::link(),
+            url,
+            fmt::reset(),
+            width = KW,
+        );
     }
 
     // Tunnel URL
@@ -142,15 +110,145 @@ pub fn print_boot_screen(info: &BootInfo) {
         let provider_tag = info
             .tunnel_provider
             .as_deref()
-            .map(|p| format!(" {dim}({p}){reset}"))
+            .map(|p| format!("  {}({}){}", fmt::dim(), p, fmt::reset()))
             .unwrap_or_default();
-        println!("  {dim}tunnel{reset}    {yellow_underline}{url}{reset}{provider_tag}");
+        println!(
+            "  {}{:<width$}{}  {}{}{}{}",
+            fmt::dim(),
+            "tunnel",
+            fmt::reset(),
+            fmt::link(),
+            url,
+            fmt::reset(),
+            provider_tag,
+            width = KW,
+        );
     }
+
+    // Non-default channels (skip if only the default set)
+    let non_default: Vec<&str> = info
+        .channels
+        .iter()
+        .filter(|c| !matches!(c.as_str(), "repl" | "gateway"))
+        .map(|c| c.as_str())
+        .collect();
+    if !non_default.is_empty() {
+        println!(
+            "  {}{:<width$}{}  {}{}{}",
+            fmt::dim(),
+            "channels",
+            fmt::reset(),
+            fmt::accent(),
+            non_default.join("  "),
+            fmt::reset(),
+            width = KW,
+        );
+    }
+
+    // ── Tier 3: compact feature tags ──────────────────────────────────
+
+    let mut tags: Vec<String> = Vec::new();
+
+    // Database
+    if info.db_connected {
+        tags.push(format!("db:{}", info.db_backend));
+    }
+
+    // Tool count
+    if info.tool_count > 0 {
+        tags.push(format!("tools:{}", info.tool_count));
+    }
+
+    // Routines
+    if info.routines_enabled {
+        tags.push("routines".to_string());
+    }
+
+    // Heartbeat with interval
+    if info.heartbeat_enabled {
+        let interval = if info.heartbeat_interval_secs >= 3600
+            && info.heartbeat_interval_secs.is_multiple_of(3600)
+        {
+            format!("{}h", info.heartbeat_interval_secs / 3600)
+        } else if info.heartbeat_interval_secs >= 60
+            && info.heartbeat_interval_secs.is_multiple_of(60)
+        {
+            format!("{}m", info.heartbeat_interval_secs / 60)
+        } else {
+            format!("{}s", info.heartbeat_interval_secs)
+        };
+        tags.push(format!("heartbeat:{interval}"));
+    }
+
+    // Skills
+    if info.skills_enabled {
+        tags.push("skills".to_string());
+    }
+
+    // Sandbox / Docker
+    if info.sandbox_enabled {
+        let suffix = match info.docker_status {
+            crate::sandbox::detect::DockerStatus::Available => "",
+            crate::sandbox::detect::DockerStatus::NotRunning => ":stopped",
+            _ => ":unavail",
+        };
+        tags.push(format!("sandbox{suffix}"));
+    }
+
+    // Embeddings
+    if info.embeddings_enabled {
+        if let Some(ref provider) = info.embeddings_provider {
+            tags.push(format!("embeddings:{provider}"));
+        } else {
+            tags.push("embeddings".to_string());
+        }
+    }
+
+    // Claude Code bridge
+    if info.claude_code_enabled {
+        tags.push("claude-code".to_string());
+    }
+
+    // ACP agents
+    if info.acp_enabled {
+        tags.push("acp".to_string());
+    }
+
+    if !tags.is_empty() {
+        println!(
+            "  {}{:<width$}{}  {}",
+            fmt::dim(),
+            "features",
+            fmt::reset(),
+            tags.join("  "),
+            width = KW,
+        );
+    }
+
+    // ── Footer ────────────────────────────────────────────────────────
 
     println!();
     println!("{border}");
-    println!();
-    println!("  /help for commands, /quit to exit");
+
+    // Startup elapsed
+    if let Some(elapsed) = info.startup_elapsed {
+        let millis = elapsed.as_millis();
+        let elapsed_str = if millis < 1000 {
+            format!("{millis}ms")
+        } else {
+            let secs = elapsed.as_secs_f64();
+            format!("{secs:.1}s")
+        };
+        println!("  {}ready in {}{}", fmt::dim(), elapsed_str, fmt::reset());
+    }
+
+    // Hint to run `ironclaw status` for full details
+    println!(
+        "  {}Run `ironclaw status` for full system details.{}",
+        fmt::hint(),
+        fmt::reset()
+    );
+
     println!();
 }
 
@@ -178,6 +276,7 @@ mod tests {
             sandbox_enabled: true,
             docker_status: DockerStatus::Available,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: true,
             skills_enabled: true,
             channels: vec![
@@ -187,6 +286,7 @@ mod tests {
             ],
             tunnel_url: Some("https://abc123.ngrok.io".to_string()),
             tunnel_provider: Some("ngrok".to_string()),
+            startup_elapsed: None,
         };
         // Should not panic
         print_boot_screen(&info);
@@ -211,11 +311,13 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec![],
             tunnel_url: None,
             tunnel_provider: None,
+            startup_elapsed: None,
         };
         // Should not panic
         print_boot_screen(&info);
@@ -240,11 +342,13 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec!["repl".to_string()],
             tunnel_url: None,
             tunnel_provider: None,
+            startup_elapsed: None,
         };
         // Should not panic
         print_boot_screen(&info);

@@ -1,5 +1,6 @@
 //! Tool trait and types.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -58,9 +59,18 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
+    ///
+    /// - `Never` tools are always allowed (no approval needed).
+    /// - `UnlessAutoApproved` tools are allowed in autonomous contexts
+    ///   (autonomous execution implies auto-approve).
+    /// - `Always` tools are only allowed if explicitly listed in `allowed_tools`.
+    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
+            Self::Autonomous { allowed_tools } => match requirement {
+                ApprovalRequirement::Never => false,
+                ApprovalRequirement::UnlessAutoApproved => false,
+                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
+            },
         }
     }
 
@@ -112,6 +122,33 @@ impl Default for ToolRateLimitConfig {
     }
 }
 
+/// Risk level of a tool invocation.
+///
+/// Used by the shell tool to classify commands and by the worker to drive
+/// approval decisions and observability logging. Implements `Ord` so callers
+/// can compare levels (e.g. `risk >= RiskLevel::High`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RiskLevel {
+    /// Read-only, safe, reversible (e.g. `ls`, `cat`, `grep`).
+    Low,
+    /// Creates or modifies state, but generally reversible
+    /// (e.g. `mkdir`, `git commit`, `cargo build`).
+    Medium,
+    /// Destructive, irreversible, or security-sensitive
+    /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
+    High,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => f.write_str("low"),
+            Self::Medium => f.write_str("medium"),
+            Self::High => f.write_str("high"),
+        }
+    }
+}
+
 /// Where a tool should execute: orchestrator process or inside a container.
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
@@ -122,6 +159,46 @@ pub enum ToolDomain {
     Orchestrator,
     /// Must run inside a sandboxed container (filesystem, shell, code).
     Container,
+}
+
+/// Which engine versions a tool is available in.
+///
+/// Declared by each tool via `Tool::engine_compatibility()`. Tools default to
+/// `Both`; override for version-specific tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineCompatibility {
+    /// Available in both v1 (legacy agent loop) and v2 (engine threads).
+    Both,
+    /// Only available in v1 (legacy agent loop). Replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`).
+    V1Only,
+    /// Only available in v2 (engine threads/capabilities).
+    V2Only,
+}
+
+impl EngineCompatibility {
+    /// Whether a tool with this compatibility is visible in the given engine version.
+    pub fn is_visible_in(self, version: EngineVersion) -> bool {
+        match self {
+            Self::Both => true,
+            Self::V1Only => version == EngineVersion::V1,
+            Self::V2Only => version == EngineVersion::V2,
+        }
+    }
+}
+
+/// Engine version selector for filtering tools.
+///
+/// Used by `ToolRegistry::tool_definitions_for_engine()` as the filter
+/// parameter. Separate from `EngineCompatibility` to avoid the footgun of
+/// passing `Both` as a filter (which would confusingly exclude version-specific
+/// tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineVersion {
+    /// V1 legacy agent loop.
+    V1,
+    /// V2 engine threads/capabilities.
+    V2,
 }
 
 /// Error type for tool execution.
@@ -276,6 +353,18 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Risk level for a specific invocation of this tool.
+    ///
+    /// Defaults to `Low` (read-only, safe). Override for tools whose risk
+    /// depends on the parameters — the shell tool classifies commands into
+    /// `Low` / `Medium` / `High` based on the command string.
+    ///
+    /// The worker logs this value with every tool call so operators can audit
+    /// the risk level at which each execution was classified.
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
+    }
+
     /// Whether this tool invocation requires user approval.
     ///
     /// Returns `Never` by default (most tools run in a sandboxed environment).
@@ -301,6 +390,16 @@ pub trait Tool: Send + Sync {
     /// Default: `Orchestrator` (safe for the main process).
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    /// Which engine versions this tool is available in.
+    ///
+    /// Default: `Both`. Override to `V1Only` for tools replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`), or for
+    /// tools that cannot be LLM-invoked in v2 (e.g. `ApprovalRequirement::Always`
+    /// tools with no interactive approval path).
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::Both
     }
 
     /// Parameter names whose values must be redacted before logging, hooks, and approvals.
@@ -363,6 +462,16 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Canonical provider extension that owns this action, when one exists.
+    ///
+    /// This lets the runtime resolve `action -> provider extension` without
+    /// inferring ownership from the action name. MCP subtools should report the
+    /// server extension name, and extension-backed WASM tools should report
+    /// their extension id.
+    fn provider_extension(&self) -> Option<&str> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         let parameters = self.parameters_schema();
@@ -405,6 +514,53 @@ pub fn require_param<'a>(
     params
         .get(name)
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
+/// Check if a tool invocation is allowed based on the job's approval context.
+///
+/// This helper function should be called by tools that execute sub-tools
+/// (like the builder) to ensure proper approval checking is done even when
+/// bypassing the worker's normal approval flow.
+///
+/// Returns `Ok(())` if the tool is allowed, `Err(ToolError::NotAuthorized)` if blocked.
+///
+/// # Security semantics
+///
+/// When `approval_context` is `None`, this function uses **legacy blocking behavior**:
+/// - `Never` tools: allowed
+/// - `UnlessAutoApproved` tools: blocked (require interactive approval)
+/// - `Always` tools: blocked (require explicit approval)
+///
+/// This matches the worker-level `ApprovalContext::is_blocked_or_default()` semantics
+/// to prevent privilege escalation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// # use ironclaw::context::JobContext;
+/// # use ironclaw::tools::{Tool, ToolError, ToolOutput, check_approval_in_context};
+/// # use serde_json::Value;
+/// async fn execute(&self, params: Value, ctx: &JobContext) -> Result<ToolOutput, ToolError> {
+///     // If this tool executes sub-tools, check their approval first
+///     check_approval_in_context(ctx, "sub_tool_name", self.requires_approval(&params))?;
+///
+///     // ... rest of implementation
+///     # todo!()
+/// }
+/// ```
+pub fn check_approval_in_context(
+    ctx: &crate::context::JobContext,
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+) -> Result<(), ToolError> {
+    // Match worker-level approval semantics exactly to prevent inconsistency
+    if ApprovalContext::is_blocked_or_default(&ctx.approval_context, tool_name, requirement) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
+    }
+    Ok(())
 }
 
 /// Replace sensitive parameter values with `"[REDACTED]"`.
@@ -462,6 +618,22 @@ pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_js
 /// on maliciously crafted schemas.
 const MAX_SCHEMA_DEPTH: usize = 16;
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     validate_tool_schema_inner(schema, path, 0)
 }
@@ -476,7 +648,18 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
-    // Rule 1: must have "type": "object" at this level
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
+    let has_combinators = has_object_combinator_variants(schema);
+
+    // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -484,16 +667,71 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
             return errors; // Can't check further
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(validate_tool_schema_inner(
+                        variant,
+                        &variant_path,
+                        depth + 1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
+            }
             return errors;
         }
     };
@@ -884,10 +1122,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
+    fn test_approval_context_autonomous_blocks_always_but_allows_soft() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Never and UnlessAutoApproved are always allowed in autonomous context
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Always tools are blocked unless explicitly listed
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
@@ -902,9 +1142,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_blocks_never_when_not_in_scope() {
+    fn test_approval_context_never_always_passes() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(
+            !ctx.is_blocked("any_tool", ApprovalRequirement::Never),
+            "Never tools should always be allowed regardless of allowlist"
+        );
     }
 
     #[test]
@@ -942,7 +1185,8 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(ApprovalContext::is_blocked_or_default(
+        // UnlessAutoApproved is allowed in autonomous context (auto-approved)
+        assert!(!ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved

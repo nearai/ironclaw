@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{db_first_bool, db_first_or_default, optional_env};
 use crate::error::ConfigError;
 
 /// Builder mode configuration.
@@ -34,14 +34,29 @@ impl Default for BuilderModeConfig {
 impl BuilderModeConfig {
     pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
         let bs = &settings.builder;
+        let defaults = crate::settings::BuilderSettings::default();
         Ok(Self {
-            enabled: parse_bool_env("BUILDER_ENABLED", bs.enabled)?,
-            build_dir: optional_env("BUILDER_DIR")?
-                .map(PathBuf::from)
-                .or_else(|| bs.build_dir.clone()),
-            max_iterations: parse_optional_env("BUILDER_MAX_ITERATIONS", bs.max_iterations)?,
-            timeout_secs: parse_optional_env("BUILDER_TIMEOUT_SECS", bs.timeout_secs)?,
-            auto_register: parse_bool_env("BUILDER_AUTO_REGISTER", bs.auto_register)?,
+            enabled: db_first_bool(bs.enabled, defaults.enabled, "BUILDER_ENABLED")?,
+            build_dir: if let Some(ref dir) = bs.build_dir {
+                Some(dir.clone())
+            } else {
+                optional_env("BUILDER_DIR")?.map(PathBuf::from)
+            },
+            max_iterations: db_first_or_default(
+                &bs.max_iterations,
+                &defaults.max_iterations,
+                "BUILDER_MAX_ITERATIONS",
+            )?,
+            timeout_secs: db_first_or_default(
+                &bs.timeout_secs,
+                &defaults.timeout_secs,
+                "BUILDER_TIMEOUT_SECS",
+            )?,
+            auto_register: db_first_bool(
+                bs.auto_register,
+                defaults.auto_register,
+                "BUILDER_AUTO_REGISTER",
+            )?,
         })
     }
 
@@ -63,12 +78,12 @@ impl BuilderModeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     #[test]
     fn resolve_falls_back_to_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.builder.max_iterations = 99;
         settings.builder.auto_register = false;
@@ -79,8 +94,8 @@ mod tests {
     }
 
     #[test]
-    fn env_overrides_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+    fn db_settings_override_env() {
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.builder.timeout_secs = 123;
 
@@ -89,6 +104,22 @@ mod tests {
         let cfg = BuilderModeConfig::resolve(&settings).expect("resolve");
         unsafe { std::env::remove_var("BUILDER_TIMEOUT_SECS") };
 
-        assert_eq!(cfg.timeout_secs, 3);
+        assert_eq!(cfg.timeout_secs, 123, "DB setting should win over env");
+    }
+
+    #[test]
+    fn env_used_when_no_db_setting() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("BUILDER_TIMEOUT_SECS", "42") };
+        let cfg = BuilderModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("BUILDER_TIMEOUT_SECS") };
+
+        assert_eq!(
+            cfg.timeout_secs, 42,
+            "env should be used when DB has the default value"
+        );
     }
 }

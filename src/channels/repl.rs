@@ -15,11 +15,14 @@
 //! - `/compact` - Compact the context
 //! - `/new` - Start a new thread
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
+//!   Approval prompts intentionally stay text-based for parity with other channels;
+//!   there is no arrow-key selector path.
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -36,10 +39,12 @@ use rustyline::{
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 use crate::agent::truncate_for_preview;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::cli::fmt;
 use crate::error::ChannelError;
 
 /// Max characters for tool result previews in the terminal.
@@ -73,6 +78,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/suggest",
     "/thread",
     "/resume",
+    "/reasoning",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -119,7 +125,7 @@ impl Hinter for ReplHelper {
 
 impl Highlighter for ReplHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[90m{hint}\x1b[0m"))
+        Cow::Owned(format!("{}{hint}{}", fmt::dim(), fmt::reset()))
     }
 }
 
@@ -143,55 +149,76 @@ impl ConditionalEventHandler for EscInterruptHandler {
     }
 }
 
+// REPL approvals intentionally use the same plain-text yes/no/always path as
+// other channels. That keeps the terminal flow aligned with SubmissionParser
+// and avoids a selector-specific approval path that can diverge from engine
+// gate handling.
+
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
     let mut skin = MadSkin::default();
-    skin.set_headers_fg(termimad::crossterm::style::Color::Yellow);
-    skin.bold.set_fg(termimad::crossterm::style::Color::White);
-    skin.italic
-        .set_fg(termimad::crossterm::style::Color::Magenta);
-    skin.inline_code
-        .set_fg(termimad::crossterm::style::Color::Green);
-    skin.code_block
-        .set_fg(termimad::crossterm::style::Color::Green);
+    skin.set_headers_fg(crossterm::style::Color::Yellow);
+    skin.bold.set_fg(crossterm::style::Color::White);
+    skin.italic.set_fg(crossterm::style::Color::Magenta);
+    skin.inline_code.set_fg(crossterm::style::Color::Green);
+    skin.code_block.set_fg(crossterm::style::Color::Green);
     skin.code_block.left_margin = 2;
     skin
 }
 
+/// Truncate a string to `max_chars` using character boundaries.
+///
+/// For strings longer than `max_chars`, shows the first half and last half
+/// separated by `...` so both ends are visible.
+fn smart_truncate(s: &str, max_chars: usize) -> Cow<'_, str> {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return Cow::Borrowed(s);
+    }
+    // Account for the 3-char "..." separator
+    let budget = max_chars.saturating_sub(3);
+    let head_len = budget / 2;
+    let tail_len = budget - head_len;
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s
+        .chars()
+        .skip(char_count.saturating_sub(tail_len))
+        .collect();
+    Cow::Owned(format!("{head}...{tail}"))
+}
+
 /// Format JSON params as `key: value` lines for the approval card.
 fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
+    let max_val_len = fmt::term_width().saturating_sub(8);
+
     match params {
         serde_json::Value::Object(map) => {
             let mut lines = Vec::new();
             for (key, value) in map {
                 let val_str = match value {
                     serde_json::Value::String(s) => {
-                        let display = if s.len() > 120 { &s[..120] } else { s };
-                        format!("\x1b[32m\"{display}\"\x1b[0m")
+                        let display = smart_truncate(s, max_val_len);
+                        format!("{}\"{display}\"{}", fmt::success(), fmt::reset())
                     }
                     other => {
                         let rendered = other.to_string();
-                        if rendered.len() > 120 {
-                            format!("{}...", &rendered[..120])
-                        } else {
-                            rendered
-                        }
+                        smart_truncate(&rendered, max_val_len).into_owned()
                     }
                 };
-                lines.push(format!("{indent}\x1b[36m{key}\x1b[0m: {val_str}"));
+                lines.push(format!(
+                    "{indent}{}{key}{}: {val_str}",
+                    fmt::accent(),
+                    fmt::reset()
+                ));
             }
             lines.join("\n")
         }
         other => {
             let pretty = serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
-            let truncated = if pretty.len() > 300 {
-                format!("{}...", &pretty[..300])
-            } else {
-                pretty
-            };
+            let truncated = smart_truncate(&pretty, 300);
             truncated
                 .lines()
-                .map(|l| format!("{indent}\x1b[90m{l}\x1b[0m"))
+                .map(|l| format!("{indent}{}{l}{}", fmt::dim(), fmt::reset()))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -210,6 +237,14 @@ pub struct ReplChannel {
     is_streaming: Arc<AtomicBool>,
     /// When true, the one-liner startup banner is suppressed (boot screen shown instead).
     suppress_banner: Arc<AtomicBool>,
+    /// Sender to inject messages into the agent loop (set after start()).
+    msg_tx: Arc<Mutex<Option<mpsc::Sender<IncomingMessage>>>>,
+    /// Pending approval request currently shown in the REPL.
+    pending_approval: Arc<Mutex<Option<Uuid>>>,
+    /// When true, the readline thread must yield stdin (approval selector or agent processing).
+    stdin_locked: Arc<AtomicBool>,
+    /// Number of transient status lines (Thinking) to erase on next output.
+    transient_lines: std::sync::atomic::AtomicU8,
 }
 
 impl ReplChannel {
@@ -226,6 +261,10 @@ impl ReplChannel {
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            msg_tx: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(None)),
+            stdin_locked: Arc::new(AtomicBool::new(false)),
+            transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -242,6 +281,10 @@ impl ReplChannel {
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            msg_tx: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(None)),
+            stdin_locked: Arc::new(AtomicBool::new(false)),
+            transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -253,6 +296,29 @@ impl ReplChannel {
     fn is_debug(&self) -> bool {
         self.debug_mode.load(Ordering::Relaxed)
     }
+
+    /// Erase transient status lines (Thinking indicators) from the terminal.
+    fn clear_transient(&self) {
+        use crossterm::{cursor, execute, terminal};
+        let n = self.transient_lines.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let mut stderr = io::stderr();
+            let _ = execute!(stderr, cursor::MoveUp(n as u16));
+            let _ = execute!(stderr, terminal::Clear(terminal::ClearType::FromCursorDown));
+        }
+    }
+
+    async fn finish_single_message_turn(&self) {
+        if self.single_message.is_none() {
+            return;
+        }
+
+        let tx = self.msg_tx.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(tx) = tx {
+            let msg = IncomingMessage::new("repl", &self.user_id, "/quit");
+            let _ = tx.send(msg).await;
+        }
+    }
 }
 
 impl Default for ReplChannel {
@@ -261,34 +327,52 @@ impl Default for ReplChannel {
     }
 }
 
+fn rewrite_repl_approval_submission(
+    line: &str,
+    pending_approval: &Arc<Mutex<Option<Uuid>>>,
+) -> Option<String> {
+    let submission = crate::agent::SubmissionParser::parse(line);
+    let crate::agent::Submission::ApprovalResponse { approved, always } = submission else {
+        return None;
+    };
+
+    let request_id = pending_approval
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())?;
+    serde_json::to_string(&crate::agent::Submission::ExecApproval {
+        request_id,
+        approved,
+        always,
+    })
+    .ok()
+}
+
 fn print_help() {
-    // Bold white for section headers, bold cyan for commands, dim gray for descriptions
-    let h = "\x1b[1m"; // bold (section headers)
-    let c = "\x1b[1;36m"; // bold cyan (commands)
-    let d = "\x1b[90m"; // dim gray (descriptions)
-    let r = "\x1b[0m"; // reset
+    let h = fmt::bold();
+    let c = fmt::bold_accent();
+    let d = fmt::dim();
+    let r = fmt::reset();
+    let hi = fmt::hint();
 
     println!();
     println!("  {h}IronClaw REPL{r}");
     println!();
-    println!("  {h}Commands{r}");
-    println!("  {c}/help{r}              {d}show this help{r}");
-    println!("  {c}/debug{r}             {d}toggle verbose output{r}");
-    println!("  {c}/quit{r} {c}/exit{r}        {d}exit the repl{r}");
+    println!("  {h}Quick start{r}");
+    println!("    {c}/new{r}         {hi}Start a new thread{r}");
+    println!("    {c}/compact{r}     {hi}Compress context window{r}");
+    println!("    {c}/quit{r}        {hi}Exit{r}");
     println!();
-    println!("  {h}Conversation{r}");
-    println!("  {c}/undo{r}              {d}undo the last turn{r}");
-    println!("  {c}/redo{r}              {d}redo an undone turn{r}");
-    println!("  {c}/clear{r}             {d}clear conversation{r}");
-    println!("  {c}/compact{r}           {d}compact context window{r}");
-    println!("  {c}/new{r}               {d}new conversation thread{r}");
-    println!("  {c}/interrupt{r}         {d}stop current operation{r}");
-    println!("  {c}esc{r}                {d}stop current operation{r}");
-    println!();
-    println!("  {h}Approval responses{r}");
-    println!("  {c}yes{r} ({c}y{r})            {d}approve tool execution{r}");
-    println!("  {c}no{r} ({c}n{r})             {d}deny tool execution{r}");
-    println!("  {c}always{r} ({c}a{r})         {d}approve for this session{r}");
+    println!("  {h}All commands{r}");
+    println!(
+        "    {d}Conversation{r}  {c}/new{r} {c}/clear{r} {c}/compact{r} {c}/undo{r} {c}/redo{r} {c}/summarize{r} {c}/suggest{r}"
+    );
+    println!("    {d}Threads{r}       {c}/thread{r} {c}/resume{r} {c}/list{r}");
+    println!("    {d}Execution{r}     {c}/interrupt{r} {d}(esc){r} {c}/cancel{r}");
+    println!(
+        "    {d}System{r}        {c}/tools{r} {c}/model{r} {c}/version{r} {c}/status{r} {c}/debug{r} {c}/heartbeat{r}"
+    );
+    println!("    {d}Session{r}       {c}/help{r} {c}/quit{r}");
     println!();
 }
 
@@ -305,10 +389,20 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
+        // Store tx so send_status can inject approval responses directly.
+        // Skip for single-message mode — no interactive approval is needed
+        // and the extra sender would keep the stream open after /quit.
+        if self.single_message.is_none()
+            && let Ok(mut guard) = self.msg_tx.lock()
+        {
+            *guard = Some(tx.clone());
+        }
         let single_message = self.single_message.clone();
         let user_id = self.user_id.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
+        let pending_approval = Arc::clone(&self.pending_approval);
+        let stdin_locked = Arc::clone(&self.stdin_locked);
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
@@ -316,11 +410,10 @@ impl Channel for ReplChannel {
 
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", &user_id, &msg).with_timezone(&sys_tz);
+                let incoming = IncomingMessage::new("repl", &user_id, &msg)
+                    .with_metadata(serde_json::json!({ "single_message_mode": true }))
+                    .with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
-                // Ensure the agent exits after handling exactly one turn in -m mode,
-                // even when other channels (gateway/http) are enabled.
-                let _ = tx.blocking_send(IncomingMessage::new("repl", &user_id, "/quit"));
                 return;
             }
 
@@ -357,18 +450,33 @@ impl Channel for ReplChannel {
             let _ = rl.load_history(&hist_path);
 
             if !suppress_banner.load(Ordering::Relaxed) {
-                println!("\x1b[1mIronClaw\x1b[0m  /help for commands, /quit to exit");
+                println!(
+                    "{}IronClaw{}  /help for commands, /quit to exit",
+                    fmt::bold(),
+                    fmt::reset()
+                );
                 println!();
             }
 
             loop {
+                // Yield stdin while approval selector or agent processing locks it
+                while stdin_locked.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+
                 let prompt = if debug_mode.load(Ordering::Relaxed) {
-                    "\x1b[33m[debug]\x1b[0m \x1b[1;36m\u{203A}\x1b[0m "
+                    format!(
+                        "{}[debug]{} {}\u{203A}{} ",
+                        fmt::warning(),
+                        fmt::reset(),
+                        fmt::bold_accent(),
+                        fmt::reset()
+                    )
                 } else {
-                    "\x1b[1;36m\u{203A}\x1b[0m "
+                    format!("{}\u{203A}{} ", fmt::bold_accent(), fmt::reset())
                 };
 
-                match rl.readline(prompt) {
+                match rl.readline(&prompt) {
                     Ok(line) => {
                         let line = line.trim();
                         if line.is_empty() {
@@ -394,18 +502,24 @@ impl Channel for ReplChannel {
                                 let current = debug_mode.load(Ordering::Relaxed);
                                 debug_mode.store(!current, Ordering::Relaxed);
                                 if !current {
-                                    println!("\x1b[90mdebug mode on\x1b[0m");
+                                    println!("{}debug mode on{}", fmt::dim(), fmt::reset());
                                 } else {
-                                    println!("\x1b[90mdebug mode off\x1b[0m");
+                                    println!("{}debug mode off{}", fmt::dim(), fmt::reset());
                                 }
                                 continue;
                             }
                             _ => {}
                         }
 
+                        let content = rewrite_repl_approval_submission(line, &pending_approval)
+                            .unwrap_or_else(|| line.to_string());
                         let msg =
-                            IncomingMessage::new("repl", &user_id, line).with_timezone(&sys_tz);
+                            IncomingMessage::new("repl", &user_id, content).with_timezone(&sys_tz);
+                        // Lock stdin before sending so readline doesn't restart
+                        // while the agent is processing (approval selector needs stdin)
+                        stdin_locked.store(true, Ordering::Relaxed);
                         if tx.blocking_send(msg).is_err() {
+                            stdin_locked.store(false, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -456,21 +570,37 @@ impl Channel for ReplChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
+        let approval_prompt_already_rendered = self
+            .pending_approval
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some()
+            && response.content.contains("requires approval");
+        if approval_prompt_already_rendered {
+            self.stdin_locked.store(false, Ordering::Relaxed);
+            self.finish_single_message_turn().await;
+            return Ok(());
+        }
+
+        let width = fmt::term_width();
 
         // If we were streaming, the content was already printed via StreamChunk.
         // Just finish the line and reset.
         if self.is_streaming.swap(false, Ordering::Relaxed) {
             println!();
             println!();
+            self.stdin_locked.store(false, Ordering::Relaxed);
+            self.finish_single_message_turn().await;
             return Ok(());
         }
 
+        // Clear any leftover thinking indicators
+        self.clear_transient();
+
         // Dim separator line before the response
         let sep_width = width.min(80);
-        eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+        eprintln!("{}", fmt::separator(sep_width));
 
         // Render markdown
         let skin = make_skin();
@@ -478,6 +608,9 @@ impl Channel for ReplChannel {
 
         print!("{text}");
         println!();
+        // Unlock stdin so readline can resume
+        self.stdin_locked.store(false, Ordering::Relaxed);
+        self.finish_single_message_turn().await;
         Ok(())
     }
 
@@ -490,31 +623,40 @@ impl Channel for ReplChannel {
 
         match status {
             StatusUpdate::Thinking(msg) => {
+                self.clear_transient();
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                eprintln!("  \x1b[90m\u{25CB} {display}\x1b[0m");
+                eprintln!("  {}\u{25CB} {display}{}", fmt::dim(), fmt::reset());
+                self.transient_lines.store(1, Ordering::Relaxed);
             }
-            StatusUpdate::ToolStarted { name } => {
-                eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
+            StatusUpdate::ToolStarted { name, detail, .. } => {
+                self.clear_transient();
+                if let Some(d) = detail {
+                    eprintln!("  {}\u{25CB} {name}: {d}{}", fmt::dim(), fmt::reset());
+                } else {
+                    eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                }
+                self.transient_lines.store(1, Ordering::Relaxed);
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {
+                self.clear_transient();
                 if success {
-                    eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
+                    eprintln!("  {}\u{25CF} {name}{}", fmt::success(), fmt::reset());
                 } else {
-                    eprintln!("  \x1b[31m\u{2717} {name} (failed)\x1b[0m");
+                    eprintln!("  {}\u{2717} {name} (failed){}", fmt::error(), fmt::reset());
                 }
             }
-            StatusUpdate::ToolResult { name: _, preview } => {
+            StatusUpdate::ToolResult {
+                name: _, preview, ..
+            } => {
                 let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
-                eprintln!("    \x1b[90m{display}\x1b[0m");
+                eprintln!("    {}{display}{}", fmt::dim(), fmt::reset());
             }
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition
                 if !self.is_streaming.swap(true, Ordering::Relaxed) {
-                    let width = crossterm::terminal::size()
-                        .map(|(w, _)| w as usize)
-                        .unwrap_or(80);
-                    let sep_width = width.min(80);
-                    eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+                    self.clear_transient();
+                    let sep_width = fmt::term_width().min(80);
+                    eprintln!("{}", fmt::separator(sep_width));
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
@@ -525,73 +667,63 @@ impl Channel for ReplChannel {
                 browse_url,
             } => {
                 eprintln!(
-                    "  \x1b[36m[job]\x1b[0m {title} \x1b[90m({job_id})\x1b[0m \x1b[4m{browse_url}\x1b[0m"
+                    "  {}[job]{} {title} {}({job_id}){} {}{browse_url}{}",
+                    fmt::accent(),
+                    fmt::reset(),
+                    fmt::dim(),
+                    fmt::reset(),
+                    fmt::link(),
+                    fmt::reset()
                 );
             }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                    eprintln!("  \x1b[90m{display}\x1b[0m");
+                    eprintln!("  {}{display}{}", fmt::dim(), fmt::reset());
                 }
             }
             StatusUpdate::ApprovalNeeded {
                 request_id,
                 tool_name,
-                description,
+                description: _,
                 parameters,
                 allow_always,
             } => {
-                let term_width = crossterm::terminal::size()
-                    .map(|(w, _)| w as usize)
-                    .unwrap_or(80);
-                let box_width = (term_width.saturating_sub(4)).clamp(40, 60);
+                if let Ok(parsed) = Uuid::parse_str(&request_id)
+                    && let Ok(mut guard) = self.pending_approval.lock()
+                {
+                    *guard = Some(parsed);
+                }
+                self.clear_transient();
+                let pipe = format!("{}│{}", fmt::accent(), fmt::reset());
 
-                // Short request ID for the bottom border
-                let short_id = if request_id.len() > 8 {
-                    &request_id[..8]
+                // Header: ◆ tool requires approval
+                eprintln!();
+                eprintln!(
+                    "  {}\u{25C6}  {}{tool_name}{} requires approval",
+                    fmt::accent(),
+                    fmt::bold(),
+                    fmt::reset()
+                );
+
+                // Params: │  key  value
+                let param_lines = format_json_params(&parameters, &format!("  {pipe}  "));
+                if !param_lines.is_empty() {
+                    eprintln!("  {pipe}");
+                    for line in param_lines.lines() {
+                        eprintln!("{line}");
+                    }
+                }
+                eprintln!("  {pipe}");
+                let choices = if allow_always {
+                    "Reply 'yes' to approve, 'always' to auto-approve, or 'no' to deny."
                 } else {
-                    &request_id
+                    "Reply 'yes' to approve or 'no' to deny."
                 };
-
-                // Top border: ┌ tool_name requires approval ───
-                let top_label = format!(" {tool_name} requires approval ");
-                let top_fill = box_width.saturating_sub(top_label.len() + 1);
-                let top_border = format!(
-                    "\u{250C}\x1b[33m{top_label}\x1b[0m{}",
-                    "\u{2500}".repeat(top_fill)
-                );
-
-                // Bottom border: └─ short_id ─────
-                let bot_label = format!(" {short_id} ");
-                let bot_fill = box_width.saturating_sub(bot_label.len() + 2);
-                let bot_border = format!(
-                    "\u{2514}\u{2500}\x1b[90m{bot_label}\x1b[0m{}",
-                    "\u{2500}".repeat(bot_fill)
-                );
-
-                eprintln!();
-                eprintln!("  {top_border}");
-                eprintln!("  \u{2502} \x1b[90m{description}\x1b[0m");
-                eprintln!("  \u{2502}");
-
-                // Params
-                let param_lines = format_json_params(&parameters, "  \u{2502}   ");
-                // The format_json_params already includes the indent prefix
-                // but we need to handle the case where each line already starts with it
-                for line in param_lines.lines() {
-                    eprintln!("{line}");
-                }
-
-                eprintln!("  \u{2502}");
-                if allow_always {
-                    eprintln!(
-                        "  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[34malways\x1b[0m (a) / \x1b[31mno\x1b[0m (n)"
-                    );
-                } else {
-                    eprintln!("  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[31mno\x1b[0m (n)");
-                }
-                eprintln!("  {bot_border}");
-                eprintln!();
+                eprintln!("  {}{choices}{}", fmt::dim(), fmt::reset());
+                // Resume readline so the user can answer via the normal
+                // submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthRequired {
                 extension_name,
@@ -599,36 +731,93 @@ impl Channel for ReplChannel {
                 setup_url,
                 ..
             } => {
+                if let Ok(mut guard) = self.pending_approval.lock() {
+                    *guard = None;
+                }
                 eprintln!();
-                eprintln!("\x1b[33m  Authentication required for {extension_name}\x1b[0m");
+                eprintln!(
+                    "{}  Authentication required for {extension_name}{}",
+                    fmt::warning(),
+                    fmt::reset()
+                );
                 if let Some(ref instr) = instructions {
                     eprintln!("  {instr}");
                 }
                 if let Some(ref url) = setup_url {
-                    eprintln!("  \x1b[4m{url}\x1b[0m");
+                    eprintln!("  {}{url}{}", fmt::link(), fmt::reset());
                 }
                 eprintln!();
+                // Resume readline so the user can paste a token or continue the
+                // auth flow via the normal submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthCompleted {
                 extension_name,
                 success,
                 message,
             } => {
+                if let Ok(mut guard) = self.pending_approval.lock() {
+                    *guard = None;
+                }
                 if success {
-                    eprintln!("\x1b[32m  {extension_name}: {message}\x1b[0m");
+                    eprintln!(
+                        "{}  {extension_name}: {message}{}",
+                        fmt::success(),
+                        fmt::reset()
+                    );
                 } else {
-                    eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
+                    eprintln!(
+                        "{}  {extension_name}: {message}{}",
+                        fmt::error(),
+                        fmt::reset()
+                    );
                 }
             }
             StatusUpdate::ImageGenerated { path, .. } => {
                 if let Some(ref p) = path {
-                    eprintln!("\x1b[36m  [image] {p}\x1b[0m");
+                    eprintln!("{}  [image] {p}{}", fmt::accent(), fmt::reset());
                 } else {
-                    eprintln!("\x1b[36m  [image generated]\x1b[0m");
+                    eprintln!("{}  [image generated]{}", fmt::accent(), fmt::reset());
                 }
             }
             StatusUpdate::Suggestions { .. } => {
                 // Suggestions are only rendered by the web gateway
+            }
+            StatusUpdate::ReasoningUpdate {
+                narrative,
+                decisions,
+            } => {
+                if !narrative.is_empty() {
+                    let display = truncate_for_preview(&narrative, CLI_STATUS_MAX);
+                    eprintln!("  \x1b[94m\u{25B6} {display}\x1b[0m");
+                }
+                for d in &decisions {
+                    let display = truncate_for_preview(&d.rationale, CLI_STATUS_MAX);
+                    eprintln!("    \x1b[90m\u{2192} {}: {display}\x1b[0m", d.tool_name);
+                }
+            }
+            StatusUpdate::TurnCost { .. } => {
+                // Cost display is handled by the TUI channel
+            }
+            StatusUpdate::JobStatus { .. }
+            | StatusUpdate::JobResult { .. }
+            | StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. }
+            | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
+            | StatusUpdate::ConversationHistory { .. } => {
+                // Infrastructure status events are only rendered by the TUI.
+            }
+            StatusUpdate::SkillActivated { skill_names, .. } => {
+                if !skill_names.is_empty() {
+                    eprintln!(
+                        "  \x1b[36m\u{25C8} skills: {}\x1b[0m",
+                        skill_names.join(", ")
+                    );
+                }
             }
         }
         Ok(())
@@ -640,11 +829,9 @@ impl Channel for ReplChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let skin = make_skin();
-        let width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
+        let width = fmt::term_width();
 
-        eprintln!("\x1b[34m\u{25CF}\x1b[0m notification");
+        eprintln!("{}\u{25CF}{} notification", fmt::accent(), fmt::reset());
         let text = termimad::FmtText::from(&skin, &response.content, Some(width));
         eprint!("{text}");
         eprintln!();
@@ -663,25 +850,80 @@ impl Channel for ReplChannel {
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
 
+    /// Regression: single-message mode must close the stream after the one
+    /// message so callers (and tests) don't hang forever.
     #[tokio::test]
-    async fn single_message_mode_sends_message_then_quit() {
+    async fn single_message_mode_sends_message_and_closes_stream() {
         let repl = ReplChannel::with_message("hi".to_string());
         let mut stream = repl.start().await.expect("repl start should succeed");
 
-        let first = stream.next().await.expect("first message missing");
+        let first = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for first message")
+            .expect("first message missing");
         assert_eq!(first.channel, "repl");
         assert_eq!(first.content, "hi");
 
-        let second = stream.next().await.expect("quit message missing");
-        assert_eq!(second.channel, "repl");
-        assert_eq!(second.content, "/quit");
-
+        // The spawned thread sent the message and returned, dropping its
+        // sender. Because we skip storing a clone in msg_tx for single-
+        // message mode, the stream should close immediately.
         assert!(
-            stream.next().await.is_none(),
-            "stream should end after /quit"
+            timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("timed out waiting for stream to close")
+                .is_none(),
+            "stream should end after the single message"
+        );
+    }
+
+    /// Regression: per `.claude/rules/testing.md` ("Test Through the Caller,
+    /// Not Just the Helper"), a unit test that only asserts the
+    /// `stdin_locked` flag flipped is insufficient — the side effect that
+    /// matters is the input thread's polling loop in `start()` actually
+    /// resuming. This test mirrors that polling pattern and asserts it
+    /// observes the unlock after `send_status(AuthRequired)`.
+    #[tokio::test]
+    async fn auth_required_status_unblocks_input_polling_loop() {
+        let repl = ReplChannel::with_user_id("test-user");
+        repl.stdin_locked.store(true, Ordering::Relaxed);
+
+        let stdin_locked = Arc::clone(&repl.stdin_locked);
+        let poller = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while stdin_locked.load(Ordering::Relaxed) {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            true
+        });
+
+        repl.send_status(
+            StatusUpdate::AuthRequired {
+                extension_name: ironclaw_common::ExtensionName::new("google_oauth_token").unwrap(),
+                instructions: Some("Paste your token".to_string()),
+                auth_url: None,
+                setup_url: Some("http://127.0.0.1:8080/auth".to_string()),
+                request_id: None,
+            },
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("auth required status should render successfully");
+
+        let resumed = poller.join().expect("polling thread panicked");
+        assert!(
+            resumed,
+            "input polling loop must observe the unlock so the next readline can start"
+        );
+        assert!(
+            !repl.stdin_locked.load(Ordering::Relaxed),
+            "stdin_locked must remain false after AuthRequired so subsequent prompts aren't blocked"
         );
     }
 }

@@ -13,11 +13,73 @@ use super::{
 use crate::db::WorkspaceStore;
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::workspace::{
-    MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
-    fuse_results,
+    ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, RankedResult, SearchConfig,
+    SearchResult, VersionSummary, WorkspaceEntry, fuse_results,
 };
 
 use chrono::Utc;
+
+/// Escape SQLite `LIKE` metacharacters in a user-supplied string.
+///
+/// SQLite `LIKE` treats `%` as "any sequence of characters" and `_` as
+/// "any single character". A directory name like `foo_bar` therefore
+/// matches `fooXbar`, `foo7bar`, etc., causing `list_directory()` to
+/// over-fetch from the database. The Rust-side `strip_prefix` filter
+/// downstream catches these as false positives, so today this manifests
+/// as wasted I/O rather than wrong results, but the moment a future
+/// caller drops that filter (or relies on row counts) the bug becomes
+/// silently incorrect.
+///
+/// This helper escapes `%`, `_`, and the escape character `\` itself by
+/// prefixing each with `\`. The caller must pair it with `LIKE … ESCAPE '\\'`
+/// in the SQL so SQLite knows to interpret `\` as the escape prefix.
+///
+/// Backslash is escaped first so the escapes we add for `%`/`_` aren't
+/// re-escaped on the next pass.
+pub(crate) fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Escape a free-form user query for FTS5 `MATCH`.
+///
+/// FTS5 treats `column:term` as a column-scoped search. A naive query like
+/// `George 1:1 meeting notes` is parsed by FTS5 as the column-scoped lookup
+/// `1:1` (find the term `1` in a column named `1`), and since
+/// `memory_chunks_fts` has no column called `1`, SQLite errors at row-fetch
+/// time with `no such column: 1`. The same trap is set by `(`, `)`, `*`,
+/// `^`, `"`, `AND`/`OR`/`NOT` keywords, and so on.
+///
+/// This sanitiser tokenises the input on whitespace, escapes any internal
+/// double quotes by doubling them (per FTS5 phrase syntax), wraps each
+/// token in double quotes to make it a literal phrase, and joins the
+/// phrases with spaces. FTS5's default boolean operator is AND, so the
+/// resulting query means "every input token must appear, as a literal
+/// term, somewhere in the indexed content". Inside a phrase, FTS5 still
+/// runs the tokenizer, so leading/trailing punctuation on tokens like
+/// `(apple` or `George.` is stripped naturally — we don't have to special
+/// case it.
+///
+/// Returns `None` when the query has no usable tokens (empty string,
+/// whitespace only). The caller should skip the FTS branch entirely in
+/// that case rather than running an empty `MATCH`.
+pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
+    let phrases: Vec<String> = query
+        .split_whitespace()
+        .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+        .collect();
+    if phrases.is_empty() {
+        None
+    } else {
+        Some(phrases.join(" "))
+    }
+}
 
 /// Resolve the embedding dimension from environment variables.
 ///
@@ -36,7 +98,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
         .unwrap_or(false);
 
     if !enabled {
-        tracing::info!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
+        tracing::debug!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
         return None;
     }
 
@@ -422,10 +484,19 @@ impl WorkspaceStore for LibSqlBackend {
         };
 
         let agent_id_str = agent_id.map(|id| id.to_string());
+        // Escape LIKE metacharacters in the user-supplied directory before
+        // building the prefix pattern. Without this, a dir named `foo_bar`
+        // becomes the SQL pattern `foo_bar/%` which `_` makes match
+        // `fooXbar/...` too, over-fetching rows. The Rust-side
+        // `strip_prefix` filter below catches the false positives so
+        // results stay correct, but the SQL is still wrong and we don't
+        // want to depend on that filter staying in place. The literal-bare
+        // `%` form below is the "list everything" sentinel and skips the
+        // escape on purpose.
         let pattern = if dir.is_empty() {
             "%".to_string()
         } else {
-            format!("{}%", dir)
+            format!("{}%", escape_like_pattern(&dir))
         };
 
         let mut rows = conn
@@ -434,7 +505,7 @@ impl WorkspaceStore for LibSqlBackend {
                 SELECT path, updated_at, substr(content, 1, 200) as content_preview
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
-                  AND (?3 = '%' OR path LIKE ?3)
+                  AND (?3 = '%' OR path LIKE ?3 ESCAPE '\')
                 ORDER BY path
                 "#,
                 params![user_id, agent_id_str.as_deref(), pattern],
@@ -644,6 +715,79 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(id)
     }
 
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
+
+        // BEGIN IMMEDIATE (not the default DEFERRED): grab the RESERVED
+        // write lock at transaction start so the busy_timeout handler fires
+        // on contention. DEFERRED starts as a reader and returns
+        // SQLITE_BUSY *immediately* on the first write when another
+        // transaction already holds the write lock — bypassing busy_timeout
+        // entirely, which turned concurrent reindexers into instant
+        // "database is locked" failures in tests.
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Begin transaction failed: {}", e),
+            })?;
+
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = ?1",
+            params![document_id.to_string()],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Delete failed: {}", e),
+        })?;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let id = Uuid::new_v4();
+            // Note: embedding dimension is not validated here — the F32_BLOB(N)
+            // column type created by ensure_vector_index() enforces byte length
+            // at the libSQL level and will reject mismatched dimensions.
+            let embedding_blob = chunk.embedding.as_ref().map(|e| {
+                let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
+                bytes
+            });
+
+            tx.execute(
+                r#"
+                    INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                params![
+                    id.to_string(),
+                    document_id.to_string(),
+                    index as i64,
+                    chunk.content.as_str(),
+                    embedding_blob.map(libsql::Value::Blob),
+                ],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Insert failed: {}", e),
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Commit failed: {}", e),
+            })?;
+
+        Ok(())
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -735,7 +879,9 @@ impl WorkspaceStore for LibSqlBackend {
         let agent_id_str = agent_id.map(|id| id.to_string());
         let pre_limit = config.pre_fusion_limit as i64;
 
-        let fts_results = if config.use_fts {
+        let fts_results = if config.use_fts
+            && let Some(fts_query) = escape_fts5_query(query)
+        {
             let mut rows = conn
                 .query(
                     r#"
@@ -748,7 +894,7 @@ impl WorkspaceStore for LibSqlBackend {
                     ORDER BY rank
                     LIMIT ?4
                     "#,
-                    params![user_id, agent_id_str.as_deref(), query, pre_limit],
+                    params![user_id, agent_id_str.as_deref(), fts_query, pre_limit],
                 )
                 .await
                 .map_err(|e| WorkspaceError::SearchFailed {
@@ -839,6 +985,341 @@ impl WorkspaceStore for LibSqlBackend {
         }
 
         Ok(fuse_results(fts_results, vector_results, config))
+    }
+
+    // ==================== Metadata ====================
+
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let now = fmt_ts(&Utc::now());
+        let meta_str =
+            serde_json::to_string(metadata).map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to serialize metadata: {e}"),
+            })?;
+        conn.execute(
+            "UPDATE memory_documents SET metadata = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.to_string(), meta_str, now],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to update metadata: {e}"),
+        })?;
+        Ok(())
+    }
+
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let agent_str = agent_id.map(|a| a.to_string());
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = ?1 AND agent_id IS ?2
+                  AND (path LIKE '%/.config' OR path = '.config')
+                ORDER BY path
+                "#,
+                params![user_id, agent_str],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to find config documents: {e}"),
+            })?;
+
+        let mut docs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read config document row: {e}"),
+            })?
+        {
+            docs.push(row_to_memory_document(&row));
+        }
+        Ok(docs)
+    }
+
+    // ==================== Versioning ====================
+
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let id = Uuid::new_v4().to_string();
+        let doc_id = document_id.to_string();
+        let now = fmt_ts(&Utc::now());
+
+        // BEGIN IMMEDIATE acquires a write lock upfront, serializing
+        // concurrent writers so two callers cannot both read the same
+        // MAX(version) before either inserts.
+        conn.execute("BEGIN IMMEDIATE", params![])
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to start transaction: {e}"),
+            })?;
+
+        let result: Result<i32, WorkspaceError> = async {
+            let mut rows = conn
+                .query(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
+                    params![doc_id.clone()],
+                )
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to get next version number: {e}"),
+                })?;
+
+            let next_version = if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to read version number: {e}"),
+                })? {
+                get_i64(&row, 0) as i32
+            } else {
+                1
+            };
+            drop(rows);
+
+            conn.execute(
+                r#"
+                INSERT INTO memory_document_versions
+                    (id, document_id, version, content, content_hash, created_at, changed_by)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    id,
+                    doc_id,
+                    next_version as i64,
+                    content,
+                    content_hash,
+                    now,
+                    changed_by
+                ],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to save version: {e}"),
+            })?;
+
+            Ok(next_version)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", params![]).await.map_err(|e| {
+                    WorkspaceError::SearchFailed {
+                        reason: format!("Failed to commit version: {e}"),
+                    }
+                })?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", params![]).await;
+            }
+        }
+
+        result
+    }
+
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<DocumentVersion, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, document_id, version, content, content_hash,
+                       created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = ?1 AND version = ?2
+                "#,
+                params![document_id.to_string(), version as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get version: {e}"),
+            })?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version row: {e}"),
+            })?
+            .ok_or(WorkspaceError::VersionNotFound {
+                document_id,
+                version,
+            })?;
+
+        Ok(DocumentVersion {
+            id: get_text(&row, 0)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid version UUID: {e}"),
+                })?,
+            document_id: get_text(&row, 1)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid document UUID: {e}"),
+                })?,
+            version: get_i64(&row, 2) as i32,
+            content: get_text(&row, 3),
+            content_hash: get_text(&row, 4),
+            created_at: get_ts(&row, 5),
+            changed_by: get_opt_text(&row, 6),
+        })
+    }
+
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<VersionSummary>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT version, content_hash, created_at, changed_by
+                FROM memory_document_versions
+                WHERE document_id = ?1
+                ORDER BY version DESC
+                LIMIT ?2
+                "#,
+                params![document_id.to_string(), limit],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to list versions: {e}"),
+            })?;
+
+        let mut versions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version row: {e}"),
+            })?
+        {
+            versions.push(VersionSummary {
+                version: get_i64(&row, 0) as i32,
+                content_hash: get_text(&row, 1),
+                created_at: get_ts(&row, 2),
+                changed_by: get_opt_text(&row, 3),
+            });
+        }
+        Ok(versions)
+    }
+
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                "SELECT MAX(version) FROM memory_document_versions WHERE document_id = ?1",
+                params![document_id.to_string()],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to get latest version number: {e}"),
+            })?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version number: {e}"),
+            })?
+        {
+            // MAX returns NULL if no rows — libsql returns Null for the value
+            let val = row.get::<libsql::Value>(0).ok();
+            match val {
+                Some(libsql::Value::Integer(v)) => Ok(Some(v as i32)),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let doc_id = document_id.to_string();
+        let result = conn
+            .execute(
+                r#"
+                DELETE FROM memory_document_versions
+                WHERE document_id = ?1
+                  AND version NOT IN (
+                      SELECT version FROM memory_document_versions
+                      WHERE document_id = ?1
+                      ORDER BY version DESC
+                      LIMIT ?2
+                  )
+                "#,
+                params![doc_id, keep_count as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to prune versions: {e}"),
+            })?;
+        Ok(result)
     }
 }
 
@@ -1015,9 +1496,219 @@ mod tests {
         assert_eq!(first.content, "quantum computing research");
     }
 
+    #[test]
+    fn escape_like_pattern_escapes_metacharacters() {
+        // Plain string is unchanged.
+        assert_eq!(escape_like_pattern("foo"), "foo");
+        // `%` and `_` get prefixed with the escape character.
+        assert_eq!(escape_like_pattern("foo_bar"), r"foo\_bar");
+        assert_eq!(escape_like_pattern("100%"), r"100\%");
+        // Backslash escapes itself.
+        assert_eq!(escape_like_pattern(r"a\b"), r"a\\b");
+        // Mixed: backslash is processed first so we don't double-escape
+        // the `\` we added for `%`.
+        assert_eq!(escape_like_pattern(r"a%b_c\d"), r"a\%b\_c\\d");
+        assert_eq!(escape_like_pattern(""), "");
+    }
+
+    /// Behavioural guard for `list_directory` against LIKE-wildcard
+    /// over-fetch. This test asserts the *observable* behaviour is correct
+    /// even when dir names contain SQLite LIKE metacharacters. Note that
+    /// the result list is also correct *without* the SQL escape because
+    /// the Rust-side `strip_prefix` filter at the bottom of the loop
+    /// drops the false positives — so this test alone won't catch a
+    /// regression that re-introduces the SQL bug. The companion test
+    /// `test_list_directory_sql_layer_escapes_like_metacharacters` below
+    /// hits the SQL layer directly to catch that.
+    #[tokio::test]
+    async fn test_list_directory_does_not_match_underscore_wildcards() {
+        let (backend, _dir) = setup_backend().await;
+
+        // Set up two sibling directories whose names are identical except
+        // at the position SQLite's `_` LIKE wildcard would match.
+        insert_test_chunk(&backend, "u1", "foo_bar/note.md", "intended", None).await;
+        insert_test_chunk(&backend, "u1", "fooXbar/note.md", "should not match", None).await;
+        insert_test_chunk(&backend, "u1", "100%done/note.md", "percent dir", None).await;
+
+        // Listing `foo_bar/` must return only its own children.
+        let entries = backend
+            .list_directory("u1", None, "foo_bar")
+            .await
+            .expect("list foo_bar");
+        let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec!["foo_bar/note.md".to_string()],
+            "underscore in dir name must not be a SQLite LIKE wildcard"
+        );
+
+        // Listing `100%done/` must work too — `%` is the multi-char wildcard,
+        // so without escaping it would match anything starting with `100`.
+        let entries = backend
+            .list_directory("u1", None, "100%done")
+            .await
+            .expect("list 100%done");
+        let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec!["100%done/note.md".to_string()],
+            "percent in dir name must not be a SQLite LIKE wildcard"
+        );
+    }
+
+    /// SQL-layer test demonstrating *both* the bug and the fix. We
+    /// bypass `list_directory`'s Rust `strip_prefix` filter and run two
+    /// queries against `memory_documents` directly:
+    ///
+    ///   1. The unescaped pattern `foo_bar/%` (what the bug looks like)
+    ///      — SQLite's `_` LIKE wildcard matches `fooXbar/note.md` too,
+    ///      so the row count is wrong.
+    ///   2. The escaped pattern with `ESCAPE '\\'` (what the fix looks
+    ///      like) — only the literal `foo_bar/note.md` row comes back.
+    ///
+    /// Both assertions must hold; if SQLite ever changes its LIKE
+    /// semantics, the first assertion fails loudly. If `escape_like_pattern`
+    /// regresses, the second assertion fails.
+    #[tokio::test]
+    async fn test_list_directory_sql_layer_escapes_like_metacharacters() {
+        let (backend, _dir) = setup_backend().await;
+        insert_test_chunk(&backend, "u1", "foo_bar/note.md", "intended", None).await;
+        insert_test_chunk(&backend, "u1", "fooXbar/note.md", "should not match", None).await;
+
+        let conn = backend.connect().await.expect("connect");
+
+        // 1. Bug demonstration: unescaped pattern over-fetches.
+        let bad_pattern = "foo_bar/%";
+        let mut rows = conn
+            .query(
+                "SELECT path FROM memory_documents WHERE user_id = ?1 AND path LIKE ?2 ORDER BY path",
+                params!["u1", bad_pattern],
+            )
+            .await
+            .expect("query");
+        let mut over_fetched = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            over_fetched.push(get_text(&row, 0));
+        }
+        assert_eq!(
+            over_fetched,
+            vec!["fooXbar/note.md".to_string(), "foo_bar/note.md".to_string()],
+            "without ESCAPE, SQLite's `_` LIKE wildcard matches `X`, \
+             so an unescaped `foo_bar/%` pulls in `fooXbar/note.md` too"
+        );
+
+        // 2. Fix demonstration: escaped pattern + ESCAPE clause is exact.
+        let good_pattern = format!("{}%", escape_like_pattern("foo_bar/"));
+        let mut rows = conn
+            .query(
+                "SELECT path FROM memory_documents WHERE user_id = ?1 \
+                 AND path LIKE ?2 ESCAPE '\\' ORDER BY path",
+                params!["u1", good_pattern],
+            )
+            .await
+            .expect("query");
+        let mut correct = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            correct.push(get_text(&row, 0));
+        }
+        assert_eq!(
+            correct,
+            vec!["foo_bar/note.md".to_string()],
+            "with escape_like_pattern + ESCAPE '\\\\', only the literal \
+             prefix matches"
+        );
+    }
+
+    #[test]
+    fn escape_fts5_query_handles_special_chars() {
+        // Empty / whitespace-only inputs short-circuit so the caller can
+        // skip the FTS branch entirely.
+        assert_eq!(escape_fts5_query(""), None);
+        assert_eq!(escape_fts5_query("   "), None);
+
+        // Bare tokens get phrase-quoted.
+        assert_eq!(
+            escape_fts5_query("George meeting").as_deref(),
+            Some(r#""George" "meeting""#)
+        );
+
+        // The original repro: `1:1` must not become a column-scoped search.
+        assert_eq!(
+            escape_fts5_query("George 1:1 meeting notes").as_deref(),
+            Some(r#""George" "1:1" "meeting" "notes""#)
+        );
+
+        // Embedded double quotes get doubled (FTS5 phrase escape rule).
+        assert_eq!(
+            escape_fts5_query(r#"alice "the boss" bob"#).as_deref(),
+            Some(r#""alice" """the" "boss""" "bob""#)
+        );
+
+        // Parens, stars, and other FTS5 operators are wrapped untouched —
+        // FTS5's tokenizer drops them inside a phrase, so they cause no harm.
+        assert_eq!(
+            escape_fts5_query("(apple) AND pie*").as_deref(),
+            Some(r#""(apple)" "AND" "pie*""#)
+        );
+    }
+
+    /// Reproduces the FTS5 "no such column: 1" failure that surfaced in
+    /// `tests/e2e_live.rs` when memory_search was called with the query
+    /// "George 1:1 meeting notes". FTS5 parses `1:1` as a column-scoped
+    /// search (`column_named_1:term_1`), and since no column "1" exists
+    /// on `memory_chunks_fts`, SQLite errors out at row-fetch time.
+    ///
+    /// This is a query-side bug (not a schema bug): the user input must be
+    /// escaped before being handed to FTS5 MATCH.
+    #[tokio::test]
+    async fn test_hybrid_search_handles_fts5_special_chars() {
+        let (backend, _dir) = setup_backend().await;
+
+        insert_test_chunk(
+            &backend,
+            "user1",
+            "1on1.md",
+            "George 1:1 meeting notes recap",
+            None,
+        )
+        .await;
+
+        let config = SearchConfig::default().with_limit(5);
+
+        // Each of these queries contains a character FTS5 treats as syntax.
+        // All should succeed (returning >=1 row for the matching content) and
+        // none should panic the row-fetch with `no such column: <token>`.
+        for query in [
+            "George 1:1 meeting notes",
+            "1:1",
+            "George (notes)",
+            "George \"notes\"",
+            "report:Q4",
+        ] {
+            let result = backend
+                .hybrid_search("user1", None, query, None, &config)
+                .await;
+            assert!(
+                result.is_ok(),
+                "hybrid_search must not error on FTS5 special chars; query={query:?} err={:?}",
+                result.err()
+            );
+        }
+
+        // Sanity check: a clean query should still find the row.
+        let results = backend
+            .hybrid_search("user1", None, "George meeting", None, &config)
+            .await
+            .expect("clean query");
+        assert!(
+            results.iter().any(|r| r.content.contains("George")),
+            "clean FTS query should still find the chunk"
+        );
+    }
+
     mod resolve_dimension {
         use super::*;
-        use crate::config::helpers::ENV_MUTEX;
+        use crate::config::helpers::lock_env;
 
         fn clear_embedding_env() {
             // SAFETY: called under ENV_MUTEX
@@ -1030,14 +1721,14 @@ mod tests {
 
         #[test]
         fn returns_none_when_disabled() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             assert!(resolve_embedding_dimension().is_none());
         }
 
         #[test]
         fn returns_explicit_dimension() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {
@@ -1053,7 +1744,7 @@ mod tests {
 
         #[test]
         fn infers_from_model() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {
@@ -1069,7 +1760,7 @@ mod tests {
 
         #[test]
         fn defaults_to_1536_for_unknown_model() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {

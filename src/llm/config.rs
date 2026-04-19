@@ -165,6 +165,8 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    /// Gemini OAuth config (populated when backend=gemini_oauth).
+    pub gemini_oauth: Option<GeminiOauthConfig>,
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
@@ -178,6 +180,24 @@ pub struct LlmConfig {
     /// Enable cascade mode for smart routing (retry with primary if cheap model
     /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
     pub smart_routing_cascade: bool,
+    /// Maximum number of retries for transient LLM errors.
+    /// Set via `LLM_MAX_RETRIES` (falls back to `NEARAI_MAX_RETRIES`). Default: 3.
+    pub max_retries: u32,
+    /// Consecutive failures before circuit breaker opens. None = disabled.
+    /// Set via `LLM_CIRCUIT_BREAKER_THRESHOLD` (falls back to `CIRCUIT_BREAKER_THRESHOLD`).
+    pub circuit_breaker_threshold: Option<u32>,
+    /// Seconds the circuit stays open before probing. Default: 30.
+    /// Set via `LLM_CIRCUIT_BREAKER_RECOVERY_SECS` (falls back to `CIRCUIT_BREAKER_RECOVERY_SECS`).
+    pub circuit_breaker_recovery_secs: u64,
+    /// Enable in-memory response caching. Default: false.
+    /// Set via `LLM_RESPONSE_CACHE_ENABLED` (falls back to `RESPONSE_CACHE_ENABLED`).
+    pub response_cache_enabled: bool,
+    /// TTL in seconds for cached responses. Default: 3600.
+    /// Set via `LLM_RESPONSE_CACHE_TTL_SECS` (falls back to `RESPONSE_CACHE_TTL_SECS`).
+    pub response_cache_ttl_secs: u64,
+    /// Max cached responses before LRU eviction. Default: 1000.
+    /// Set via `LLM_RESPONSE_CACHE_MAX_ENTRIES` (falls back to `RESPONSE_CACHE_MAX_ENTRIES`).
+    pub response_cache_max_entries: usize,
 }
 
 impl LlmConfig {
@@ -265,5 +285,36 @@ impl NearAiConfig {
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
         }
+    }
+}
+
+/// Configuration for Gemini OAuth integration.
+///
+/// Extended generation config parameters (topP, topK, seed, etc.) are read from
+/// environment variables at request time:
+/// - `GEMINI_TOP_P` — nucleus sampling (0.0–1.0)
+/// - `GEMINI_TOP_K` — top-k sampling (integer)
+/// - `GEMINI_SEED` — deterministic generation seed
+/// - `GEMINI_PRESENCE_PENALTY` — presence penalty (-2.0–2.0)
+/// - `GEMINI_FREQUENCY_PENALTY` — frequency penalty (-2.0–2.0)
+/// - `GEMINI_RESPONSE_MIME_TYPE` — e.g. "application/json"
+/// - `GEMINI_RESPONSE_JSON_SCHEMA` — JSON schema string for structured output
+/// - `GEMINI_CACHED_CONTENT` — cached content resource name
+/// - `GEMINI_CLI_CUSTOM_HEADERS` — custom headers (key:value,key:value)
+/// - `GOOGLE_GENAI_API_VERSION` — API version (default: v1beta)
+/// - `GEMINI_API_KEY` — optional API key for non-OAuth auth mode
+/// - `GEMINI_API_KEY_AUTH_MECHANISM` — "x-goog-api-key" (default) or "bearer"
+#[derive(Debug, Clone)]
+pub struct GeminiOauthConfig {
+    pub model: String,
+    pub credentials_path: PathBuf,
+}
+
+impl GeminiOauthConfig {
+    pub fn default_credentials_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gemini")
+            .join("oauth_creds.json")
     }
 }

@@ -2,18 +2,29 @@ use crate::config::helpers::optional_env;
 use crate::error::ConfigError;
 use crate::workspace::layer::MemoryLayer;
 
-/// Workspace memory configuration.
+/// Workspace-level configuration (memory layers, read scopes).
 ///
-/// Controls memory layer definitions for privacy-aware writes.
-/// Layers are parsed from the `MEMORY_LAYERS` env var (JSON array)
-/// or default to a single private layer scoped to the gateway user.
-#[derive(Debug, Clone)]
+/// Parsed from environment variables. Lives outside of `GatewayConfig`
+/// so that non-gateway channels can eventually use the same settings.
+#[derive(Debug, Clone, Default)]
 pub struct WorkspaceConfig {
+    /// Memory layer definitions (JSON in `MEMORY_LAYERS` env var, or defaults).
     pub memory_layers: Vec<MemoryLayer>,
+    /// Additional user scopes for workspace reads.
+    ///
+    /// When set, the workspace can read (search, read, list) from these
+    /// additional user scopes while writes remain isolated to the primary
+    /// `user_id`. Parsed from `WORKSPACE_READ_SCOPES` (comma-separated).
+    pub read_scopes: Vec<String>,
 }
 
 impl WorkspaceConfig {
-    pub(crate) fn resolve(user_id: &str) -> Result<Self, ConfigError> {
+    /// Resolve workspace config from environment variables.
+    ///
+    /// `user_id` is used to derive default memory layers when `MEMORY_LAYERS`
+    /// is not set.
+    pub fn resolve(user_id: &str) -> Result<Self, ConfigError> {
+        // --- Memory layers ---
         let memory_layers: Vec<MemoryLayer> = match optional_env("MEMORY_LAYERS")? {
             Some(json_str) => {
                 serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
@@ -57,6 +68,20 @@ impl WorkspaceConfig {
                     message: format!("layer '{}' has an empty scope", layer.name),
                 });
             }
+            if !layer
+                .scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "MEMORY_LAYERS".to_string(),
+                    message: format!(
+                        "layer '{}' scope '{}' contains invalid characters \
+                         (allowed: a-z, A-Z, 0-9, _, -)",
+                        layer.name, layer.scope
+                    ),
+                });
+            }
         }
 
         // Check for duplicate layer names
@@ -72,20 +97,53 @@ impl WorkspaceConfig {
             }
         }
 
-        Ok(Self { memory_layers })
+        // --- Read scopes ---
+        let read_scopes: Vec<String> = optional_env("WORKSPACE_READ_SCOPES")?
+            .map(|s| {
+                s.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for scope in &read_scopes {
+            if scope.len() > 128 {
+                let prefix: String = scope.chars().take(32).collect();
+                return Err(ConfigError::InvalidValue {
+                    key: "WORKSPACE_READ_SCOPES".to_string(),
+                    message: format!("scope '{prefix}...' exceeds 128 characters"),
+                });
+            }
+            if !scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "WORKSPACE_READ_SCOPES".to_string(),
+                    message: format!(
+                        "scope '{}' contains invalid characters \
+                         (allowed: a-z, A-Z, 0-9, _, -)",
+                        scope
+                    ),
+                });
+            }
+        }
+
+        Ok(Self {
+            memory_layers,
+            read_scopes,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize env-var-dependent tests to avoid races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     fn with_env(key: &str, val: Option<&str>, f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let prev = std::env::var(key).ok();
         match val {
             Some(v) => unsafe { std::env::set_var(key, v) },

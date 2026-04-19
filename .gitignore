@@ -17,6 +17,7 @@ target/
 # Python
 __pycache__/
 *.pyc
+/tests/e2e/.venv/
 
 # Benchmark results (local runs, not committed)
 bench-results/
@@ -39,3 +40,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+engine_trace_*.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.log

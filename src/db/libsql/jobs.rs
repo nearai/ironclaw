@@ -134,6 +134,10 @@ impl JobStore for LibSqlBackend {
                     // TODO(#661): persist user_timezone in agent_jobs table so
                     // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
+                    // TODO(#1125): approval_context is #[serde(skip)] so it's lost on
+                    // DB restore. Tools that were allowed before restart will be blocked
+                    // until the scheduler re-sets the context on the next dispatch.
+                    approval_context: None,
                 }))
             }
             None => Ok(None),
@@ -230,6 +234,49 @@ impl JobStore for LibSqlBackend {
         Ok(jobs)
     }
 
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct' AND user_id = ?1
+                ORDER BY created_at DESC
+                "#,
+                params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut jobs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str = get_text(&row, 0);
+            let Ok(id) = id_str.parse() else {
+                tracing::warn!("Skipping agent job with invalid UUID: {}", id_str);
+                continue;
+            };
+            jobs.push(AgentJobRecord {
+                id,
+                title: get_text(&row, 1),
+                status: get_text(&row, 2),
+                user_id: get_text(&row, 3),
+                failure_reason: get_opt_text(&row, 4),
+                created_at: get_ts(&row, 5),
+                started_at: get_opt_ts(&row, 6),
+                completed_at: get_opt_ts(&row, 7),
+            });
+        }
+        Ok(jobs)
+    }
+
     async fn get_agent_job_failure_reason(
         &self,
         id: Uuid,
@@ -260,6 +307,32 @@ impl JobStore for LibSqlBackend {
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
                 (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut summary = AgentJobSummary::default();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let status = get_text(&row, 0);
+            let count = get_i64(&row, 1) as usize;
+            summary.add_count(&status, count);
+        }
+        Ok(summary)
+    }
+
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' AND user_id = ?1 GROUP BY status",
+                params![user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -430,5 +503,67 @@ impl JobStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let status = JobState::Completed.to_string();
+
+        // System jobs represent synchronous channel/CLI-initiated dispatches
+        // that begin and end in the same instant. Write `created_at =
+        // started_at = completed_at` so audit queries computing duration
+        // (`completed_at - started_at`) see 0, not NULL, and dashboards that
+        // filter for "started but not yet completed" don't pick these up as
+        // never-started rows.
+        //
+        // ⚠️ System job timestamps do NOT reflect tool execution time.
+        // The row is INSERTed *before* the dispatched tool runs. This is
+        // intentional: the audit row must be durable even if the dispatcher
+        // panics mid-tool, and an updating second write would double the
+        // per-dispatch DB cost. Consumers that need execution duration must
+        // read `job_actions.duration_ms` for the associated action rows —
+        // they wrap the actual `tool.execute()` boundary and carry the real
+        // start/end measurements. (Same caveat applies to the PostgreSQL
+        // backend in `src/history/store.rs::create_system_job`.)
+        //
+        // ⚠️ Row growth: every ToolDispatcher::dispatch() call (gateway
+        // handlers, CLI commands, routine ticks) creates one system job row.
+        // `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+        // so these rows are intentionally retained forever. If row count
+        // becomes a concern, prefer adding a partial index (`WHERE category
+        // != 'system'`) for the agent-job listing queries rather than
+        // deleting rows — deleting would violate the "LLM data is never
+        // deleted" rule (CLAUDE.md).
+        conn.execute(
+            r#"
+            INSERT INTO agent_jobs (
+                id, title, description, category, status, source,
+                user_id, actual_cost, repair_attempts, max_tokens,
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                id.to_string(),
+                format!("System: {source}"),
+                format!("System operation: {source}"),
+                "system",
+                status,
+                "system",
+                user_id,
+                "0",  // actual_cost as TEXT decimal
+                0i64, // repair_attempts
+                0i64, // max_tokens
+                0i64, // total_tokens_used
+                fmt_ts(&now),
+                fmt_ts(&now), // started_at = created_at (instant start)
+                fmt_ts(&now), // completed_at = created_at (instant completion)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(id)
     }
 }

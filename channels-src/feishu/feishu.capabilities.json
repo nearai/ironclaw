@@ -3,11 +3,11 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "feishu",
-  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages",
+  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages via Event Subscription webhooks",
   "auth": {
     "secret_name": "feishu_app_id",
     "display_name": "Feishu / Lark",
-    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). You need the App ID and App Secret.",
+    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). You need the App ID and App Secret. Note: IronClaw supports Event Subscription webhook delivery, but not Feishu's long-connection websocket mode.",
     "setup_url": "https://open.feishu.cn/app",
     "token_hint": "App ID looks like cli_XXXX, App Secret is a long alphanumeric string",
     "env_var": "FEISHU_APP_ID"
@@ -16,18 +16,18 @@
     "required_secrets": [
       {
         "name": "feishu_app_id",
-        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app)",
+        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app). Use webhook-based Event Subscription, not long-connection websocket mode.",
         "optional": false
       },
       {
         "name": "feishu_app_secret",
-        "prompt": "Enter your Feishu/Lark App Secret",
+        "prompt": "Enter your Feishu/Lark App Secret (from your app settings at open.feishu.cn)",
         "optional": false
       },
       {
         "name": "feishu_verification_token",
-        "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription settings)",
-        "optional": true
+        "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription webhook settings)",
+        "optional": false
       }
     ],
     "setup_url": "https://open.feishu.cn/app"
@@ -63,13 +63,15 @@
       },
       "webhook": {
         "secret_header": "X-Feishu-Verification-Token",
-        "secret_name": "feishu_verification_token"
+        "secret_name": "feishu_verification_token",
+        "managed_by_host": false
       }
     }
   },
   "config": {
     "app_id": null,
     "app_secret": null,
+    "verification_token": null,
     "api_base": "https://open.feishu.cn",
     "owner_id": null,
     "dm_policy": "pairing",

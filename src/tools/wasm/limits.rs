@@ -9,8 +9,12 @@ use wasmtime::ResourceLimiter;
 /// Default memory limit: 10 MB (conservative for untrusted code).
 pub const DEFAULT_MEMORY_LIMIT: u64 = 10 * 1024 * 1024;
 
-/// Default fuel limit: 10 million instructions.
-pub const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
+/// Default fuel limit: 100 million instructions.
+///
+/// 10M was too low for WASM tools that make HTTP requests then parse/serialize
+/// JSON responses with serde_json. A single 30KB JSON round-trip can burn 20-50M
+/// instructions between the recursive-descent parser and the Value tree builder.
+pub const DEFAULT_FUEL_LIMIT: u64 = 100_000_000;
 
 /// Default execution timeout: 60 seconds.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -102,7 +106,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         let desired_u64 = desired as u64;
 
         if desired_u64 > self.memory_limit {
@@ -130,7 +134,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         // Allow reasonable table growth
         if desired > 10_000 {
             tracing::warn!(

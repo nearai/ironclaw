@@ -18,6 +18,7 @@ pub mod config;
 pub mod costs;
 pub mod error;
 pub mod failover;
+pub mod gemini_oauth;
 mod github_copilot;
 pub(crate) mod github_copilot_auth;
 mod nearai_chat;
@@ -34,6 +35,7 @@ mod rig_adapter;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub mod transcription;
 
 #[cfg(test)]
 mod codex_test_helpers;
@@ -50,17 +52,21 @@ pub use config::{
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
+pub use gemini_oauth::GeminiOauthProvider;
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
+pub(crate) use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult,
+    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TOOL_INTENT_NUDGE, TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
+    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
+    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
+    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
+    user_signals_execution_intent,
 };
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
@@ -91,6 +97,10 @@ pub async fn create_llm_provider(
 
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
         return create_llm_provider_with_config(&config.nearai, session, timeout);
+    }
+
+    if config.backend == "gemini_oauth" || config.backend == "gemini-oauth" {
+        return create_gemini_oauth_provider(config);
     }
 
     // Bedrock uses a native AWS SDK, not the rig-core registry
@@ -276,7 +286,8 @@ fn create_openai_compat_from_registry(
 
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
+        let base_url = normalize_openai_base_url(&config.base_url);
+        builder = builder.base_url(&base_url);
     }
     if !extra_headers.is_empty() {
         builder = builder.http_headers(extra_headers);
@@ -490,6 +501,19 @@ fn create_cheap_provider_for_backend(
         });
     }
 
+    if config.backend == "gemini_oauth" {
+        let Some(ref gemini_config) = config.gemini_oauth else {
+            return Err(LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: "Gemini OAuth config not available for cheap model".to_string(),
+            });
+        };
+        let mut cheap_gemini_config = gemini_config.clone();
+        cheap_gemini_config.model = cheap_model.to_string();
+        let provider = GeminiOauthProvider::new(cheap_gemini_config)?;
+        return Ok(Some(Arc::new(provider)));
+    }
+
     // Registry-based provider: clone config and swap model
     let reg_config = config.provider.as_ref().ok_or_else(|| LlmError::RequestFailed {
         provider: config.backend.clone(),
@@ -539,9 +563,10 @@ pub async fn build_provider_chain(
     };
     tracing::debug!("LLM provider initialized: {}", llm.model_name());
 
-    // 1. Retry
+    // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
+    // with fallback to NEARAI_* for backward compatibility).
     let retry_config = RetryConfig {
-        max_retries: config.nearai.max_retries,
+        max_retries: config.max_retries,
     };
     let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
         tracing::debug!(
@@ -622,18 +647,15 @@ pub async fn build_provider_chain(
     };
 
     // 4. Circuit breaker
-    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.nearai.circuit_breaker_threshold
-    {
+    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.circuit_breaker_threshold {
         let cb_config = CircuitBreakerConfig {
             failure_threshold: threshold,
-            recovery_timeout: std::time::Duration::from_secs(
-                config.nearai.circuit_breaker_recovery_secs,
-            ),
+            recovery_timeout: std::time::Duration::from_secs(config.circuit_breaker_recovery_secs),
             ..CircuitBreakerConfig::default()
         };
         tracing::debug!(
             threshold,
-            recovery_secs = config.nearai.circuit_breaker_recovery_secs,
+            recovery_secs = config.circuit_breaker_recovery_secs,
             "LLM circuit breaker enabled"
         );
         Arc::new(CircuitBreakerProvider::new(llm, cb_config))
@@ -642,14 +664,14 @@ pub async fn build_provider_chain(
     };
 
     // 5. Response cache
-    let llm: Arc<dyn LlmProvider> = if config.nearai.response_cache_enabled {
+    let llm: Arc<dyn LlmProvider> = if config.response_cache_enabled {
         let rc_config = ResponseCacheConfig {
-            ttl: std::time::Duration::from_secs(config.nearai.response_cache_ttl_secs),
-            max_entries: config.nearai.response_cache_max_entries,
+            ttl: std::time::Duration::from_secs(config.response_cache_ttl_secs),
+            max_entries: config.response_cache_max_entries,
         };
         tracing::debug!(
-            ttl_secs = config.nearai.response_cache_ttl_secs,
-            max_entries = config.nearai.response_cache_max_entries,
+            ttl_secs = config.response_cache_ttl_secs,
+            max_entries = config.response_cache_max_entries,
             "LLM response cache enabled"
         );
         Arc::new(CachedProvider::new(llm, rc_config))
@@ -672,6 +694,45 @@ pub async fn build_provider_chain(
     }
 
     Ok((llm, cheap_llm, recording_handle))
+}
+
+pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let gemini_config = config
+        .gemini_oauth
+        .clone()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "gemini_oauth".to_string(),
+        })?;
+    let provider = gemini_oauth::GeminiOauthProvider::new(gemini_config)?;
+    Ok(Arc::new(provider))
+}
+
+/// Normalize an OpenAI-compatible base URL by appending `/v1` when the URL
+/// contains no path (bare `scheme://host[:port]`).
+///
+/// rig-core's `openai::Client` does not auto-append `/v1/` to the base URL,
+/// so local model servers (MLX, vLLM, llama.cpp) using bare URLs like
+/// `http://localhost:8080` get 404s. This mirrors the old
+/// `NearAiChatProvider::api_url()` behavior.
+///
+/// URLs that already carry a path — including non-`/v1` versioned paths such
+/// as Zai's `/api/paas/v4` or Gemini's `/v1beta/openai` — are returned
+/// unchanged so we don't corrupt provider-specific endpoints.
+///
+/// **Note:** This is intentionally applied only to `OpenAiCompletions`-protocol
+/// providers. Ollama uses `/api/chat` (not `/v1/chat/completions`) and its
+/// rig-core client handles the path internally, so normalization is not needed.
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.to_ascii_lowercase().ends_with("/v1") {
+        return trimmed.to_string();
+    }
+    match url::Url::parse(trimmed) {
+        Ok(parsed) if parsed.path().is_empty() || parsed.path() == "/" => {
+            format!("{trimmed}/v1")
+        }
+        _ => trimmed.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -705,10 +766,17 @@ mod tests {
             nearai: test_nearai_config(),
             provider: None,
             bedrock: None,
+            gemini_oauth: None,
             request_timeout_secs: 120,
             cheap_model: None,
             smart_routing_cascade: true,
             openai_codex: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
         }
     }
 
@@ -787,6 +855,30 @@ mod tests {
     }
 
     #[test]
+    fn test_create_cheap_llm_provider_gemini_oauth_creates_provider() {
+        let mut config = test_llm_config();
+        config.backend = "gemini_oauth".to_string();
+        config.cheap_model = Some("gemini-2.5-flash-lite".to_string());
+        config.gemini_oauth = Some(crate::config::GeminiOauthConfig {
+            model: "gemini-2.5-pro".to_string(),
+            credentials_path: std::path::PathBuf::from("/tmp/nonexistent-creds.json"),
+        });
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_cheap_llm_provider(&config, session);
+
+        // Should succeed and return a provider (credentials validation is deferred
+        // until the first LLM call, not at construction time).
+        let provider = result.expect("gemini_oauth cheap provider should succeed");
+        assert!(provider.is_some(), "Should return Some(provider)");
+        assert_eq!(
+            provider.unwrap().model_name(),
+            "gemini-2.5-flash-lite",
+            "Cheap provider should use the overridden model name"
+        );
+    }
+
+    #[test]
     fn test_cheap_model_name_resolution() {
         // Generic takes priority
         let mut config = test_llm_config();
@@ -808,5 +900,60 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_appends_v1_for_bare_hosts() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://my-server.example.com"),
+            "https://my-server.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_leaves_v1_alone() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        // Case-insensitive: /V1 should not get double-suffixed
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/V1"),
+            "http://localhost:8080/V1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_existing_paths() {
+        // Non-/v1 versioned paths from real providers must stay unchanged
+        assert_eq!(
+            normalize_openai_base_url("https://api.z.ai/api/paas/v4"),
+            "https://api.z.ai/api/paas/v4"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        // Custom subpaths should also stay unchanged
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.com/custom"),
+            "https://api.example.com/custom"
+        );
     }
 }

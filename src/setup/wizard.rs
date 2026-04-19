@@ -44,6 +44,8 @@ use crate::setup::prompts::{
 // const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
+const QUICK_PROFILE_LOCAL: &str = "local";
+const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,9 @@ pub enum SetupError {
 
     #[error("User cancelled")]
     Cancelled,
+
+    #[error("Sandbox error: {0}")]
+    Sandbox(#[from] crate::sandbox::error::SandboxError),
 }
 
 impl From<crate::setup::channels::ChannelSetupError> for SetupError {
@@ -84,12 +89,15 @@ pub struct SetupConfig {
     pub provider_only: bool,
     /// Quick setup: auto-defaults everything except LLM provider and model.
     pub quick: bool,
+    /// Run only specific setup steps (e.g. "provider", "channels", "model", "database", "security").
+    pub steps: Vec<String>,
 }
 
 /// Interactive setup wizard for IronClaw.
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    selected_deployment_profile: Option<String>,
     owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup, postgres only).
@@ -118,6 +126,7 @@ impl SetupWizard {
         Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id: "default".to_string(),
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -137,6 +146,7 @@ impl SetupWizard {
         Ok(Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id,
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -188,6 +198,55 @@ impl SetupWizard {
         print_banner();
         print_header("IronClaw Setup Wizard");
 
+        if !self.config.steps.is_empty() {
+            // Selective step mode: reconnect to existing DB and load settings,
+            // then run only the requested steps.
+            self.reconnect_existing_db().await?;
+
+            let valid_steps = ["provider", "channels", "model", "database", "security"];
+            for s in &self.config.steps {
+                if !valid_steps.contains(&s.as_str()) {
+                    return Err(SetupError::Config(format!(
+                        "Unknown step '{}'. Valid steps: {}",
+                        s,
+                        valid_steps.join(", ")
+                    )));
+                }
+            }
+
+            let total = self.config.steps.len();
+            for (i, step_name) in self.config.steps.clone().iter().enumerate() {
+                let step_num = i + 1;
+                match step_name.as_str() {
+                    "database" => {
+                        print_step(step_num, total, "Database Connection");
+                        self.step_database().await?;
+                    }
+                    "security" => {
+                        print_step(step_num, total, "Security");
+                        self.step_security().await?;
+                    }
+                    "provider" => {
+                        print_step(step_num, total, "Inference Provider");
+                        self.step_inference_provider().await?;
+                    }
+                    "model" => {
+                        print_step(step_num, total, "Model Selection");
+                        self.step_model_selection().await?;
+                    }
+                    "channels" => {
+                        print_step(step_num, total, "Channel Configuration");
+                        self.step_channels().await?;
+                    }
+                    _ => {} // already validated above
+                }
+                self.persist_after_step().await;
+            }
+
+            self.save_and_summarize().await?;
+            return Ok(());
+        }
+
         if self.config.channels_only {
             // Channels-only mode: reconnect to existing DB and load settings
             // before running the channel step, so secrets and save work.
@@ -206,7 +265,15 @@ impl SetupWizard {
             self.persist_after_step().await;
         } else if self.config.quick {
             // Quick mode: auto-default database + security, only ask for
-            // LLM provider + model. Designed for first-run experience.
+            // the local usage profile (on true first run), LLM provider,
+            // and model. Designed for first-run experience.
+
+            // Profile selection runs first so that `apply_profile()` can set
+            // `database_backend` before `auto_setup_database()` connects.
+            // The subsequent clone → try_load → merge_from cycle preserves
+            // these wizard-chosen values over any stale DB values.
+            self.step_quick_local_profile()?;
+
             self.auto_setup_database().await?;
 
             // Load existing settings from DB (if any prior partial run)
@@ -220,23 +287,23 @@ impl SetupWizard {
             // Pre-populate backend from env so step_inference_provider
             // can offer "Keep current provider?" instead of asking from scratch.
             if self.settings.llm_backend.is_none() {
-                use crate::config::helpers::env_or_override;
-                if let Some(b) = env_or_override("LLM_BACKEND")
-                    && !b.trim().is_empty()
-                {
-                    self.settings.llm_backend = Some(b.trim().to_string());
-                } else if env_or_override("NEARAI_API_KEY").is_some() {
+                if let Ok(b) = std::env::var("LLM_BACKEND") {
+                    self.settings.llm_backend = Some(b);
+                } else if std::env::var("NEARAI_API_KEY").is_ok() {
                     self.settings.llm_backend = Some("nearai".to_string());
-                } else if env_or_override("ANTHROPIC_API_KEY").is_some()
-                    || env_or_override("ANTHROPIC_OAUTH_TOKEN").is_some()
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
                 {
                     self.settings.llm_backend = Some("anthropic".to_string());
-                } else if env_or_override("OPENAI_API_KEY").is_some() {
+                } else if std::env::var("OPENAI_API_KEY").is_ok() {
                     self.settings.llm_backend = Some("openai".to_string());
+                } else if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("openrouter".to_string());
                 }
             }
 
-            if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+                && !api_key.is_empty()
                 && self.settings.llm_backend.as_deref() == Some("nearai")
             {
                 // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
@@ -250,6 +317,79 @@ impl SetupWizard {
                 self.llm_api_key = Some(SecretString::from(api_key));
                 if self.settings.selected_model.is_none() {
                     let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if self.settings.llm_backend.as_deref() == Some("anthropic")
+                && let Some(api_key) = Self::detect_anthropic_key()
+            {
+                // Anthropic key detected — skip interactive prompts
+                print_info("Anthropic credentials found — using Anthropic provider");
+                let secret_name = if api_key.starts_with("sk-ant-oat") {
+                    "llm_anthropic_oauth_token"
+                } else {
+                    "llm_anthropic_api_key"
+                };
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret(secret_name, &key).await {
+                        tracing::warn!("Failed to persist Anthropic key to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("anthropic")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("claude-sonnet-4-20250514");
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+                && !api_key.is_empty()
+                && self.settings.llm_backend.as_deref() == Some("openai")
+            {
+                // OpenAI key detected — skip interactive prompts
+                print_info("OPENAI_API_KEY found — using OpenAI provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_openai_api_key", &key).await {
+                        tracing::warn!("Failed to persist OPENAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("openai")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("gpt-5-mini");
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY")
+                && !api_key.is_empty()
+                && self.settings.llm_backend.as_deref() == Some("openrouter")
+            {
+                // OpenRouter key detected — skip interactive prompts
+                print_info("OPENROUTER_API_KEY found — using OpenRouter provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_openrouter_api_key", &key).await {
+                        tracing::warn!("Failed to persist OPENROUTER_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("openrouter")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("openai/gpt-4o");
                     self.settings.selected_model = Some(default.to_string());
                     print_info(&format!("Using default model: {default}"));
                 }
@@ -763,12 +903,15 @@ impl SetupWizard {
     }
 
     /// Run PostgreSQL migrations.
+    ///
+    /// Delegates to `crate::db::migration_fixup::run_postgres_migrations_with_fixup`,
+    /// which acquires the migration advisory lock, realigns any historically
+    /// diverged checksums (issue #1328), then runs refinery's embedded
+    /// migrations. Bundled into a single helper so this call site cannot
+    /// drift from `Store::run_migrations` (see PR #2101 review).
     #[cfg(feature = "postgres")]
     async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
         if let Some(ref pool) = self.db_pool {
-            use refinery::embed_migrations;
-            embed_migrations!("migrations");
-
             if !self.config.quick {
                 print_info("Running migrations...");
             }
@@ -779,8 +922,7 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
 
-            migrations::runner()
-                .run_async(&mut **client)
+            crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
@@ -908,7 +1050,10 @@ impl SetupWizard {
                 self.settings.secrets_master_key_hex = Some(key_hex.clone());
 
                 println!();
-                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
+                print_info(&format!(
+                    "Master key generated and will be saved to {}",
+                    crate::bootstrap::ironclaw_env_path().display()
+                ));
                 println!();
                 println!("  SECRETS_MASTER_KEY={}", key_hex);
                 println!();
@@ -1001,62 +1146,100 @@ impl SetupWizard {
         }
     }
 
+    /// Quick first-run local deployment profile selection.
+    ///
+    /// Existing `IRONCLAW_PROFILE` values are respected because
+    /// `load_bootstrap_settings()` has already applied them before the wizard
+    /// starts. This prompt only fills in the missing first-run local default.
+    fn step_quick_local_profile(&mut self) -> Result<(), SetupError> {
+        if crate::config::env_or_override("IRONCLAW_PROFILE").is_some() {
+            return Ok(());
+        }
+
+        let options = [
+            "Local (TUI + background tasks, no Docker sandbox)",
+            "Local sandbox (TUI + background tasks + Docker sandbox)",
+        ];
+        let choice = select_one("How should IronClaw run on this machine?", &options)
+            .map_err(SetupError::Io)?;
+        let profile = match choice {
+            0 => QUICK_PROFILE_LOCAL,
+            1 => QUICK_PROFILE_LOCAL_SANDBOX,
+            _ => unreachable!("select_one only returns 0 or 1 for a two-option menu"),
+        };
+
+        self.apply_quick_local_profile(profile)?;
+        print_success(&format!("Using '{profile}' deployment profile"));
+        Ok(())
+    }
+
+    fn apply_quick_local_profile(&mut self, profile: &str) -> Result<(), SetupError> {
+        match profile {
+            QUICK_PROFILE_LOCAL | QUICK_PROFILE_LOCAL_SANDBOX => {}
+            other => {
+                return Err(SetupError::Config(format!(
+                    "unsupported quick local profile: {other}"
+                )));
+            }
+        }
+
+        crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
+        crate::config::profile::apply_profile(&mut self.settings)
+            .map_err(|e| SetupError::Config(e.to_string()))?;
+
+        self.selected_deployment_profile = Some(profile.to_string());
+        Ok(())
+    }
+
     /// Auto-setup security with zero prompts (quick mode).
     ///
-    /// Silently configures the master key: uses existing env var or keychain
-    /// key if available, otherwise generates and stores one automatically
-    /// (keychain on macOS, env var fallback).
+    /// Thin caller over [`SecretsConfig::resolve`], which owns the
+    /// env-var → keychain → generate-and-persist chain. The wizard's
+    /// only remaining responsibilities here are building the
+    /// `SecretsCrypto` instance that subsequent wizard steps use to
+    /// encrypt credentials before the DB is available, mirroring the
+    /// resolved source into settings so `write_bootstrap_env()` picks
+    /// up the hex when in env-var mode, and printing a user-visible
+    /// status line.
     async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
-        // Check env var first
-        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-            self.settings.secrets_master_key_source = KeySource::Env;
-            print_success("Security configured (env var)");
-            return Ok(());
-        }
-
-        // Try existing keychain key (no prompts — get_master_key may show
-        // OS dialogs on macOS, but that's unavoidable for keychain access)
-        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
-            let key_hex: String = keychain_key_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Security configured (keychain)");
-            return Ok(());
-        }
-
-        // No existing key — generate one
-        // Try keychain first (preferred on macOS)
-        let key = crate::secrets::keychain::generate_master_key();
-        if crate::secrets::keychain::store_master_key(&key)
+        let cfg = crate::config::SecretsConfig::resolve()
             .await
-            .is_ok()
-        {
-            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Master key stored in OS keychain");
-            return Ok(());
-        }
+            .map_err(|e| SetupError::Config(e.to_string()))?;
 
-        // Keychain unavailable — fall back to env var mode
-        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        let master_key = cfg.master_key.clone().ok_or_else(|| {
+            SetupError::Config("secrets resolve returned no master key".to_string())
+        })?;
+
         self.secrets_crypto = Some(Arc::new(
-            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+            SecretsCrypto::new(master_key.clone())
                 .map_err(|e| SetupError::Config(e.to_string()))?,
         ));
-        crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
-        self.settings.secrets_master_key_hex = Some(key_hex);
-        self.settings.secrets_master_key_source = KeySource::Env;
-        print_success("Master key stored in ~/.ironclaw/.env");
+        self.settings.secrets_master_key_source = cfg.source;
+
+        // In env-var mode the hex is needed by `bootstrap_env_vars()` so
+        // that the wizard's idempotent final `.env` write includes
+        // `SECRETS_MASTER_KEY=…` alongside the rest of the bootstrap
+        // vars. `resolve()` has already persisted the key on its own,
+        // but the wizard's full-set rewrite happens after DB settings
+        // merge in and must carry the key forward.
+        if matches!(cfg.source, KeySource::Env) {
+            self.settings.secrets_master_key_hex = Some(master_key.expose_secret().to_string());
+        }
+
+        // `SecretsConfig::resolve` either returns a key with source
+        // `Env`/`Keychain` or errors — `None` cannot be produced here,
+        // so only the two real sources are handled.
+        let msg = match cfg.source {
+            KeySource::Env => format!(
+                "Master key stored in {}",
+                crate::bootstrap::ironclaw_env_path().display()
+            ),
+            KeySource::Keychain => "Master key stored in OS keychain".to_string(),
+            KeySource::None => unreachable!(
+                "SecretsConfig::resolve returns a key or errors; None is never produced"
+            ),
+        };
+        print_success(&msg);
         Ok(())
     }
 
@@ -1078,21 +1261,38 @@ impl SetupWizard {
                     .map(|s| s.display_name().to_string())
                     .unwrap_or_else(|| def.id.clone())
             } else {
-                current.clone()
+                match current.as_str() {
+                    "nearai" => "NEAR AI".to_string(),
+                    "gemini_oauth" | "gemini-oauth" => "Gemini API (OAuth)".to_string(),
+                    _ => {
+                        if let Some(def) = registry.find(&current) {
+                            def.setup
+                                .as_ref()
+                                .map(|s| s.display_name().to_string())
+                                .unwrap_or_else(|| def.id.clone())
+                        } else {
+                            current.clone()
+                        }
+                    }
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
 
             let is_known = current == "nearai"
                 || current == "bedrock"
+                || current == "gemini_oauth"
+                || current == "gemini-oauth"
                 || current == "openai_codex"
                 || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
-                    // Keeping the existing Bedrock config — no need to re-run
-                    // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "gemini_oauth" || current == "gemini-oauth" {
+                    print_info("Keeping existing Gemini CLI OAuth configuration.");
                     return Ok(());
                 }
                 if current == "openai_codex" {
@@ -1113,33 +1313,100 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then OpenAI Codex, then registry providers, then Bedrock
+        // Build menu: NearAI first, then Gemini OAuth, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
-        options.push("NEAR AI          - multi-model access via NEAR account".to_string());
-        provider_ids.push("nearai".to_string());
+        // Detect which providers have API keys already set in the environment.
+        let detected_env: HashMap<&str, bool> = [
+            ("nearai", std::env::var("NEARAI_API_KEY").is_ok()),
+            (
+                "anthropic",
+                std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok(),
+            ),
+            ("openai", std::env::var("OPENAI_API_KEY").is_ok()),
+            ("openrouter", std::env::var("OPENROUTER_API_KEY").is_ok()),
+        ]
+        .into_iter()
+        .collect();
 
-        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
-        provider_ids.push("openai_codex".to_string());
+        // Helper: build a label for a provider entry, prepending a checkmark if detected.
+        let make_label = |id: &str, name: &str, desc: &str| -> String {
+            if detected_env.get(id).copied().unwrap_or(false) {
+                format!("\u{2713} {:<15}- {}", name, desc)
+            } else {
+                format!("  {:<15}- {}", name, desc)
+            }
+        };
+
+        // Collect all entries as (provider_id, label, is_detected).
+        struct ProviderEntry {
+            id: String,
+            label: String,
+            detected: bool,
+        }
+
+        let mut entries: Vec<ProviderEntry> = Vec::with_capacity(2 + selectable.len());
+
+        entries.push(ProviderEntry {
+            id: "nearai".to_string(),
+            label: make_label("nearai", "NEAR AI", "multi-model access via NEAR account"),
+            detected: detected_env.get("nearai").copied().unwrap_or(false),
+        });
+
+        entries.push(ProviderEntry {
+            id: "gemini_oauth".to_string(),
+            label: make_label(
+                "gemini_oauth",
+                "Gemini CLI",
+                "Official Gemini API via Gemini CLI OAuth",
+            ),
+            detected: false,
+        });
+
+        entries.push(ProviderEntry {
+            id: "openai_codex".to_string(),
+            label: make_label(
+                "openai_codex",
+                "OpenAI Codex",
+                "ChatGPT subscription (Plus/Pro/Max)",
+            ),
+            detected: false,
+        });
 
         for def in &selectable {
-            let label = format!(
-                "{:<17}- {}",
-                def.setup
-                    .as_ref()
-                    .map(|s| s.display_name())
-                    .unwrap_or(&def.id),
-                def.description
-            );
-            options.push(label);
-            provider_ids.push(def.id.clone());
+            let display_name = def
+                .setup
+                .as_ref()
+                .map(|s| s.display_name())
+                .unwrap_or(&def.id);
+            entries.push(ProviderEntry {
+                id: def.id.clone(),
+                label: make_label(&def.id, display_name, &def.description),
+                detected: detected_env.get(def.id.as_str()).copied().unwrap_or(false),
+            });
         }
 
         // Bedrock is a special case (native AWS SDK, not registry-based)
-        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
-        provider_ids.push("bedrock".to_string());
+        entries.push(ProviderEntry {
+            id: "bedrock".to_string(),
+            label: make_label(
+                "bedrock",
+                "AWS Bedrock",
+                "Claude & other models via AWS (IAM, SSO)",
+            ),
+            detected: false,
+        });
+
+        // Sort: detected providers first, preserving relative order within each group.
+        entries.sort_by_key(|e| !e.detected);
+
+        let mut options: Vec<String> = Vec::with_capacity(entries.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            options.push(entry.label.clone());
+            provider_ids.push(entry.id.clone());
+        }
 
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
         let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
@@ -1147,6 +1414,8 @@ impl SetupWizard {
 
         if selected_id == "bedrock" {
             self.setup_bedrock().await?;
+        } else if selected_id == "gemini_oauth" {
+            self.setup_gemini_oauth().await?;
         } else {
             self.run_provider_setup(selected_id, &registry).await?;
         }
@@ -1239,6 +1508,24 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    /// Detect an Anthropic credential from the environment.
+    ///
+    /// Checks `ANTHROPIC_API_KEY` first, then `ANTHROPIC_OAUTH_TOKEN`.
+    /// Returns the key/token string if found, or `None`.
+    fn detect_anthropic_key() -> Option<String> {
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+            && !key.is_empty()
+        {
+            return Some(key);
+        }
+        if let Ok(token) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
+            && !token.is_empty()
+        {
+            return Some(token);
+        }
+        None
     }
 
     /// Update the selected LLM backend while preserving the current model when
@@ -1795,6 +2082,40 @@ impl SetupWizard {
         Ok(())
     }
 
+    async fn setup_gemini_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("gemini_oauth".to_string());
+        print_info("Starting Gemini CLI OAuth authentication...");
+        println!();
+
+        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let cred_manager =
+            crate::llm::gemini_oauth::CredentialManager::new(&creds_path).map_err(|e| {
+                SetupError::Config(format!(
+                    "Failed to initialize Gemini credential manager: {}",
+                    e
+                ))
+            })?;
+
+        match cred_manager.get_valid_credential().await {
+            Ok(cred) => {
+                print_success("Gemini CLI authentication successful!");
+                if let Some(ref pid) = cred.project_id {
+                    print_info(&format!("Cloud Code project: {}", pid));
+                }
+            }
+            Err(e) => {
+                return Err(SetupError::Config(format!(
+                    "Gemini CLI authentication failed: {}. Please try again.",
+                    e
+                )));
+            }
+        }
+
+        println!();
+        print_success("Gemini API configured via Gemini CLI");
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1818,109 +2139,157 @@ impl SetupWizard {
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
         let registry = crate::llm::ProviderRegistry::load();
 
-        if backend == "nearai" {
-            // NEAR AI: use existing provider list_models()
-            let fetched = self.fetch_nearai_models().await;
-            let models = if fetched.is_empty() {
-                crate::llm::default_models()
-            } else {
-                fetched.iter().map(|m| (m.clone(), m.clone())).collect()
-            };
-            self.select_from_model_list(&models)?;
-        } else if let Some(def) = registry.find(backend) {
-            let can_list = def
-                .setup
-                .as_ref()
-                .map(|s| s.can_list_models())
-                .unwrap_or(false);
-
-            if can_list {
-                // Try to fetch models from the provider's /v1/models endpoint
-                let cached_key = self
-                    .llm_api_key
-                    .as_ref()
-                    .map(|k| k.expose_secret().to_string());
-
-                let models = match backend {
-                    "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
-                    "openai" => fetch_openai_models(cached_key.as_deref()).await,
-                    "ollama" => {
-                        let base_url = self
-                            .settings
-                            .ollama_base_url
-                            .as_deref()
-                            .or(def.default_base_url.as_deref())
-                            .unwrap_or("http://localhost:11434");
-                        let models = fetch_ollama_models(base_url).await;
-                        if models.is_empty() {
-                            print_info("No models found. Pull one first: ollama pull llama3");
-                        }
-                        models
-                    }
-                    _ => {
-                        // Generic OpenAI-compatible model listing
-                        let base_url = def.default_base_url.as_deref().unwrap_or("");
-                        fetch_openai_compatible_models(base_url, cached_key.as_deref()).await
-                    }
-                };
-
-                // Apply models_filter from setup hint (e.g., Groq "chat" filters non-chat models)
-                let models =
-                    if let Some(filter) = def.setup.as_ref().and_then(|s| s.models_filter()) {
-                        let filter_lower = filter.to_lowercase();
-                        models
-                            .into_iter()
-                            .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
-                            .collect()
-                    } else {
-                        models
-                    };
-
-                if models.is_empty() {
-                    // Fall back to manual entry
-                    let default = &def.default_model;
-                    let model_id = input(&format!("Model name (default: {default})"))
-                        .map_err(SetupError::Io)?;
-                    let model_id = if model_id.is_empty() {
-                        default.clone()
-                    } else {
-                        model_id
-                    };
-                    self.settings.selected_model = Some(model_id.clone());
-                    print_success(&format!("Selected {}", model_id));
+        match backend {
+            "nearai" => {
+                // NEAR AI: use existing provider list_models()
+                let fetched = self.fetch_nearai_models().await;
+                let models = if fetched.is_empty() {
+                    crate::llm::default_models()
                 } else {
-                    self.select_from_model_list(&models)?;
-                }
-            } else {
-                // Manual model entry
-                let default = &def.default_model;
+                    fetched.iter().map(|m| (m.clone(), m.clone())).collect()
+                };
+                self.select_from_model_list(&models)?;
+            }
+            "gemini_oauth" | "gemini-oauth" => {
+                let default_models: Vec<(String, String)> = vec![
+                    (
+                        "gemini-3.1-pro-preview".into(),
+                        "Gemini 3.1 Pro (Latest, strongest reasoning)".into(),
+                    ),
+                    (
+                        "gemini-3.1-pro-preview-customtools".into(),
+                        "Gemini 3.1 Pro Custom Tools (Enhanced tool use)".into(),
+                    ),
+                    (
+                        "gemini-3-pro-preview".into(),
+                        "Gemini 3 Pro (Preview)".into(),
+                    ),
+                    (
+                        "gemini-3-flash-preview".into(),
+                        "Gemini 3 Flash (Fast preview with thinking)".into(),
+                    ),
+                    (
+                        "gemini-3.1-flash-lite-preview".into(),
+                        "Gemini 3.1 Flash Lite (Preview, lightweight)".into(),
+                    ),
+                    (
+                        "gemini-2.5-pro".into(),
+                        "Gemini 2.5 Pro (Stable, strong reasoning)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash".into(),
+                        "Gemini 2.5 Flash (Fast, good quality)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash-lite".into(),
+                        "Gemini 2.5 Flash Lite (Fastest, lightweight)".into(),
+                    ),
+                ];
+                self.select_from_model_list(&default_models)?;
+            }
+            "bedrock" => {
                 let model_id =
-                    input(&format!("Model name (default: {default})")).map_err(SetupError::Io)?;
-                let model_id = if model_id.is_empty() {
-                    default.clone()
-                } else {
-                    model_id
-                };
+                    input("Bedrock model ID (e.g., anthropic.claude-v3-sonnet-20240229-v1:0)")
+                        .map_err(SetupError::Io)?;
+                if model_id.is_empty() {
+                    return Err(SetupError::Config("Model ID is required".to_string()));
+                }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
-        } else if backend == "bedrock" {
-            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model ID is required".to_string()));
+            _ => {
+                if let Some(def) = registry.find(backend) {
+                    let can_list = def
+                        .setup
+                        .as_ref()
+                        .map(|s| s.can_list_models())
+                        .unwrap_or(false);
+
+                    if can_list {
+                        // Try to fetch models from the provider's /v1/models endpoint
+                        let cached_key = self
+                            .llm_api_key
+                            .as_ref()
+                            .map(|k| k.expose_secret().to_string());
+
+                        let models = match backend {
+                            "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
+                            "openai" => fetch_openai_models(cached_key.as_deref()).await,
+                            "ollama" => {
+                                let base_url = self
+                                    .settings
+                                    .ollama_base_url
+                                    .as_deref()
+                                    .or(def.default_base_url.as_deref())
+                                    .unwrap_or("http://localhost:11434");
+                                let models = fetch_ollama_models(base_url).await;
+                                if models.is_empty() {
+                                    print_info(
+                                        "No models found. Pull one first: ollama pull llama3",
+                                    );
+                                }
+                                models
+                            }
+                            _ => {
+                                // Generic OpenAI-compatible model listing
+                                let base_url = def.default_base_url.as_deref().unwrap_or("");
+                                fetch_openai_compatible_models(base_url, cached_key.as_deref())
+                                    .await
+                            }
+                        };
+
+                        // Apply models_filter from setup hint
+                        let models = if let Some(filter) =
+                            def.setup.as_ref().and_then(|s| s.models_filter())
+                        {
+                            let filter_lower = filter.to_lowercase();
+                            models
+                                .into_iter()
+                                .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
+                                .collect()
+                        } else {
+                            models
+                        };
+
+                        if models.is_empty() {
+                            // Fall back to manual entry
+                            let default = &def.default_model;
+                            let model_id = input(&format!("Model name (default: {default})"))
+                                .map_err(SetupError::Io)?;
+                            let model_id = if model_id.is_empty() {
+                                default.clone()
+                            } else {
+                                model_id
+                            };
+                            self.settings.selected_model = Some(model_id.clone());
+                            print_success(&format!("Selected {}", model_id));
+                        } else {
+                            self.select_from_model_list(&models)?;
+                        }
+                    } else {
+                        // Manual model entry
+                        let default = &def.default_model;
+                        let model_id = input(&format!("Model name (default: {default})"))
+                            .map_err(SetupError::Io)?;
+                        let model_id = if model_id.is_empty() {
+                            default.clone()
+                        } else {
+                            model_id
+                        };
+                        self.settings.selected_model = Some(model_id.clone());
+                        print_success(&format!("Selected {}", model_id));
+                    }
+                } else {
+                    // Unknown provider, manual entry
+                    let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
+                        .map_err(SetupError::Io)?;
+                    if model_id.is_empty() {
+                        return Err(SetupError::Config("Model name is required".to_string()));
+                    }
+                    self.settings.selected_model = Some(model_id.clone());
+                    print_success(&format!("Selected {}", model_id));
+                }
             }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
-        } else {
-            // Unknown provider, manual entry
-            let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model name is required".to_string()));
-            }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
         }
 
         Ok(())
@@ -2004,6 +2373,7 @@ impl SetupWizard {
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
         let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let has_bedrock = backend == "bedrock";
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         if backend == "openai" && has_openai_key {
@@ -2014,28 +2384,38 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
+        if backend == "bedrock" {
+            self.settings.embeddings.enabled = true;
+            self.settings.embeddings.provider = "bedrock".to_string();
+            self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+            print_success("Embeddings enabled via AWS Bedrock");
+            return Ok(());
+        }
+
+        // If no NEAR AI session, Bedrock config, or OpenAI key, embeddings aren't available.
+        if !has_nearai && !has_bedrock && !has_openai_key {
             print_info("No NEAR AI session or OpenAI key found for embeddings.");
             print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
 
-        let mut options = Vec::new();
+        let mut provider_options = Vec::new();
         if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
+            provider_options.push(("nearai", "NEAR AI (uses same auth, no extra cost)"));
         }
-        options.push("OpenAI (requires API key)");
+        if has_bedrock {
+            provider_options.push(("bedrock", "AWS Bedrock (uses AWS auth and region)"));
+        }
+        provider_options.push(("openai", "OpenAI (requires API key)"));
 
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
-        } else {
-            "openai"
-        };
+        let display_options: Vec<&str> = provider_options
+            .iter()
+            .map(|(_, display)| *display)
+            .collect();
+        let choice =
+            select_one("Select embeddings provider:", &display_options).map_err(SetupError::Io)?;
+        let provider = provider_options[choice].0;
 
         match provider {
             "nearai" => {
@@ -2043,6 +2423,12 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "nearai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
+            }
+            "bedrock" => {
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "bedrock".to_string();
+                self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+                print_success("Embeddings enabled via AWS Bedrock");
             }
             _ => {
                 if !has_openai_key {
@@ -2549,6 +2935,9 @@ impl SetupWizard {
             crate::sandbox::detect::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
                 print_success("Docker is installed and running. Sandbox enabled.");
+
+                // Check if the worker image exists
+                self.ensure_worker_image().await?;
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -2578,6 +2967,8 @@ impl SetupWizard {
                         } else {
                             "Docker is now running. Sandbox enabled."
                         });
+                        // Check if the worker image exists
+                        self.ensure_worker_image().await?;
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
@@ -2659,6 +3050,113 @@ impl SetupWizard {
                 self.settings.sandbox.claude_code_enabled = false;
                 print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
             }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure the sandbox worker Docker image exists, building it if necessary.
+    async fn ensure_worker_image(&mut self) -> Result<(), SetupError> {
+        use crate::sandbox::container::{ContainerRunner, connect_docker};
+
+        let image_name = self.settings.sandbox.image.clone();
+        let docker = match connect_docker().await {
+            Ok(d) => d,
+            Err(e) => {
+                // check_docker() may report Available (via CLI fallback) even when
+                // connect_docker() fails (e.g. on Windows). Don't hard-fail setup.
+                print_info(&format!(
+                    "Could not connect to Docker API to verify image: {}",
+                    e
+                ));
+                print_info("Image check skipped. The image will be pulled at first job run.");
+                return Ok(());
+            }
+        };
+        let runner = ContainerRunner::for_image_ops(docker, image_name.clone());
+
+        if runner.image_exists().await {
+            print_success(&format!("Worker image '{}' found.", image_name));
+            return Ok(());
+        }
+
+        println!();
+        print_info(&format!("Worker image '{}' not found.", image_name));
+        print_info("This image is required for sandboxed job execution.");
+        println!();
+
+        // Images that contain '/' look like registry references (e.g.
+        // "ghcr.io/nearai/ironclaw-worker:v1"). For those, or when
+        // auto_pull_image is enabled, attempt a pull before offering a
+        // local build — the runtime would do the same thing via
+        // SandboxManager::ensure_ready().
+        let is_registry_image = image_name.contains('/');
+        if is_registry_image || self.settings.sandbox.auto_pull_image {
+            print_info(&format!("Attempting to pull '{}'...", image_name));
+            match runner.pull_image().await {
+                Ok(()) => {
+                    print_success(&format!("Successfully pulled image '{}'.", image_name));
+                    return Ok(());
+                }
+                Err(e) => {
+                    if is_registry_image {
+                        // Registry image that can't be pulled — don't offer local build.
+                        print_error(&format!("Failed to pull image: {}", e));
+                        print_info("Ensure the image is published and accessible, or set");
+                        print_info("SANDBOX_IMAGE to a local image name and try again.");
+                        return Ok(());
+                    }
+                    print_info(&format!(
+                        "Pull failed ({}). Checking for local Dockerfile...",
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Only offer local build for default-style local images.
+        let dockerfile_path = std::path::PathBuf::from("Dockerfile.worker");
+
+        if dockerfile_path.exists() {
+            print_info(&format!(
+                "Found Dockerfile at: {}",
+                dockerfile_path.display()
+            ));
+            if confirm(
+                "Build the worker image now? (this may take a few minutes)",
+                true,
+            )
+            .map_err(SetupError::Io)?
+            {
+                print_info("Building worker image... This may take a few minutes.");
+                match runner.build_image(&dockerfile_path).await {
+                    Ok(()) => {
+                        print_success(&format!("Successfully built image '{}'.", image_name));
+                    }
+                    Err(e) => {
+                        print_error(&format!("Failed to build image: {}", e));
+                        print_info("You can build it manually later with:");
+                        print_info(&format!(
+                            "  docker build -f Dockerfile.worker -t {} .",
+                            image_name
+                        ));
+                    }
+                }
+            } else {
+                print_info("Skipped image build. Build it manually with:");
+                print_info(&format!(
+                    "  docker build -f Dockerfile.worker -t {} .",
+                    image_name
+                ));
+            }
+        } else {
+            print_info("No Dockerfile.worker found in current directory.");
+            print_info("To use Docker sandbox, build the worker image manually:");
+            print_info(&format!(
+                "  docker build -f Dockerfile.worker -t {} .",
+                image_name
+            ));
+            print_info("or clone the IronClaw repository and build from source.");
         }
 
         Ok(())
@@ -2753,8 +3251,8 @@ impl SetupWizard {
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
     /// Only true chicken-and-egg settings are written here — things needed
-    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
-    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// before the database is connected: `IRONCLAW_PROFILE`, `DATABASE_BACKEND`,
+    /// `DATABASE_URL`, `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
     /// channel config vars (Signal, Claude Code sandbox).
     ///
     /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
@@ -2762,8 +3260,12 @@ impl SetupWizard {
     /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
     /// API keys live only in the encrypted secrets DB and are injected via
     /// `inject_llm_keys_from_secrets()` after DB init.
-    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+    fn bootstrap_env_vars(&self) -> Vec<(String, String)> {
         let mut env_vars: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref profile) = self.selected_deployment_profile {
+            env_vars.push(("IRONCLAW_PROFILE".to_string(), profile.clone()));
+        }
 
         if let Some(ref backend) = self.settings.database_backend {
             env_vars.push(("DATABASE_BACKEND".to_string(), backend.clone()));
@@ -2828,6 +3330,12 @@ impl SetupWizard {
             ));
         }
 
+        env_vars
+    }
+
+    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+        let env_vars = self.bootstrap_env_vars();
+
         if !env_vars.is_empty() {
             let pairs: Vec<(&str, &str)> = env_vars
                 .iter()
@@ -2844,16 +3352,17 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Persist the NEAR AI session token to the database.
+    /// Persist the NEAR AI session token to encrypted secrets and the database.
     ///
     /// The session manager writes to disk during `ensure_authenticated()` but
     /// doesn't have a DB store attached during onboarding. This reads the
-    /// session file from disk and stores it under the `nearai.session_token`
-    /// key so the runtime's `attach_store()` finds it without fallback.
+    /// session file from disk and stores it under `nearai_session_token` in the
+    /// encrypted secrets store. Falls back to the plaintext settings table
+    /// only when no secrets store is available.
     ///
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
-    async fn persist_session_to_db(&self) {
+    async fn persist_session_to_db(&mut self) {
         let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
@@ -2864,6 +3373,23 @@ impl SetupWizard {
             Err(_) => return,
         };
 
+        // Try to persist to encrypted secrets store (preferred).
+        if let Ok(ctx) = self.init_secrets_context().await {
+            if let Err(e) = ctx
+                .save_secret(
+                    "nearai_session_token",
+                    &secrecy::SecretString::from(data.clone()),
+                )
+                .await
+            {
+                tracing::debug!("Could not persist session token to secrets store: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to encrypted secrets store");
+                return;
+            }
+        }
+
+        // Fallback: persist to plaintext settings table.
         #[cfg(feature = "postgres")]
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
@@ -2921,7 +3447,12 @@ impl SetupWizard {
     /// via `self.settings.merge_from(&step_settings)`, since `merge_from`
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
-    async fn try_load_existing_settings(&mut self) {
+    async fn try_load_existing_settings(&mut self) -> bool {
+        // NB: `loaded` starts false and is only reassigned inside feature-gated
+        // blocks below.  When *neither* `postgres` nor `libsql` is enabled the
+        // function always returns false (no DB backend → nothing to load).
+        // Each block shadows `loaded` via `let loaded = …` so the compiler
+        // sees a use on every path; this is intentional, not accidental shadowing.
         let loaded = false;
 
         #[cfg(feature = "postgres")]
@@ -2972,12 +3503,14 @@ impl SetupWizard {
             loaded
         };
 
-        // Suppress unused variable warning when only one backend is compiled.
-        let _ = loaded;
+        loaded
     }
 
-    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
+    /// Save settings to the database and `~/.ironclaw/.env`, then print
+    /// a warm completion card with the 3 key facts.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
+        use crate::cli::fmt;
+
         self.settings.onboard_completed = true;
 
         // Final persist (idempotent — earlier incremental saves already wrote
@@ -2993,117 +3526,108 @@ impl SetupWizard {
         // Write bootstrap env (also idempotent)
         self.write_bootstrap_env()?;
 
+        // ── Completion card ───────────────────────────────────
+        let sep = fmt::separator(38);
+
         println!();
-        print_success("Configuration saved to database");
+        println!("  {}", sep);
         println!();
 
-        // Print summary
-        println!("Configuration Summary:");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        // Title line: checkmark + "ironclaw is ready"
+        println!(
+            "  {}\u{2713}{} {}ironclaw is ready{}",
+            fmt::success(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
+        println!();
 
-        let backend = self
-            .settings
-            .database_backend
-            .as_deref()
-            .unwrap_or("postgres");
-        match backend {
-            "libsql" => {
-                if let Some(ref path) = self.settings.libsql_path {
-                    println!("  Database: libSQL ({})", path);
-                } else {
-                    println!("  Database: libSQL (default path)");
-                }
-                if self.settings.libsql_url.is_some() {
-                    println!("  Turso sync: enabled");
-                }
-            }
-            _ => {
-                if self.settings.database_url.is_some() {
-                    println!("  Database: PostgreSQL (configured)");
-                }
-            }
-        }
-
-        match self.settings.secrets_master_key_source {
-            KeySource::Keychain => println!("  Security: OS keychain"),
-            KeySource::Env => println!("  Security: environment variable"),
-            KeySource::None => println!("  Security: disabled"),
-        }
-
-        if let Some(ref provider) = self.settings.llm_backend {
-            let display = match provider.as_str() {
-                "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic",
-                "openai" => "OpenAI",
-                "ollama" => "Ollama",
-                "openai_compatible" => "OpenAI-compatible",
-                "bedrock" => "AWS Bedrock",
-                "openai_codex" => "OpenAI Codex",
-                other => other,
-            };
-            println!("  Provider: {}", display);
-        }
-
-        if let Some(ref model) = self.settings.selected_model {
+        // Fact 1: Provider + model
+        let provider_display = match self.settings.llm_backend.as_deref() {
+            Some("nearai") => "NEAR AI".to_string(),
+            Some("anthropic") => "Anthropic".to_string(),
+            Some("openai") => "OpenAI".to_string(),
+            Some("ollama") => "Ollama".to_string(),
+            Some("openai_compatible") => "OpenAI-compatible".to_string(),
+            Some("bedrock") => "AWS Bedrock".to_string(),
+            Some("openai_codex") => "OpenAI Codex".to_string(),
+            Some("gemini_oauth") => "Gemini CLI".to_string(),
+            Some(other) => other.to_string(),
+            None => "unknown".to_string(),
+        };
+        let model_suffix = if let Some(ref model) = self.settings.selected_model {
             // Truncate long model names (char-based to avoid UTF-8 panic)
-            let display = if model.chars().count() > 40 {
-                let truncated: String = model.chars().take(37).collect();
+            let display = if model.chars().count() > 30 {
+                let truncated: String = model.chars().take(27).collect();
                 format!("{}...", truncated)
             } else {
                 model.clone()
             };
-            println!("  Model: {}", display);
-        }
-
-        if self.settings.embeddings.enabled {
-            println!(
-                "  Embeddings: {} ({})",
-                self.settings.embeddings.provider, self.settings.embeddings.model
-            );
+            format!(" ({})", display)
         } else {
-            println!("  Embeddings: disabled");
-        }
+            String::new()
+        };
+        let provider_value = format!("{}{}", provider_display, model_suffix);
+        println!(
+            "    {}provider{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            provider_value,
+            fmt::reset(),
+        );
 
-        if let Some(ref tunnel_url) = self.settings.tunnel.public_url {
-            println!("  Tunnel: {} (static)", tunnel_url);
-        } else if let Some(ref provider) = self.settings.tunnel.provider {
-            println!("  Tunnel: {} (managed, starts at boot)", provider);
-        }
+        // Fact 2: Database
+        let db_display = match self.settings.database_backend.as_deref() {
+            Some("libsql") => "libSQL".to_string(),
+            Some("postgres") | Some("postgresql") => "PostgreSQL".to_string(),
+            Some(other) => other.to_string(),
+            None => "unknown".to_string(),
+        };
+        println!(
+            "    {}database{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            db_display,
+            fmt::reset(),
+        );
 
-        let has_tunnel =
-            self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
-
-        println!("  Channels:");
-        println!("    - CLI/TUI: enabled");
-
-        if self.settings.channels.http_enabled {
-            let port = self.settings.channels.http_port.unwrap_or(8080);
-            println!("    - HTTP: enabled (port {})", port);
-        }
-
-        for channel_name in &self.settings.channels.wasm_channels {
-            let mode = if has_tunnel { "webhook" } else { "polling" };
-            println!(
-                "    - {}: enabled ({})",
-                capitalize_first(channel_name),
-                mode
-            );
-        }
-
-        if self.settings.heartbeat.enabled {
-            println!(
-                "  Heartbeat: every {} minutes",
-                self.settings.heartbeat.interval_secs / 60
-            );
-        }
+        // Fact 3: Security
+        let security_display = match self.settings.secrets_master_key_source {
+            KeySource::Keychain => "OS keychain",
+            KeySource::Env => "environment variable",
+            KeySource::None => "disabled",
+        };
+        println!(
+            "    {}security{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            security_display,
+            fmt::reset(),
+        );
 
         println!();
-        println!("To start the agent, run:");
-        println!("  ironclaw");
+        println!("  {}", sep);
         println!();
-        println!("To change settings later:");
-        println!("  ironclaw config set <setting> <value>");
-        println!("  ironclaw onboard");
+
+        // Action hints
+        println!(
+            "  {}Start chatting:{}   {}ironclaw{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
+        println!(
+            "  {}Full setup:{}       {}ironclaw onboard{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
         println!();
 
         if self.config.quick {
@@ -3432,7 +3956,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_wizard_creation() {
@@ -3448,6 +3972,7 @@ mod tests {
             channels_only: false,
             provider_only: false,
             quick: false,
+            steps: vec![],
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
@@ -3455,7 +3980,7 @@ mod tests {
 
     #[test]
     fn test_wizard_owner_id_uses_resolved_env_scope() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let _owner = EnvGuard::set("IRONCLAW_OWNER_ID", " wizard-owner ");
 
         let wizard = SetupWizard::new();
@@ -3464,7 +3989,7 @@ mod tests {
 
     #[test]
     fn test_wizard_owner_id_uses_toml_scope() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let _owner = EnvGuard::clear("IRONCLAW_OWNER_ID");
         let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let path = dir.path().join("config.toml");
@@ -3476,11 +4001,110 @@ mod tests {
     }
 
     #[test]
+    fn test_bootstrap_env_vars_include_selected_deployment_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        wizard.selected_deployment_profile = Some(QUICK_PROFILE_LOCAL_SANDBOX.to_string());
+        wizard.settings.database_backend = Some("libsql".to_string());
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            vars.iter().any(|(key, value)| {
+                key == "IRONCLAW_PROFILE" && value == QUICK_PROFILE_LOCAL_SANDBOX
+            }),
+            "selected deployment profile should be persisted to bootstrap env"
+        );
+        assert!(
+            vars.iter()
+                .any(|(key, value)| key == "DATABASE_BACKEND" && value == "libsql"),
+            "existing bootstrap vars should still be written"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_env_vars_do_not_persist_unselected_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::set("IRONCLAW_PROFILE", QUICK_PROFILE_LOCAL);
+        let wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            !vars.iter().any(|(key, _)| key == "IRONCLAW_PROFILE"),
+            "only a wizard-selected profile should be written back"
+        );
+    }
+
+    #[test]
+    fn test_apply_quick_local_profile_sets_profile_and_preserves_db_config_on_merge() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        // Simulate a pre-existing database_url chosen earlier in the wizard
+        // (e.g. by auto_setup_database before profile selection was reordered).
+        wizard.settings.database_url = Some("postgres://my-host/db".to_string());
+        wizard.settings.database_backend = Some("postgres".to_string());
+
+        // Snapshot settings *before* profile application — mimics the
+        // `let step1_settings = self.settings.clone()` line in quick mode.
+        let step1_settings = wizard.settings.clone();
+
+        wizard
+            .apply_quick_local_profile(QUICK_PROFILE_LOCAL)
+            .expect("apply_quick_local_profile should succeed");
+
+        // Profile applies its own database_backend (libsql) which overwrites
+        // the wizard-chosen value.
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("libsql"),
+            "profile should overwrite database_backend"
+        );
+
+        // After merge_from, the wizard-chosen values should win back.
+        wizard.settings.merge_from(&step1_settings);
+
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("postgres"),
+            "merge_from should restore the wizard-chosen database_backend"
+        );
+        assert_eq!(
+            wizard.settings.database_url.as_deref(),
+            Some("postgres://my-host/db"),
+            "merge_from should restore the wizard-chosen database_url"
+        );
+        // Profile-applied non-DB settings should still be present since
+        // step1_settings had defaults for them.
+        assert!(
+            wizard.settings.heartbeat.enabled,
+            "profile-set heartbeat.enabled should survive merge"
+        );
+        assert_eq!(
+            wizard.selected_deployment_profile.as_deref(),
+            Some("local"),
+            "selected_deployment_profile should be set"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_try_with_config_and_toml_propagates_invalid_owner_env() {
         use std::os::unix::ffi::OsStringExt;
 
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let original = std::env::var_os("IRONCLAW_OWNER_ID");
         unsafe {
             std::env::set_var("IRONCLAW_OWNER_ID", OsString::from_vec(vec![0x66, 0x80]));
@@ -3940,7 +4564,7 @@ mod tests {
     fn test_build_nearai_model_fetch_config_picks_up_api_key_env() {
         use secrecy::ExposeSecret;
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = lock_env();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "test-cloud-api-key-12345");
         let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
@@ -3964,7 +4588,7 @@ mod tests {
     /// the config should have `api_key: None` (session token path).
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_no_api_key() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = lock_env();
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
         let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
@@ -3983,7 +4607,7 @@ mod tests {
     /// Regression test for #799: empty NEARAI_API_KEY should be treated as absent.
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_empty_api_key() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = lock_env();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "");
 
         let config = build_nearai_model_fetch_config();
@@ -4001,7 +4625,7 @@ mod tests {
     fn test_model_discovery_picks_up_injected_var() {
         use secrecy::ExposeSecret;
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = lock_env();
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
         let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
@@ -4032,7 +4656,7 @@ mod tests {
     /// the NEAR AI authentication menu.
     #[test]
     fn test_build_nearai_model_fetch_config_picks_up_runtime_env() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = lock_env();
         // Ensure the real env var is unset so the only source is the overlay.
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
 

@@ -7,12 +7,28 @@
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::cli::fmt;
 use crate::settings::Settings;
+
+async fn load_acp_agents_for_doctor()
+-> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
+    match crate::config::Config::from_env().await {
+        Ok(config) => {
+            let db: Option<std::sync::Arc<dyn crate::db::Database>> =
+                crate::db::connect_from_config(&config.database)
+                    .await
+                    .ok()
+                    .map(|db| db as std::sync::Arc<dyn crate::db::Database>);
+            crate::config::acp::load_acp_agents_for_user(db.as_deref(), &config.owner_id).await
+        }
+        Err(_) => crate::config::acp::load_acp_agents().await,
+    }
+}
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("IronClaw Doctor");
-    println!("===============\n");
+    println!();
+    println!("  {}IronClaw Doctor{}", fmt::bold(), fmt::reset());
 
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -21,7 +37,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // Load settings once for checks that need them.
     let settings = Settings::load();
 
-    // ── Settings & core config ─────────────────────────────────
+    // ── Core ─────────────────────────────────────────────────
+
+    section_header("Core");
 
     check(
         "Settings file",
@@ -63,7 +81,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── Subsystem configuration checks ─────────────────────────
+    // ── Features ─────────────────────────────────────────────
+
+    section_header("Features");
 
     check(
         "Embeddings",
@@ -75,7 +95,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Routines config",
-        check_routines_config(),
+        check_routines_config(&settings),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -92,6 +112,14 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "MCP servers",
         check_mcp_config().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "ACP agents",
+        check_acp_config().await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -121,7 +149,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── External binary checks ────────────────────────────────
+    // ── External ─────────────────────────────────────────────
+
+    section_header("External");
 
     check(
         "Docker daemon",
@@ -158,7 +188,18 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Summary ───────────────────────────────────────────────
 
     println!();
-    println!("  {passed} passed, {failed} failed, {skipped} skipped");
+    println!(
+        "  {}{} passed{}, {}{} failed{}, {}{} skipped{}",
+        fmt::success(),
+        passed,
+        fmt::reset(),
+        if failed > 0 { fmt::error() } else { fmt::dim() },
+        failed,
+        fmt::reset(),
+        fmt::dim(),
+        skipped,
+        fmt::reset(),
+    );
 
     if failed > 0 {
         println!("\n  Some checks failed. This is normal if you don't use those features.");
@@ -167,21 +208,38 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print a section header with a separator and bold group name.
+fn section_header(name: &str) {
+    println!();
+    println!("  {}", fmt::separator(36));
+    println!("  {}{}{}", fmt::bold(), name, fmt::reset());
+    println!();
+}
+
 // ── Individual checks ───────────────────────────────────────
 
 fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32, skipped: &mut u32) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
-            println!("  [pass] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Pass, name, &detail, 18)
+            );
         }
         CheckResult::Fail(detail) => {
             *failed += 1;
-            println!("  [FAIL] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Fail, name, &detail, 18)
+            );
         }
         CheckResult::Skip(reason) => {
             *skipped += 1;
-            println!("  [skip] {name}: {reason}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Skip, name, &reason, 18)
+            );
         }
     }
 }
@@ -399,8 +457,8 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
 
 // ── Routines config ─────────────────────────────────────────
 
-fn check_routines_config() -> CheckResult {
-    match crate::config::RoutineConfig::resolve() {
+fn check_routines_config(settings: &Settings) -> CheckResult {
+    match crate::config::RoutineConfig::resolve(settings) {
         Ok(config) => {
             if config.enabled {
                 CheckResult::Pass(format!(
@@ -485,13 +543,50 @@ async fn check_mcp_config() -> CheckResult {
     }
 }
 
+async fn check_acp_config() -> CheckResult {
+    match load_acp_agents_for_doctor().await {
+        Ok(file) => {
+            let agents: Vec<_> = file.enabled_agents().collect();
+            if agents.is_empty() {
+                return CheckResult::Skip("no ACP agents configured".into());
+            }
+
+            let mut invalid = Vec::new();
+            for agent in &agents {
+                if let Err(e) = agent.validate() {
+                    invalid.push(format!("{}: {}", agent.name, e));
+                }
+            }
+
+            if invalid.is_empty() {
+                CheckResult::Pass(format!("{} agent(s) configured, all valid", agents.len()))
+            } else {
+                CheckResult::Fail(format!(
+                    "{} agent(s), {} invalid: {}",
+                    agents.len(),
+                    invalid.len(),
+                    invalid.join("; ")
+                ))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No such file") {
+                CheckResult::Skip("no ACP config file".into())
+            } else {
+                CheckResult::Fail(format!("config error: {e}"))
+            }
+        }
+    }
+}
+
 // ── Skills ──────────────────────────────────────────────────
 
 async fn check_skills() -> CheckResult {
     let user_dir = ironclaw_base_dir().join("skills");
     let installed_dir = ironclaw_base_dir().join("installed_skills");
 
-    let mut registry = crate::skills::SkillRegistry::new(user_dir.clone());
+    let mut registry = ironclaw_skills::SkillRegistry::new(user_dir.clone());
     registry = registry.with_installed_dir(installed_dir);
 
     // discover_all() returns loaded skill names (not warnings).
@@ -657,7 +752,7 @@ mod tests {
             }
         }
 
-        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -702,7 +797,8 @@ mod tests {
 
     #[test]
     fn check_routines_config_does_not_panic() {
-        let result = check_routines_config();
+        let settings = Settings::default();
+        let result = check_routines_config(&settings);
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
@@ -777,7 +873,7 @@ mod tests {
 
     #[test]
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -804,7 +900,7 @@ mod tests {
 
     #[test]
     fn check_embeddings_disabled_by_default_returns_skip() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
@@ -826,12 +922,13 @@ mod tests {
 
     #[test]
     fn check_routines_enabled_by_default() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("ROUTINES_ENABLED");
         }
-        match check_routines_config() {
+        let settings = Settings::default();
+        match check_routines_config(&settings) {
             CheckResult::Pass(msg) => {
                 assert!(
                     msg.contains("enabled"),

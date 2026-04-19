@@ -216,9 +216,18 @@ async fn extension_manager_with_process_manager_constructs() {
     );
 
     // Verify the manager is functional — list returns Ok.
-    let result = manager.list(None, false).await;
+    //
+    // We do NOT assert the result is empty: with `store: None`,
+    // ExtensionManager.list() falls back to file-based load_mcp_servers()
+    // which reads ~/.ironclaw/mcp-servers.json. Asserting empty would leak
+    // the developer's local MCP-server configuration into the test, and
+    // overriding IRONCLAW_BASE_DIR from an integration test is unsafe (it
+    // would mutate process-wide env state in a binary that has no access
+    // to the crate-private ENV_MUTEX). The only thing this test is meant
+    // to verify is that the constructor wires up correctly and list() can
+    // be called without erroring — which is exactly what is_ok() checks.
+    let result = manager.list(None, false, "test").await;
     assert!(result.is_ok(), "list should succeed on empty manager");
-    assert!(result.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------

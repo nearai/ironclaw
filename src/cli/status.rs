@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::cli::fmt;
 use crate::settings::Settings;
 
 /// Load settings from JSON and TOML config files, matching the runtime
@@ -34,26 +35,44 @@ fn load_settings_from(json_path: &std::path::Path, toml_path: &std::path::Path) 
     settings
 }
 
+async fn load_acp_agents_for_status()
+-> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
+    match crate::config::Config::from_env().await {
+        Ok(config) => {
+            let db: Option<std::sync::Arc<dyn crate::db::Database>> =
+                crate::db::connect_from_config(&config.database)
+                    .await
+                    .ok()
+                    .map(|db| db as std::sync::Arc<dyn crate::db::Database>);
+            crate::config::acp::load_acp_agents_for_user(db.as_deref(), &config.owner_id).await
+        }
+        Err(_) => crate::config::acp::load_acp_agents().await,
+    }
+}
+
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
     let settings = load_settings();
 
-    println!("IronClaw Status");
-    println!("===============\n");
+    println!();
+    println!("  {}IronClaw Status{}", fmt::bold(), fmt::reset());
+    println!();
 
     // Version
     println!(
-        "  Version:     {} v{}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        "{}",
+        fmt::kv_line(
+            "Version",
+            &format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            12,
+        )
     );
 
     // Database
-    print!("  Database:    ");
     let db_backend = std::env::var("DATABASE_BACKEND")
         .ok()
         .unwrap_or_else(|| "postgres".to_string());
-    match db_backend.as_str() {
+    let db_value = match db_backend.as_str() {
         "libsql" | "turso" | "sqlite" => {
             let path = std::env::var("LIBSQL_PATH")
                 .map(std::path::PathBuf::from)
@@ -64,77 +83,77 @@ pub async fn run_status_command() -> anyhow::Result<()> {
                 } else {
                     ""
                 };
-                println!("libSQL ({}{})", path.display(), turso);
+                format!("libSQL ({}{})", path.display(), turso)
             } else {
-                println!("libSQL (file missing: {})", path.display());
+                format!("libSQL (file missing: {})", path.display())
             }
         }
         _ => {
             if std::env::var("DATABASE_URL").is_ok() {
                 match check_database().await {
-                    Ok(()) => println!("connected (PostgreSQL)"),
-                    Err(e) => println!("error ({})", e),
+                    Ok(()) => "connected (PostgreSQL)".to_string(),
+                    Err(e) => format!("error ({})", e),
                 }
             } else {
-                println!("not configured");
+                "not configured".to_string()
             }
         }
-    }
+    };
+    println!("{}", fmt::kv_line("Database", &db_value, 12));
 
     // Session / Auth
-    print!("  Session:     ");
     let session_path = crate::config::llm::default_session_path();
-    if session_path.exists() {
-        println!("found ({})", session_path.display());
+    let session_value = if session_path.exists() {
+        format!("found ({})", session_path.display())
     } else {
-        println!("not found (run `ironclaw onboard`)");
-    }
+        "not found (run `ironclaw onboard`)".to_string()
+    };
+    println!("{}", fmt::kv_line("Session", &session_value, 12));
 
     // Secrets (auto-detect from env only; skip keychain probe to avoid
     // triggering macOS system password dialogs on a simple status check)
-    print!("  Secrets:     ");
-    if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-        println!("configured (env)");
+    let secrets_value = if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+        "configured (env)".to_string()
     } else {
         // We don't probe the keychain here because get_generic_password()
         // triggers macOS unlock+authorization dialogs, which is bad UX for
         // a read-only status command. If onboarding completed with keychain
         // storage, the key is there; we just can't cheaply verify it.
-        println!("env not set (keychain may be configured)");
-    }
+        "env not set (keychain may be configured)".to_string()
+    };
+    println!("{}", fmt::kv_line("Secrets", &secrets_value, 12));
 
     // Embeddings
-    print!("  Embeddings:  ");
     let emb_enabled = settings.embeddings.enabled
         || std::env::var("OPENAI_API_KEY").is_ok()
         || std::env::var("EMBEDDING_ENABLED")
             .map(|v| v == "true")
             .unwrap_or(false);
-    if emb_enabled {
-        println!(
+    let emb_value = if emb_enabled {
+        format!(
             "enabled (provider: {}, model: {})",
             settings.embeddings.provider, settings.embeddings.model
-        );
+        )
     } else {
-        println!("disabled");
-    }
+        "disabled".to_string()
+    };
+    println!("{}", fmt::kv_line("Embeddings", &emb_value, 12));
 
     // WASM tools
-    print!("  WASM Tools:  ");
     let tools_dir = settings
         .wasm
         .tools_dir
         .clone()
         .unwrap_or_else(default_tools_dir);
-    if tools_dir.exists() {
+    let tools_value = if tools_dir.exists() {
         let count = count_wasm_files(&tools_dir);
-        println!("{} installed ({})", count, tools_dir.display());
+        format!("{} installed ({})", count, tools_dir.display())
     } else {
-        println!("directory not found ({})", tools_dir.display());
-    }
+        format!("directory not found ({})", tools_dir.display())
+    };
+    println!("{}", fmt::kv_line("WASM Tools", &tools_value, 12));
 
     // WASM channels
-    print!("  Channels:    ");
     let channels_dir = settings
         .channels
         .wasm_channels_dir
@@ -147,41 +166,54 @@ pub async fn run_status_command() -> anyhow::Result<()> {
             settings.channels.http_port.unwrap_or(3000)
         ));
     }
-    if channels_dir.exists() {
-        let wasm_count = count_wasm_files(&channels_dir);
-        if wasm_count > 0 {
-            channel_info.push(format!("{} wasm", wasm_count));
-        }
+    if let Some(wasm_summary) = format_wasm_channels_summary(&settings, &channels_dir) {
+        channel_info.push(wasm_summary);
     }
-    println!("{}", channel_info.join(", "));
+    println!("{}", fmt::kv_line("Channels", &channel_info.join(", "), 12));
 
     // Heartbeat
-    print!("  Heartbeat:   ");
     let hb_enabled = settings.heartbeat.enabled
         || std::env::var("HEARTBEAT_ENABLED")
             .map(|v| v == "true")
             .unwrap_or(false);
-    if hb_enabled {
-        println!("enabled (interval: {}s)", settings.heartbeat.interval_secs);
+    let hb_value = if hb_enabled {
+        format!("enabled (interval: {}s)", settings.heartbeat.interval_secs)
     } else {
-        println!("disabled");
-    }
+        "disabled".to_string()
+    };
+    println!("{}", fmt::kv_line("Heartbeat", &hb_value, 12));
 
     // MCP servers
-    print!("  MCP Servers: ");
-    match crate::tools::mcp::config::load_mcp_servers().await {
+    let mcp_value = match crate::tools::mcp::config::load_mcp_servers().await {
         Ok(servers) => {
             let enabled = servers.servers.iter().filter(|s| s.enabled).count();
             let total = servers.servers.len();
-            println!("{} enabled / {} configured", enabled, total);
+            format!("{} enabled / {} configured", enabled, total)
         }
-        Err(_) => println!("none configured"),
-    }
+        Err(_) => "none configured".to_string(),
+    };
+    println!("{}", fmt::kv_line("MCP Servers", &mcp_value, 12));
+
+    // ACP agents
+    let acp_value = match load_acp_agents_for_status().await {
+        Ok(agents) => {
+            let enabled = agents.agents.iter().filter(|a| a.enabled).count();
+            let total = agents.agents.len();
+            format!("{} enabled / {} configured", enabled, total)
+        }
+        Err(_) => "none configured".to_string(),
+    };
+    println!("{}", fmt::kv_line("ACP Agents", &acp_value, 12));
 
     // Config path
+    println!();
     println!(
-        "\n  Config:      {}",
-        crate::bootstrap::ironclaw_env_path().display()
+        "{}",
+        fmt::kv_line(
+            "Config",
+            &crate::bootstrap::ironclaw_env_path().display().to_string(),
+            12,
+        )
     );
 
     Ok(())
@@ -228,6 +260,32 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
+fn format_wasm_channels_summary(
+    settings: &Settings,
+    channels_dir: &std::path::Path,
+) -> Option<String> {
+    if settings.channels.wasm_channels_enabled && !settings.channels.wasm_channels.is_empty() {
+        let mut channels = settings.channels.wasm_channels.clone();
+        channels.sort();
+        return Some(format!("{} wasm ({})", channels.len(), channels.join(", ")));
+    }
+
+    let wasm_count = count_wasm_files(channels_dir);
+    if wasm_count > 0 {
+        if settings.channels.wasm_channels_enabled {
+            return Some(format!("{} wasm", wasm_count));
+        } else {
+            return Some(format!(
+                "{} wasm installed ({})",
+                wasm_count,
+                channels_dir.display()
+            ));
+        }
+    }
+
+    None
+}
+
 fn default_tools_dir() -> PathBuf {
     ironclaw_base_dir().join("tools")
 }
@@ -238,7 +296,8 @@ fn default_channels_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::load_settings_from;
+    use super::{format_wasm_channels_summary, load_settings_from};
+    use crate::settings::Settings;
 
     /// Regression test for #354: load_settings_from must read config.toml.
     #[test]
@@ -329,5 +388,31 @@ mod tests {
         // Should fall back to JSON values, not crash
         assert!(settings.heartbeat.enabled);
         assert_eq!(settings.heartbeat.interval_secs, 500);
+    }
+
+    #[test]
+    fn formats_enabled_wasm_channels_with_names() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channels_enabled = true;
+        settings.channels.wasm_channels = vec!["telegram".to_string(), "slack".to_string()];
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let summary = format_wasm_channels_summary(&settings, dir.path());
+
+        assert_eq!(summary.as_deref(), Some("2 wasm (slack, telegram)"));
+    }
+
+    #[test]
+    fn formats_installed_wasm_channels_when_enabled_list_is_empty() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channels_enabled = false;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::File::create(dir.path().join("telegram.wasm")).expect("write wasm");
+        std::fs::File::create(dir.path().join("slack.wasm")).expect("write wasm");
+
+        let summary = format_wasm_channels_summary(&settings, dir.path());
+        let expected = format!("2 wasm installed ({})", dir.path().display());
+
+        assert_eq!(summary.as_deref(), Some(expected.as_str()));
     }
 }

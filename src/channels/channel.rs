@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use ironclaw_common::ExtensionName;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -67,20 +68,22 @@ pub struct IncomingMessage {
     pub id: Uuid,
     /// Channel this message came from.
     pub channel: String,
-    /// Storage/persistence scope for this interaction.
+    /// Resolved owner identity for this message.
     ///
     /// For owner-capable channels this is the stable instance owner ID when the
-    /// configured owner is speaking; otherwise it can be a guest/sender-scoped
-    /// identifier to preserve isolation.
+    /// configured owner is speaking; for pairing-aware channels (e.g. WASM) this
+    /// is the result of `pairing_resolve_identity`; for non-pairing channels
+    /// (HTTP, web, REPL) it comes directly from the authenticated token.
     pub user_id: String,
-    /// Stable instance owner scope for this IronClaw deployment.
-    pub owner_id: String,
     /// Channel-specific sender/actor identifier.
     pub sender_id: String,
     /// Optional display name.
     pub user_name: Option<String>,
     /// Message content.
     pub content: String,
+    /// Structured submission sideband for internal callers that need exact
+    /// routing semantics without serializing control payloads into `content`.
+    pub structured_submission: Option<crate::agent::submission::Submission>,
     /// Thread/conversation ID for threaded conversations.
     pub thread_id: Option<String>,
     /// Stable channel/chat/thread scope for this conversation.
@@ -97,6 +100,25 @@ pub struct IncomingMessage {
     /// monitor) and must bypass the normal user-input pipeline. This field is
     /// not settable via metadata, so external channels cannot spoof it.
     pub(crate) is_internal: bool,
+    /// `true` when this message represents an *agent broadcast* echoing
+    /// back through the channel — e.g. an outbound bot message that the
+    /// channel adapter (Slack, Discord, etc.) re-delivers as an inbound
+    /// event. Mission `OnEvent` firing skips messages with this flag set
+    /// to avoid self-recursion: a mission whose pattern matches its own
+    /// output would otherwise re-trigger forever.
+    ///
+    /// Channel adapters that have echo behavior MUST set this when
+    /// re-emitting the agent's own outbound text. Adapters without echo
+    /// behavior (CLI, REPL, web gateway) leave it `false`.
+    pub is_agent_broadcast: bool,
+    /// When set, this message was produced as a side effect of a mission
+    /// firing — typically the mission's notification text re-entering
+    /// through a channel adapter. Mission `OnEvent` firing skips messages
+    /// tagged with a `triggering_mission_id` to bound chain-recursion
+    /// across distinct missions (mission A → notification → mission B →
+    /// notification → mission C → ...). The string is the originating
+    /// `MissionId` for diagnostics.
+    pub triggering_mission_id: Option<String>,
 }
 
 impl IncomingMessage {
@@ -110,11 +132,11 @@ impl IncomingMessage {
         Self {
             id: Uuid::new_v4(),
             channel: channel.into(),
-            owner_id: user_id.clone(),
             sender_id: user_id.clone(),
             user_id,
             user_name: None,
             content: content.into(),
+            structured_submission: None,
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),
@@ -122,7 +144,24 @@ impl IncomingMessage {
             timezone: None,
             attachments: Vec::new(),
             is_internal: false,
+            is_agent_broadcast: false,
+            triggering_mission_id: None,
         }
+    }
+
+    /// Mark this message as an agent broadcast echo. Channel adapters that
+    /// re-emit the agent's own outbound text as an inbound event MUST call
+    /// this so mission `OnEvent` firing skips it.
+    pub fn with_agent_broadcast(mut self) -> Self {
+        self.is_agent_broadcast = true;
+        self
+    }
+
+    /// Mark this message as having been produced by a mission firing.
+    /// Used for chain-recursion guards across distinct missions.
+    pub fn with_triggering_mission(mut self, mission_id: impl Into<String>) -> Self {
+        self.triggering_mission_id = Some(mission_id.into());
+        self
     }
 
     /// Set the thread ID.
@@ -130,12 +169,6 @@ impl IncomingMessage {
         let thread_id = thread_id.into();
         self.conversation_scope_id = Some(thread_id.clone());
         self.thread_id = Some(thread_id);
-        self
-    }
-
-    /// Set the stable owner scope for this message.
-    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.owner_id = owner_id.into();
         self
     }
 
@@ -160,6 +193,15 @@ impl IncomingMessage {
     /// Set user name.
     pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
         self.user_name = Some(name.into());
+        self
+    }
+
+    /// Attach a structured submission sideband payload.
+    pub fn with_structured_submission(
+        mut self,
+        submission: crate::agent::submission::Submission,
+    ) -> Self {
+        self.structured_submission = Some(submission);
         self
     }
 
@@ -201,28 +243,26 @@ impl IncomingMessage {
 }
 
 /// Extract a channel-specific proactive routing target from message metadata.
+///
+/// Checked keys (first match wins):
+/// - `signal_target` — Signal phone number or group ID
+/// - `chat_id` — Telegram chat ID
+/// - `channel_id` — Slack channel/DM ID (used by channel-relay)
+/// - `target` — generic fallback
 pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<String> {
-    metadata
-        .get("signal_target")
-        .and_then(|value| match value {
+    // Helper to extract a string or numeric value from a JSON key.
+    let extract = |key: &str| -> Option<String> {
+        metadata.get(key).and_then(|value| match value {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         })
-        .or_else(|| {
-            metadata.get("chat_id").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            metadata.get("target").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
+    };
+
+    extract("signal_target")
+        .or_else(|| extract("chat_id"))
+        .or_else(|| extract("channel_id"))
+        .or_else(|| extract("target"))
 }
 
 /// Stream of incoming messages.
@@ -265,13 +305,29 @@ impl OutgoingResponse {
     }
 }
 
+/// A single tool decision within a reasoning update.
+#[derive(Debug, Clone)]
+pub struct ToolDecision {
+    /// Tool name.
+    pub tool_name: String,
+    /// Agent's reasoning for choosing this tool.
+    pub rationale: String,
+}
+
 /// Status update types for showing agent activity.
 #[derive(Debug, Clone)]
 pub enum StatusUpdate {
     /// Agent is thinking/processing.
     Thinking(String),
     /// Tool execution started.
-    ToolStarted { name: String },
+    ToolStarted {
+        name: String,
+        /// Short contextual summary extracted from tool arguments.
+        detail: Option<String>,
+        /// Stable tool-call ID when available, used to disambiguate repeated
+        /// calls to the same tool name in a single turn.
+        call_id: Option<String>,
+    },
     /// Tool execution completed.
     ///
     /// Use [`StatusUpdate::tool_completed`] to construct this variant — it
@@ -286,9 +342,18 @@ pub enum StatusUpdate {
         /// Only populated when `success` is `false`. Values listed in the
         /// tool's `sensitive_params()` are replaced with `"[REDACTED]"`.
         parameters: Option<String>,
+        /// Stable tool-call ID when available.
+        call_id: Option<String>,
+        /// Actual tool execution duration when available.
+        duration_ms: Option<u64>,
     },
     /// Brief preview of tool execution output.
-    ToolResult { name: String, preview: String },
+    ToolResult {
+        name: String,
+        preview: String,
+        /// Stable tool-call ID when available.
+        call_id: Option<String>,
+    },
     /// Streaming text chunk.
     StreamChunk(String),
     /// General status message.
@@ -313,29 +378,210 @@ pub enum StatusUpdate {
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
+        request_id: Option<String>,
     },
     /// Extension authentication completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },
     /// An image was generated by a tool.
     ImageGenerated {
+        /// Stable identity for this generated-image event.
+        event_id: String,
         /// Base64 data URL of the generated image.
         data_url: String,
         /// Optional workspace path where the image was saved.
         path: Option<String>,
     },
+    /// A sandbox job's status changed.
+    JobStatus { job_id: String, status: String },
+    /// A sandbox job completed with final result.
+    JobResult { job_id: String, status: String },
+    /// A routine was created, updated, or deleted.
+    RoutineUpdate {
+        id: String,
+        name: String,
+        trigger_type: String,
+        enabled: bool,
+        last_run: Option<String>,
+        next_fire: Option<String>,
+    },
+    /// Context pressure update (token usage approaching limit).
+    ContextPressure {
+        used_tokens: u64,
+        max_tokens: u64,
+        percentage: u8,
+        warning: Option<String>,
+    },
+    /// Sandbox / Docker status update.
+    SandboxStatus {
+        docker_available: bool,
+        running_containers: u32,
+        status: String,
+    },
+    /// Secrets vault status update.
+    SecretsStatus { count: u32, vault_unlocked: bool },
+    /// Cost guard / budget status update.
+    CostGuard {
+        session_budget_usd: Option<String>,
+        spent_usd: String,
+        remaining_usd: Option<String>,
+        limit_reached: bool,
+    },
     /// Suggested follow-up messages for the user.
     Suggestions { suggestions: Vec<String> },
+    /// Agent reasoning update (why it chose specific tools).
+    ReasoningUpdate {
+        /// Human-readable summary of the agent's decision.
+        narrative: String,
+        /// Per-tool decisions.
+        decisions: Vec<ToolDecision>,
+    },
+    /// Per-turn token usage and cost summary (shown as subtle metadata).
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+    },
+    /// Skills activated for this conversation turn.
+    ///
+    /// `feedback` carries optional human-readable notes about the
+    /// activation — e.g. "chain-loaded from code-review", "ceo-setup
+    /// excluded by setup marker", "budget exhausted". Empty when the
+    /// activation path has nothing to annotate. The UI should render
+    /// each line as a muted sub-bullet under the skill list; channels
+    /// that ignore it should just drop the field.
+    SkillActivated {
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
+    /// Thread list for interactive resume picker.
+    ThreadList { threads: Vec<ThreadSummary> },
+    /// Engine v2 thread list for TUI activity sidebar.
+    EngineThreadList { threads: Vec<EngineThreadSummary> },
+    /// Full conversation history for displaying a resumed thread in the TUI.
+    ConversationHistory {
+        thread_id: String,
+        messages: Vec<HistoryMessage>,
+        pending_approval: Option<ChatApprovalPrompt>,
+    },
+}
+
+/// A single message from conversation history, for hydrating the TUI on thread resume.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub content: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Engine v2 thread summary for TUI sidebar display.
+#[derive(Debug, Clone)]
+pub struct EngineThreadSummary {
+    pub id: String,
+    pub goal: String,
+    pub thread_type: String,
+    pub state: String,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Lightweight thread summary for the resume picker.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub message_count: i64,
+    pub last_activity: String,
+    pub channel: String,
+}
+
+/// Shared chat-style approval prompt formatting used by non-web channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatApprovalPrompt {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub allow_always: bool,
+}
+
+const APPROVAL_PARAMETER_PREVIEW_BYTES: usize = 1200;
+const APPROVAL_PARAMETER_TRUNCATION_SUFFIX: &str = "\n... [parameters truncated]";
+const APPROVAL_SUMMARY_DESCRIPTION_BYTES: usize = 120;
+const DETAIL_MAX_LEN: usize = 80;
+
+/// Extract a short, non-sensitive one-liner from tool arguments.
+///
+/// Returns `None` for unknown tools or when no relevant field is present.
+pub fn tool_call_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    let raw = match name {
+        "http" | "http_request" | "web_fetch" => {
+            let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+            let url = args.get("url").and_then(|v| v.as_str())?;
+            format!("{method} {url}")
+        }
+        "shell" | "execute_command" => args.get("command").and_then(|v| v.as_str())?.to_string(),
+        "read_file" | "write_file" | "list_dir" => {
+            args.get("path").and_then(|v| v.as_str())?.to_string()
+        }
+        "memory_search" => {
+            let q = args.get("query").and_then(|v| v.as_str())?;
+            format!("query: {q}")
+        }
+        "memory_read" => args.get("path").and_then(|v| v.as_str())?.to_string(),
+        "memory_write" => {
+            let target = args.get("target").and_then(|v| v.as_str())?;
+            format!("target: {target}")
+        }
+        "create_job" => args.get("title").and_then(|v| v.as_str())?.to_string(),
+        "message" | "send_message" => {
+            let channel = args.get("channel").and_then(|v| v.as_str())?;
+            format!("to: {channel}")
+        }
+        "skill_search" | "tool_search" => args.get("query").and_then(|v| v.as_str())?.to_string(),
+        _ => return None,
+    };
+
+    Some(truncate_detail(&raw))
+}
+
+fn truncate_detail(s: &str) -> String {
+    if s.chars().count() <= DETAIL_MAX_LEN {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(DETAIL_MAX_LEN.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
 }
 
 impl StatusUpdate {
+    /// Build a `ToolStarted` status with a derived contextual detail.
+    pub fn tool_started(name: String, arguments: &serde_json::Value) -> Self {
+        Self::tool_started_with_id(name, arguments, None)
+    }
+
+    /// Build a `ToolStarted` status with an explicit tool-call ID.
+    pub fn tool_started_with_id(
+        name: String,
+        arguments: &serde_json::Value,
+        call_id: Option<String>,
+    ) -> Self {
+        Self::ToolStarted {
+            detail: tool_call_detail(&name, arguments),
+            name,
+            call_id,
+        }
+    }
+
     /// Build a `ToolCompleted` status with redacted parameters.
     ///
     /// On failure, serializes the tool's input parameters as pretty JSON after
@@ -347,9 +593,11 @@ impl StatusUpdate {
     /// borrow lifetime of the sensitive slice.
     pub fn tool_completed(
         name: String,
+        call_id: Option<String>,
         result: &Result<String, crate::error::Error>,
         params: &serde_json::Value,
         tool: Option<&dyn crate::tools::Tool>,
+        duration_ms: Option<u64>,
     ) -> Self {
         let success = result.is_ok();
         let sensitive = tool.map(|t| t.sensitive_params()).unwrap_or(&[]);
@@ -363,7 +611,134 @@ impl StatusUpdate {
             } else {
                 None
             },
+            call_id,
+            duration_ms,
         }
+    }
+}
+
+impl ChatApprovalPrompt {
+    /// Build a shared chat approval prompt from a status update.
+    pub fn from_status(status: &StatusUpdate) -> Option<Self> {
+        let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+            allow_always,
+        } = status
+        else {
+            return None;
+        };
+
+        Some(Self {
+            request_id: request_id.clone(),
+            tool_name: tool_name.clone(),
+            description: description.clone(),
+            parameters: parameters.clone(),
+            allow_always: *allow_always,
+        })
+    }
+
+    fn truncated_text(input: &str, max_bytes: usize, suffix: &str) -> String {
+        if input.len() <= max_bytes {
+            return input.to_string();
+        }
+
+        let budget = max_bytes.saturating_sub(suffix.len());
+        let end = crate::util::floor_char_boundary(input, budget);
+        format!("{}{}", &input[..end], suffix)
+    }
+
+    /// Pretty-printed tool parameters for display, bounded for chat channels.
+    pub fn parameters_preview(&self) -> String {
+        let rendered = serde_json::to_string_pretty(&self.parameters)
+            .unwrap_or_else(|_| self.parameters.to_string());
+        Self::truncated_text(
+            &rendered,
+            APPROVAL_PARAMETER_PREVIEW_BYTES,
+            APPROVAL_PARAMETER_TRUNCATION_SUFFIX,
+        )
+    }
+
+    /// Shared reply vocabulary summary for compact status surfaces.
+    pub fn reply_summary(&self) -> &'static str {
+        if self.allow_always {
+            "yes (or /approve), no (or /deny), or always (or /always)"
+        } else {
+            "yes (or /approve) or no (or /deny)"
+        }
+    }
+
+    /// Compact approval summary for fallback/accessibility surfaces.
+    pub fn summary_text(&self) -> String {
+        let description = Self::truncated_text(
+            &self.description.replace('\n', " "),
+            APPROVAL_SUMMARY_DESCRIPTION_BYTES,
+            "...",
+        );
+        format!(
+            "Approval needed for {}: {} (Request ID: {}). Reply with {}.",
+            self.tool_name,
+            description,
+            self.request_id,
+            self.reply_summary()
+        )
+    }
+
+    fn markdown_parameters_preview(&self) -> String {
+        self.parameters_preview().replace('`', "\\`")
+    }
+
+    /// Approval prompt formatted for plain-text chat channels.
+    pub fn plain_text_message(&self) -> String {
+        let mut lines = vec![
+            format!("Approval needed: {}", self.tool_name),
+            self.description.clone(),
+            String::new(),
+            format!("Request ID: {}", self.request_id),
+            "Parameters:".to_string(),
+            self.parameters_preview(),
+            String::new(),
+            "Reply with:".to_string(),
+            "- yes, y, approve, or /approve to approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "- always, a, or /always to approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("- no, n, deny, or /deny to deny this request".to_string());
+        lines.join("\n")
+    }
+
+    /// Approval prompt formatted for Markdown-capable chat channels.
+    pub fn markdown_message(&self) -> String {
+        let mut lines = vec![
+            "⚠️ *Approval Required*".to_string(),
+            String::new(),
+            format!("*Request ID:* `{}`", self.request_id),
+            format!("*Tool:* {}", self.tool_name),
+            format!("*Description:* {}", self.description),
+            "*Parameters:*".to_string(),
+            format!("```json\n{}\n```", self.markdown_parameters_preview()),
+            String::new(),
+            "Reply with:".to_string(),
+            "• `yes`, `y`, `approve`, or `/approve` - Approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "• `always`, `a`, or `/always` - Approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("• `no`, `n`, `deny`, or `/deny` - Deny this request".to_string());
+        lines.join("\n")
     }
 }
 
@@ -501,19 +876,23 @@ mod tests {
 
         let status = StatusUpdate::tool_completed(
             "secret_save".into(),
+            None,
             &err,
             &params,
             Some(&tool as &dyn crate::tools::Tool),
+            Some(25),
         );
 
         if let StatusUpdate::ToolCompleted {
             success,
             error,
             parameters,
+            duration_ms,
             ..
         } = &status
         {
             assert!(!success);
+            assert_eq!(*duration_ms, Some(25));
             let err_msg = error.as_deref().expect("should have error");
             assert!(err_msg.contains("db error"), "error: {}", err_msg);
             let param_str = parameters
@@ -544,7 +923,8 @@ mod tests {
         let params = serde_json::json!({"name": "key", "value": "secret"});
         let ok: Result<String, crate::error::Error> = Ok("done".into());
 
-        let status = StatusUpdate::tool_completed("secret_save".into(), &ok, &params, None);
+        let status =
+            StatusUpdate::tool_completed("secret_save".into(), None, &ok, &params, None, None);
 
         if let StatusUpdate::ToolCompleted {
             success,
@@ -571,7 +951,7 @@ mod tests {
             }
             .into());
 
-        let status = StatusUpdate::tool_completed("shell".into(), &err, &params, None);
+        let status = StatusUpdate::tool_completed("shell".into(), None, &err, &params, None, None);
 
         if let StatusUpdate::ToolCompleted { parameters, .. } = &status {
             let param_str = parameters.as_ref().expect("should have parameters");
@@ -589,5 +969,158 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn tool_call_detail_http() {
+        let args = serde_json::json!({"method": "POST", "url": "https://api.example.com/data"});
+        let detail = super::tool_call_detail("http", &args);
+        assert_eq!(detail.as_deref(), Some("POST https://api.example.com/data"));
+    }
+
+    #[test]
+    fn tool_call_detail_shell() {
+        let args = serde_json::json!({"command": "cargo test --all"});
+        let detail = super::tool_call_detail("shell", &args);
+        assert_eq!(detail.as_deref(), Some("cargo test --all"));
+    }
+
+    #[test]
+    fn tool_call_detail_memory_search() {
+        let args = serde_json::json!({"query": "database migration"});
+        let detail = super::tool_call_detail("memory_search", &args);
+        assert_eq!(detail.as_deref(), Some("query: database migration"));
+    }
+
+    #[test]
+    fn tool_call_detail_unknown_tool() {
+        let args = serde_json::json!({"foo": "bar"});
+        let detail = super::tool_call_detail("unknown_tool_xyz", &args);
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn tool_call_detail_truncation() {
+        let long_url = format!("https://example.com/{}", "a".repeat(100));
+        let args = serde_json::json!({"url": long_url});
+        let detail = super::tool_call_detail("http", &args).unwrap();
+        assert!(detail.chars().count() <= super::DETAIL_MAX_LEN);
+        assert!(detail.ends_with("..."));
+    }
+
+    #[test]
+    fn routing_target_extracts_slack_channel_id() {
+        // Slack relay messages carry channel_id in metadata — this must be
+        // picked up for proactive broadcasts to land in the correct channel
+        // instead of falling back to sender_id (which routes to DMs).
+        let metadata = serde_json::json!({
+            "team_id": "T05CUBCSQPL",
+            "channel_id": "C088K6C3SQZ",
+            "sender_id": "UCBGL1WNS",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("C088K6C3SQZ"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_signal_over_channel_id() {
+        let metadata = serde_json::json!({
+            "signal_target": "+15551234567",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("+15551234567"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_chat_id_over_channel_id() {
+        let metadata = serde_json::json!({
+            "chat_id": "123456789",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("123456789"),
+        );
+    }
+
+    #[test]
+    fn routing_target_returns_none_for_empty_metadata() {
+        let metadata = serde_json::json!({});
+        assert!(routing_target_from_metadata(&metadata).is_none());
+    }
+
+    #[test]
+    fn chat_approval_prompt_plain_text_includes_all_reply_forms() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-123".into(),
+            tool_name: "http".into(),
+            description: "Fetch weather data".into(),
+            parameters: serde_json::json!({"url": "https://api.weather.test"}),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let text = prompt.plain_text_message();
+        assert!(text.contains("Request ID: req-123"));
+        assert!(text.contains("approve, or /approve"));
+        assert!(text.contains("always, a, or /always"));
+        assert!(text.contains("deny, or /deny"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_hides_always_when_not_allowed() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-456".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({"command": "rm -rf /tmp/demo"}),
+            allow_always: false,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("`/approve`"));
+        assert!(markdown.contains("`/deny`"));
+        assert!(!markdown.contains("`/always`"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_truncates_large_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-789".into(),
+            tool_name: "http".into(),
+            description: "Fetch large payload".into(),
+            parameters: serde_json::json!({
+                "body": "x".repeat(APPROVAL_PARAMETER_PREVIEW_BYTES + 200),
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let preview = prompt.parameters_preview();
+        assert!(preview.contains("[parameters truncated]"));
+        assert!(preview.len() <= APPROVAL_PARAMETER_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn chat_approval_prompt_escapes_backticks_in_markdown_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-999".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({
+                "command": "printf '```danger```'"
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("\\`\\`\\`danger\\`\\`\\`"));
     }
 }

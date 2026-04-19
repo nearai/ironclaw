@@ -39,10 +39,11 @@ impl Default for TranscriptionConfig {
 
 impl TranscriptionConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let enabled = parse_bool_env(
-            "TRANSCRIPTION_ENABLED",
-            settings.transcription.as_ref().is_some_and(|t| t.enabled),
-        )?;
+        // Tri-state: Some(true/false) = explicit DB value, None = unset (fall back to env).
+        let enabled = match settings.transcription.as_ref().map(|t| t.enabled) {
+            Some(db_enabled) => db_enabled,
+            None => parse_bool_env("TRANSCRIPTION_ENABLED", false)?,
+        };
 
         let provider =
             optional_env("TRANSCRIPTION_PROVIDER")?.unwrap_or_else(|| "openai".to_string());
@@ -89,7 +90,9 @@ impl TranscriptionConfig {
     }
 
     /// Create the transcription provider if enabled and configured.
-    pub fn create_provider(&self) -> Option<Box<dyn crate::transcription::TranscriptionProvider>> {
+    pub fn create_provider(
+        &self,
+    ) -> Option<Box<dyn crate::llm::transcription::TranscriptionProvider>> {
         if !self.enabled {
             return None;
         }
@@ -103,10 +106,11 @@ impl TranscriptionConfig {
                     "Audio transcription enabled via Chat Completions API"
                 );
 
-                let mut provider = crate::transcription::ChatCompletionsTranscriptionProvider::new(
-                    api_key.clone(),
-                )
-                .with_model(&self.model);
+                let mut provider =
+                    crate::llm::transcription::ChatCompletionsTranscriptionProvider::new(
+                        api_key.clone(),
+                    )
+                    .with_model(&self.model);
 
                 if let Some(ref base_url) = self.base_url {
                     provider = provider.with_base_url(base_url);
@@ -121,7 +125,7 @@ impl TranscriptionConfig {
                 );
 
                 let mut provider =
-                    crate::transcription::OpenAiWhisperProvider::new(api_key.clone())
+                    crate::llm::transcription::OpenAiWhisperProvider::new(api_key.clone())
                         .with_model(&self.model);
 
                 if let Some(ref base_url) = self.base_url {

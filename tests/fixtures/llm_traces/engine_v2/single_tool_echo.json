@@ -1,0 +1,36 @@
+{
+  "model_name": "v2-single-tool-echo",
+  "expects": {
+    "response_contains": ["V2 echo test"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "echo"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_v2_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "V2 echo test"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The echo tool returned: V2 echo test",
+        "input_tokens": 150,
+        "output_tokens": 15
+      }
+    }
+  ]
+}

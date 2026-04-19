@@ -41,6 +41,12 @@ impl SubmissionParser {
         if lower == "/suggest" {
             return Submission::Suggest;
         }
+        if lower.starts_with("/expected ") {
+            let description = trimmed["/expected ".len()..].trim().to_string();
+            if !description.is_empty() {
+                return Submission::Expected { description };
+            }
+        }
         if lower == "/thread new" || lower == "/new" {
             return Submission::NewThread;
         }
@@ -90,6 +96,17 @@ impl SubmissionParser {
             return Submission::SystemCommand {
                 command: "debug".to_string(),
                 args: vec![],
+            };
+        }
+        if lower == "/reasoning" || lower.starts_with("/reasoning ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "reasoning".to_string(),
+                args,
             };
         }
         if lower == "/restart" {
@@ -148,7 +165,10 @@ impl SubmissionParser {
             }
         }
 
-        // /resume <uuid> - resume from checkpoint
+        // /resume - show thread picker; /resume <uuid> - resume from checkpoint
+        if lower == "/resume" {
+            return Submission::ListThreads;
+        }
         if let Some(rest) = lower.strip_prefix("/resume ")
             && let Ok(id) = Uuid::parse_str(rest.trim())
         {
@@ -158,13 +178,22 @@ impl SubmissionParser {
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
         if trimmed.starts_with('{')
             && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
-            && matches!(submission, Submission::ExecApproval { .. })
+            && matches!(
+                submission,
+                Submission::ExecApproval { .. }
+                    | Submission::ExternalCallback { .. }
+                    | Submission::GateAuthResolution { .. }
+            )
         {
             return submission;
         }
 
-        // Approval responses (simple yes/no/always for pending approvals)
-        // These are short enough to check explicitly
+        // Approval responses (simple yes/no/always for pending approvals).
+        // The parser is stateless — it cannot check whether an approval is
+        // actually pending. The routing layer in agent_loop.rs downgrades bare
+        // keywords to UserInput when no approval is pending; slash-prefixed
+        // variants (e.g. /approve, /deny, /yes, /no, /always) always route
+        // as ApprovalResponse.
         match lower.as_str() {
             "yes" | "y" | "approve" | "ok" | "/approve" | "/yes" | "/y" => {
                 return Submission::ApprovalResponse {
@@ -185,6 +214,66 @@ impl SubmissionParser {
                 };
             }
             _ => {}
+        }
+
+        // Plan commands
+        if lower == "/plan" || lower == "/plan list" {
+            return Submission::Plan {
+                sub: PlanSubcommand::List,
+            };
+        }
+        if let Some(rest) = lower.strip_prefix("/plan ") {
+            let rest = rest.trim();
+            if rest == "list" {
+                return Submission::Plan {
+                    sub: PlanSubcommand::List,
+                };
+            }
+            if let Some(after) = rest.strip_prefix("approve") {
+                let plan_ref = after.trim();
+                return Submission::Plan {
+                    sub: PlanSubcommand::Approve {
+                        plan_ref: if plan_ref.is_empty() {
+                            None
+                        } else {
+                            Some(plan_ref.to_string())
+                        },
+                    },
+                };
+            }
+            if let Some(after) = rest.strip_prefix("status") {
+                let plan_ref = after.trim();
+                return Submission::Plan {
+                    sub: PlanSubcommand::Status {
+                        plan_ref: if plan_ref.is_empty() {
+                            None
+                        } else {
+                            Some(plan_ref.to_string())
+                        },
+                    },
+                };
+            }
+            if let Some(after) = rest.strip_prefix("revise") {
+                let after = after.trim();
+                // Try to split: first word is plan_ref, rest is feedback
+                let (plan_ref, feedback) = if let Some((first, rest)) = after.split_once(' ') {
+                    (Some(first.to_string()), rest.trim().to_string())
+                } else {
+                    (None, after.to_string())
+                };
+                if !feedback.is_empty() {
+                    return Submission::Plan {
+                        sub: PlanSubcommand::Revise { plan_ref, feedback },
+                    };
+                }
+            }
+            // Default: treat as plan creation
+            let description = trimmed["/plan ".len()..].trim().to_string();
+            if !description.is_empty() {
+                return Submission::Plan {
+                    sub: PlanSubcommand::Create { description },
+                };
+            }
         }
 
         // Default: user input
@@ -211,6 +300,20 @@ pub enum Submission {
         approved: bool,
         /// If true, auto-approve this tool for the rest of the session.
         always: bool,
+    },
+
+    /// External system resolved a pending gate (for example an OAuth callback).
+    ExternalCallback {
+        /// ID of the pending gate request being resolved.
+        request_id: Uuid,
+    },
+
+    /// Resolve an authentication gate with an exact request id.
+    GateAuthResolution {
+        /// ID of the pending authentication gate being resolved.
+        request_id: Uuid,
+        /// Credential submission or cancellation for the gate.
+        resolution: AuthGateResolution,
     },
 
     /// Simple approval response (yes/no/always) for the current pending approval.
@@ -251,6 +354,9 @@ pub enum Submission {
     /// Create a new thread.
     NewThread,
 
+    /// List threads for the interactive resume picker.
+    ListThreads,
+
     /// Trigger a manual heartbeat check.
     Heartbeat,
 
@@ -259,6 +365,13 @@ pub enum Submission {
 
     /// Suggest next steps based on the current thread.
     Suggest,
+
+    /// User-provided expected behavior for the last interaction.
+    /// Fires into the self-improvement pipeline with conversation context.
+    Expected {
+        /// What the user expected to happen.
+        description: String,
+    },
 
     /// Check job status. No job_id shows all jobs; with job_id shows a specific job.
     JobStatus {
@@ -283,6 +396,38 @@ pub enum Submission {
         /// Arguments to the command.
         args: Vec<String>,
     },
+
+    /// Plan mode command (/plan).
+    /// All subcommands are rewritten to UserInput with [PLAN MODE] prefix
+    /// to activate the plan-mode skill.
+    Plan {
+        /// The plan subcommand.
+        sub: PlanSubcommand,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AuthGateResolution {
+    CredentialProvided { token: String },
+    Cancelled,
+}
+
+/// Subcommands for the /plan command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PlanSubcommand {
+    /// Create a new plan: /plan <description>
+    Create { description: String },
+    /// Approve and execute a plan: /plan approve [ref]
+    Approve { plan_ref: Option<String> },
+    /// Check plan status: /plan status [ref]
+    Status { plan_ref: Option<String> },
+    /// Revise a plan with feedback: /plan revise [ref] <feedback>
+    Revise {
+        plan_ref: Option<String>,
+        feedback: String,
+    },
+    /// List all plans: /plan list
+    List,
 }
 
 impl Submission {
@@ -400,6 +545,9 @@ pub enum SubmissionResult {
 
     /// Turn was interrupted.
     Interrupted,
+
+    /// Auth flow initiated — config card sent, no text response needed.
+    AuthPending,
 }
 
 impl SubmissionResult {
@@ -421,6 +569,11 @@ impl SubmissionResult {
         Self::Ok {
             message: Some(message.into()),
         }
+    }
+
+    /// Create an auth-pending result (suppresses text response).
+    pub fn auth_pending() -> Self {
+        Self::AuthPending
     }
 
     /// Create an error result.
@@ -688,6 +841,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parser_json_gate_auth_resolution() {
+        let request_id = Uuid::new_v4();
+        let json = serde_json::to_string(&Submission::GateAuthResolution {
+            request_id,
+            resolution: AuthGateResolution::CredentialProvided {
+                token: "secret-token".to_string(),
+            },
+        })
+        .expect("serialize");
+
+        let parsed = SubmissionParser::parse(&json);
+        assert!(matches!(
+            parsed,
+            Submission::GateAuthResolution {
+                request_id: rid,
+                resolution: AuthGateResolution::CredentialProvided { token }
+            } if rid == request_id && token == "secret-token"
+        ));
+    }
+
+    #[test]
     fn test_parser_system_command_help() {
         let submission = SubmissionParser::parse("/help");
         assert!(
@@ -855,5 +1029,21 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
+    }
+
+    #[test]
+    fn test_parser_expected() {
+        let submission =
+            SubmissionParser::parse("/expected should have logged in via GitHub OAuth");
+        assert!(
+            matches!(submission, Submission::Expected { description } if description == "should have logged in via GitHub OAuth")
+        );
+    }
+
+    #[test]
+    fn test_parser_expected_empty_is_user_input() {
+        // "/expected " with no description should fall through to user input
+        let submission = SubmissionParser::parse("/expected ");
+        assert!(matches!(submission, Submission::UserInput { .. }));
     }
 }

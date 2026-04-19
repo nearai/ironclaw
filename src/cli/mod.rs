@@ -10,21 +10,26 @@
 //! - Managing routines (`routines list`, `routines create`, `routines edit`, ...)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
+//! - Listing deployment profiles (`profile list`)
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
+pub mod acp;
 mod channels;
 mod completion;
 mod config;
 mod doctor;
+pub mod fmt;
+mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
 mod logs;
 mod mcp;
 pub mod memory;
-pub mod oauth_defaults;
+mod models;
 mod pairing;
+mod profile;
 mod registry;
 mod routines;
 mod service;
@@ -32,17 +37,21 @@ mod skills;
 pub mod status;
 mod tool;
 
+pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
+pub use models::{ModelsCommand, run_models_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
+pub use profile::{ProfileCommand, run_profile_command};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use routines::{RoutinesCommand, run_routines_command};
 pub use service::{ServiceCommand, run_service_command};
@@ -59,9 +68,18 @@ use clap::{ColorChoice, Parser, Subcommand};
 #[command(
     about = "Secure personal AI assistant that protects your data and expands its capabilities"
 )]
-#[command(
-    long_about = "IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.\nExamples:\n  ironclaw run  # Start the agent\n  ironclaw config list  # List configs"
-)]
+#[command(long_about = "IronClaw is a secure AI assistant.\n\n\
+     Getting started:\n  \
+       ironclaw onboard              # Interactive setup wizard (recommended for first run)\n  \
+       ironclaw onboard --quick      # Quick setup: just pick a provider and model\n  \
+       ironclaw models set-provider openai  # Switch to a specific provider\n  \
+       ironclaw doctor               # Check your configuration\n\n\
+     Common commands:\n  \
+       ironclaw run                  # Start the agent\n  \
+       ironclaw config list          # View all settings\n  \
+       ironclaw models status        # Show current provider and model\n  \
+       ironclaw models list          # List available providers\n\n\
+     Use 'ironclaw <subcommand> --help' for details on any command.")]
 #[command(version)]
 #[command(color = ColorChoice::Auto)] // Enable auto-color for help (if the terminal supports it)
 pub struct Cli {
@@ -87,6 +105,14 @@ pub struct Cli {
     /// Skip first-run onboarding check
     #[arg(long, global = true)]
     pub no_onboard: bool,
+
+    /// Auto-approve tool execution (shell, file writes, HTTP, etc.)
+    ///
+    /// Skips interactive approval prompts for standard tools. Destructive
+    /// operations still require explicit approval. Other safeguards remain
+    /// active: rate limits, hooks, authentication gates.
+    #[arg(long, global = true)]
+    pub auto_approve: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -100,8 +126,16 @@ pub enum Command {
 
     /// Interactive onboarding wizard
     #[command(
-        about = "Run interactive setup wizard",
-        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels\n  ironclaw onboard --provider-only  # Change LLM provider and model"
+        about = "Run interactive setup wizard (start here if new to IronClaw)",
+        long_about = "Guides you through configuring IronClaw step by step.\n\n\
+         This is the recommended way to set up your LLM provider, API keys,\n\
+         database, and channels. Run it again any time to change settings.\n\n\
+         Examples:\n  \
+           ironclaw onboard                    # Full setup wizard\n  \
+           ironclaw onboard --quick            # Quick: just provider + model\n  \
+           ironclaw onboard --step provider    # Change only the LLM provider\n  \
+           ironclaw onboard --step channels    # Reconfigure messaging channels\n  \
+           ironclaw onboard --step provider,model  # Change provider and model"
     )]
     Onboard {
         /// Skip authentication (use existing session)
@@ -109,23 +143,35 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick", "step"], help = "Deprecated: use --step channels")]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick", "step"], help = "Deprecated: use --step provider")]
         provider_only: bool,
 
         /// Quick setup: auto-defaults everything except LLM provider and model
-        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only", "step"])]
         quick: bool,
+
+        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security)
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["channels_only", "provider_only", "quick"])]
+        step: Vec<String>,
     },
 
     /// Manage configuration settings
     #[command(
         subcommand,
-        about = "Manage app configs",
-        long_about = "Commands for listing, getting, and setting configurations.\nExample: ironclaw config list"
+        about = "Manage app configuration settings",
+        long_about = "View and modify IronClaw settings (stored in database and config.toml).\n\n\
+         For LLM provider/model changes, use `ironclaw models` instead.\n\n\
+         Examples:\n  \
+           ironclaw config list              # List all settings\n  \
+           ironclaw config list -f agent     # Filter by prefix\n  \
+           ironclaw config get agent.name    # Get a specific value\n  \
+           ironclaw config set agent.name my-bot  # Change a value\n  \
+           ironclaw config init              # Generate config.toml\n  \
+           ironclaw config path              # Show where settings are stored"
     )]
     Config(ConfigCommand),
 
@@ -186,6 +232,14 @@ pub enum Command {
     )]
     Pairing(PairingCommand),
 
+    /// Manage deployment profiles
+    #[command(
+        subcommand,
+        about = "Manage deployment profiles",
+        long_about = "List available deployment profiles and see which is active.\nExamples:\n  ironclaw profile list\n  ironclaw profile list --json"
+    )]
+    Profile(ProfileCommand),
+
     /// Manage OS service (launchd / systemd)
     #[command(
         subcommand,
@@ -202,10 +256,37 @@ pub enum Command {
     )]
     Skills(SkillsCommand),
 
+    /// Manage lifecycle hooks
+    #[command(
+        subcommand,
+        about = "Manage lifecycle hooks",
+        long_about = "List and inspect lifecycle hooks (bundled, plugin, workspace).\nExamples:\n  ironclaw hooks list\n  ironclaw hooks list --verbose\n  ironclaw hooks list --json"
+    )]
+    Hooks(HooksCommand),
+
+    /// Manage LLM providers and models
+    #[command(
+        subcommand,
+        about = "Manage LLM providers and models",
+        long_about = "List providers, view current configuration, and set active provider/model.\n\n\
+         Use this to switch between AI providers without re-running the full setup wizard.\n\n\
+         Examples:\n  \
+           ironclaw models list                          # List all providers\n  \
+           ironclaw models list openai --verbose         # Show details for OpenAI\n  \
+           ironclaw models status                        # Show current provider/model\n  \
+           ironclaw models set gpt-4o                    # Change model\n  \
+           ironclaw models set-provider anthropic        # Switch to Anthropic\n  \
+           ironclaw models set-provider ollama --model llama3  # Switch to local Ollama"
+    )]
+    Models(ModelsCommand),
+
     /// Probe external dependencies and validate configuration
     #[command(
-        about = "Run diagnostics",
-        long_about = "Checks dependencies and config validity.\nExample: ironclaw doctor"
+        about = "Run diagnostics (check if everything is configured correctly)",
+        long_about = "Probes LLM provider, database, channels, and external dependencies.\n\
+         Surfaces misconfiguration before it causes problems at runtime.\n\n\
+         Run this if something is not working — it will tell you what to fix.\n\n\
+         Example:\n  ironclaw doctor"
     )]
     Doctor,
 
@@ -241,8 +322,11 @@ pub enum Command {
 
     /// Authenticate with a provider (re-login)
     #[command(
-        about = "Authenticate with a provider",
-        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+        about = "Authenticate with a provider (re-login)",
+        long_about = "Re-authenticate with an LLM provider.\n\n\
+         For most providers, set the API key environment variable instead.\n\
+         For interactive setup: `ironclaw onboard --step provider`\n\n\
+         Example:\n  ironclaw login --openai-codex"
     )]
     Login {
         /// Authenticate with OpenAI Codex (ChatGPT subscription)
@@ -263,9 +347,17 @@ pub enum Command {
         orchestrator_url: String,
 
         /// Maximum iterations before stopping.
-        #[arg(long, default_value = "50")]
+        #[arg(long, env = "IRONCLAW_MAX_ITERATIONS", default_value = "50")]
         max_iterations: u32,
     },
+
+    /// Manage ACP (Agent Client Protocol) agents
+    #[command(
+        subcommand,
+        about = "Manage ACP agents",
+        long_about = "Add, list, remove, or test ACP-compliant coding agents.\nExample: ironclaw acp add goose --command goose --arg \"--stdio\""
+    )]
+    Acp(AcpCommand),
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
@@ -286,6 +378,19 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+    },
+
+    /// Run as an ACP bridge inside a Docker container (internal use).
+    /// Spawns an ACP-compliant agent and streams output back to the orchestrator.
+    #[command(hide = true)]
+    AcpBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
     },
 }
 
@@ -327,7 +432,7 @@ pub async fn run_routines_cli(
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let user_id = std::env::var("GATEWAY_USER_ID").unwrap_or_else(|_| "default".to_string());
+    let user_id = config.owner_id.clone();
     run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
@@ -341,7 +446,12 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
 
     let embeddings = config
         .embeddings
-        .create_provider(&config.llm.nearai.base_url, session);
+        .create_provider(
+            &config.llm.nearai.base_url,
+            session,
+            config.llm.bedrock.as_ref(),
+        )
+        .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await

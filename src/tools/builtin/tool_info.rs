@@ -45,11 +45,23 @@ impl ToolInfoDetail {
 }
 
 fn schema_param_names(schema: &serde_json::Value) -> Vec<String> {
-    schema
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|props| props.keys().cloned().collect())
-        .unwrap_or_default()
+    let mut names = std::collections::BTreeSet::new();
+
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        names.extend(props.keys().cloned());
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for variant in variants {
+                if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                    names.extend(props.keys().cloned());
+                }
+            }
+        }
+    }
+
+    names.into_iter().collect()
 }
 
 fn fallback_summary(schema: &serde_json::Value) -> ToolDiscoverySummary {
@@ -130,6 +142,16 @@ impl Tool for ToolInfoTool {
         let tool = registry.get(name).await.ok_or_else(|| {
             ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
         })?;
+
+        // Reject tools that are not available in the current engine version.
+        if !tool
+            .engine_compatibility()
+            .is_visible_in(registry.engine_version())
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Tool '{name}' is not available in the current engine version"
+            )));
+        }
 
         let schema = tool.discovery_schema();
         let param_names = schema_param_names(&schema);
@@ -281,5 +303,48 @@ mod tests {
             .execute(serde_json::json!({"name": "echo"}), &ctx)
             .await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_rejects_v1_only_in_v2_registry() {
+        use crate::tools::tool::{EngineCompatibility, EngineVersion};
+
+        struct V1OnlyStub;
+
+        #[async_trait]
+        impl Tool for V1OnlyStub {
+            fn name(&self) -> &str {
+                "v1_stub"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+            fn engine_compatibility(&self) -> EngineCompatibility {
+                EngineCompatibility::V1Only
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+        registry.register(Arc::new(V1OnlyStub)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "v1_stub"}), &ctx)
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters(ref msg)) if msg.contains("not available")),
+            "tool_info should reject V1Only tools in V2 registry"
+        );
     }
 }

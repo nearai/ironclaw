@@ -7,6 +7,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod advanced {
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use ironclaw::agent::routine::Trigger;
@@ -22,6 +23,43 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    struct OauthCallbackEnvGuard {
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl OauthCallbackEnvGuard {
+        fn clear() -> Self {
+            static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+            let guard = ENV_MUTEX
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("env mutex poisoned");
+            let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+            Self {
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for OauthCallbackEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                } else {
+                    std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
 
     async fn wait_for_routine_run(
         db: &std::sync::Arc<dyn Database>,
@@ -587,6 +625,8 @@ mod advanced {
     async fn mcp_extension_lifecycle() {
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        const TEST_USER_ID: &str = "test-user";
+        let _oauth_env = OauthCallbackEnvGuard::clear();
 
         // 1. Start mock MCP server with pre-configured tool responses.
         let mock_server = start_mock_mcp_server(vec![
@@ -614,7 +654,8 @@ mod advanced {
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/mcp_extension_lifecycle.json")).unwrap();
 
-        // 3. Build rig with auto-approve (so tool_install doesn't block).
+        // 3. Build rig with auto-approve so install can proceed without a
+        // manual approval gate in the test harness.
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .with_auto_approve_tools(true)
@@ -622,10 +663,16 @@ mod advanced {
             .build()
             .await;
 
-        // 4. Inject mock-notion registry entry pointing to the mock server.
+        // 4. Force gateway-mode OAuth so post-install auth returns an auth URL
+        // instead of blocking in the CLI/browser OAuth flow.
         let ext_mgr = rig
             .extension_manager()
             .expect("test rig must expose extension manager");
+        ext_mgr
+            .enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        // 5. Inject mock-notion registry entry pointing to the mock server.
         ext_mgr
             .inject_registry_entry(RegistryEntry {
                 name: "mock-notion".to_string(),
@@ -642,33 +689,33 @@ mod advanced {
             })
             .await;
 
-        // 5. Turn 1: "setup mock-notion" → search → install → text.
+        // 6. Turn 1: "setup mock-notion" → search → install → auth-needed text.
         rig.send_message("setup mock-notion").await;
         let r1 = rig.wait_for_responses(1, TIMEOUT).await;
         assert!(!r1.is_empty(), "Turn 1: no response");
 
-        // 6. Simulate OAuth completion: inject token + activate.
+        // 7. Simulate OAuth completion: inject token + activate.
         // This mirrors what the gateway's oauth_callback_handler does after
         // the user completes the OAuth flow in their browser.
-        let secret_name = "mcp_mock-notion_access_token";
+        let secret_name = "mcp_mock_notion_access_token";
         ext_mgr
             .secrets()
             .create(
-                "default",
+                TEST_USER_ID,
                 ironclaw::secrets::CreateSecretParams::new(secret_name, "mock-access-token")
-                    .with_provider("mcp:mock-notion".to_string()),
+                    .with_provider("mcp:mock_notion".to_string()),
             )
             .await
             .expect("failed to inject test token");
 
-        let activate_result = ext_mgr.activate("mock-notion").await;
+        let activate_result = ext_mgr.activate("mock-notion", TEST_USER_ID).await;
         assert!(
             activate_result.is_ok(),
             "activation failed: {:?}",
             activate_result.err()
         );
 
-        // 7. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
+        // 8. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
         // Wait for r1.len() + 1 to ensure we observe at least one new turn-2 response.
         let turn1_count = r1.len();
         rig.send_message("it's done, check what's in my notion")
@@ -680,7 +727,7 @@ mod advanced {
             r2.len()
         );
 
-        // 8. Verify tool calls across both turns.
+        // 9. Verify tool calls across both turns.
         let started = rig.tool_calls_started();
         assert!(
             started.iter().any(|s| s == "tool_search"),
@@ -693,7 +740,8 @@ mod advanced {
 
         // Verify MCP tools were called in turn 2.
         assert!(
-            started.iter().any(|s| s.starts_with("mock-notion_")),
+            started.iter().any(|s| s == "mock_notion_notion-search")
+                && started.iter().any(|s| s == "mock_notion_notion-fetch"),
             "No mock-notion MCP tools called: {started:?}"
         );
 
@@ -707,47 +755,156 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 9. Bootstrap greeting fires on fresh workspace
+    // 9. Message queue during tool execution
+    //
+    // Verifies that messages queued on a thread's pending_messages are
+    // auto-processed by the drain loop after the current turn completes.
     // -----------------------------------------------------------------------
 
-    /// Verifies that a fresh workspace triggers a static bootstrap greeting
-    /// before the user sends any message (no LLM call needed).
     #[tokio::test]
-    async fn bootstrap_greeting_fires() {
-        let rig = TestRigBuilder::new().with_bootstrap().build().await;
+    async fn message_queue_drains_after_tool_turn() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/message_queue_during_tools.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
-        // The static bootstrap greeting should arrive without us sending any
-        // message and without an LLM call.
-        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        // Turn 1: Send initial message to establish the session and thread.
+        rig.send_message("Echo hello for me").await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
         assert!(
-            !responses.is_empty(),
-            "bootstrap greeting should produce a response"
-        );
-        let greeting = &responses[0].content;
-        assert!(
-            greeting.contains("chief of staff"),
-            "bootstrap greeting should contain the static text, got: {greeting}"
+            r1[0].content.to_lowercase().contains("hello"),
+            "Turn 1: missing 'hello' in: {}",
+            r1[0].content,
         );
 
-        // The bootstrap greeting must carry a thread_id so the gateway can
-        // route it to the correct assistant conversation.
+        // Verify the echo tool was used in turn 1.
+        let started = rig.tool_calls_started();
         assert!(
-            responses[0].thread_id.is_some(),
-            "bootstrap greeting response should have a thread_id set"
+            started.iter().any(|s| s == "echo"),
+            "Turn 1: echo tool not called: {started:?}",
+        );
+
+        // Pre-populate the thread's pending_messages queue.
+        // This simulates what happens when a concurrent request (e.g. gateway
+        // POST) arrives while the thread is in Processing state.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let mut sess = session.lock().await;
+            // Find the active thread and queue a message.
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get_mut(&tid))
+                .expect("active thread should exist after turn 1");
+            thread.queue_message("What is 2+2?".to_string());
+            assert_eq!(thread.pending_messages.len(), 1);
+        }
+
+        // Turn 2: Send a message that triggers tool calls.
+        // After this turn completes, the drain loop should find "What is 2+2?"
+        // in pending_messages and process it automatically.
+        rig.send_message("Now echo world and check the time").await;
+
+        // Wait for 3 total responses:
+        //   r1 = turn 1 response ("hello")
+        //   r2 = turn 2 response ("echo world + time") — sent inline by drain loop
+        //   r3 = queued message response ("2+2 = 4") — processed by drain loop
+        let all = rig.wait_for_responses(3, TIMEOUT).await;
+        assert!(
+            all.len() >= 3,
+            "Expected 3 responses (turn1 + turn2 + queued), got {}:\n{:?}",
+            all.len(),
+            all.iter().map(|r| &r.content).collect::<Vec<_>>(),
+        );
+
+        // The third response should be from the queued message ("What is 2+2?")
+        let queued_response = &all[2].content;
+        assert!(
+            queued_response.contains("4"),
+            "Queued message response should contain '4', got: {queued_response}",
+        );
+
+        // Verify the pending queue was fully drained.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let sess = session.lock().await;
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get(&tid))
+                .expect("active thread should still exist");
+            assert!(
+                thread.pending_messages.is_empty(),
+                "Pending queue should be empty after drain, got: {:?}",
+                thread.pending_messages,
+            );
+        }
+
+        // Verify tool usage across all turns.
+        let all_started = rig.tool_calls_started();
+        let echo_count = all_started.iter().filter(|s| *s == "echo").count();
+        assert_eq!(
+            echo_count, 2,
+            "Expected 2 echo calls (turn 1 + turn 2), got {echo_count}",
+        );
+        assert!(
+            all_started.iter().any(|s| s == "time"),
+            "time tool should have been called in turn 2: {all_started:?}",
         );
 
         rig.shutdown();
     }
 
     // -----------------------------------------------------------------------
-    // 10. Bootstrap onboarding completes and clears BOOTSTRAP.md
+    // 10. Assistant thread bootstrap remains read-only
     // -----------------------------------------------------------------------
 
-    /// Exercises the full onboarding flow: bootstrap greeting fires, user
-    /// converses for 3 turns, agent writes profile + memory + identity,
+    /// Verifies that creating the assistant conversation does not inject a
+    /// synthetic greeting turn into history.
+    #[tokio::test]
+    async fn assistant_thread_starts_empty() {
+        let rig = TestRigBuilder::new().with_bootstrap().build().await;
+
+        // Simulate the gateway bootstrap path: create the assistant thread.
+        let db = rig.database();
+        let conv_id = db
+            .get_or_create_assistant_conversation("default", "gateway")
+            .await
+            .expect("create assistant conversation");
+
+        // Verify the thread is still empty.
+        let (messages, _) = db
+            .list_conversation_messages_paginated(conv_id, None, 10)
+            .await
+            .expect("list messages");
+        assert_eq!(
+            messages.len(),
+            0,
+            "assistant conversation should start empty"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Bootstrap onboarding completes and clears BOOTSTRAP.md
+    // -----------------------------------------------------------------------
+
+    /// Exercises the full onboarding flow: the assistant thread starts empty,
+    /// user converses for 3 turns, agent writes profile + memory + identity,
     /// clears BOOTSTRAP.md, and the workspace reflects all writes.
     #[tokio::test]
     async fn bootstrap_onboarding_clears_bootstrap() {
+        use std::sync::Arc;
+
+        use ironclaw::workspace::Workspace;
         use ironclaw::workspace::paths;
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/bootstrap_onboarding.json")).unwrap();
@@ -757,17 +914,17 @@ mod advanced {
             .build()
             .await;
 
-        // 1. Wait for the static bootstrap greeting (no user message needed).
-        let greeting_responses = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(
-            !greeting_responses.is_empty(),
-            "bootstrap greeting should arrive"
-        );
-        assert!(
-            greeting_responses[0].content.contains("chief of staff"),
-            "expected bootstrap greeting, got: {}",
-            greeting_responses[0].content
-        );
+        // 1. Create the assistant thread without injecting history.
+        let db = rig.database();
+        let conv_id = db
+            .get_or_create_assistant_conversation("default", "gateway")
+            .await
+            .expect("create assistant conversation");
+        let (messages, _) = db
+            .list_conversation_messages_paginated(conv_id, None, 10)
+            .await
+            .expect("list messages");
+        assert!(messages.is_empty(), "assistant thread should start empty");
 
         // 2. BOOTSTRAP.md should exist (non-empty) before onboarding completes.
         let ws = rig.workspace().expect("workspace should exist");
@@ -779,7 +936,7 @@ mod advanced {
 
         // 3. Run the 3-turn conversation. The trace has the agent write
         //    profile, memory, identity, and then clear bootstrap.
-        let mut total = 1; // already have the greeting
+        let mut total = 0;
         for turn in &trace.turns {
             rig.send_message(&turn.user_input).await;
             total += 1;
@@ -800,23 +957,21 @@ mod advanced {
             memory_writes.iter().all(|(_, ok)| *ok),
             "all memory_write calls should succeed: {memory_writes:?}"
         );
-
-        // 5. BOOTSTRAP.md should now be empty (cleared by memory_write target=bootstrap).
-        let bootstrap_after = ws.read(paths::BOOTSTRAP).await.expect("read BOOTSTRAP");
+        // 5. BOOTSTRAP.md should now be empty in the tenant workspace receiving
+        // the onboarding messages ("test-user"), not the owner workspace.
+        let tenant_ws = Workspace::new_with_db("test-user", Arc::clone(rig.database()));
+        let bootstrap_after = tenant_ws
+            .read(paths::BOOTSTRAP)
+            .await
+            .expect("read BOOTSTRAP");
         assert!(
             bootstrap_after.content.is_empty(),
             "BOOTSTRAP.md should be empty after onboarding, got: {:?}",
             bootstrap_after.content
         );
 
-        // 6. The bootstrap-completed flag should be set (prevents re-injection).
-        assert!(
-            ws.is_bootstrap_completed(),
-            "bootstrap_completed flag should be set after profile write"
-        );
-
-        // 7. Profile should exist in workspace with expected fields.
-        let profile = ws.read(paths::PROFILE).await.expect("read profile");
+        // 6. Profile should exist in the tenant workspace with expected fields.
+        let profile = tenant_ws.read(paths::PROFILE).await.expect("read profile");
         assert!(
             !profile.content.is_empty(),
             "profile.json should not be empty"
@@ -828,7 +983,7 @@ mod advanced {
         );
 
         // Try parsing the stored profile to catch deserialization issues early.
-        let stored = ws
+        let stored = tenant_ws
             .read(paths::PROFILE)
             .await
             .expect("read profile for deser test");
@@ -850,7 +1005,7 @@ mod advanced {
         );
 
         // Manually trigger sync.
-        let synced = ws
+        let synced = tenant_ws
             .sync_profile_documents()
             .await
             .expect("sync_profile_documents");
@@ -868,7 +1023,7 @@ mod advanced {
         );
 
         // 8. USER.md should have been synced from the profile via sync_profile_documents().
-        let user_doc = ws.read(paths::USER).await.expect("read USER.md");
+        let user_doc = tenant_ws.read(paths::USER).await.expect("read USER.md");
         assert!(
             user_doc.content.contains("Alex"),
             "USER.md should contain user name from profile, got: {:?}",
@@ -886,7 +1041,7 @@ mod advanced {
         );
 
         // 9. Assistant directives should have been synced from the profile.
-        let directives = ws
+        let directives = tenant_ws
             .read(paths::ASSISTANT_DIRECTIVES)
             .await
             .expect("read assistant-directives.md");
@@ -902,7 +1057,10 @@ mod advanced {
         );
 
         // 10. IDENTITY.md should have been written by the agent.
-        let identity = ws.read(paths::IDENTITY).await.expect("read IDENTITY.md");
+        let identity = tenant_ws
+            .read(paths::IDENTITY)
+            .await
+            .expect("read IDENTITY.md");
         assert!(
             identity.content.contains("Claw"),
             "IDENTITY.md should contain the chosen agent name, got: {:?}",

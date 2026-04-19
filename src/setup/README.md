@@ -56,16 +56,27 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 Quick mode (`--quick` flag, or auto-triggered on first run) provides a
 near-instant onboarding experience by auto-defaulting everything except
-the LLM provider and model selection.
+the local deployment profile, LLM provider, and model selection.
 
 ```
+Local Usage Profile     ← choose local or local-sandbox when unset
 auto_setup_database()    → libsql at ~/.ironclaw/ironclaw.db (zero prompts)
 auto_setup_security()    → keychain or env var (zero prompts)
-Step 1/2: Inference Provider  ← only interactive step
-Step 2/2: Model Selection     ← only interactive step
+Step 1/2: Inference Provider  ← interactive unless provider env is detected
+Step 2/2: Model Selection     ← interactive unless defaulted by detected provider
        ↓
    save_and_summarize()      → includes tip to run `ironclaw onboard`
 ```
+
+**Local usage profile:** If `IRONCLAW_PROFILE` is already set, quick mode
+respects it and does not prompt. On a true first run with no profile and no
+existing DB settings, quick mode asks whether the user wants:
+- `local`: TUI, local libSQL, background tasks enabled, no Docker sandbox
+- `local-sandbox`: TUI, local libSQL, background tasks enabled, Docker sandbox enabled with read-only policy
+
+The selected profile is written to `~/.ironclaw/.env` as `IRONCLAW_PROFILE`
+so subsequent startups apply the same built-in profile before database-backed
+settings are loaded.
 
 **`auto_setup_database()`:** Uses existing env vars if set (`DATABASE_URL`
 for postgres, `LIBSQL_PATH` for libsql) without prompting. Otherwise
@@ -302,12 +313,13 @@ key first, then falls back to the standard env var.
 1. Ask "Enable semantic search?" (default: yes)
 2. Detect available providers:
    - NEAR AI: if backend is `nearai` OR valid session exists
+   - AWS Bedrock: if backend is `bedrock`
    - OpenAI: if `OPENAI_API_KEY` in env OR (backend is `openai` AND cached key)
 3. If both available → let user choose
 4. If only one → use it
 5. If neither → disable embeddings
 
-**Default model:** `text-embedding-3-small` (for both providers)
+**Default model:** `text-embedding-3-small` for NEAR AI/OpenAI, `amazon.titan-embed-text-v2:0` for AWS Bedrock
 
 ---
 
@@ -345,11 +357,19 @@ key first, then falls back to the standard env var.
 - Reads `capabilities.json` for `setup.required_secrets`
 - For each secret: check existing, prompt or auto-generate, validate regex
 - Save each secret via `SecretsContext`
+- Persist selected channel names in `settings.channels.wasm_channels` as a
+  first-run startup fallback. Once the running app writes
+  `activated_channels`, that runtime state becomes the authoritative restore
+  source, including an explicit empty list after deactivation.
 
 **Telegram special case** (`setup_telegram`):
 - Validates bot token via Telegram `getMe` API
 - Owner binding: polls `getUpdates` for 120s to capture sender's user ID
-- Optional webhook secret generation
+- Pairing mode is the right choice if you want a Telegram conversation to
+  continue in the browser history sidebar. Open mode keeps the bot usable in
+  Telegram, but it creates a split identity that does not automatically merge
+  into the web UI thread list.
+- Optional webhook secret auto-generation for webhook mode
 
 **SecretsContext creation** (`init_secrets_context`):
 1. Check `self.secrets_crypto` (set in Step 2) → use if available
@@ -377,6 +397,12 @@ key first, then falls back to the standard env var.
    fallback to source build)
 7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
    for all Google tools sharing `google_oauth_token`)
+
+**Google OAuth note:** Google-suite tools can use a shared built-in desktop OAuth
+client for quick local setup. If the browser flow fails with "This app is blocked",
+the user must provide `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
+or enter the matching client credentials in the extension Setup tab, then retry
+the auth flow.
 
 **Registry lookup** (`load_registry_catalog`):
 Searches for `registry/` directory in order:
@@ -408,9 +434,10 @@ Settings are persisted in two places:
 **Layer 1: `~/.ironclaw/.env`** (bootstrap vars)
 
 Contains only the settings needed BEFORE database connection. Written by
-`save_bootstrap_env()` in `bootstrap.rs`.
+`write_bootstrap_env()` in `wizard.rs` via `upsert_bootstrap_vars()`.
 
 ```env
+IRONCLAW_PROFILE="local"
 DATABASE_BACKEND="libsql"
 LIBSQL_PATH="/Users/name/.ironclaw/ironclaw.db"
 SECRETS_MASTER_KEY="..."   # only if env key source selected
@@ -419,6 +446,7 @@ ONBOARD_COMPLETED="true"
 
 Or for PostgreSQL:
 ```env
+IRONCLAW_PROFILE="local"
 DATABASE_BACKEND="postgres"
 DATABASE_URL="postgres://user:pass@localhost/ironclaw"
 SECRETS_MASTER_KEY="..."
@@ -426,8 +454,9 @@ ONBOARD_COMPLETED="true"
 ```
 
 **Why separate?** Chicken-and-egg: you need `DATABASE_BACKEND` to know
-which database to connect to, and `SECRETS_MASTER_KEY` to decrypt the
-secrets store — neither can be stored in the database. LLM settings
+which database to connect to, `IRONCLAW_PROFILE` to apply built-in defaults
+before DB overlays, and `SECRETS_MASTER_KEY` to decrypt the
+secrets store; none of these can rely on database settings. LLM settings
 (`LLM_BACKEND`, base URLs, model names) are persisted to the DB via
 `persist_settings()` and loaded after connection. API keys are stored
 encrypted in the secrets DB.
@@ -494,6 +523,7 @@ Final step of the wizard:
 
 Bootstrap vars written to `~/.ironclaw/.env` (only true chicken-and-egg vars
 that are needed before the DB is connected):
+- `IRONCLAW_PROFILE` (when quick first-run setup selected a profile)
 - `DATABASE_BACKEND` (always)
 - `DATABASE_URL` (if postgres)
 - `LIBSQL_PATH` (if libsql)
@@ -660,7 +690,7 @@ local browser.
    export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
    ```
 
-The `callback_url()` function in `oauth_defaults.rs` checks this env var
+The `callback_url()` function in `src/auth/oauth.rs` checks this env var
 and falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
 
 ### URL Passwords

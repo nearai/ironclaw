@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
+use deadpool_postgres::GenericClient;
+#[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -15,6 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
+#[cfg(feature = "postgres")]
+use crate::workspace::GREETING_SEED;
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -60,17 +64,14 @@ impl Store {
         Ok(Self { pool })
     }
 
-    /// Run database migrations (embedded via refinery).
+    /// Run database migrations: acquires the migration advisory lock,
+    /// realigns any historically diverged checksums (issue #1328), then
+    /// runs refinery's embedded migrations. All bundled into a single
+    /// helper so this call site cannot drift from
+    /// `SetupWizard::run_migrations_postgres` (see PR #2101 review).
     pub async fn run_migrations(&self) -> Result<(), DatabaseError> {
-        use refinery::embed_migrations;
-        embed_migrations!("migrations");
-
         let mut client = self.pool.get().await?;
-        migrations::runner()
-            .run_async(&mut **client)
-            .await
-            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
-        Ok(())
+        crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client).await
     }
 
     /// Get a connection from the pool.
@@ -200,6 +201,72 @@ impl Store {
         Ok(())
     }
 
+    /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs represent synchronous channel/CLI-initiated dispatches
+    /// that begin and end in the same instant. `created_at`, `started_at`,
+    /// and `completed_at` are all set to the same timestamp so audit
+    /// queries computing duration (`completed_at - started_at`) see 0, not
+    /// NULL, and dashboards filtering for "started but not yet completed"
+    /// don't misclassify these as never-started rows.
+    ///
+    /// ⚠️ **System job timestamps do NOT reflect tool execution time.**
+    /// The row is INSERTed *before* the tool runs, with all three timestamps
+    /// pinned to "now". This is intentional: the audit row must be durable
+    /// even if the dispatcher panics mid-tool, and an updating second write
+    /// would double the per-dispatch DB cost. Consumers that need execution
+    /// duration must read from the associated `job_actions` rows
+    /// (`job_actions.duration_ms`) — they wrap the actual `tool.execute()`
+    /// boundary and carry the real start/end measurements.
+    ///
+    /// ⚠️ Row growth: every `ToolDispatcher::dispatch()` call (gateway
+    /// handlers, CLI commands, routine ticks) creates one system job row.
+    /// `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+    /// so these rows are intentionally retained forever. If row count
+    /// becomes a concern for agent-job listing queries, prefer adding a
+    /// partial index (`WHERE category != 'system'`) rather than deleting
+    /// rows — deletion would violate the "LLM data is never deleted" rule
+    /// (CLAUDE.md).
+    pub async fn create_system_job(
+        &self,
+        user_id: &str,
+        source: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let status = JobState::Completed.to_string();
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_jobs (
+                id, title, description, category, status, source,
+                user_id, actual_cost, repair_attempts, max_tokens,
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            "#,
+            &[
+                &id,
+                &format!("System: {source}"),
+                &format!("System operation: {source}"),
+                &Some("system"),
+                &status,
+                &"system",
+                &user_id,
+                &rust_decimal::Decimal::ZERO,
+                &0i32,
+                &0i64,
+                &0i64,
+                &now,
+                &Some(now), // started_at = created_at (instant start)
+                &Some(now), // completed_at = created_at (instant completion)
+            ],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
     /// Get a job by ID.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         let conn = self.conn().await?;
@@ -258,6 +325,10 @@ impl Store {
                     // TODO(#661): persist user_timezone in agent_jobs table so
                     // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
+                    // TODO(#1125): approval_context is #[serde(skip)] so it's lost on
+                    // DB restore. Tools that were allowed before restart will be blocked
+                    // until the scheduler re-sets the context on the next dispatch.
+                    approval_context: None,
                 }))
             }
             None => Ok(None),
@@ -492,6 +563,80 @@ pub struct SandboxJobRecord {
     /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
     /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
     pub credential_grants_json: String,
+    /// Optional MCP server filter from the original `create_job` call. Mirrors
+    /// `JobCreationParams::mcp_servers`: `None` = mount the master config,
+    /// `Some([])` = no MCP, `Some(["name"])` = filtered. Persisted in the
+    /// `restart_params` column so a restarted job re-applies the same filter.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Optional cap on worker agent loop iterations from the original
+    /// `create_job` call. Persisted in `restart_params` so a restart honors
+    /// the original cap instead of falling back to the worker default.
+    pub max_iterations: Option<u32>,
+}
+
+/// JSON shape stored in the `agent_jobs.restart_params` column. Both fields
+/// are optional; the column is NULL when neither was set on the original job.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SandboxRestartParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+impl SandboxRestartParams {
+    /// Build from the two `SandboxJobRecord` fields. Returns `None` when both
+    /// are `None` so the DB column stays NULL for jobs that didn't customize
+    /// either knob.
+    pub fn from_record(
+        mcp_servers: Option<&[String]>,
+        max_iterations: Option<u32>,
+    ) -> Option<Self> {
+        if mcp_servers.is_none() && max_iterations.is_none() {
+            return None;
+        }
+        Some(Self {
+            mcp_servers: mcp_servers.map(<[String]>::to_vec),
+            max_iterations,
+        })
+    }
+
+    /// Serialize for storage. Returns `None` for an empty struct so we store
+    /// SQL NULL rather than the literal `{}`.
+    pub fn to_json(&self) -> Option<String> {
+        if self.mcp_servers.is_none() && self.max_iterations.is_none() {
+            return None;
+        }
+        serde_json::to_string(self).ok()
+    }
+
+    /// Parse the column value. Logs and returns default on parse error so a
+    /// corrupt blob does not break job listing — the worst case is the
+    /// restart loses the filter, which matches pre-fix behaviour.
+    pub fn from_column(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::default();
+        };
+        if raw.trim().is_empty() {
+            return Self::default();
+        }
+        match serde_json::from_str::<SandboxRestartParams>(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to parse sandbox restart_params; ignoring"
+                );
+                Self::default()
+            }
+        }
+    }
+}
+
+impl crate::ownership::Owned for SandboxJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary of sandbox job counts grouped by status.
@@ -516,6 +661,12 @@ pub struct AgentJobRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+}
+
+impl crate::ownership::Owned for AgentJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary counts for agent (non-sandbox) jobs.
@@ -549,18 +700,24 @@ impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
     pub async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let restart_params_json =
+            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+                .as_ref()
+                .and_then(SandboxRestartParams::to_json);
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
-                success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
+                success, failure_reason, created_at, started_at, completed_at,
+                restart_params
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
                 started_at = EXCLUDED.started_at,
-                completed_at = EXCLUDED.completed_at
+                completed_at = EXCLUDED.completed_at,
+                restart_params = EXCLUDED.restart_params
             "#,
             &[
                 &job.id,
@@ -574,6 +731,7 @@ impl Store {
                 &job.created_at,
                 &job.started_at,
                 &job.completed_at,
+                &restart_params_json,
             ],
         )
         .await?;
@@ -590,48 +748,19 @@ impl Store {
             .query_opt(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
             )
             .await?;
 
-        Ok(row.map(|r| SandboxJobRecord {
-            id: r.get("id"),
-            task: r.get("title"),
-            status: r.get("status"),
-            user_id: r.get("user_id"),
-            project_dir: r
-                .get::<_, Option<String>>("project_dir")
-                .unwrap_or_default(),
-            success: r.get("success"),
-            failure_reason: r.get("failure_reason"),
-            created_at: r.get("created_at"),
-            started_at: r.get("started_at"),
-            completed_at: r.get("completed_at"),
-            credential_grants_json: r.get::<_, String>("description"),
-        }))
-    }
-
-    /// List all sandbox jobs, most recent first.
-    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                r#"
-                SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE source = 'sandbox'
-                ORDER BY created_at DESC
-                "#,
-                &[],
-            )
-            .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| SandboxJobRecord {
+        Ok(row.map(|r| {
+            let restart_params = SandboxRestartParams::from_column(
+                r.get::<_, Option<String>>("restart_params").as_deref(),
+            );
+            SandboxJobRecord {
                 id: r.get("id"),
                 task: r.get("title"),
                 status: r.get("status"),
@@ -645,6 +774,51 @@ impl Store {
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
                 credential_grants_json: r.get::<_, String>("description"),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
+            }
+        }))
+    }
+
+    /// List all sandbox jobs, most recent first.
+    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, description, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
+                FROM agent_jobs WHERE source = 'sandbox'
+                ORDER BY created_at DESC
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -659,7 +833,8 @@ impl Store {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
@@ -669,20 +844,27 @@ impl Store {
 
         Ok(rows
             .iter()
-            .map(|r| SandboxJobRecord {
-                id: r.get("id"),
-                task: r.get("title"),
-                status: r.get("status"),
-                user_id: r.get("user_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
-                success: r.get("success"),
-                failure_reason: r.get("failure_reason"),
-                created_at: r.get("created_at"),
-                started_at: r.get("started_at"),
-                completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -842,6 +1024,38 @@ impl Store {
             .collect())
     }
 
+    pub async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| AgentJobRecord {
+                id: r.get("id"),
+                title: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get::<_, Option<String>>("user_id").unwrap_or_default(),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                failure_reason: r.get("failure_reason"),
+            })
+            .collect())
+    }
+
     /// Get the failure reason for a single agent job.
     pub async fn get_agent_job_failure_reason(
         &self,
@@ -864,6 +1078,27 @@ impl Store {
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
                 &[],
+            )
+            .await?;
+
+        let mut summary = AgentJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            summary.add_count(&status, count as usize);
+        }
+        Ok(summary)
+    }
+
+    pub async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' AND user_id = $1 GROUP BY status",
+                &[&user_id],
             )
             .await?;
 
@@ -1109,15 +1344,25 @@ impl Store {
     pub async fn get_webhook_routine_by_path(
         &self,
         path: &str,
+        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError> {
         let conn = self.conn().await?;
-        let row = conn
-            .query_opt(
+        let row = if let Some(uid) = user_id {
+            conn.query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND user_id = $2 \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path, &uid],
+            )
+            .await?
+        } else {
+            conn.query_opt(
                 "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
                  AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
                 &[&path],
             )
-            .await?;
+            .await?
+        };
         row.as_ref().map(row_to_routine).transpose()
     }
 
@@ -1350,6 +1595,40 @@ impl Store {
         Ok(counts)
     }
 
+    /// Batch-load the most recent run status for multiple routines in a single query.
+    /// Uses a window function to pick only the latest run per routine.
+    #[cfg(feature = "postgres")]
+    pub async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT ON (routine_id) routine_id, status
+                 FROM routine_runs
+                 WHERE routine_id = ANY($1)
+                 ORDER BY routine_id, started_at DESC",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut statuses = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let status_str: String = row.get("status");
+            if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                statuses.insert(id, status);
+            }
+        }
+
+        Ok(statuses)
+    }
+
     /// Link a routine run to a dispatched job.
     pub async fn link_routine_run_to_job(
         &self,
@@ -1458,6 +1737,10 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    /// Live state extracted from metadata (e.g. "Processing").
+    pub live_state: Option<String>,
+    /// Live-state started_at extracted from metadata for stale filtering.
+    pub live_state_started_at: Option<String>,
     /// Channel that owns this conversation (e.g. "gateway", "telegram", "routine").
     pub channel: String,
 }
@@ -1484,19 +1767,21 @@ impl Store {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         let conn = self.conn().await?;
         let affected = conn
             .execute(
                 r#"
-            INSERT INTO conversations (id, channel, user_id, thread_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, thread_id, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
-            SET last_activity = NOW()
+            SET last_activity = NOW(),
+                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
-                &[&id, &channel, &user_id, &thread_id],
+                &[&id, &channel, &user_id, &thread_id, &source_channel],
             )
             .await?;
         Ok(affected > 0)
@@ -1543,6 +1828,16 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let live_state = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("state"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let live_state_started_at = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("started_at"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let sql_title: Option<String> = r.get("title");
                 let title = sql_title.or_else(|| {
                     metadata
@@ -1557,6 +1852,8 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    live_state,
+                    live_state_started_at,
                     channel: r.get("channel"),
                 }
             })
@@ -1603,6 +1900,16 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let live_state = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("state"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let live_state_started_at = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("started_at"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 // For routine/heartbeat threads, derive title from metadata
                 // since they may have no user messages.
                 let sql_title: Option<String> = r.get("title");
@@ -1619,6 +1926,8 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    live_state,
+                    live_state_started_at,
                     channel: r.get("channel"),
                 }
             })
@@ -1672,6 +1981,27 @@ impl Store {
             .await?;
 
         Ok(row.get("id"))
+    }
+
+    /// Read-only lookup for an existing routine conversation.
+    pub async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rid = routine_id.to_string();
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'routine_id' = $2
+                LIMIT 1
+                "#,
+                &[&user_id, &rid],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("id")))
     }
 
     /// Get or create the singleton heartbeat conversation for a user.
@@ -1733,7 +2063,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
                 LIMIT 1
                 "#,
@@ -1742,7 +2072,20 @@ impl Store {
             .await?;
 
         if let Some(row) = row {
-            return Ok(row.get("id"));
+            let id: Uuid = row.get("id");
+            let source_channel: Option<String> = row.get("source_channel");
+            if source_channel.is_none() {
+                conn.execute(
+                    r#"
+                    UPDATE conversations
+                    SET source_channel = $2
+                    WHERE id = $1 AND source_channel IS NULL
+                    "#,
+                    &[&id, &channel],
+                )
+                .await?;
+            }
+            return Ok(id);
         }
 
         // Create a new assistant conversation
@@ -1750,10 +2093,10 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 
@@ -1793,6 +2136,21 @@ impl Store {
             )
             .await?;
         Ok(row.is_some())
+    }
+
+    /// Get the source_channel for a conversation.
+    pub async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT source_channel FROM conversations WHERE id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
     }
 
     /// Load messages for a conversation with cursor-based pagination.
@@ -2182,6 +2540,636 @@ impl Store {
     }
 }
 
+// ==================== Users / API Tokens / Invitations ====================
+
+#[cfg(feature = "postgres")]
+use crate::db::{ApiTokenRecord, UserRecord};
+
+#[cfg(feature = "postgres")]
+impl Store {
+    pub(crate) async fn seed_initial_assistant_thread(
+        client: &impl GenericClient,
+        user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let conversation_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "assistant",
+            "title": "Assistant",
+        });
+        client
+            .execute(
+                r#"
+                INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity)
+                VALUES ($1, 'gateway', $2, $3, 'gateway', $4, $4)
+                "#,
+                &[&conversation_id, &user_id, &metadata, &created_at],
+            )
+            .await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+                VALUES ($1, $2, 'assistant', $3, $4)
+                "#,
+                &[&message_id, &conversation_id, &GREETING_SEED, &created_at],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Create a new user record.
+    pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Get a user by their string id.
+    pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE id = $1", &[&id])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// Get a user by email address.
+    pub async fn get_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// List users, optionally filtered by status.
+    pub async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = match status {
+            Some(s) => {
+                conn.query(
+                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE status = $1 ORDER BY created_at DESC",
+                    &[&s],
+                )
+                .await?
+            }
+            None => {
+                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users ORDER BY created_at DESC", &[])
+                    .await?
+            }
+        };
+        Ok(rows.iter().map(row_to_user).collect())
+    }
+
+    /// Update a user's status.
+    pub async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2",
+            &[&status, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update a user's role (admin/member).
+    pub async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2",
+            &[&role, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update a user's display name and metadata.
+    pub async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET display_name = $1, metadata = $2, updated_at = NOW() WHERE id = $3",
+            &[&display_name, metadata, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Record a login timestamp for a user.
+    pub async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a new API token.
+    pub async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        conn.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user_id,
+                &token_hash.as_slice(),
+                &token_prefix,
+                &name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// Create a user and their initial API token atomically in a single transaction.
+    pub async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+
+        tx.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        tx.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user.id,
+                &token_hash.as_slice(),
+                &token_prefix,
+                &token_name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+
+        tx.commit().await?;
+
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// List tokens for a user.
+    pub async fn list_api_tokens(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, token_prefix, expires_at, last_used_at, created_at, revoked_at
+                FROM api_tokens
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_api_token).collect())
+    }
+
+    /// Soft-revoke a token. Returns false if the token doesn't exist or doesn't belong to the user.
+    pub async fn revoke_api_token(
+        &self,
+        token_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+                &[&token_id, &user_id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Authenticate a token by hash. Returns the token record and its owning user
+    /// if the token is active (non-revoked, non-expired) and the user is active.
+    pub async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
+                       u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
+                FROM api_tokens t
+                JOIN users u ON t.user_id = u.id
+                WHERE t.token_hash = $1
+                  AND t.revoked_at IS NULL
+                  AND (t.expires_at IS NULL OR t.expires_at > NOW())
+                  AND u.status = 'active'
+                "#,
+                &[&token_hash.as_slice()],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            let token = ApiTokenRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                name: r.get("name"),
+                token_prefix: r.get("token_prefix"),
+                expires_at: r.get("expires_at"),
+                last_used_at: r.get("last_used_at"),
+                created_at: r.get("created_at"),
+                revoked_at: r.get("revoked_at"),
+            };
+            let user = UserRecord {
+                id: r.get("u_id"),
+                email: r.get("email"),
+                display_name: r.get("display_name"),
+                status: r.get("status"),
+                role: r.get("role"),
+                created_at: r.get("u_created_at"),
+                updated_at: r.get("updated_at"),
+                last_login_at: r.get("last_login_at"),
+                created_by: r.get("created_by"),
+                metadata: r.get("metadata"),
+            };
+            (token, user)
+        }))
+    }
+
+    /// Update `last_used_at` for a token.
+    pub async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1",
+            &[&token_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Check whether any user records exist.
+    pub async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM users LIMIT 1) as has_users",
+                &[],
+            )
+            .await?;
+        Ok(row.get("has_users"))
+    }
+
+    /// Delete a user and all their data across all user-scoped tables.
+    /// Returns false if the user doesn't exist.
+    pub async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Delete from child tables first to avoid FK violations.
+        // job_events must come before agent_jobs (FK without CASCADE).
+        // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots.
+        // conversations cascades to conversation_messages.
+        // memory_documents cascades to memory_chunks.
+        // routines cascades to routine_runs.
+        // api_tokens cascade automatically via FK on users.
+        for table in &[
+            "settings",
+            "heartbeat_state",
+            "tool_rate_limit_state",
+            "secret_usage_log",
+            "leak_detection_events",
+            "secrets",
+            "wasm_tools",
+            "routines",
+            "memory_documents",
+            "conversations",
+            // user_identities (added in V17): without this delete, the
+            // PostgreSQL FK rejects the `DELETE FROM users` below, and on
+            // libSQL the rows are silently orphaned — a future user with
+            // the same id could inherit the previous user's external
+            // identity rows, which is a tenant-isolation breach.
+            "user_identities",
+        ] {
+            tx.execute(&format!("DELETE FROM {table} WHERE user_id = $1"), &[&id])
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+        // job_events references agent_jobs(id) without CASCADE — delete via subquery.
+        tx.execute(
+            "DELETE FROM job_events WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = $1)",
+            &[&id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute("DELETE FROM agent_jobs WHERE user_id = $1", &[&id])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Nullify self-referencing created_by before deleting the user
+        tx.execute(
+            "UPDATE users SET created_by = NULL WHERE created_by = $1",
+            &[&id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // api_tokens cascade automatically via FK
+        let result = tx
+            .execute("DELETE FROM users WHERE id = $1", &[&id])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(result > 0)
+    }
+
+    /// Get per-user LLM usage stats for a time period.
+    /// Aggregates from llm_calls via agent_jobs.user_id.
+    pub async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE l.created_at >= $1
+                  AND COALESCE(j.user_id, c.user_id) = $2
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since, &uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE l.created_at >= $1
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserUsageStats {
+                user_id: row.get("user_id"),
+                model: row.get("model"),
+                call_count: row.get("call_count"),
+                input_tokens: row.get("input_tokens"),
+                output_tokens: row.get("output_tokens"),
+                total_cost: row.get("total_cost"),
+            });
+        }
+        Ok(stats)
+    }
+
+    /// Lightweight per-user summary stats (job count, total cost, last active).
+    ///
+    /// Aggregates from `llm_calls`, resolving user_id via either `agent_jobs`
+    /// (for background job calls) or `conversations` (for chat calls where
+    /// `job_id` is NULL).
+    pub async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT
+                    COALESCE(j.user_id, c.user_id) AS user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE COALESCE(j.user_id, c.user_id) = $1
+                GROUP BY COALESCE(j.user_id, c.user_id)
+                "#,
+                &[&uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT
+                    COALESCE(j.user_id, c.user_id) AS user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                GROUP BY COALESCE(j.user_id, c.user_id)
+                "#,
+                &[],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserSummaryStats {
+                user_id: row.get("user_id"),
+                job_count: row.get("job_count"),
+                total_cost: row.get("total_cost"),
+                last_active_at: row.get("last_active_at"),
+            });
+        }
+        Ok(stats)
+    }
+
+    /// All LLM aggregates are scoped to `since` so the query is served by
+    /// `idx_llm_calls_created_at` rather than a full `llm_calls` scan.
+    pub async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<crate::db::AdminUsageSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM users) AS total_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
+                    (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(cost), 0::numeric) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= $1
+                ) recent
+                "#,
+                &[&since],
+            )
+            .await?;
+
+        Ok(crate::db::AdminUsageSummary {
+            total_users: row.get("total_users"),
+            active_users: row.get("active_users"),
+            suspended_users: row.get("suspended_users"),
+            admin_users: row.get("admin_users"),
+            total_jobs: row.get("total_jobs"),
+            llm_calls: row.get("llm_calls"),
+            input_tokens: row.get("input_tokens"),
+            output_tokens: row.get("output_tokens"),
+            usage_cost: row.get("usage_cost"),
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
+    UserRecord {
+        id: row.get("id"),
+        email: row.get("email"),
+        display_name: row.get("display_name"),
+        status: row.get("status"),
+        role: row.get("role"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        last_login_at: row.get("last_login_at"),
+        created_by: row.get("created_by"),
+        metadata: row.get("metadata"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_api_token(row: &tokio_postgres::Row) -> ApiTokenRecord {
+    ApiTokenRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        name: row.get("name"),
+        token_prefix: row.get("token_prefix"),
+        expires_at: row.get("expires_at"),
+        last_used_at: row.get("last_used_at"),
+        created_at: row.get("created_at"),
+        revoked_at: row.get("revoked_at"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2197,9 +3185,12 @@ mod tests {
             started_at: Utc::now(),
             last_activity: Utc::now(),
             thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
+            live_state_started_at: Some(Utc::now().to_rfc3339()),
             channel: "telegram".to_string(),
         };
         assert_eq!(summary.channel, "telegram");
+        assert_eq!(summary.live_state.as_deref(), Some("Processing"));
     }
 
     #[test]
@@ -2212,9 +3203,161 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: ch.to_string(),
             };
             assert_eq!(summary.channel, ch);
+        }
+    }
+
+    /// PG integration test for admin_usage_summary.
+    /// Mirrors src/db/libsql/users.rs::test_admin_usage_summary_aggregates_in_db.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_admin_usage_summary_pg() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        // Use unique IDs to avoid collisions with other test runs.
+        let test_id = Uuid::new_v4().to_string();
+        let alice_id = format!("alice-{test_id}");
+        let bob_id = format!("bob-{test_id}");
+        let now = chrono::Utc::now();
+
+        // Create two test users.
+        let alice = crate::db::UserRecord {
+            id: alice_id.clone(),
+            email: Some(format!("alice-{test_id}@test.local")),
+            display_name: "Alice".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        let bob = crate::db::UserRecord {
+            id: bob_id.clone(),
+            email: Some(format!("bob-{test_id}@test.local")),
+            display_name: "Bob".to_string(),
+            status: "suspended".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        store.create_user(&alice).await.unwrap();
+        store.create_user(&bob).await.unwrap();
+
+        // Create jobs for each user.
+        let ctx_a1 = JobContext::with_user(&alice_id, "Job A1", "test");
+        let ctx_a2 = JobContext::with_user(&alice_id, "Job A2", "test");
+        let ctx_b1 = JobContext::with_user(&bob_id, "Job B1", "test");
+        store.save_job(&ctx_a1).await.unwrap();
+        store.save_job(&ctx_a2).await.unwrap();
+        store.save_job(&ctx_b1).await.unwrap();
+
+        // Record LLM calls.
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a1.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.05").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.10").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-3.5",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.01").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary = store.admin_usage_summary(since).await.unwrap();
+
+        // Assertions on counts — the DB may contain rows from other runs, so
+        // assert >= for global counts; the test users we just inserted must be
+        // reflected.
+        assert!(summary.total_users >= 2, "expected at least 2 users");
+        assert!(summary.active_users >= 1, "expected at least 1 active user");
+        assert!(
+            summary.suspended_users >= 1,
+            "expected at least 1 suspended user"
+        );
+        assert!(summary.admin_users >= 1, "expected at least 1 admin user");
+        assert!(summary.total_jobs >= 3, "expected at least 3 jobs");
+        assert!(summary.llm_calls >= 3, "expected at least 3 LLM calls");
+        assert!(
+            summary.input_tokens >= 300,
+            "expected at least 300 input tokens"
+        );
+        assert!(
+            summary.output_tokens >= 150,
+            "expected at least 150 output tokens"
+        );
+        assert!(
+            summary.usage_cost >= Decimal::from_str_exact("0.16").unwrap(),
+            "expected usage_cost >= 0.16, got {}",
+            summary.usage_cost
+        );
+
+        // Clean up test data.
+        // safety: idempotent test-cleanup deletes in an `#[ignore]` integration test — no atomicity requirement
+        let conn = store.conn().await.unwrap();
+        for job_id in [ctx_a1.job_id, ctx_a2.job_id, ctx_b1.job_id] {
+            conn.execute("DELETE FROM llm_calls WHERE job_id = $1", &[&job_id])
+                .await
+                .unwrap();
+            conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&job_id])
+                .await
+                .unwrap();
+        }
+        for uid in [&alice_id, &bob_id] {
+            conn.execute("DELETE FROM users WHERE id = $1", &[uid])
+                .await
+                .unwrap();
         }
     }
 

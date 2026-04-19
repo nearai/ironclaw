@@ -46,10 +46,10 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::secrets::SecretsStore;
+use ironclaw_common::AppEvent;
 
 /// Resolve the orchestrator port from the `ORCHESTRATOR_PORT` environment
 /// variable, falling back to 50051.
@@ -63,7 +63,7 @@ fn resolve_orchestrator_port() -> u16 {
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
     pub docker_status: crate::sandbox::DockerStatus,
 }
@@ -122,6 +122,13 @@ pub async fn setup_orchestrator(
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
             claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            acp_memory_limit_mb: config.acp.memory_limit_mb,
+            acp_timeout_secs: config.acp.timeout_secs,
+            mcp_per_job_enabled: std::env::var("MCP_PER_JOB_ENABLED")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false),
+            claude_code_enabled: config.claude_code.enabled,
+            acp_enabled: config.acp.enabled,
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
@@ -133,7 +140,8 @@ pub async fn setup_orchestrator(
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
-            user_id: "default".to_string(),
+            user_id: config.owner_id.clone(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {
@@ -148,6 +156,9 @@ pub async fn setup_orchestrator(
                 config.claude_code.model,
                 config.claude_code.max_turns
             );
+        }
+        if config.acp.enabled {
+            tracing::info!("ACP agent sandbox mode available");
         }
         (job_event_tx, Some(jm))
     } else {
@@ -164,19 +175,15 @@ pub async fn setup_orchestrator(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serialize access to `ORCHESTRATOR_PORT` env var across test threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn resolve_orchestrator_port_from_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
 
         // Safety: env-var mutation requires unsafe in edition 2024;
-        // ENV_LOCK serializes concurrent access from other test threads.
+        // lock_env() serializes concurrent access from other test threads.
 
         // Absent env var → default 50051
         unsafe { std::env::remove_var("ORCHESTRATOR_PORT") };

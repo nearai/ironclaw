@@ -10,17 +10,27 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::auth::{
+    AuthDescriptor, AuthDescriptorKind, OAuthFlowDescriptor, PendingOAuthLaunchParams,
+    auth_descriptor_for_secret, build_pending_oauth_launch, upsert_auth_descriptor,
+};
+use crate::channels::ChannelManager;
 use crate::channels::wasm::{
     LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
-    WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key,
+    WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
+    owner_id_from_capabilities,
 };
-use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
-    ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
-    InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult, VerificationChallenge,
+    ActivateResult, AuthResult, ConfigureResult, EnsureReadyIntent, EnsureReadyOutcome,
+    ExtensionError, ExtensionKind, ExtensionPhase, ExtensionSource, InstallResult,
+    InstalledExtension, LatentProviderAction, RegistryEntry, ResultSource, SearchResult,
+    ToolAuthState, UpgradeOutcome, UpgradeResult,
+    naming::{
+        canonicalize_extension_name, extension_name_candidates, legacy_extension_alias,
+        normalize_extension_names,
+    },
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -31,7 +41,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -50,23 +60,41 @@ struct HostedOAuthFlowStart {
     kind: ExtensionKind,
     auth_url: String,
     expected_state: String,
-    flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+    flow: crate::auth::oauth::PendingOAuthFlow,
+    instructions: Option<String>,
+    setup_url: Option<String>,
 }
 
-fn hosted_proxy_client_secret(
-    client_secret: &Option<String>,
-    builtin: Option<&crate::cli::oauth_defaults::OAuthCredentials>,
-    exchange_proxy_configured: bool,
-) -> Option<String> {
-    if !exchange_proxy_configured {
-        return client_secret.clone();
+#[derive(Debug, Default)]
+struct SecretCleanupPlan {
+    base_secrets: HashSet<String>,
+    companion_secrets: HashMap<String, HashSet<String>>,
+}
+
+impl SecretCleanupPlan {
+    fn add_base_secret(&mut self, secret_name: impl AsRef<str>) {
+        self.base_secrets
+            .insert(secret_name.as_ref().to_lowercase());
     }
 
-    let builtin_secret = builtin.map(|credentials| credentials.client_secret);
-    match (client_secret, builtin_secret) {
-        (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
-        _ => client_secret.clone(),
+    fn add_companion_secret(
+        &mut self,
+        base_secret_name: impl AsRef<str>,
+        companion_secret_name: impl AsRef<str>,
+    ) {
+        self.companion_secrets
+            .entry(base_secret_name.as_ref().to_lowercase())
+            .or_default()
+            .insert(companion_secret_name.as_ref().to_lowercase());
     }
+}
+
+fn oauth_refresh_secret_name(secret_name: &str) -> String {
+    format!("{}_refresh_token", secret_name.to_lowercase())
+}
+
+fn oauth_scopes_secret_name(secret_name: &str) -> String {
+    format!("{}_scopes", secret_name.to_lowercase())
 }
 
 fn normalize_oauth_callback_path(path: &str) -> String {
@@ -107,44 +135,21 @@ struct ChannelRuntimeState {
     wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 }
 
+/// Setup schema returned to web UI for extension configuration.
+pub struct ExtensionSetupSchema {
+    pub secrets: Vec<crate::channels::web::types::SecretFieldInfo>,
+    pub fields: Vec<crate::channels::web::types::SetupFieldInfo>,
+}
+
+/// Only these global (non-namespaced) setting paths may be written by extension
+/// setup fields. Everything else must be under `extensions.<name>.*`.
+const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &["llm_backend", "selected_model"];
+
 #[cfg(test)]
 type TestWasmChannelLoader =
     Arc<dyn Fn(&str) -> Result<LoadedChannel, ExtensionError> + Send + Sync>;
+
 #[cfg(test)]
-type TestTelegramBindingResolver =
-    Arc<dyn Fn(&str, Option<i64>) -> Result<TelegramBindingResult, ExtensionError> + Send + Sync>;
-
-const TELEGRAM_OWNER_BIND_TIMEOUT_SECS: u64 = 120;
-const TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS: u64 = 300;
-const TELEGRAM_GET_UPDATES_TIMEOUT_SECS: u64 = 25;
-const TELEGRAM_OWNER_BIND_CODE_LEN: usize = 8;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TelegramBindingData {
-    owner_id: i64,
-    bot_username: Option<String>,
-    binding_state: TelegramOwnerBindingState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TelegramOwnerBindingState {
-    Existing,
-    VerifiedNow,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingTelegramVerificationChallenge {
-    code: String,
-    bot_username: Option<String>,
-    expires_at_unix: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TelegramBindingResult {
-    Bound(TelegramBindingData),
-    Pending(VerificationChallenge),
-}
-
 fn telegram_request_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
     tracing::warn!(
         action,
@@ -156,6 +161,7 @@ fn telegram_request_error(action: &'static str, error: &reqwest::Error) -> Exten
     ExtensionError::Other(format!("Telegram {action} request failed"))
 }
 
+#[cfg(test)]
 fn telegram_response_parse_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
     tracing::warn!(
         action,
@@ -166,30 +172,7 @@ fn telegram_response_parse_error(action: &'static str, error: &reqwest::Error) -
     ExtensionError::Other(format!("Failed to parse Telegram {action} response"))
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TelegramGetMeResponse {
-    ok: bool,
-    #[serde(default)]
-    result: Option<TelegramGetMeUser>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TelegramGetMeUser {
-    #[serde(default)]
-    username: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TelegramGetUpdatesResponse {
-    ok: bool,
-    #[serde(default)]
-    result: Vec<TelegramUpdate>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
+#[cfg(test)]
 #[derive(Debug, serde::Deserialize)]
 struct TelegramApiOkResponse {
     ok: bool,
@@ -197,121 +180,137 @@ struct TelegramApiOkResponse {
     description: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    #[serde(default)]
-    message: Option<TelegramMessage>,
-    #[serde(default)]
-    edited_message: Option<TelegramMessage>,
+#[cfg(any(test, debug_assertions))]
+const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
+const TELEGRAM_DEFAULT_API_BASE: &str = "https://api.telegram.org";
+
+#[cfg(any(test, debug_assertions))]
+fn telegram_api_base_url() -> String {
+    crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| TELEGRAM_DEFAULT_API_BASE.to_string())
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TelegramMessage {
-    chat: TelegramChat,
-    #[serde(default)]
-    from: Option<TelegramUser>,
-    #[serde(default)]
-    text: Option<String>,
+#[cfg(not(any(test, debug_assertions)))]
+fn telegram_api_base_url() -> String {
+    TELEGRAM_DEFAULT_API_BASE.to_string()
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TelegramChat {
-    #[serde(rename = "type")]
-    chat_type: String,
+fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
+    format!("{}/bot{bot_token}/{method}", telegram_api_base_url())
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TelegramUser {
-    id: i64,
-    is_bot: bool,
+fn is_valid_telegram_bot_token(bot_token: &str) -> bool {
+    let Some((bot_id, secret)) = bot_token.split_once(':') else {
+        return false;
+    };
+
+    !bot_id.is_empty()
+        && !secret.is_empty()
+        && bot_id.chars().all(|c| c.is_ascii_digit())
+        && secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn build_wasm_channel_runtime_config_updates(
-    tunnel_url: Option<&str>,
-    webhook_secret: Option<&str>,
-    owner_id: Option<i64>,
-) -> HashMap<String, serde_json::Value> {
-    let mut config_updates = HashMap::new();
+/// Validate a Telegram bot token by calling the getMe API.
+/// Returns the bot username on success, or an error if the token is invalid.
+async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, ExtensionError> {
+    #[derive(serde::Deserialize)]
+    struct GetMeResponse {
+        ok: bool,
+        description: Option<String>,
+        result: Option<GetMeUser>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GetMeUser {
+        username: Option<String>,
+    }
 
-    if let Some(tunnel_url) = tunnel_url {
-        config_updates.insert(
-            "tunnel_url".to_string(),
-            serde_json::Value::String(tunnel_url.to_string()),
+    if !is_valid_telegram_bot_token(bot_token.trim()) {
+        return Err(ExtensionError::ValidationFailed(
+            "Invalid Telegram bot token format.".to_string(),
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+    let url = telegram_bot_api_url(bot_token, "getMe");
+    let resp = client.get(&url).send().await.map_err(|e| {
+        tracing::debug!(
+            is_timeout = e.is_timeout(),
+            is_connect = e.is_connect(),
+            status = e.status().map(|s| s.as_u16()),
+            "Telegram getMe request failed"
         );
+        ExtensionError::ValidationFailed("Telegram getMe request failed".to_string())
+    })?;
+
+    if !resp.status().is_success() {
+        return Err(ExtensionError::ValidationFailed(format!(
+            "Telegram token validation failed (HTTP {})",
+            resp.status()
+        )));
     }
 
-    if let Some(secret) = webhook_secret {
-        config_updates.insert(
-            "webhook_secret".to_string(),
-            serde_json::Value::String(secret.to_string()),
+    let body: GetMeResponse = resp.json().await.map_err(|e| {
+        tracing::debug!(
+            is_timeout = e.is_timeout(),
+            status = e.status().map(|s| s.as_u16()),
+            "Failed to parse Telegram getMe response"
         );
+        ExtensionError::ValidationFailed("Failed to parse Telegram getMe response".to_string())
+    })?;
+
+    if !body.ok {
+        return Err(ExtensionError::ValidationFailed(
+            body.description
+                .unwrap_or_else(|| "Telegram getMe returned ok=false".to_string()),
+        ));
     }
 
-    if let Some(owner_id) = owner_id {
-        config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-    }
-
-    config_updates
+    Ok(body
+        .result
+        .and_then(|r| r.username)
+        .filter(|u| !u.trim().is_empty()))
 }
 
-fn channel_auth_instructions(
+use crate::pairing::approval::build_runtime_config_updates as build_wasm_channel_runtime_config_updates;
+
+async fn inject_wasm_channel_secret_config_updates(
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    owner_id: &str,
     channel_name: &str,
-    secret: &crate::channels::wasm::SecretSetupSchema,
-) -> String {
-    if channel_name == TELEGRAM_CHANNEL_NAME && secret.name == "telegram_bot_token" {
-        return format!(
-            "{} After you submit it, IronClaw will show a one-time verification code. Send `/start CODE` to your bot in Telegram and IronClaw will finish setup automatically.",
-            secret.prompt
-        );
+    config_updates: &mut HashMap<String, serde_json::Value>,
+) {
+    let secret_config_mappings: &[(&str, &str)] = match channel_name {
+        "feishu" => &[
+            ("app_id", "feishu_app_id"),
+            ("app_secret", "feishu_app_secret"),
+            ("verification_token", "feishu_verification_token"),
+        ],
+        _ => return,
+    };
+
+    for &(config_key, secret_name) in secret_config_mappings {
+        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
+            config_updates.insert(
+                config_key.to_string(),
+                serde_json::Value::String(decrypted.expose().to_string()),
+            );
+        }
     }
-
-    secret.prompt.clone()
 }
 
-fn unix_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+// Auth instructions come from the capabilities file's `prompt` field (single
+// source of truth). Post-activation pairing instructions live in
+// `derive_onboarding()` (web/handlers/extensions.rs).
 
-fn generate_telegram_verification_code() -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(TELEGRAM_OWNER_BIND_CODE_LEN)
-        .map(char::from)
-        .collect::<String>()
-        .to_lowercase()
-}
-
-fn telegram_verification_deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
-    bot_username
-        .filter(|username| !username.trim().is_empty())
-        .map(|username| format!("https://t.me/{username}?start={code}"))
-}
-
-fn telegram_verification_instructions(bot_username: Option<&str>, code: &str) -> String {
-    if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
-        return format!(
-            "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
-        );
-    }
-
-    format!("Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically.")
-}
-
-fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
-    let trimmed = text.trim();
-    trimmed == code
-        || trimmed == format!("/start {code}")
-        || trimmed
-            .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-            .any(|token| token == code)
-}
-
+#[cfg(test)]
 async fn send_telegram_text_message(
     client: &reqwest::Client,
     endpoint: &str,
@@ -374,6 +373,10 @@ pub struct ExtensionManager {
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
+    latent_wasm_provider_actions: RwLock<HashMap<String, Vec<LatentProviderAction>>>,
+    /// Per-server URL cache for `mcp_supports_auth` metadata discovery.
+    /// Avoids re-issuing a network probe on every `list()` call.
+    mcp_auth_support_cache: RwLock<HashMap<String, bool>>,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -390,24 +393,31 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
-    /// Names of WASM channels that were successfully loaded at startup.
+    /// When set, settings reads/writes go through this cache-backed store
+    /// instead of the raw `Database`. Populated via `with_settings_store()`.
+    settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    /// Names of WASM/relay channels that are actively running in this process.
+    ///
+    /// This is runtime state, not install/discovery state. Installed WASM
+    /// channels are still discovered from disk in `list()`, but only channels
+    /// present in this set are reported as active.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
     installed_relay_extensions: RwLock<HashSet<String>>,
     /// Last activation error for each WASM channel (ephemeral, cleared on success).
     activation_errors: RwLock<HashMap<String, String>>,
-    /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
-    sse_sender:
-        RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
+    /// SSE broadcast manager (set post-construction via `set_sse_sender()`).
+    sse_manager: RwLock<Option<Arc<crate::channels::web::sse::SseManager>>>,
     /// Shared registry of pending OAuth flows for gateway-routed callbacks.
     ///
     /// Keyed by CSRF `state` parameter. Populated in `start_wasm_oauth()`
     /// when running in gateway mode, consumed by the web gateway's
     /// `/oauth/callback` handler.
-    pending_oauth_flows: crate::cli::oauth_defaults::PendingOAuthRegistry,
-    /// Gateway auth token for authenticating with the platform token exchange proxy.
-    /// Read once at construction from `GATEWAY_AUTH_TOKEN` env var.
-    gateway_token: Option<String>,
+    pending_oauth_flows: crate::auth::oauth::PendingOAuthRegistry,
+    /// OAuth proxy auth token for authenticating with the hosted token exchange proxy.
+    /// Resolved once at construction from `IRONCLAW_OAUTH_PROXY_AUTH_TOKEN`,
+    /// then `GATEWAY_AUTH_TOKEN` as a backward-compatible fallback.
+    oauth_proxy_auth_token: Option<String>,
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
@@ -430,11 +440,9 @@ pub struct ExtensionManager {
     /// The gateway's own base URL for building OAuth redirect URIs.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
-    pending_telegram_verification: RwLock<HashMap<String, PendingTelegramVerificationChallenge>>,
+    channel_activation_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     #[cfg(test)]
     test_wasm_channel_loader: RwLock<Option<TestWasmChannelLoader>>,
-    #[cfg(test)]
-    test_telegram_binding_resolver: RwLock<Option<TestTelegramBindingResolver>>,
 }
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
@@ -462,14 +470,123 @@ fn sanitize_url_for_logging(url: &str) -> String {
     }
 }
 
+/// Whether the install-time `kind_hint` permits falling back to local tool
+/// source discovery. Only WASM kinds are buildable from a local Cargo source;
+/// MCP servers, channel relays, and ACP agents must come from the registry or
+/// an explicit URL.
+fn kind_allows_local_discovery(kind_hint: Option<ExtensionKind>) -> bool {
+    matches!(
+        kind_hint,
+        None | Some(ExtensionKind::WasmTool) | Some(ExtensionKind::WasmChannel)
+    )
+}
+
+/// Search common directories relative to the current working directory for a
+/// tool source directory matching `name`.
+///
+/// Checks these patterns (both hyphen and underscore variants):
+/// - `tools-src/<name>/`
+/// - `tool-src/<name>/`
+/// - `<name>/` (direct subdirectory)
+///
+/// A directory is considered a match if it contains a `Cargo.toml`.
+fn find_local_tool_source(name: &str) -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_local_tool_source_in(name, &cwd)
+}
+
+/// Inner implementation that accepts an explicit search root (for testability).
+fn find_local_tool_source_in(
+    name: &str,
+    search_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    // Build a stable, priority-ordered list of name variants. Order matters:
+    // when multiple variants exist in the same search directory, the first
+    // match wins. Prefer the exact/underscore form over hyphen and
+    // suffix-stripped/added variants so behavior is reproducible across runs.
+    let underscore_name = name.replace('-', "_");
+    let hyphen_name = name.replace('_', "-");
+
+    let mut candidates: Vec<String> = Vec::with_capacity(4);
+    candidates.push(underscore_name.clone());
+    candidates.push(hyphen_name.clone());
+
+    // If the name ends with a tool suffix, also try stripped variants.
+    // Otherwise, try suffixed variants. `underscore_name` has all `-`
+    // replaced with `_`, so checking `_tool` covers both `name_tool` and
+    // `name-tool` inputs.
+    if let Some(base) = underscore_name.strip_suffix("_tool") {
+        candidates.push(base.to_string());
+        candidates.push(base.replace('_', "-"));
+    } else {
+        candidates.push(format!("{}_tool", underscore_name));
+        candidates.push(format!("{}-tool", hyphen_name));
+    }
+
+    // Remove duplicates while preserving priority order (e.g. when
+    // underscore_name == hyphen_name).
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.clone()));
+
+    let search_dirs = ["tools-src", "tool-src", "."];
+
+    for dir_prefix in &search_dirs {
+        let base = if *dir_prefix == "." {
+            search_root.to_path_buf()
+        } else {
+            search_root.join(dir_prefix)
+        };
+
+        if !base.is_dir() {
+            continue;
+        }
+
+        for candidate_name in &candidates {
+            let candidate = base.join(candidate_name);
+            if candidate.is_dir() && candidate.join("Cargo.toml").is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+/// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
+/// `None` if the file is missing, unparseable, or lacks a package name —
+/// callers fall back to the extension name in that case.
+fn read_crate_name_from_cargo_toml(source_dir: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(source_dir.join("Cargo.toml")).ok()?;
+    let value: toml::Value = contents.parse().ok()?;
+    value
+        .get("package")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
 impl ExtensionManager {
+    fn existing_extension_file_path(
+        dir: &std::path::Path,
+        name: &str,
+        suffix: &str,
+    ) -> std::path::PathBuf {
+        for candidate in extension_name_candidates(name) {
+            let path = dir.join(format!("{}{}", candidate, suffix));
+            if path.exists() {
+                return path;
+            }
+        }
+        dir.join(format!("{}{}", name, suffix))
+    }
+
     pub fn owner_id(&self) -> &str {
         &self.user_id
     }
 
     pub async fn active_tool_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
-        match self.list(None, false).await {
+        match self.list(None, false, &self.user_id).await {
             Ok(extensions) => {
                 for extension in extensions {
                     match extension.kind {
@@ -523,6 +640,8 @@ impl ExtensionManager {
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
+            latent_wasm_provider_actions: RwLock::new(HashMap::new()),
+            mcp_auth_support_cache: RwLock::new(HashMap::new()),
             channel_runtime: RwLock::new(None),
             relay_channel_manager: RwLock::new(None),
             secrets,
@@ -532,56 +651,27 @@ impl ExtensionManager {
             tunnel_url,
             user_id,
             store,
+            settings_override: None,
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
-            sse_sender: RwLock::new(None),
-            pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
-            gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
+            sse_manager: RwLock::new(None),
+            pending_oauth_flows: crate::auth::oauth::new_pending_oauth_registry(),
+            oauth_proxy_auth_token: crate::auth::oauth::oauth_proxy_auth_token(),
             relay_config: crate::config::RelayConfig::from_env(),
             relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
             relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
-            pending_telegram_verification: RwLock::new(HashMap::new()),
+            channel_activation_locks: RwLock::new(HashMap::new()),
             #[cfg(test)]
             test_wasm_channel_loader: RwLock::new(None),
-            #[cfg(test)]
-            test_telegram_binding_resolver: RwLock::new(None),
         }
     }
 
     #[cfg(test)]
     async fn set_test_wasm_channel_loader(&self, loader: TestWasmChannelLoader) {
         *self.test_wasm_channel_loader.write().await = Some(loader);
-    }
-
-    #[cfg(test)]
-    async fn set_test_telegram_binding_resolver(&self, resolver: TestTelegramBindingResolver) {
-        *self.test_telegram_binding_resolver.write().await = Some(resolver);
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn set_test_telegram_pending_verification(
-        &self,
-        code: &str,
-        bot_username: Option<&str>,
-    ) {
-        let code = code.to_string();
-        let bot_username = bot_username.map(str::to_string);
-        self.set_test_telegram_binding_resolver(Arc::new(move |_token, existing_owner_id| {
-            if existing_owner_id.is_some() {
-                return Err(ExtensionError::Other(
-                    "unexpected existing owner binding".to_string(),
-                ));
-            }
-            Ok(TelegramBindingResult::Pending(VerificationChallenge {
-                code: code.clone(),
-                instructions: telegram_verification_instructions(bot_username.as_deref(), &code),
-                deep_link: telegram_verification_deep_link(bot_username.as_deref(), &code),
-            }))
-        }))
-        .await;
     }
 
     /// Enable gateway mode so OAuth flows return auth URLs to the frontend
@@ -606,7 +696,7 @@ impl ExtensionManager {
         if self.gateway_mode.load(std::sync::atomic::Ordering::Acquire) {
             return true;
         }
-        if crate::cli::oauth_defaults::use_gateway_callback() {
+        if crate::auth::oauth::use_gateway_callback() {
             return true;
         }
         self.tunnel_url
@@ -614,7 +704,7 @@ impl ExtensionManager {
             .filter(|u| !u.is_empty())
             .and_then(|raw| url::Url::parse(raw).ok())
             .and_then(|u| u.host_str().map(String::from))
-            .map(|host| !crate::cli::oauth_defaults::is_loopback_host(&host))
+            .map(|host| !crate::auth::oauth::is_loopback_host(&host))
             .unwrap_or(false)
     }
 
@@ -626,11 +716,9 @@ impl ExtensionManager {
     /// 3. `tunnel_url` (from config)
     /// 4. `None` (local/CLI mode)
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
-        use crate::cli::oauth_defaults;
-        if oauth_defaults::use_gateway_callback() {
-            return Some(normalize_hosted_callback_url(
-                &oauth_defaults::callback_url(),
-            ));
+        use crate::auth::oauth;
+        if oauth::use_gateway_callback() {
+            return Some(normalize_hosted_callback_url(&oauth::callback_url()));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -644,7 +732,7 @@ impl ExtensionManager {
             .and_then(|raw| {
                 let url = url::Url::parse(raw).ok()?;
                 let host = url.host_str().map(String::from)?;
-                if oauth_defaults::is_loopback_host(&host) {
+                if oauth::is_loopback_host(&host) {
                     return None;
                 }
                 let base = raw.trim_end_matches('/');
@@ -659,6 +747,66 @@ impl ExtensionManager {
                 "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
             )
         })
+    }
+
+    /// Resolve the relay URL override for an extension from settings.
+    ///
+    /// Returns `Some(url)` if a non-empty per-extension `relay_url` override is
+    /// set for the given extension; otherwise returns `None` and callers should
+    /// fall back to the env-level `RelayConfig`.
+    ///
+    /// Uses `self.user_id` (owner scope) for consistency with `configure()`,
+    /// which also writes setting_path fields under the owner scope.
+    ///
+    /// The override is validated: only `http` / `https` schemes are accepted
+    /// and the URL must not contain userinfo (embedded credentials).  This
+    /// prevents a malicious override from exfiltrating the instance-wide relay
+    /// API key to an attacker-controlled host.
+    async fn effective_relay_url(&self, name: &str) -> Option<String> {
+        if let Some(ref store) = self.store {
+            let key = format!("extensions.{name}.relay_url");
+            if let Ok(Some(v)) = store.get_setting(&self.user_id, &key).await {
+                let url = v
+                    .as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(ref u) = url {
+                    // Validate the override to prevent API-key exfiltration:
+                    // only allow http(s) with no embedded credentials.
+                    match url::Url::parse(u) {
+                        Ok(parsed)
+                            if (parsed.scheme() == "http" || parsed.scheme() == "https")
+                                && parsed.username().is_empty()
+                                && parsed.password().is_none() =>
+                        {
+                            tracing::trace!(
+                                extension = %name,
+                                relay_url_host = %parsed.host_str().unwrap_or("unknown"),
+                                "effective_relay_url: using per-extension override from settings"
+                            );
+                            return url;
+                        }
+                        Ok(parsed) => {
+                            tracing::warn!(
+                                extension = %name,
+                                scheme = %parsed.scheme(),
+                                has_userinfo = !parsed.username().is_empty() || parsed.password().is_some(),
+                                "effective_relay_url: rejecting override — \
+                                 only http/https without embedded credentials is allowed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                error = %e,
+                                "effective_relay_url: rejecting override — invalid URL"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Get the shared relay event sender for the webhook endpoint.
@@ -729,7 +877,7 @@ impl ExtensionManager {
             }
         }
 
-        let store = self.store.as_ref()?;
+        let store = self.settings_store()?;
         let key = format!("channels.wasm_channel_owner_ids.{name}");
         match store.get_setting(&self.user_id, &key).await {
             Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
@@ -746,24 +894,18 @@ impl ExtensionManager {
         }
     }
 
-    async fn set_channel_owner_id(&self, name: &str, owner_id: i64) -> Result<(), ExtensionError> {
-        if let Some(store) = self.store.as_ref() {
-            store
-                .set_setting(
-                    &self.user_id,
-                    &format!("channels.wasm_channel_owner_ids.{name}"),
-                    &serde_json::json!(owner_id),
-                )
-                .await
-                .map_err(|e| ExtensionError::Config(e.to_string()))?;
+    async fn current_channel_owner_actor_id(&self, name: &str) -> Option<String> {
+        if let Some(owner_id) = self.current_channel_owner_id(name).await {
+            return Some(owner_id.to_string());
         }
 
-        let mut rt_guard = self.channel_runtime.write().await;
-        if let Some(rt) = rt_guard.as_mut() {
-            rt.wasm_channel_owner_ids.insert(name.to_string(), owner_id);
-        }
-
-        Ok(())
+        let rt_guard = self.channel_runtime.read().await;
+        let rt = (*rt_guard).as_ref()?;
+        rt.pairing_store
+            .external_id_for_owner(name, &crate::ownership::OwnerId::from(self.user_id.clone()))
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn load_channel_runtime_config_overrides(
@@ -773,7 +915,7 @@ impl ExtensionManager {
         let mut overrides = HashMap::new();
 
         if name == TELEGRAM_CHANNEL_NAME
-            && let Some(store) = self.store.as_ref()
+            && let Some(store) = self.settings_store()
             && let Ok(Some(serde_json::Value::String(username))) = store
                 .get_setting(&self.user_id, &bot_username_setting_key(name))
                 .await
@@ -786,87 +928,110 @@ impl ExtensionManager {
     }
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
-        self.current_channel_owner_id(name).await.is_some()
+        self.current_channel_owner_actor_id(name).await.is_some()
+    }
+
+    async fn channel_activation_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        {
+            let locks = self.channel_activation_locks.read().await;
+            if let Some(lock) = locks.get(name) {
+                return Arc::clone(lock);
+            }
+        }
+        let mut locks = self.channel_activation_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    pub async fn complete_pairing_approval(
+        &self,
+        channel_name: &str,
+        external_id: &str,
+    ) -> Result<(), ExtensionError> {
+        // Normalize to lowercase — pairing storage and webhook routes are
+        // lowercase, so mixed-case requests must resolve consistently.
+        let channel_name = channel_name.to_ascii_lowercase();
+        let channel_name = channel_name.as_str();
+        let activation_lock = self.channel_activation_lock(channel_name).await;
+        let _guard = activation_lock.lock().await;
+
+        let router = {
+            let rt_guard = self.channel_runtime.read().await;
+            match rt_guard.as_ref() {
+                Some(rt) => Arc::clone(&rt.wasm_channel_router),
+                None => return Ok(()),
+            }
+        };
+
+        let webhook_path = format!("/webhook/{}", channel_name);
+        let Some(existing_channel) = router.get_channel_for_path(&webhook_path).await else {
+            return Ok(());
+        };
+
+        let external_id = crate::pairing::ExternalId::from(external_id.to_string());
+        let config_overrides = self
+            .load_channel_runtime_config_overrides(channel_name)
+            .await;
+        let deps = crate::pairing::approval::ApprovalDeps {
+            tunnel_url: self.tunnel_url.as_deref(),
+            store: self.store.as_ref(),
+            user_id: &self.user_id,
+            config_overrides,
+        };
+        let result = crate::pairing::approval::propagate_approval(
+            &existing_channel,
+            channel_name,
+            &external_id,
+            &deps,
+        )
+        .await;
+
+        // Only cache the owner binding after runtime propagation succeeds.
+        // If `propagate_approval` fails, the caller rolls back the durable
+        // pairing row and this in-memory fast-path must not report the channel
+        // as claimed until restart.
+        if result.is_ok()
+            && let Ok(owner_id_numeric) = external_id.as_str().parse::<i64>()
+        {
+            let mut rt_guard = self.channel_runtime.write().await;
+            if let Some(rt) = rt_guard.as_mut() {
+                rt.wasm_channel_owner_ids
+                    .insert(channel_name.to_string(), owner_id_numeric);
+            }
+        }
+
+        result
+    }
+
+    /// Whether any sender has been paired (via `channel_identities`) for this
+    /// WASM channel. Used by the gateway extensions list to derive a correct
+    /// `activation_status` instead of relying on `ext.active` as a proxy.
+    ///
+    /// Returns false if no DB-backed pairing store is available — the noop
+    /// pairing store cannot have rows. See nearai/ironclaw#1921.
+    pub async fn has_wasm_channel_pairing(&self, name: &str) -> bool {
+        let rt_guard = self.channel_runtime.read().await;
+        let Some(ref rt) = *rt_guard else {
+            return false;
+        };
+        match rt.pairing_store.read_allow_from(name).await {
+            Ok(allow) => !allow.is_empty(),
+            Err(error) => {
+                tracing::debug!(
+                    channel = %name,
+                    error = %error,
+                    "Failed to read paired senders from pairing store"
+                );
+                false
+            }
+        }
     }
 
     pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
-        self.current_channel_owner_id(name)
-            .await
-            .map(|owner_id| owner_id.to_string())
-    }
-
-    async fn get_pending_telegram_verification(
-        &self,
-        name: &str,
-    ) -> Option<PendingTelegramVerificationChallenge> {
-        let now = unix_timestamp_secs();
-        let mut guard = self.pending_telegram_verification.write().await;
-        let challenge = guard.get(name).cloned()?;
-        if challenge.expires_at_unix <= now {
-            guard.remove(name);
-            return None;
-        }
-        Some(challenge)
-    }
-
-    async fn set_pending_telegram_verification(
-        &self,
-        name: &str,
-        challenge: PendingTelegramVerificationChallenge,
-    ) {
-        self.pending_telegram_verification
-            .write()
-            .await
-            .insert(name.to_string(), challenge);
-    }
-
-    async fn clear_pending_telegram_verification(&self, name: &str) {
-        self.pending_telegram_verification
-            .write()
-            .await
-            .remove(name);
-    }
-
-    async fn issue_telegram_verification_challenge(
-        &self,
-        client: &reqwest::Client,
-        name: &str,
-        bot_token: &str,
-        bot_username: Option<&str>,
-    ) -> Result<VerificationChallenge, ExtensionError> {
-        let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
-        let delete_webhook_resp = client
-            .post(&delete_webhook_url)
-            .query(&[("drop_pending_updates", "true")])
-            .send()
-            .await
-            .map_err(|e| telegram_request_error("deleteWebhook", &e))?;
-        if !delete_webhook_resp.status().is_success() {
-            return Err(ExtensionError::Other(format!(
-                "Telegram deleteWebhook failed (HTTP {})",
-                delete_webhook_resp.status()
-            )));
-        }
-
-        let challenge = PendingTelegramVerificationChallenge {
-            code: generate_telegram_verification_code(),
-            bot_username: bot_username.map(str::to_string),
-            expires_at_unix: unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
-        };
-        self.set_pending_telegram_verification(name, challenge.clone())
-            .await;
-
-        Ok(VerificationChallenge {
-            code: challenge.code.clone(),
-            instructions: telegram_verification_instructions(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-            deep_link: telegram_verification_deep_link(
-                challenge.bot_username.as_deref(),
-                &challenge.code,
-            ),
-        })
+        self.current_channel_owner_actor_id(name).await
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -879,45 +1044,81 @@ impl ExtensionManager {
 
     /// Check if a channel name corresponds to a relay extension (has stored team_id
     /// or is tracked in the installed relay extensions set).
-    pub async fn is_relay_channel(&self, name: &str) -> bool {
+    pub async fn is_relay_channel(&self, name: &str, user_id: &str) -> bool {
         // Check in-memory installed set first (supports no-store mode)
         if self.installed_relay_extensions.read().await.contains(name) {
             return true;
         }
-        // Then check persistent settings
+        // Check for stored team_id (persisted across restarts by the OAuth callback)
         if let Some(ref store) = self.store {
-            let team_id_key = format!("relay:{}:team_id", name);
-            store
-                .get_setting(&self.user_id, &team_id_key)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-        } else {
-            false
+            let key = format!("relay:{}:team_id", name);
+            if let Ok(Some(v)) = store.get_setting(user_id, &key).await {
+                return v.as_str().is_some_and(|s| !s.is_empty());
+            }
         }
+        false
+    }
+
+    /// Check whether a stored `team_id` setting exists for the given relay extension.
+    ///
+    /// Unlike [`is_relay_channel`], this does **not** consult the in-memory
+    /// `installed_relay_extensions` set — it only looks at the persistent settings
+    /// store.  This distinction matters for `auth_channel_relay`: an extension can
+    /// be *installed* (present in the in-memory set) but not yet *authenticated*
+    /// (no OAuth completed, no team_id stored).
+    async fn has_stored_team_id(&self, name: &str, _user_id: &str) -> bool {
+        if let Some(ref store) = self.store {
+            let key = format!("relay:{}:team_id", name);
+            // Use owner scope (self.user_id) for consistency: the OAuth callback
+            // stores team_id under state.owner_id which maps to self.user_id.
+            match store.get_setting(&self.user_id, &key).await {
+                Ok(Some(v)) => {
+                    let has_id = v.as_str().is_some_and(|s| !s.is_empty());
+                    tracing::trace!(
+                        extension = %name,
+                        has_team_id = has_id,
+                        "has_stored_team_id: checked store"
+                    );
+                    return has_id;
+                }
+                Ok(None) => {
+                    tracing::trace!(
+                        extension = %name,
+                        "has_stored_team_id: no team_id setting found"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        extension = %name,
+                        error = %e,
+                        "has_stored_team_id: failed to read from settings store"
+                    );
+                }
+            }
+        }
+        false
     }
 
     /// Restore persisted relay channels after startup.
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
-    /// a stored stream token), and activates each via `activate_stored_relay()`.
+    /// a stored team_id setting), and activates each via `activate_stored_relay()`.
     /// Skips channels that are already active.
     ///
     /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
     /// Otherwise, each activation attempt fails with "Channel manager not initialized".
-    pub async fn restore_relay_channels(&self) {
-        let persisted = self.load_persisted_active_channels().await;
+    pub async fn restore_relay_channels(&self, user_id: &str) {
+        let persisted = self.load_persisted_active_channels(user_id).await;
         let already_active = self.active_channel_names.read().await.clone();
 
         for name in &persisted {
             if already_active.contains(name) {
                 continue;
             }
-            if !self.is_relay_channel(name).await {
+            if !self.is_relay_channel(name, user_id).await {
                 continue;
             }
-            match self.activate_stored_relay(name).await {
+            match self.activate_stored_relay(name, user_id).await {
                 Ok(_) => {
                     tracing::debug!(channel = %name, "Restored persisted relay channel");
                 }
@@ -962,8 +1163,10 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
-    /// Register channel names that were loaded at startup.
-    /// Called after WASM channels are loaded so `list()` reports accurate active status.
+    /// Register channel names that are already running in the current process.
+    ///
+    /// Startup uses this after restoring persisted active channels; hot
+    /// activation updates the same set after a channel is successfully started.
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
@@ -972,8 +1175,8 @@ impl ExtensionManager {
     /// Persist the set of active channel names to the settings store.
     ///
     /// Saved under key `activated_channels` so channels auto-activate on restart.
-    async fn persist_active_channels(&self) {
-        let Some(ref store) = self.store else {
+    async fn persist_active_channels(&self, user_id: &str) {
+        let Some(store) = self.settings_store() else {
             return;
         };
         let names: Vec<String> = self
@@ -985,7 +1188,7 @@ impl ExtensionManager {
             .collect();
         let value = serde_json::json!(names);
         if let Err(e) = store
-            .set_setting(&self.user_id, "activated_channels", &value)
+            .set_setting(user_id, "activated_channels", &value)
             .await
         {
             tracing::warn!(error = %e, "Failed to persist activated_channels setting");
@@ -996,13 +1199,13 @@ impl ExtensionManager {
     ///
     /// Returns channel names that were activated in a prior session so they can
     /// be auto-activated at startup.
-    pub async fn load_persisted_active_channels(&self) -> Vec<String> {
-        let Some(ref store) = self.store else {
+    pub async fn load_persisted_active_channels(&self, user_id: &str) -> Vec<String> {
+        let Some(store) = self.settings_store() else {
             return Vec::new();
         };
-        match store.get_setting(&self.user_id, "activated_channels").await {
-            Ok(Some(value)) => match serde_json::from_value(value) {
-                Ok(names) => names,
+        match store.get_setting(user_id, "activated_channels").await {
+            Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
+                Ok(names) => normalize_extension_names(names),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to deserialize activated_channels");
                     Vec::new()
@@ -1016,20 +1219,89 @@ impl ExtensionManager {
         }
     }
 
-    /// Set the SSE broadcast sender for pushing extension status events to the web UI.
-    pub async fn set_sse_sender(
+    /// Resolve which channels should be restored at startup.
+    ///
+    /// `activated_channels` is authoritative once present, including an empty
+    /// list after the user deactivates everything. The setup wizard's
+    /// `channels.wasm_channels` list is only a first-run fallback before any
+    /// runtime activation state has been persisted.
+    pub async fn load_startup_active_channels(
         &self,
-        sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
-    ) {
-        *self.sse_sender.write().await = Some(sender);
+        user_id: &str,
+        configured_names: Vec<String>,
+    ) -> Vec<String> {
+        let Some(store) = self.settings_store() else {
+            return normalize_extension_names(configured_names);
+        };
+
+        match store.get_setting(user_id, "activated_channels").await {
+            Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
+                Ok(names) => normalize_extension_names(names),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to deserialize activated_channels");
+                    Vec::new()
+                }
+            },
+            Ok(None) => normalize_extension_names(configured_names),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load activated_channels setting");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Set the SSE broadcast sender for pushing extension status events to the web UI.
+    pub async fn set_sse_sender(&self, sse: Arc<crate::channels::web::sse::SseManager>) {
+        *self.sse_manager.write().await = Some(sse);
     }
 
     /// Returns the pending OAuth flow registry for sharing with the web gateway.
     ///
     /// The gateway's `/oauth/callback` handler uses this to look up pending flows
     /// by CSRF `state` parameter and complete the token exchange.
-    pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
+    pub fn pending_oauth_flows(&self) -> &crate::auth::oauth::PendingOAuthRegistry {
         &self.pending_oauth_flows
+    }
+
+    pub async fn sse_sender(&self) -> Option<Arc<crate::channels::web::sse::SseManager>> {
+        self.sse_manager.read().await.clone()
+    }
+
+    pub fn database(&self) -> Option<&Arc<dyn crate::db::Database>> {
+        self.store.as_ref()
+    }
+
+    /// Route settings through the cached store when available, falling back
+    /// to the raw Database.
+    pub(crate) fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
+        if let Some(ref ss) = self.settings_override {
+            Some(ss.as_ref() as &dyn crate::db::SettingsStore)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+        }
+    }
+
+    /// Arc-wrapped settings store for passing to subsystems that need owned access.
+    pub(crate) fn settings_store_arc(&self) -> Option<Arc<dyn crate::db::SettingsStore>> {
+        if let Some(ref ss) = self.settings_override {
+            Some(Arc::clone(ss) as Arc<dyn crate::db::SettingsStore>)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>)
+        }
+    }
+
+    /// Attach a cached settings store so settings reads/writes route through
+    /// the cache layer, keeping the agent loop's view coherent.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_override = Some(store);
+        self
     }
 
     async fn clear_pending_extension_auth(&self, name: &str) {
@@ -1090,21 +1362,29 @@ impl ExtensionManager {
     }
 
     async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
-        oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+        oauth::sweep_expired_flows(&self.pending_oauth_flows).await;
 
-        let hosted_state = oauth_defaults::build_platform_state(&request.expected_state);
+        let hosted_state = oauth::build_platform_state(&request.expected_state);
         let auth_url = Self::rewrite_oauth_state_param(
             request.auth_url,
             &request.expected_state,
             &hosted_state,
         );
 
-        self.pending_oauth_flows
-            .write()
-            .await
-            .insert(request.expected_state, request.flow);
+        // Dedupe by (secret_name, user_id): a retry from the same user for
+        // the same credential should reuse a single pending entry rather than
+        // accumulate stale flows. This logic used to live in
+        // bridge::auth_manager and was lost when the call moved here; without
+        // it, repeated `check_action_auth` calls leak pending entries.
+        let secret_name = request.flow.secret_name.clone();
+        let user_id = request.flow.user_id.clone();
+        let mut pending_flows = self.pending_oauth_flows.write().await;
+        pending_flows
+            .retain(|_, flow| !(flow.secret_name == secret_name && flow.user_id == user_id));
+        pending_flows.insert(request.expected_state, request.flow);
+        drop(pending_flows);
 
         self.pending_auth.write().await.insert(
             request.name.clone(),
@@ -1116,19 +1396,49 @@ impl ExtensionManager {
             },
         );
 
-        AuthResult::awaiting_authorization(
-            request.name,
-            request.kind,
+        match request.instructions {
+            Some(instructions) => AuthResult::awaiting_authorization_with_guidance(
+                request.name,
+                request.kind,
+                auth_url,
+                "gateway".to_string(),
+                instructions,
+                request.setup_url,
+            ),
+            None => AuthResult::awaiting_authorization(
+                request.name,
+                request.kind,
+                auth_url,
+                "gateway".to_string(),
+            ),
+        }
+    }
+
+    pub async fn start_hosted_oauth_flow(
+        &self,
+        name: String,
+        kind: ExtensionKind,
+        auth_url: String,
+        expected_state: String,
+        flow: crate::auth::oauth::PendingOAuthFlow,
+    ) -> AuthResult {
+        self.start_gateway_oauth_flow(HostedOAuthFlowStart {
+            name,
+            kind,
             auth_url,
-            "gateway".to_string(),
-        )
+            expected_state,
+            flow,
+            instructions: None,
+            setup_url: None,
+        })
+        .await
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
-        if let Some(ref sender) = *self.sse_sender.read().await {
-            let _ = sender.send(crate::channels::web::types::SseEvent::ExtensionStatus {
-                extension_name: name.to_string(),
+        if let Some(ref sse) = *self.sse_manager.read().await {
+            sse.broadcast(ironclaw_common::AppEvent::ExtensionStatus {
+                extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
             });
@@ -1171,14 +1481,15 @@ impl ExtensionManager {
         name: &str,
         url: Option<&str>,
         kind_hint: Option<ExtensionKind>,
+        user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
         let sanitized_url = url.map(sanitize_url_for_logging);
         tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
-        Self::validate_extension_name(name)?;
 
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
-        if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
-            return self.install_from_entry(&entry).await.map_err(|e| {
+        if let Some(entry) = self.registry.get_with_kind(&name, kind_hint).await {
+            return self.install_from_entry(&entry, user_id).await.map_err(|e| {
                 tracing::error!(extension = %name, error = %e, "Extension install failed");
                 e
             });
@@ -1188,10 +1499,10 @@ impl ExtensionManager {
         if let Some(url) = url {
             let kind = kind_hint.unwrap_or_else(|| infer_kind_from_url(url));
             return match kind {
-                ExtensionKind::McpServer => self.install_mcp_from_url(name, url).await,
-                ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
+                ExtensionKind::McpServer => self.install_mcp_from_url(&name, url, user_id).await,
+                ExtensionKind::WasmTool => self.install_wasm_tool_from_url(&name, url).await,
                 ExtensionKind::WasmChannel => {
-                    self.install_wasm_channel_from_url(name, url, None).await
+                    self.install_wasm_channel_from_url(&name, url, None).await
                 }
                 ExtensionKind::ChannelRelay => {
                     // ChannelRelay extensions are installed from registry, not by URL
@@ -1199,6 +1510,10 @@ impl ExtensionManager {
                         "Channel relay extensions cannot be installed by URL".to_string(),
                     ))
                 }
+                ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
+                    "ACP agents are configured via 'ironclaw acp add', not the extension manager"
+                        .to_string(),
+                )),
             }
             .map_err(|e| {
                 let sanitized = sanitize_url_for_logging(url);
@@ -1207,11 +1522,24 @@ impl ExtensionManager {
             });
         }
 
+        // Try to discover a local tool source directory in the working directory.
+        // Only applies to WASM kinds — MCP servers, channel relays, and ACP agents
+        // can't be built from a local Cargo-based source.
+        if kind_allows_local_discovery(kind_hint)
+            && let Some(source_dir) = find_local_tool_source(&name)
+        {
+            return self
+                .install_from_local_source(&name, &source_dir, kind_hint)
+                .await;
+        }
+
         let err = ExtensionError::NotFound(format!(
-            "'{}' not found in registry. Try searching with discover:true or provide a URL.",
+            "'{}' not found in registry or local directories. \
+             Try searching with discover:true, provide a URL, \
+             or ensure tool source exists in tools-src/{0}/, tool-src/{0}/, or ./{0}/.",
             name
         ));
-        tracing::warn!(extension = %name, "Extension not found in registry");
+        tracing::warn!(extension = %name, "Extension not found in registry or locally");
         Err(err)
     }
 
@@ -1219,32 +1547,372 @@ impl ExtensionManager {
     ///
     /// Read-only for WASM extensions; may initiate OAuth for MCP servers.
     /// To provide secrets, use [`configure()`] instead.
-    pub async fn auth(&self, name: &str) -> Result<AuthResult, ExtensionError> {
+    pub async fn auth(&self, name: &str, user_id: &str) -> Result<AuthResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
         // Clean up expired pending auths
         self.cleanup_expired_auths().await;
 
         // Determine what kind of extension this is
-        let kind = self.determine_installed_kind(name).await?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         match kind {
-            ExtensionKind::McpServer => self.auth_mcp(name).await,
-            ExtensionKind::WasmTool => self.auth_wasm_tool(name).await,
-            ExtensionKind::WasmChannel => self.auth_wasm_channel_status(name).await,
-            ExtensionKind::ChannelRelay => self.auth_channel_relay(name).await,
+            ExtensionKind::McpServer => self.auth_mcp(&name, user_id).await,
+            ExtensionKind::WasmTool => self.auth_wasm_tool(&name, user_id).await,
+            ExtensionKind::WasmChannel => self.auth_wasm_channel_status(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.auth_channel_relay(&name, user_id).await,
+            ExtensionKind::AcpAgent => Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::AcpAgent,
+                status: crate::extensions::AuthStatus::NoAuthRequired,
+            }),
         }
     }
 
     /// Activate an installed (and optionally authenticated) extension.
-    pub async fn activate(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name).await?;
+    pub async fn activate(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         match kind {
-            ExtensionKind::McpServer => self.activate_mcp(name).await,
-            ExtensionKind::WasmTool => self.activate_wasm_tool(name).await,
-            ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
-            ExtensionKind::ChannelRelay => self.activate_channel_relay(name).await,
+            ExtensionKind::McpServer => self.activate_mcp(&name, user_id).await,
+            ExtensionKind::WasmTool => self.activate_wasm_tool(&name, user_id).await,
+            ExtensionKind::WasmChannel => self.activate_wasm_channel(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.activate_channel_relay(&name, user_id).await,
+            ExtensionKind::AcpAgent => Ok(ActivateResult {
+                name: name.to_string(),
+                kind: ExtensionKind::AcpAgent,
+                tools_loaded: Vec::new(),
+                message: format!(
+                    "ACP agent '{}' is managed via 'ironclaw acp' commands",
+                    name
+                ),
+            }),
         }
+    }
+
+    /// Canonical kernel-owned readiness check for an installed extension.
+    pub async fn ensure_extension_ready(
+        &self,
+        name: &str,
+        user_id: &str,
+        intent: EnsureReadyIntent,
+    ) -> Result<EnsureReadyOutcome, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let kind = match self.determine_installed_kind(&name, user_id).await {
+            Ok(kind) => kind,
+            Err(ExtensionError::NotInstalled(_))
+                if matches!(
+                    intent,
+                    EnsureReadyIntent::PostInstall | EnsureReadyIntent::ExplicitActivate
+                ) =>
+            {
+                // Auto-install only on explicit user actions (PostInstall after a
+                // user-initiated install, or ExplicitActivate). For
+                // `UseCapability` (LLM-driven latent action invocation) we
+                // intentionally do NOT silently install registry extensions —
+                // that path must surface as `NotInstalled` so the bridge can
+                // route it through the approval/install gate.
+                let entry = self
+                    .registry
+                    .get(&name)
+                    .await
+                    .ok_or_else(|| ExtensionError::NotInstalled(name.clone()))?;
+                tracing::debug!(
+                    extension = %name,
+                    kind = %entry.kind,
+                    "Auto-installing registry extension on explicit user action"
+                );
+                self.install_from_entry(&entry, user_id).await?;
+                self.determine_installed_kind(&name, user_id).await?
+            }
+            Err(err) => return Err(err),
+        };
+
+        match self.auth(&name, user_id).await? {
+            auth_result @ AuthResult {
+                status:
+                    crate::extensions::AuthStatus::AwaitingAuthorization { .. }
+                    | crate::extensions::AuthStatus::AwaitingToken { .. },
+                ..
+            } => {
+                return Ok(EnsureReadyOutcome::NeedsAuth {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsAuth,
+                    credential_name: self
+                        .first_missing_auth_secret_pub(&auth_result.name, user_id)
+                        .await,
+                    auth: auth_result,
+                });
+            }
+            AuthResult {
+                status:
+                    crate::extensions::AuthStatus::NeedsSetup {
+                        instructions,
+                        setup_url,
+                    },
+                ..
+            } => {
+                return Ok(EnsureReadyOutcome::NeedsSetup {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsSetup,
+                    instructions,
+                    setup_url,
+                });
+            }
+            AuthResult {
+                status:
+                    crate::extensions::AuthStatus::Authenticated
+                    | crate::extensions::AuthStatus::NoAuthRequired,
+                ..
+            } => {}
+        }
+
+        if self.is_extension_active(&name, kind).await {
+            return Ok(EnsureReadyOutcome::Ready {
+                name,
+                kind,
+                phase: ExtensionPhase::Ready,
+                activation: None,
+            });
+        }
+
+        match intent {
+            EnsureReadyIntent::ExplicitAuth => {
+                return Ok(EnsureReadyOutcome::Ready {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsActivation,
+                    activation: None,
+                });
+            }
+            EnsureReadyIntent::UseCapability
+            | EnsureReadyIntent::PostInstall
+            | EnsureReadyIntent::ExplicitActivate => {}
+        }
+
+        match self.activate(&name, user_id).await {
+            Ok(activation) => Ok(EnsureReadyOutcome::Ready {
+                name,
+                kind,
+                phase: ExtensionPhase::Ready,
+                activation: Some(activation),
+            }),
+            Err(ExtensionError::AuthRequired) => match self.auth(&name, user_id).await? {
+                auth_result @ AuthResult {
+                    status:
+                        crate::extensions::AuthStatus::AwaitingAuthorization { .. }
+                        | crate::extensions::AuthStatus::AwaitingToken { .. },
+                    ..
+                } => Ok(EnsureReadyOutcome::NeedsAuth {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsAuth,
+                    credential_name: self
+                        .first_missing_auth_secret_pub(&auth_result.name, user_id)
+                        .await,
+                    auth: auth_result,
+                }),
+                AuthResult {
+                    status:
+                        crate::extensions::AuthStatus::NeedsSetup {
+                            instructions,
+                            setup_url,
+                        },
+                    ..
+                } => Ok(EnsureReadyOutcome::NeedsSetup {
+                    name,
+                    kind,
+                    phase: ExtensionPhase::NeedsSetup,
+                    instructions,
+                    setup_url,
+                }),
+                _ => Err(ExtensionError::AuthRequired),
+            },
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn latent_provider_actions_default_user(&self) -> Vec<LatentProviderAction> {
+        self.latent_provider_actions(&self.user_id).await
+    }
+
+    pub async fn latent_provider_action(
+        &self,
+        action_name: &str,
+        user_id: &str,
+    ) -> Option<LatentProviderAction> {
+        self.latent_provider_actions(user_id)
+            .await
+            .into_iter()
+            .find(|action| action.action_name == action_name)
+    }
+
+    pub async fn latent_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
+        let mut actions = Vec::new();
+        let mut seen_actions = HashSet::new();
+
+        let mut push_action = |action: LatentProviderAction| {
+            if seen_actions.insert(action.action_name.clone()) {
+                actions.push(action);
+            }
+        };
+
+        if let Ok(servers) = self.load_mcp_servers(user_id).await {
+            for server in servers.servers {
+                if !self
+                    .is_extension_active(&server.name, ExtensionKind::McpServer)
+                    .await
+                {
+                    for action in self.latent_actions_for_mcp_server(&server) {
+                        push_action(action);
+                    }
+                }
+            }
+        }
+
+        for action in self.cached_latent_wasm_provider_actions(user_id).await {
+            if self
+                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool)
+                .await
+            {
+                continue;
+            }
+            actions.push(action);
+        }
+
+        actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
+        actions
+    }
+
+    async fn cached_latent_wasm_provider_actions(
+        &self,
+        user_id: &str,
+    ) -> Vec<LatentProviderAction> {
+        // Per-user cache: `build_*` calls `determine_installed_kind(name, user_id)`
+        // which returns user-scoped results, so a single global cache would
+        // leak installed-kind state across tenants.
+        if let Some(actions) = self
+            .latent_wasm_provider_actions
+            .read()
+            .await
+            .get(user_id)
+            .cloned()
+        {
+            return actions;
+        }
+
+        let actions = self.build_latent_wasm_provider_actions(user_id).await;
+        self.latent_wasm_provider_actions
+            .write()
+            .await
+            .insert(user_id.to_string(), actions.clone());
+        actions
+    }
+
+    async fn build_latent_wasm_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
+        let mut actions: Vec<LatentProviderAction> = Vec::new();
+        let mut seen_actions: HashSet<String> = HashSet::new();
+        let mut push_action = |action: LatentProviderAction| {
+            if seen_actions.insert(action.action_name.clone()) {
+                actions.push(action);
+            }
+        };
+
+        if self.wasm_tools_dir.exists()
+            && let Ok(tools) = discover_tools(&self.wasm_tools_dir).await
+        {
+            for (name, _) in tools {
+                let description = self
+                    .load_tool_capabilities(&name)
+                    .await
+                    .and_then(|cap| cap.description);
+                let description = if let Some(description) = description {
+                    description
+                } else {
+                    self.registry
+                        .get_with_kind(&name, Some(ExtensionKind::WasmTool))
+                        .await
+                        .map(|entry| entry.description)
+                        .unwrap_or_else(|| format!("Use the '{}' tool provider.", name))
+                };
+                push_action(LatentProviderAction {
+                    action_name: name.clone(),
+                    provider_extension: name.clone(),
+                    description: format!(
+                        "{} The runtime will activate/authenticate this provider automatically before use.",
+                        description
+                    ),
+                    parameters_schema: serde_json::json!({"type":"object"}),
+                });
+            }
+        }
+
+        for result in self.registry.search("").await {
+            let entry = result.entry;
+            if !matches!(
+                entry.kind,
+                ExtensionKind::WasmTool | ExtensionKind::McpServer
+            ) {
+                continue;
+            }
+            if self
+                .determine_installed_kind(&entry.name, user_id)
+                .await
+                .is_ok()
+            {
+                continue;
+            }
+
+            let description = match entry.kind {
+                ExtensionKind::McpServer => format!(
+                    "{} The runtime will install, connect, and authenticate this provider automatically before concrete provider actions become available.",
+                    entry.description
+                ),
+                ExtensionKind::WasmTool => format!(
+                    "{} The runtime will install and authenticate this provider automatically before use.",
+                    entry.description
+                ),
+                ExtensionKind::WasmChannel
+                | ExtensionKind::ChannelRelay
+                | ExtensionKind::AcpAgent => continue,
+            };
+            push_action(LatentProviderAction {
+                action_name: entry.name.clone(),
+                provider_extension: entry.name,
+                description,
+                parameters_schema: serde_json::json!({"type":"object"}),
+            });
+        }
+
+        actions.sort_by(|a, b| a.action_name.cmp(&b.action_name));
+        actions
+    }
+
+    async fn invalidate_latent_wasm_provider_actions_cache(&self) {
+        self.latent_wasm_provider_actions.write().await.clear();
+    }
+
+    pub async fn provider_action_names(&self, provider_extension: &str) -> Vec<String> {
+        // Active providers surface either a bare provider action (if one is
+        // actually registered) or concrete `{provider}_*` actions. The bare
+        // latent provider action itself is synthetic and is resolved before
+        // execution reaches this helper.
+        let prefix = format!("{}_", provider_extension);
+        let mut actions: Vec<String> = self
+            .tool_registry
+            .list()
+            .await
+            .into_iter()
+            .filter(|name| name == provider_extension || name.starts_with(&prefix))
+            .collect();
+        actions.sort();
+        actions
     }
 
     /// List extensions with their status.
@@ -1255,26 +1923,34 @@ impl ExtensionManager {
         &self,
         kind_filter: Option<ExtensionKind>,
         include_available: bool,
+        user_id: &str,
     ) -> Result<Vec<InstalledExtension>, ExtensionError> {
         let mut extensions = Vec::new();
 
         // List MCP servers
         if kind_filter.is_none() || kind_filter == Some(ExtensionKind::McpServer) {
-            match self.load_mcp_servers().await {
+            match self.load_mcp_servers(user_id).await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated =
-                            is_authenticated(server, &self.secrets, &self.user_id).await;
+                        let authenticated = self.mcp_has_configured_auth(server, user_id).await;
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
+                        let has_auth = if authenticated {
+                            true
+                        } else {
+                            self.mcp_supports_auth(server).await
+                        };
 
-                        // Get tool names if active
+                        // Get tool names if active. Use normalized prefix
+                        // so hyphenated server names match underscore-only
+                        // registry keys.
                         let tools = if active {
+                            let prefix = crate::tools::mcp::mcp_tool_id(&server.name, "");
                             self.tool_registry
                                 .list()
                                 .await
                                 .into_iter()
-                                .filter(|t| t.starts_with(&format!("{}_", server.name)))
+                                .filter(|t| t.starts_with(&prefix))
                                 .collect()
                         } else {
                             Vec::new()
@@ -1284,7 +1960,8 @@ impl ExtensionManager {
                             .registry
                             .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
                             .await
-                            .map(|e| e.display_name);
+                            .map(|e| e.display_name)
+                            .or_else(|| Some(server.name.clone()));
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -1295,7 +1972,7 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
-                            has_auth: false,
+                            has_auth,
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1315,14 +1992,15 @@ impl ExtensionManager {
             match discover_tools(&self.wasm_tools_dir).await {
                 Ok(tools) => {
                     for (name, discovered) in tools {
-                        let active = self.tool_registry.has(&name).await;
-
                         let registry_entry = self
                             .registry
                             .get_with_kind(&name, Some(ExtensionKind::WasmTool))
                             .await;
                         let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
-                        let auth_state = self.check_tool_auth_status(&name).await;
+                        let auth_state = self.check_tool_auth_status(&name, user_id).await;
+                        let loaded = self.tool_registry.has(&name).await;
+                        let active = loaded
+                            && matches!(auth_state, ToolAuthState::Ready | ToolAuthState::NoAuth);
                         let version = if let Some(ref cap_path) = discovered.capabilities_path {
                             tokio::fs::read(cap_path)
                                 .await
@@ -1369,7 +2047,7 @@ impl ExtensionManager {
                     let errors = self.activation_errors.read().await;
                     for (name, discovered) in channels {
                         let active = active_names.contains(&name);
-                        let auth_state = self.check_channel_auth_status(&name).await;
+                        let auth_state = self.check_channel_auth_status(&name, user_id).await;
                         let activation_error = errors.get(&name).cloned();
                         let registry_entry = self
                             .registry
@@ -1419,9 +2097,11 @@ impl ExtensionManager {
         if kind_filter.is_none() || kind_filter == Some(ExtensionKind::ChannelRelay) {
             let installed = self.installed_relay_extensions.read().await;
             let active_names = self.active_channel_names.read().await;
+            let errors = self.activation_errors.read().await;
             for name in installed.iter() {
                 let active = active_names.contains(name);
-                let has_token = self.is_relay_channel(name).await;
+                let authenticated = self.has_stored_team_id(name, user_id).await;
+                let activation_error = errors.get(name).cloned();
                 let registry_entry = self
                     .registry
                     .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
@@ -1434,13 +2114,13 @@ impl ExtensionManager {
                     display_name,
                     description,
                     url: None,
-                    authenticated: has_token,
+                    authenticated,
                     active,
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
                     installed: true,
-                    activation_error: None,
+                    activation_error,
                     version: None,
                 });
             }
@@ -1484,14 +2164,14 @@ impl ExtensionManager {
     }
 
     /// Remove an installed extension.
-    pub async fn remove(&self, name: &str) -> Result<String, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name).await?;
+    pub async fn remove(&self, name: &str, user_id: &str) -> Result<String, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         // Clean up any in-progress OAuth flows for this extension.
         // TCP mode: abort the listener task so port 9876 is freed immediately.
         // Gateway mode: remove stale pending flow entries.
-        if let Some(pending) = self.pending_auth.write().await.remove(name)
+        if let Some(pending) = self.pending_auth.write().await.remove(&name)
             && let Some(handle) = pending.task_handle
         {
             handle.abort();
@@ -1499,17 +2179,22 @@ impl ExtensionManager {
         self.pending_oauth_flows
             .write()
             .await
-            .retain(|_, flow| flow.extension_name != name);
+            .retain(|_, flow| flow.extension_name.as_str() != name);
 
         match kind {
             ExtensionKind::McpServer => {
-                // Unregister tools with this server's prefix
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
+                    .await?;
+
+                // Unregister tools with this server's normalized prefix.
+                let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
                 let tool_names: Vec<String> = self
                     .tool_registry
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
+                    .filter(|t| t.starts_with(&prefix))
                     .collect();
 
                 for tool_name in &tool_names {
@@ -1517,12 +2202,15 @@ impl ExtensionManager {
                 }
 
                 // Remove MCP client
-                self.mcp_clients.write().await.remove(name);
+                self.mcp_clients.write().await.remove(&name);
 
                 // Remove from config
-                self.remove_mcp_server(name)
+                self.remove_mcp_server(&name, user_id)
                     .await
                     .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
 
                 Ok(format!(
                     "Removed MCP server '{}' and {} tool(s)",
@@ -1531,22 +2219,28 @@ impl ExtensionManager {
                 ))
             }
             ExtensionKind::WasmTool => {
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
+                    .await?;
+
                 // Unregister from tool registry
-                self.tool_registry.unregister(name).await;
+                self.tool_registry.unregister(&name).await;
 
                 // Evict compiled module from runtime cache so reinstall uses fresh binary
                 if let Some(ref rt) = self.wasm_tool_runtime {
-                    rt.remove(name).await;
+                    rt.remove(&name).await;
                 }
 
                 // Clear stale activation errors so reinstall starts clean
-                self.activation_errors.write().await.remove(name);
+                self.activation_errors.write().await.remove(&name);
 
                 // Revoke credential mappings from the shared registry
-                let cap_path = self
-                    .wasm_tools_dir
-                    .join(format!("{}.capabilities.json", name));
-                self.revoke_credential_mappings(&cap_path).await;
+                for candidate in extension_name_candidates(&name) {
+                    let cap_path = self
+                        .wasm_tools_dir
+                        .join(format!("{}.capabilities.json", candidate));
+                    self.revoke_credential_mappings(&cap_path).await;
+                }
 
                 // Unregister hooks registered from this plugin source.
                 let removed_hooks = self
@@ -1564,44 +2258,62 @@ impl ExtensionManager {
                 }
 
                 // Delete files
-                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+                for candidate in extension_name_candidates(&name) {
+                    let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", candidate));
+                    let cap_path = self
+                        .wasm_tools_dir
+                        .join(format!("{}.capabilities.json", candidate));
 
-                if wasm_path.exists() {
-                    tokio::fs::remove_file(&wasm_path)
-                        .await
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                    if wasm_path.exists() {
+                        tokio::fs::remove_file(&wasm_path)
+                            .await
+                            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                    }
+                    if cap_path.exists() {
+                        let _ = tokio::fs::remove_file(&cap_path).await;
+                    }
                 }
-                if cap_path.exists() {
-                    let _ = tokio::fs::remove_file(&cap_path).await;
-                }
+
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
+                self.invalidate_latent_wasm_provider_actions_cache().await;
 
                 Ok(format!("Removed WASM tool '{}'", name))
             }
             ExtensionKind::WasmChannel => {
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
+                    .await?;
+
                 // Remove from active set and persist
-                self.active_channel_names.write().await.remove(name);
-                self.persist_active_channels().await;
+                self.active_channel_names.write().await.remove(&name);
+                self.persist_active_channels(user_id).await;
 
                 // Clear stale activation errors so reinstall starts clean
-                self.activation_errors.write().await.remove(name);
+                self.activation_errors.write().await.remove(&name);
 
                 // Delete channel files
-                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
+                for candidate in extension_name_candidates(&name) {
+                    let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", candidate));
+                    let cap_path = self
+                        .wasm_channels_dir
+                        .join(format!("{}.capabilities.json", candidate));
 
-                // Revoke credential mappings before deleting the capabilities file
-                self.revoke_credential_mappings(&cap_path).await;
+                    // Revoke credential mappings before deleting the capabilities file
+                    self.revoke_credential_mappings(&cap_path).await;
 
-                if wasm_path.exists() {
-                    tokio::fs::remove_file(&wasm_path)
-                        .await
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                    if wasm_path.exists() {
+                        tokio::fs::remove_file(&wasm_path)
+                            .await
+                            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                    }
+                    if cap_path.exists() {
+                        let _ = tokio::fs::remove_file(&cap_path).await;
+                    }
                 }
-                if cap_path.exists() {
-                    let _ = tokio::fs::remove_file(&cap_path).await;
-                }
+
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
 
                 Ok(format!(
                     "Removed channel '{}'. Restart IronClaw for the change to take effect.",
@@ -1609,18 +2321,49 @@ impl ExtensionManager {
                 ))
             }
             ExtensionKind::ChannelRelay => {
+                let candidate_names = extension_name_candidates(&name);
+
                 // Remove from installed set
-                self.installed_relay_extensions.write().await.remove(name);
+                {
+                    let mut installed = self.installed_relay_extensions.write().await;
+                    for candidate in &candidate_names {
+                        installed.remove(candidate);
+                    }
+                }
 
                 // Remove from active channels
-                self.active_channel_names.write().await.remove(name);
-                self.persist_active_channels().await;
-                self.activation_errors.write().await.remove(name);
+                {
+                    let mut active_channels = self.active_channel_names.write().await;
+                    for candidate in &candidate_names {
+                        active_channels.remove(candidate);
+                    }
+                }
+                self.persist_active_channels(user_id).await;
+                self.activation_errors.write().await.remove(&name);
 
-                // Remove stored team_id
+                // Remove stored team_id setting and clean up secrets
                 if let Some(ref store) = self.store {
-                    let _ = store
-                        .delete_setting(&self.user_id, &format!("relay:{}:team_id", name))
+                    for candidate in &candidate_names {
+                        if let Err(e) = store
+                            .delete_setting(user_id, &format!("relay:{}:team_id", candidate))
+                            .await
+                        {
+                            tracing::warn!(error = %e, name = candidate, "Failed to delete relay team_id setting on removal");
+                        }
+                    }
+                }
+                for candidate in &candidate_names {
+                    if let Err(e) = self
+                        .secrets
+                        .delete(user_id, &format!("relay:{}:oauth_state", candidate))
+                        .await
+                    {
+                        tracing::warn!(error = %e, name = candidate, "Failed to delete relay oauth_state secret on removal");
+                    }
+                    // Clean up legacy stream_token secret from pre-webhook installs
+                    let _ = self
+                        .secrets
+                        .delete(user_id, &format!("relay:{}:stream_token", candidate))
                         .await;
                 }
 
@@ -1630,22 +2373,32 @@ impl ExtensionManager {
                 // Shut down and remove the channel (check both runtime paths for
                 // WASM+relay and relay-only modes).
                 let mut shut_down = false;
-                if let Some(ref rt) = *self.channel_runtime.read().await
-                    && let Some(channel) = rt.channel_manager.get_channel(name).await
-                {
-                    let _ = channel.shutdown().await;
-                    rt.channel_manager.remove(name).await;
-                    shut_down = true;
+                if let Some(ref rt) = *self.channel_runtime.read().await {
+                    for candidate in &candidate_names {
+                        if let Some(channel) = rt.channel_manager.get_channel(candidate).await {
+                            let _ = channel.shutdown().await;
+                            rt.channel_manager.remove(candidate).await;
+                            shut_down = true;
+                        }
+                    }
                 }
-                if !shut_down
-                    && let Some(ref cm) = *self.relay_channel_manager.read().await
-                    && let Some(channel) = cm.get_channel(name).await
-                {
-                    let _ = channel.shutdown().await;
-                    cm.remove(name).await;
+                if !shut_down && let Some(ref cm) = *self.relay_channel_manager.read().await {
+                    for candidate in &candidate_names {
+                        if let Some(channel) = cm.get_channel(candidate).await {
+                            let _ = channel.shutdown().await;
+                            cm.remove(candidate).await;
+                        }
+                    }
                 }
 
                 Ok(format!("Removed channel relay '{}'", name))
+            }
+            ExtensionKind::AcpAgent => {
+                // ACP agents are managed via `ironclaw acp remove`
+                Ok(format!(
+                    "ACP agent '{}' should be removed via 'ironclaw acp remove {}'",
+                    name, name
+                ))
             }
         }
     }
@@ -1657,13 +2410,17 @@ impl ExtensionManager {
     ///
     /// The upgrade preserves authentication secrets — only the `.wasm` binary
     /// (and `.capabilities.json`) are replaced.
-    pub async fn upgrade(&self, name: Option<&str>) -> Result<UpgradeResult, ExtensionError> {
+    pub async fn upgrade(
+        &self,
+        name: Option<&str>,
+        user_id: &str,
+    ) -> Result<UpgradeResult, ExtensionError> {
         // Collect extensions to check
         let mut candidates: Vec<(String, ExtensionKind)> = Vec::new();
 
         if let Some(name) = name {
             Self::validate_extension_name(name)?;
-            let kind = self.determine_installed_kind(name).await?;
+            let kind = self.determine_installed_kind(name, user_id).await?;
             if kind == ExtensionKind::McpServer {
                 return Err(ExtensionError::Other(
                     "MCP servers don't have WIT versions and cannot be upgraded this way"
@@ -1701,7 +2458,7 @@ impl ExtensionManager {
         let mut outcomes = Vec::new();
 
         for (ext_name, kind) in &candidates {
-            let outcome = self.upgrade_one(ext_name, *kind).await;
+            let outcome = self.upgrade_one(ext_name, *kind, user_id).await;
             outcomes.push(outcome);
         }
 
@@ -1727,14 +2484,14 @@ impl ExtensionManager {
     }
 
     /// Upgrade a single WASM extension if its WIT version is outdated.
-    async fn upgrade_one(&self, name: &str, kind: ExtensionKind) -> UpgradeOutcome {
+    async fn upgrade_one(&self, name: &str, kind: ExtensionKind, user_id: &str) -> UpgradeOutcome {
         let (cap_dir, host_wit) = match kind {
             ExtensionKind::WasmTool => (&self.wasm_tools_dir, crate::tools::wasm::WIT_TOOL_VERSION),
             ExtensionKind::WasmChannel => (
                 &self.wasm_channels_dir,
                 crate::tools::wasm::WIT_CHANNEL_VERSION,
             ),
-            ExtensionKind::McpServer | ExtensionKind::ChannelRelay => {
+            ExtensionKind::McpServer | ExtensionKind::ChannelRelay | ExtensionKind::AcpAgent => {
                 return UpgradeOutcome {
                     name: name.to_string(),
                     kind,
@@ -1744,8 +2501,11 @@ impl ExtensionManager {
             }
         };
 
-        // Read current WIT version from capabilities
-        let cap_path = cap_dir.join(format!("{}.capabilities.json", name));
+        // Read current WIT version from capabilities. Use the
+        // alias-aware helper so an extension installed under the
+        // legacy hyphen form is still recognised as already installed
+        // by the upgrader.
+        let cap_path = Self::existing_extension_file_path(cap_dir, name, ".capabilities.json");
         let declared_wit = if cap_path.exists() {
             match tokio::fs::read(&cap_path).await {
                 Ok(bytes) => {
@@ -1760,7 +2520,9 @@ impl ExtensionManager {
                                 .ok()
                                 .and_then(|c| c.wit_version)
                         }
-                        ExtensionKind::McpServer | ExtensionKind::ChannelRelay => None,
+                        ExtensionKind::McpServer
+                        | ExtensionKind::ChannelRelay
+                        | ExtensionKind::AcpAgent => None,
                     };
                     wit
                 }
@@ -1805,8 +2567,10 @@ impl ExtensionManager {
             };
         };
 
-        // Delete old .wasm file (keep secrets intact)
-        let wasm_path = cap_dir.join(format!("{}.wasm", name));
+        // Delete old .wasm file (keep secrets intact). Use the
+        // alias-aware helper so the legacy hyphen filename is also
+        // removed when present.
+        let wasm_path = Self::existing_extension_file_path(cap_dir, name, ".wasm");
         if wasm_path.exists()
             && let Err(e) = tokio::fs::remove_file(&wasm_path).await
         {
@@ -1823,7 +2587,7 @@ impl ExtensionManager {
         }
 
         // Reinstall from registry
-        match self.install_from_entry(&entry).await {
+        match self.install_from_entry(&entry, user_id).await {
             Ok(_) => {
                 tracing::info!(
                     extension = %name,
@@ -1852,9 +2616,13 @@ impl ExtensionManager {
     }
 
     /// Get detailed info about an installed extension (version, wit_version, host compatibility).
-    pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
+    pub async fn extension_info(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<serde_json::Value, ExtensionError> {
         Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name).await?;
+        let kind = self.determine_installed_kind(name, user_id).await?;
 
         match kind {
             ExtensionKind::WasmTool => {
@@ -1928,6 +2696,13 @@ impl ExtensionManager {
                 });
                 Ok(info)
             }
+            ExtensionKind::AcpAgent => {
+                let info = serde_json::json!({
+                    "name": name,
+                    "kind": "acp_agent",
+                });
+                Ok(info)
+            }
         }
     }
 
@@ -1935,50 +2710,164 @@ impl ExtensionManager {
 
     async fn load_mcp_servers(
         &self,
+        user_id: &str,
     ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
     {
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
+            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), user_id).await
         } else {
             crate::tools::mcp::config::load_mcp_servers().await
         }
     }
 
+    /// Look up an MCP server config by name, trying both the exact name
+    /// and the legacy hyphen/underscore alias. The factory normalizes
+    /// `server.name` (hyphens → underscores) before creating the client,
+    /// but persisted configs may still use the original hyphenated name.
+    /// `provider_extension_for_tool()` returns the normalized form, so
+    /// callers like `ensure_extension_ready → activate_mcp` may pass
+    /// `my_server` when the persisted config is keyed as `my-server`.
     async fn get_mcp_server(
         &self,
         name: &str,
+        user_id: &str,
     ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
-        let servers = self.load_mcp_servers().await?;
-        servers.get(name).cloned().ok_or_else(|| {
-            crate::tools::mcp::config::ConfigError::ServerNotFound {
-                name: name.to_string(),
-            }
+        let servers = self.load_mcp_servers(user_id).await?;
+        if let Some(config) = servers.get(name) {
+            return Ok(config.clone());
+        }
+        // Try legacy hyphen alias (underscores → hyphens)
+        let hyphen_alias = name.replace('_', "-");
+        if hyphen_alias != name
+            && let Some(config) = servers.get(&hyphen_alias)
+        {
+            return Ok(config.clone());
+        }
+        // Try normalized alias (hyphens → underscores)
+        let underscore_alias = name.replace('-', "_");
+        if underscore_alias != name
+            && let Some(config) = servers.get(&underscore_alias)
+        {
+            return Ok(config.clone());
+        }
+        Err(crate::tools::mcp::config::ConfigError::ServerNotFound {
+            name: name.to_string(),
         })
     }
 
     async fn add_mcp_server(
         &self,
         config: McpServerConfig,
+        user_id: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
         config.validate()?;
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), &self.user_id, config)
-                .await
+        if let Some(oauth) = config.oauth.as_ref()
+            && let (Some(authorization_url), Some(token_url)) =
+                (oauth.authorization_url.clone(), oauth.token_url.clone())
+        {
+            upsert_auth_descriptor(
+                self.settings_store(),
+                user_id,
+                Self::mcp_auth_descriptor(
+                    &config,
+                    OAuthFlowDescriptor {
+                        authorization_url,
+                        token_url,
+                        client_id: Some(oauth.client_id.clone()),
+                        client_id_env: None,
+                        client_secret: None,
+                        client_secret_env: None,
+                        scopes: oauth.scopes.clone(),
+                        use_pkce: oauth.use_pkce,
+                        extra_params: oauth.extra_params.clone(),
+                        access_token_field: "access_token".to_string(),
+                        validation_url: None,
+                    },
+                ),
+            )
+            .await;
+        }
+        let result = if let Some(ref store) = self.store {
+            crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), user_id, config).await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
+        };
+        if result.is_ok() {
+            // A newly configured MCP server may have a matching registry
+            // entry that was previously surfaced as a latent provider
+            // action. Drop the cache so the next listing reflects its
+            // installed/active status.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
+        result
+    }
+
+    async fn update_mcp_server(
+        &self,
+        config: McpServerConfig,
+        user_id: &str,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        config.validate()?;
+        if let Some(oauth) = config.oauth.as_ref()
+            && let (Some(authorization_url), Some(token_url)) =
+                (oauth.authorization_url.clone(), oauth.token_url.clone())
+        {
+            upsert_auth_descriptor(
+                self.settings_store(),
+                user_id,
+                Self::mcp_auth_descriptor(
+                    &config,
+                    OAuthFlowDescriptor {
+                        authorization_url,
+                        token_url,
+                        client_id: Some(oauth.client_id.clone()),
+                        client_id_env: None,
+                        client_secret: None,
+                        client_secret_env: None,
+                        scopes: oauth.scopes.clone(),
+                        use_pkce: oauth.use_pkce,
+                        extra_params: oauth.extra_params.clone(),
+                        access_token_field: "access_token".to_string(),
+                        validation_url: None,
+                    },
+                ),
+            )
+            .await;
+        }
+        let mut servers = self.load_mcp_servers(user_id).await?;
+        servers.upsert(config);
+        let result = if let Some(ref store) = self.store {
+            crate::tools::mcp::config::save_mcp_servers_to_db(store.as_ref(), user_id, &servers)
+                .await
+        } else {
+            crate::tools::mcp::config::save_mcp_servers(&servers).await
+        };
+        if result.is_ok() {
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
+        }
+        result
     }
 
     async fn remove_mcp_server(
         &self,
         name: &str,
+        user_id: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), &self.user_id, name)
-                .await
+        let result = if let Some(ref store) = self.store {
+            crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), user_id, name).await
         } else {
             crate::tools::mcp::config::remove_mcp_server(name).await
+        };
+        if result.is_ok() {
+            // Removing a server flips it back to the latent/uninstalled
+            // state; drop the cache so the registry-discovery path can
+            // resurface it as a latent provider action.
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+            self.mcp_auth_support_cache.write().await.clear();
         }
+        result
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
@@ -1986,8 +2875,11 @@ impl ExtensionManager {
     async fn install_from_entry(
         &self,
         entry: &RegistryEntry,
+        user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
-        let primary_result = self.try_install_from_source(entry, &entry.source).await;
+        let primary_result = self
+            .try_install_from_source(entry, &entry.source, user_id)
+            .await;
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
@@ -2002,7 +2894,7 @@ impl ExtensionManager {
                     primary_error = %primary_err,
                     "Primary install failed, trying fallback source"
                 );
-                match self.try_install_from_source(entry, fallback).await {
+                match self.try_install_from_source(entry, fallback, user_id).await {
                     Ok(result) => Ok(result),
                     Err(fallback_err) => {
                         tracing::error!(
@@ -2022,9 +2914,14 @@ impl ExtensionManager {
         &self,
         entry: &RegistryEntry,
         source: &ExtensionSource,
+        user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
         match entry.kind {
             ExtensionKind::McpServer => {
+                if entry.name == NEARAI_MCP_SERVER_NAME {
+                    return self.install_nearai_mcp_from_env(user_id).await;
+                }
+
                 let url = match source {
                     ExtensionSource::McpUrl { url } => url.clone(),
                     ExtensionSource::Discovered { url } => url.clone(),
@@ -2034,19 +2931,32 @@ impl ExtensionManager {
                         ));
                     }
                 };
-                self.install_mcp_from_url(&entry.name, &url).await
+                self.install_mcp_from_url(&entry.name, &url, user_id).await
             }
             ExtensionKind::WasmTool => match source {
                 ExtensionSource::WasmDownload {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    self.install_wasm_tool_from_url_with_caps(
-                        &entry.name,
-                        wasm_url,
-                        capabilities_url.as_deref(),
-                    )
-                    .await
+                    let result = self
+                        .install_wasm_tool_from_url_with_caps(
+                            &entry.name,
+                            wasm_url,
+                            capabilities_url.as_deref(),
+                        )
+                        .await?;
+                    if let Some(fallback) = entry.fallback_source.as_ref()
+                        && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
+                    {
+                        let _ = self
+                            .hydrate_capabilities_from_source_dir(
+                                &entry.name,
+                                source_dir,
+                                &self.wasm_tools_dir,
+                            )
+                            .await?;
+                    }
+                    Ok(result)
                 }
                 ExtensionSource::WasmBuildable {
                     build_dir,
@@ -2071,12 +2981,25 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
-                    self.install_wasm_channel_from_url(
-                        &entry.name,
-                        wasm_url,
-                        capabilities_url.as_deref(),
-                    )
-                    .await
+                    let result = self
+                        .install_wasm_channel_from_url(
+                            &entry.name,
+                            wasm_url,
+                            capabilities_url.as_deref(),
+                        )
+                        .await?;
+                    if let Some(fallback) = entry.fallback_source.as_ref()
+                        && let ExtensionSource::WasmBuildable { source_dir, .. } = fallback.as_ref()
+                    {
+                        let _ = self
+                            .hydrate_capabilities_from_source_dir(
+                                &entry.name,
+                                source_dir,
+                                &self.wasm_channels_dir,
+                            )
+                            .await?;
+                    }
+                    Ok(result)
                 }
                 ExtensionSource::WasmBuildable {
                     build_dir,
@@ -2111,16 +3034,71 @@ impl ExtensionManager {
                     ),
                 })
             }
+            ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
+                "ACP agents are configured via 'ironclaw acp add', not the registry".to_string(),
+            )),
         }
+    }
+
+    async fn install_nearai_mcp_from_env(
+        &self,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        if self
+            .get_mcp_server(NEARAI_MCP_SERVER_NAME, user_id)
+            .await
+            .is_ok()
+        {
+            return Err(ExtensionError::AlreadyInstalled(
+                NEARAI_MCP_SERVER_NAME.to_string(),
+            ));
+        }
+
+        let config = match crate::tools::mcp::config::nearai_mcp_server_from_env() {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                return Err(ExtensionError::InstallFailed(
+                    "NEAR AI MCP requires NEARAI_BASE_URL and NEARAI_API_KEY to be set."
+                        .to_string(),
+                ));
+            }
+            Err(crate::tools::mcp::config::ConfigError::InvalidConfig { .. }) => {
+                return Err(ExtensionError::InstallFailed(
+                    "NEAR AI MCP environment is set, but the derived MCP server configuration is invalid."
+                        .to_string(),
+                ));
+            }
+            Err(err) => {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "Failed to derive NEAR AI MCP configuration: {}",
+                    err
+                )));
+            }
+        };
+
+        let server_name = config.name.clone();
+        self.add_mcp_server(config, user_id)
+            .await
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+        Ok(InstallResult {
+            name: server_name.clone(),
+            kind: ExtensionKind::McpServer,
+            message: format!(
+                "MCP server '{}' installed. Run activate to connect.",
+                server_name
+            ),
+        })
     }
 
     async fn install_mcp_from_url(
         &self,
         name: &str,
         url: &str,
+        user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
         // Check if already installed
-        if self.get_mcp_server(name).await.is_ok() {
+        if self.get_mcp_server(name, user_id).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
@@ -2129,7 +3107,7 @@ impl ExtensionManager {
             .validate()
             .map_err(|e| ExtensionError::InvalidUrl(e.to_string()))?;
 
-        self.add_mcp_server(config)
+        self.add_mcp_server(config, user_id)
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
@@ -2162,6 +3140,7 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir)
             .await?;
+        self.invalidate_latent_wasm_provider_actions_cache().await;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -2187,6 +3166,51 @@ impl ExtensionManager {
                 name,
             ),
         })
+    }
+
+    async fn hydrate_capabilities_from_source_dir(
+        &self,
+        name: &str,
+        source_dir: &str,
+        target_dir: &std::path::Path,
+    ) -> Result<bool, ExtensionError> {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source_path = {
+            let path = std::path::Path::new(source_dir);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                manifest_dir.join(path)
+            }
+        };
+
+        let target_caps = target_dir.join(format!("{}.capabilities.json", name));
+        if target_caps.exists() {
+            return Ok(false);
+        }
+
+        let caps_candidates = [
+            source_path.join(format!("{}.capabilities.json", name)),
+            source_path.join(format!("{}-tool.capabilities.json", name)),
+            source_path.join("capabilities.json"),
+        ];
+
+        for caps_src in &caps_candidates {
+            if caps_src.exists() {
+                tokio::fs::copy(caps_src, &target_caps)
+                    .await
+                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+                tracing::debug!(
+                    extension = %name,
+                    source = %caps_src.display(),
+                    target = %target_caps.display(),
+                    "Hydrated capabilities sidecar from source directory"
+                );
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Download a WASM extension (tool or channel) from URL and install to target directory.
@@ -2354,9 +3378,15 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filename = format!("{}.wasm", name);
-        let caps_filename = format!("{}.capabilities.json", name);
+        let archive_names = crate::extensions::naming::ArchiveFilenames::new(name);
         let mut found_wasm = false;
+        let mut found_caps = false;
+        let mut fallback_wasm: Option<Vec<u8>> = None;
+        let mut fallback_wasm_name: Option<String> = None;
+        let mut multiple_wasm_candidates = false;
+        let mut fallback_caps: Option<Vec<u8>> = None;
+        let mut fallback_caps_name: Option<String> = None;
+        let mut multiple_caps_candidates = false;
 
         let entries = archive
             .entries()
@@ -2386,30 +3416,124 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            if filename == wasm_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            let mut data = Vec::with_capacity(entry.size() as usize);
+            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+            if archive_names.is_wasm(filename) {
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            } else if archive_names.is_caps(filename) {
                 std::fs::write(target_caps, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+                found_caps = true;
+            } else if filename.ends_with(".wasm") {
+                if fallback_wasm.is_some() {
+                    multiple_wasm_candidates = true;
+                } else {
+                    fallback_wasm = Some(data);
+                    fallback_wasm_name = Some(filename.to_string());
+                }
+            } else if filename.ends_with(".capabilities.json") {
+                if fallback_caps.is_some() {
+                    multiple_caps_candidates = true;
+                } else {
+                    fallback_caps = Some(data);
+                    fallback_caps_name = Some(filename.to_string());
+                }
             }
         }
 
         if !found_wasm {
-            return Err(ExtensionError::InstallFailed(format!(
-                "tar.gz archive does not contain '{}'",
-                wasm_filename
-            )));
+            if multiple_wasm_candidates {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "{} and the archive has multiple .wasm entries",
+                    archive_names.wasm_not_found_msg()
+                )));
+            }
+            let data = fallback_wasm
+                .ok_or_else(|| ExtensionError::InstallFailed(archive_names.wasm_not_found_msg()))?;
+            std::fs::write(target_wasm, &data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            tracing::debug!(
+                extension = %name,
+                fallback_wasm = fallback_wasm_name.as_deref().unwrap_or("<unknown>"),
+                "Archive did not contain the canonical wasm filename; using the sole .wasm entry"
+            );
+        }
+
+        if !found_caps
+            && !multiple_caps_candidates
+            && let Some(data) = fallback_caps
+        {
+            std::fs::write(target_caps, &data)
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+            tracing::debug!(
+                extension = %name,
+                fallback_caps = fallback_caps_name.as_deref().unwrap_or("<unknown>"),
+                "Archive did not contain the canonical capabilities filename; using the sole capabilities entry"
+            );
         }
 
         Ok(())
+    }
+
+    /// Install a WASM extension from a locally-discovered source directory.
+    ///
+    /// Used when `tool_install` is called with a name that isn't in the registry
+    /// but matches a local source directory found by `find_local_tool_source`.
+    /// Annotates the install message with the source path so the caller can
+    /// verify provenance (the tool came from the local filesystem, not the
+    /// verified registry).
+    async fn install_from_local_source(
+        &self,
+        name: &str,
+        source_dir: &std::path::Path,
+        kind_hint: Option<ExtensionKind>,
+    ) -> Result<InstallResult, ExtensionError> {
+        tracing::debug!(
+            extension = %name,
+            source_dir = %source_dir.display(),
+            "Found local tool source directory"
+        );
+        let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
+        let target_dir = match kind {
+            ExtensionKind::WasmChannel => &self.wasm_channels_dir,
+            _ => &self.wasm_tools_dir,
+        };
+        // Convert the discovered source path to UTF-8. A lossy conversion
+        // would silently substitute replacement chars and the downstream
+        // build-dir resolution would point at a non-existent path, so reject
+        // non-UTF-8 paths with a clear error instead.
+        let source_str = source_dir.to_str().ok_or_else(|| {
+            ExtensionError::InstallFailed(format!(
+                "local source path '{}' is not valid UTF-8",
+                source_dir.display(),
+            ))
+        })?;
+        // Parse the discovered Cargo.toml to learn the actual crate name. The
+        // installed extension name may differ from the crate name when suffix
+        // stripping/adding matched a directory (e.g. input `portfolio_tool`
+        // matching `tools-src/portfolio/` whose crate is `portfolio`). The
+        // compiled artifact is `<crate_name>.wasm`, so we must pass the real
+        // crate name to the artifact lookup.
+        let crate_name = read_crate_name_from_cargo_toml(source_dir);
+        let mut result = self
+            .install_wasm_from_buildable(
+                name,
+                Some(source_str),
+                crate_name.as_deref(),
+                target_dir,
+                kind,
+            )
+            .await?;
+        result.message = format!(
+            "{} (installed from LOCAL source at {})",
+            result.message,
+            source_dir.display(),
+        );
+        Ok(result)
     }
 
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
@@ -2466,11 +3590,16 @@ impl ExtensionManager {
         .await
         .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
+        if target_dir == self.wasm_tools_dir.as_path() {
+            self.invalidate_latent_wasm_provider_actions_cache().await;
+        }
+
         let kind_label = match kind {
             ExtensionKind::WasmTool => "WASM tool",
             ExtensionKind::WasmChannel => "WASM channel",
             ExtensionKind::McpServer => "MCP server",
             ExtensionKind::ChannelRelay => "channel relay",
+            ExtensionKind::AcpAgent => "ACP agent",
         };
 
         tracing::info!(
@@ -2490,14 +3619,18 @@ impl ExtensionManager {
         })
     }
 
-    async fn auth_mcp(&self, name: &str) -> Result<AuthResult, ExtensionError> {
+    async fn mcp_has_configured_auth(&self, server: &McpServerConfig, user_id: &str) -> bool {
+        server.has_custom_auth_header() || is_authenticated(server, &self.secrets, user_id).await
+    }
+
+    async fn auth_mcp(&self, name: &str, user_id: &str) -> Result<AuthResult, ExtensionError> {
         let server = self
-            .get_mcp_server(name)
+            .get_mcp_server(name, user_id)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
         // Check if already authenticated
-        if is_authenticated(&server, &self.secrets, &self.user_id).await {
+        if self.mcp_has_configured_auth(&server, user_id).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
@@ -2505,7 +3638,7 @@ impl ExtensionManager {
         // open in the same browser. The gateway's /oauth/callback handler will
         // complete the token exchange.
         if self.should_use_gateway_mode() {
-            return match self.auth_mcp_build_url(name, &server).await {
+            return match self.auth_mcp_build_url(name, &server, user_id).await {
                 Ok(result) => Ok(result),
                 Err(ExtensionError::AuthNotSupported(_)) => Ok(AuthResult::awaiting_token(
                     name,
@@ -2522,14 +3655,14 @@ impl ExtensionManager {
         }
 
         // CLI/local mode: run the full blocking OAuth flow (opens browser, waits for callback)
-        match authorize_mcp_server(&server, &self.secrets, &self.user_id).await {
+        match authorize_mcp_server(&server, &self.secrets, user_id).await {
             Ok(_token) => {
                 tracing::info!("MCP server '{}' authenticated via OAuth", name);
                 Ok(AuthResult::authenticated(name, ExtensionKind::McpServer))
             }
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
                 // Server doesn't support OAuth, try building a URL
-                match self.auth_mcp_build_url(name, &server).await {
+                match self.auth_mcp_build_url(name, &server, user_id).await {
                     Ok(result) => Ok(result),
                     Err(_) => Ok(AuthResult::awaiting_token(
                         name,
@@ -2569,19 +3702,8 @@ impl ExtensionManager {
         &self,
         name: &str,
         server: &McpServerConfig,
+        user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
-        // Try to discover OAuth metadata and build a URL the user can open manually
-        let metadata = discover_full_oauth_metadata(&server.url)
-            .await
-            .map_err(|e| match e {
-                crate::tools::mcp::auth::AuthError::NotSupported => {
-                    ExtensionError::AuthNotSupported(e.to_string())
-                }
-                _ => ExtensionError::AuthFailed(e.to_string()),
-            })?;
-
-        use crate::cli::oauth_defaults;
-
         let is_gateway = self.should_use_gateway_mode();
         self.clear_pending_extension_auth(name).await;
 
@@ -2596,15 +3718,94 @@ impl ExtensionManager {
             format!("http://localhost:{}/callback", port.1)
         };
 
-        // Try DCR if no client_id configured
-        let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
-            (oauth.client_id.clone(), None)
-        } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let registration = register_client(reg_endpoint, &redirect_uri)
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        let explicit_oauth = server.oauth.as_ref().and_then(|oauth| {
+            match (&oauth.authorization_url, &oauth.token_url) {
+                (Some(authorization_url), Some(token_url)) => Some((
+                    authorization_url.clone(),
+                    token_url.clone(),
+                    oauth.client_id.clone(),
+                    oauth.use_pkce,
+                    oauth.scopes.clone(),
+                    oauth.extra_params.clone(),
+                )),
+                _ => None,
+            }
+        });
 
-            (registration.client_id, None)
+        let metadata = if explicit_oauth.is_some() {
+            None
+        } else {
+            Some(
+                discover_full_oauth_metadata(&server.url)
+                    .await
+                    .map_err(|e| match e {
+                        crate::tools::mcp::auth::AuthError::NotSupported => {
+                            ExtensionError::AuthNotSupported(e.to_string())
+                        }
+                        _ => ExtensionError::AuthFailed(e.to_string()),
+                    })?,
+            )
+        };
+
+        let (
+            authorization_url,
+            token_url,
+            client_id,
+            client_secret,
+            client_secret_expires_at,
+            use_pkce,
+            scopes,
+            mut extra_params,
+        ) = if let Some((authorization_url, token_url, client_id, use_pkce, scopes, extra_params)) =
+            explicit_oauth
+        {
+            (
+                authorization_url,
+                token_url,
+                client_id,
+                None,
+                None,
+                use_pkce,
+                scopes,
+                extra_params,
+            )
+        } else if let Some(ref oauth) = server.oauth {
+            let metadata = metadata.as_ref().ok_or_else(|| {
+                ExtensionError::AuthFailed(
+                    "discovered MCP OAuth metadata missing authorization endpoints".to_string(),
+                )
+            })?;
+            (
+                metadata.authorization_endpoint.clone(),
+                metadata.token_endpoint.clone(),
+                oauth.client_id.clone(),
+                None,
+                None,
+                oauth.use_pkce,
+                oauth.scopes.clone(),
+                oauth.extra_params.clone(),
+            )
+        } else if let Some(ref metadata) = metadata {
+            if let Some(ref reg_endpoint) = metadata.registration_endpoint {
+                let registration = register_client(reg_endpoint, &redirect_uri)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+
+                (
+                    metadata.authorization_endpoint.clone(),
+                    metadata.token_endpoint.clone(),
+                    registration.client_id,
+                    registration.client_secret,
+                    registration.client_secret_expires_at,
+                    true,
+                    metadata.scopes_supported.clone(),
+                    HashMap::new(),
+                )
+            } else {
+                return Err(ExtensionError::AuthNotSupported(
+                    "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
+                ));
+            }
         } else {
             return Err(ExtensionError::AuthNotSupported(
                 "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
@@ -2614,69 +3815,79 @@ impl ExtensionManager {
         // RFC 8707: resource parameter to scope the token to this MCP server
         let resource = canonical_resource_uri(&server.url);
 
-        // Build authorization URL with CSRF state using the shared oauth_defaults
-        // builder, which generates PKCE + state for us.
-        let mut extra_params = server
-            .oauth
-            .as_ref()
-            .map(|o| o.extra_params.clone())
-            .unwrap_or_default();
+        upsert_auth_descriptor(
+            self.settings_store(),
+            user_id,
+            Self::mcp_auth_descriptor(
+                server,
+                OAuthFlowDescriptor {
+                    authorization_url: authorization_url.clone(),
+                    token_url: token_url.clone(),
+                    client_id: Some(client_id.clone()),
+                    client_id_env: None,
+                    client_secret: None,
+                    client_secret_env: None,
+                    scopes: scopes.clone(),
+                    use_pkce,
+                    extra_params: extra_params.clone(),
+                    access_token_field: "access_token".to_string(),
+                    validation_url: None,
+                },
+            ),
+        )
+        .await;
+
         extra_params.insert("resource".to_string(), resource.clone());
 
-        let scopes = server
-            .oauth
-            .as_ref()
-            .map(|o| o.scopes.clone())
-            .unwrap_or_else(|| metadata.scopes_supported.clone());
-
-        let oauth_result = oauth_defaults::build_oauth_url(
-            &metadata.authorization_endpoint,
-            &client_id,
-            &redirect_uri,
-            &scopes,
-            true, // Always use PKCE for MCP
-            &extra_params,
-        );
-        let expected_state = oauth_result.state;
-        let code_verifier = oauth_result.code_verifier;
+        let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
+            display_name: server.name.clone(),
+            authorization_url,
+            token_url: token_url.clone(),
+            client_id,
+            client_secret,
+            redirect_uri,
+            access_token_field: "access_token".to_string(),
+            secret_name: server.token_secret_name(),
+            provider: Some(format!("mcp:{}", name)),
+            validation_endpoint: None,
+            scopes,
+            use_pkce,
+            extra_params,
+            user_id: user_id.to_string(),
+            secrets: Arc::clone(&self.secrets),
+            sse_manager: self.sse_manager.read().await.clone(),
+            gateway_token: self.oauth_proxy_auth_token.clone(),
+            token_exchange_extra_params: {
+                let mut token_exchange_extra_params = HashMap::new();
+                token_exchange_extra_params.insert("resource".to_string(), resource.clone());
+                token_exchange_extra_params
+            },
+            client_id_secret_name: if server.oauth.is_none() {
+                Some(server.client_id_secret_name())
+            } else {
+                None
+            },
+            client_secret_secret_name: None,
+            client_secret_expires_at,
+            auto_activate_extension: true,
+        });
 
         if is_gateway {
-            let mut token_exchange_extra_params = HashMap::new();
-            token_exchange_extra_params.insert("resource".to_string(), resource.clone());
-
-            let flow = oauth_defaults::PendingOAuthFlow {
-                extension_name: name.to_string(),
-                display_name: server.name.clone(),
-                token_url: metadata.token_endpoint,
-                client_id,
-                client_secret,
-                redirect_uri,
-                code_verifier,
-                access_token_field: "access_token".to_string(),
-                secret_name: server.token_secret_name(),
-                provider: Some(format!("mcp:{}", name)),
-                validation_endpoint: None,
-                scopes,
-                user_id: self.user_id.clone(),
-                secrets: Arc::clone(&self.secrets),
-                sse_sender: self.sse_sender.read().await.clone(),
-                gateway_token: self.gateway_token.clone(),
-                token_exchange_extra_params,
-                client_id_secret_name: if server.oauth.is_none() {
-                    Some(server.client_id_secret_name())
-                } else {
-                    None
-                },
-                created_at: std::time::Instant::now(),
-            };
+            let mut flow = launch.flow;
+            if server.oauth.is_none() && flow.client_secret.is_some() {
+                flow.client_secret_secret_name = Some(server.client_secret_secret_name());
+            }
 
             Ok(self
                 .start_gateway_oauth_flow(HostedOAuthFlowStart {
                     name: name.to_string(),
                     kind: ExtensionKind::McpServer,
-                    auth_url: oauth_result.url,
-                    expected_state,
+                    auth_url: launch.auth_url,
+                    expected_state: launch.expected_state,
                     flow,
+                    instructions: None,
+                    setup_url: None,
                 })
                 .await)
         } else {
@@ -2694,28 +3905,30 @@ impl ExtensionManager {
             Ok(AuthResult::awaiting_authorization(
                 name,
                 ExtensionKind::McpServer,
-                oauth_result.url,
+                launch.auth_url,
                 "local".to_string(),
             ))
         }
     }
 
-    async fn auth_wasm_tool(&self, name: &str) -> Result<AuthResult, ExtensionError> {
-        // Read the capabilities file to get auth config
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
-
-        if !cap_path.exists() {
-            return Ok(AuthResult::no_auth_required(name, ExtensionKind::WasmTool));
-        }
-
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-
-        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes)
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+    async fn auth_wasm_tool(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<AuthResult, ExtensionError> {
+        // Read the capabilities file to get auth config. Goes through
+        // `load_tool_capabilities` so the legacy-hyphen alias is also
+        // tried — without this, a tool whose `.capabilities.json` is
+        // saved under the pre-v0.23 hyphen form (e.g.
+        // `google-drive-tool.capabilities.json`) would silently report
+        // `no_auth_required` even though the file declares OAuth, which
+        // is the bug behind the v2 Drive trace's missing auth gate.
+        let cap_file = match self.load_tool_capabilities(name).await {
+            Some(f) => f,
+            None => {
+                return Ok(AuthResult::no_auth_required(name, ExtensionKind::WasmTool));
+            }
+        };
 
         let auth = match cap_file.auth {
             Some(auth) => auth,
@@ -2732,7 +3945,7 @@ impl ExtensionManager {
             let params =
                 CreateSecretParams::new(&auth.secret_name, &value).with_provider(name.to_string());
             self.secrets
-                .create(&self.user_id, params)
+                .create(user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
@@ -2742,7 +3955,7 @@ impl ExtensionManager {
         // Check if already authenticated (with scope expansion detection)
         let token_exists = self
             .secrets
-            .exists(&self.user_id, &auth.secret_name)
+            .exists(user_id, &auth.secret_name)
             .await
             .unwrap_or(false);
 
@@ -2750,9 +3963,11 @@ impl ExtensionManager {
             // If this tool has OAuth config, check whether new scopes are needed
             let needs_reauth = if let Some(ref oauth) = auth.oauth {
                 let merged = self
-                    .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
+                    .collect_shared_scopes(&auth.secret_name, &oauth.scopes, user_id)
                     .await;
-                let needs = self.needs_scope_expansion(&auth.secret_name, &merged).await;
+                let needs = self
+                    .needs_scope_expansion(&auth.secret_name, &merged, user_id)
+                    .await;
                 tracing::debug!(
                     tool = name,
                     secret_name = %auth.secret_name,
@@ -2775,7 +3990,10 @@ impl ExtensionManager {
         // But only if credentials are available — if the tool has setup secrets
         // for client_id/secret that aren't configured yet, return needs_setup.
         if let Some(ref oauth) = auth.oauth {
-            if self.needs_setup_credentials(name, &auth, oauth).await {
+            if self
+                .needs_setup_credentials(name, &auth, oauth, user_id)
+                .await
+            {
                 let display = auth.display_name.as_deref().unwrap_or(name);
                 return Ok(AuthResult::needs_setup(
                     name,
@@ -2789,7 +4007,7 @@ impl ExtensionManager {
             }
 
             return self
-                .start_wasm_oauth(name, &auth, oauth)
+                .start_wasm_oauth(name, &auth, oauth, user_id)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()));
         }
@@ -2809,15 +4027,8 @@ impl ExtensionManager {
     }
 
     /// Determine the auth readiness of a WASM channel.
-    async fn check_channel_auth_status(&self, name: &str) -> ToolAuthState {
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        let Ok(cap_bytes) = tokio::fs::read(&cap_path).await else {
-            return ToolAuthState::NoAuth;
-        };
-        let Ok(cap_file) = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-        else {
+    async fn check_channel_auth_status(&self, name: &str, user_id: &str) -> ToolAuthState {
+        let Some(cap_file) = self.load_channel_capabilities(name).await else {
             return ToolAuthState::NoAuth;
         };
 
@@ -2834,7 +4045,7 @@ impl ExtensionManager {
         let all_provided = futures::future::join_all(
             required
                 .iter()
-                .map(|s| self.secrets.exists(&self.user_id, &s.name)),
+                .map(|s| self.secrets.exists(user_id, &s.name)),
         )
         .await
         .into_iter()
@@ -2842,9 +4053,222 @@ impl ExtensionManager {
 
         if all_provided {
             ToolAuthState::Ready
+        } else if futures::future::join_all(
+            required
+                .iter()
+                .map(|secret| self.secret_supports_oauth(user_id, &secret.name)),
+        )
+        .await
+        .into_iter()
+        .any(|supports| supports)
+        {
+            ToolAuthState::NeedsAuth
         } else {
             ToolAuthState::NeedsSetup
         }
+    }
+
+    async fn secret_supports_oauth(&self, user_id: &str, secret_name: &str) -> bool {
+        if auth_descriptor_for_secret(self.settings_store(), user_id, secret_name)
+            .await
+            .is_some_and(|descriptor| descriptor.oauth.is_some())
+        {
+            return true;
+        }
+
+        self.tool_registry
+            .credential_registry()
+            .and_then(|registry| registry.oauth_refresh_for_secret(secret_name))
+            .is_some()
+    }
+
+    fn wasm_auth_descriptor(
+        name: &str,
+        kind: AuthDescriptorKind,
+        auth: &crate::tools::wasm::AuthCapabilitySchema,
+    ) -> AuthDescriptor {
+        AuthDescriptor {
+            kind,
+            secret_name: auth.secret_name.clone(),
+            integration_name: name.to_string(),
+            display_name: auth.display_name.clone(),
+            provider: auth.provider.clone(),
+            setup_url: auth.setup_url.clone(),
+            oauth: auth.oauth.as_ref().map(|oauth| OAuthFlowDescriptor {
+                authorization_url: oauth.authorization_url.clone(),
+                token_url: oauth.token_url.clone(),
+                client_id: oauth.client_id.clone(),
+                client_id_env: oauth.client_id_env.clone(),
+                client_secret: oauth.client_secret.clone(),
+                client_secret_env: oauth.client_secret_env.clone(),
+                scopes: oauth.scopes.clone(),
+                use_pkce: oauth.use_pkce,
+                extra_params: oauth.extra_params.clone(),
+                access_token_field: oauth.access_token_field.clone(),
+                validation_url: auth
+                    .validation_endpoint
+                    .as_ref()
+                    .map(|validation| validation.url.clone()),
+            }),
+        }
+    }
+
+    fn mcp_auth_descriptor(server: &McpServerConfig, oauth: OAuthFlowDescriptor) -> AuthDescriptor {
+        AuthDescriptor {
+            kind: AuthDescriptorKind::McpServer,
+            secret_name: server.token_secret_name(),
+            integration_name: server.name.clone(),
+            display_name: server
+                .description
+                .clone()
+                .or_else(|| Some(server.name.clone())),
+            provider: Some(format!("mcp:{}", server.name)),
+            setup_url: None,
+            oauth: Some(oauth),
+        }
+    }
+
+    async fn mcp_supports_auth(&self, server: &McpServerConfig) -> bool {
+        if server.oauth.is_some() || server.requires_auth() {
+            return true;
+        }
+
+        // Cache hit: avoid the network probe on every list() call. Cache is
+        // keyed by server URL and invalidated when MCP server config changes.
+        if let Some(&cached) = self.mcp_auth_support_cache.read().await.get(&server.url) {
+            return cached;
+        }
+
+        // Metadata discovery uses the bounded MCP OAuth client timeouts in
+        // `discover_full_oauth_metadata()`, so this list-path probe cannot hang
+        // indefinitely on a hostile or slow server URL.
+        let supports = match discover_full_oauth_metadata(&server.url).await {
+            Ok(_) => true,
+            Err(crate::tools::mcp::auth::AuthError::NotSupported) => false,
+            Err(error) => {
+                tracing::debug!(
+                    server = %server.name,
+                    url = %server.url,
+                    error = %error,
+                    "Failed to determine MCP auth support from metadata discovery"
+                );
+                false
+            }
+        };
+        self.mcp_auth_support_cache
+            .write()
+            .await
+            .insert(server.url.clone(), supports);
+        supports
+    }
+
+    async fn start_secret_oauth_flow(
+        &self,
+        extension_name: &str,
+        secret_name: &str,
+        user_id: &str,
+    ) -> Option<AuthResult> {
+        use crate::auth::oauth;
+
+        let descriptor =
+            auth_descriptor_for_secret(self.settings_store(), user_id, secret_name).await?;
+        let oauth = descriptor.oauth?;
+        let builtin = oauth::builtin_credentials(secret_name);
+        let display_name = descriptor
+            .display_name
+            .clone()
+            .or_else(|| descriptor.provider.clone())
+            .unwrap_or_else(|| secret_name.to_string());
+        let redirect_uri = if oauth::use_gateway_callback() {
+            oauth::callback_url()
+        } else {
+            format!("{}/callback", oauth::callback_url())
+        };
+        let client_id = oauth
+            .client_id
+            .clone()
+            .or_else(|| {
+                oauth
+                    .client_id_env
+                    .as_ref()
+                    .and_then(|env| std::env::var(env).ok())
+            })
+            .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))?;
+        let client_secret = oauth
+            .client_secret
+            .clone()
+            .or_else(|| {
+                oauth
+                    .client_secret_env
+                    .as_ref()
+                    .and_then(|env| std::env::var(env).ok())
+            })
+            .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
+        let client_secret = oauth::hosted_proxy_client_secret(
+            &client_secret,
+            builtin.as_ref(),
+            oauth::exchange_proxy_url().is_some(),
+        );
+        let sse_manager = self.sse_manager.read().await.clone();
+        let kind = self
+            .determine_installed_kind(extension_name, user_id)
+            .await
+            .unwrap_or(ExtensionKind::WasmChannel);
+        let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
+            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                extension_name.to_string(),
+            ),
+            display_name: display_name.to_string(),
+            authorization_url: oauth.authorization_url.clone(),
+            token_url: oauth.token_url.clone(),
+            client_id,
+            client_secret,
+            redirect_uri,
+            access_token_field: oauth.access_token_field,
+            secret_name: secret_name.to_string(),
+            provider: descriptor.provider.clone(),
+            validation_endpoint: oauth.validation_url.map(|url| {
+                crate::tools::wasm::ValidationEndpointSchema {
+                    url,
+                    method: "GET".to_string(),
+                    success_status: 200,
+                    headers: std::collections::HashMap::new(),
+                }
+            }),
+            scopes: oauth.scopes,
+            use_pkce: oauth.use_pkce,
+            extra_params: oauth.extra_params,
+            user_id: user_id.to_string(),
+            secrets: Arc::clone(&self.secrets),
+            sse_manager,
+            gateway_token: self.oauth_proxy_auth_token.clone(),
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            auto_activate_extension: matches!(
+                kind,
+                ExtensionKind::WasmChannel | ExtensionKind::WasmTool
+            ),
+        });
+        let pending_flow = launch.flow;
+
+        if self.should_use_gateway_mode() {
+            return Some(
+                self.start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: extension_name.to_string(),
+                    kind,
+                    auth_url: launch.auth_url,
+                    expected_state: launch.expected_state,
+                    flow: pending_flow,
+                    instructions: None,
+                    setup_url: None,
+                })
+                .await,
+            );
+        }
+
+        None
     }
 
     /// Load and parse a WASM tool's capabilities file.
@@ -2854,11 +4278,264 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Option<crate::tools::wasm::CapabilitiesFile> {
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
+        let cap_path =
+            Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".capabilities.json");
         let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
         crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    async fn load_channel_capabilities(
+        &self,
+        name: &str,
+    ) -> Option<crate::channels::wasm::ChannelCapabilitiesFile> {
+        let cap_path =
+            Self::existing_extension_file_path(&self.wasm_channels_dir, name, ".capabilities.json");
+        let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
+        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    async fn collect_secret_cleanup_plan(
+        &self,
+        name: &str,
+        kind: ExtensionKind,
+        user_id: &str,
+    ) -> Result<SecretCleanupPlan, ExtensionError> {
+        let mut plan = SecretCleanupPlan::default();
+
+        match kind {
+            ExtensionKind::WasmTool => {
+                if let Some(cap) = self.load_tool_capabilities(name).await {
+                    for secret_name in Self::tool_secret_names(&cap) {
+                        plan.add_base_secret(secret_name);
+                    }
+
+                    if let Some(auth) = cap.auth {
+                        plan.add_base_secret(&auth.secret_name);
+                        plan.add_companion_secret(
+                            &auth.secret_name,
+                            oauth_refresh_secret_name(&auth.secret_name),
+                        );
+                        plan.add_companion_secret(
+                            &auth.secret_name,
+                            oauth_scopes_secret_name(&auth.secret_name),
+                        );
+                    }
+                }
+            }
+            ExtensionKind::WasmChannel => {
+                if let Some(cap) = self.load_channel_capabilities(name).await {
+                    for secret_name in Self::channel_secret_names(&cap) {
+                        plan.add_base_secret(secret_name);
+                    }
+                }
+            }
+            ExtensionKind::McpServer => {
+                let server = self
+                    .get_mcp_server(name, user_id)
+                    .await
+                    .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                let token_secret_name = server.token_secret_name();
+                plan.add_base_secret(&token_secret_name);
+                plan.add_base_secret(server.client_id_secret_name());
+                plan.add_base_secret(server.client_secret_secret_name());
+                // MCP OAuth can persist companion secrets through two paths:
+                // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
+                // hosted gateway callback stores companions alongside the access
+                // token secret (`<token_secret>_refresh_token` / `_scopes`).
+                plan.add_companion_secret(&token_secret_name, server.refresh_token_secret_name());
+                plan.add_companion_secret(
+                    &token_secret_name,
+                    oauth_refresh_secret_name(&token_secret_name),
+                );
+                plan.add_companion_secret(
+                    &token_secret_name,
+                    oauth_scopes_secret_name(&token_secret_name),
+                );
+            }
+            ExtensionKind::ChannelRelay | ExtensionKind::AcpAgent => {}
+        }
+
+        Ok(plan)
+    }
+
+    async fn cleanup_uninstalled_extension_secrets(&self, plan: SecretCleanupPlan, user_id: &str) {
+        let referenced_secrets = match self.collect_referenced_secret_names(user_id).await {
+            Ok(secret_names) => secret_names,
+            Err(error) => {
+                tracing::warn!(
+                    user_id,
+                    error,
+                    "Failed to determine which secrets are still referenced; keeping secrets"
+                );
+                return;
+            }
+        };
+
+        for base_secret in &plan.base_secrets {
+            if referenced_secrets.contains(base_secret) {
+                continue;
+            }
+
+            self.delete_secret_best_effort(user_id, base_secret).await;
+
+            if let Some(companion_secrets) = plan.companion_secrets.get(base_secret) {
+                for companion_secret in companion_secrets {
+                    if !referenced_secrets.contains(companion_secret) {
+                        self.delete_secret_best_effort(user_id, companion_secret)
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn delete_secret_best_effort(&self, user_id: &str, secret_name: &str) {
+        if let Err(error) = self.secrets.delete(user_id, secret_name).await {
+            tracing::warn!(
+                user_id,
+                secret_name,
+                error = %error,
+                "Failed to delete secret while uninstalling extension"
+            );
+        }
+    }
+
+    async fn collect_referenced_secret_names(
+        &self,
+        user_id: &str,
+    ) -> Result<HashSet<String>, String> {
+        let mut referenced_secret_names = HashSet::new();
+
+        let tools = discover_tools(&self.wasm_tools_dir)
+            .await
+            .map_err(|e| format!("discover tools: {e}"))?;
+        for tool_name in tools.keys() {
+            // A bare WASM install without a `.capabilities.json` sidecar is a
+            // legitimate state — the tool simply has no declared secrets.
+            // Don't abort the entire scan on a missing sidecar; just skip
+            // that tool. Aborting the whole function would mean *no* secrets
+            // get cleaned up for *any* extension when even one sidecar is
+            // missing, which is the orphaned-secrets bug serrrfirat called
+            // out.
+            let Some(cap) = self.load_tool_capabilities(tool_name).await else {
+                tracing::debug!(
+                    tool = %tool_name,
+                    "no capabilities sidecar — no secrets referenced"
+                );
+                continue;
+            };
+            referenced_secret_names.extend(Self::tool_secret_names(&cap));
+        }
+
+        let channels = crate::channels::wasm::discover_channels(&self.wasm_channels_dir)
+            .await
+            .map_err(|e| format!("discover channels: {e}"))?;
+        for channel_name in channels.keys() {
+            // Same rationale as the tool scan above: a missing channel
+            // capabilities sidecar means "no declared secrets", not "abort
+            // the whole secret-cleanup scan".
+            let Some(cap) = self.load_channel_capabilities(channel_name).await else {
+                tracing::debug!(
+                    channel = %channel_name,
+                    "no capabilities sidecar — no secrets referenced"
+                );
+                continue;
+            };
+            referenced_secret_names.extend(Self::channel_secret_names(&cap));
+        }
+
+        let mcp_servers = self
+            .load_mcp_servers(user_id)
+            .await
+            .map_err(|e| format!("load MCP servers: {e}"))?;
+        for server in &mcp_servers.servers {
+            referenced_secret_names.extend(Self::mcp_server_secret_names(server));
+        }
+
+        Ok(referenced_secret_names)
+    }
+
+    fn tool_secret_names(cap: &crate::tools::wasm::CapabilitiesFile) -> HashSet<String> {
+        let mut names = HashSet::new();
+
+        if let Some(auth) = &cap.auth {
+            names.insert(auth.secret_name.to_lowercase());
+        }
+        if let Some(setup) = &cap.setup {
+            names.extend(
+                setup
+                    .required_secrets
+                    .iter()
+                    .map(|secret| secret.name.to_lowercase()),
+            );
+        }
+        if let Some(http) = &cap.http {
+            names.extend(
+                http.credentials
+                    .values()
+                    .map(|credential| credential.secret_name.to_lowercase()),
+            );
+        }
+        if let Some(webhook) = &cap.webhook {
+            if let Some(secret_name) = &webhook.secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = &webhook.signature_key_secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = &webhook.hmac_secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
+        }
+
+        names
+    }
+
+    fn channel_secret_names(
+        cap: &crate::channels::wasm::ChannelCapabilitiesFile,
+    ) -> HashSet<String> {
+        let mut names: HashSet<String> = cap
+            .setup
+            .required_secrets
+            .iter()
+            .map(|secret| secret.name.to_lowercase())
+            .collect();
+
+        if let Some(http) = cap.capabilities.tool.http.as_ref() {
+            names.extend(
+                http.credentials
+                    .values()
+                    .map(|credential| credential.secret_name.to_lowercase()),
+            );
+        }
+
+        if let Some(webhook) = cap
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.webhook.as_ref())
+        {
+            if webhook.secret_header.is_some() || webhook.secret_name.is_some() {
+                names.insert(cap.webhook_secret_name().to_lowercase());
+            }
+            if let Some(secret_name) = cap.signature_key_secret_name() {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = cap.hmac_secret_name() {
+                names.insert(secret_name.to_lowercase());
+            }
+        }
+
+        names
+    }
+
+    fn mcp_server_secret_names(server: &McpServerConfig) -> HashSet<String> {
+        [
+            server.token_secret_name().to_lowercase(),
+            server.client_id_secret_name().to_lowercase(),
+        ]
+        .into_iter()
+        .collect()
     }
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
@@ -2870,6 +4547,7 @@ impl ExtensionManager {
         &self,
         secret_name: &str,
         base_scopes: &[String],
+        _user_id: &str,
     ) -> Vec<String> {
         let mut all_scopes: std::collections::BTreeSet<String> =
             base_scopes.iter().cloned().collect();
@@ -2890,14 +4568,19 @@ impl ExtensionManager {
     }
 
     /// Check whether the stored scopes are insufficient for the merged scopes.
-    async fn needs_scope_expansion(&self, secret_name: &str, merged_scopes: &[String]) -> bool {
+    async fn needs_scope_expansion(
+        &self,
+        secret_name: &str,
+        merged_scopes: &[String],
+        user_id: &str,
+    ) -> bool {
         if merged_scopes.is_empty() {
             return false;
         }
 
         let scopes_key = format!("{}_scopes", secret_name);
         let stored_scopes: std::collections::HashSet<String> =
-            match self.secrets.get_decrypted(&self.user_id, &scopes_key).await {
+            match self.secrets.get_decrypted(user_id, &scopes_key).await {
                 Ok(secret) => {
                     let scopes: std::collections::HashSet<String> = secret
                         .expose()
@@ -2965,8 +4648,9 @@ impl ExtensionManager {
         name: &str,
         auth: &crate::tools::wasm::AuthCapabilitySchema,
         oauth: &crate::tools::wasm::OAuthConfigSchema,
+        user_id: &str,
     ) -> bool {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+        let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
         let (id_entry, secret_entry) = self.find_setup_credential_names(name).await;
 
         for (entry, inline, env, fallback) in [
@@ -2990,7 +4674,7 @@ impl ExtensionManager {
                 continue;
             }
             let resolved = self
-                .resolve_oauth_credential(inline, env, fallback, Some(setup_name))
+                .resolve_oauth_credential(inline, env, fallback, Some(setup_name), user_id)
                 .await
                 .is_some();
             if !resolved {
@@ -3010,10 +4694,11 @@ impl ExtensionManager {
         env_var_name: &Option<String>,
         builtin_value: Option<&str>,
         setup_secret_name: Option<&str>,
+        user_id: &str,
     ) -> Option<String> {
         // 1. Check secrets store (entered via Setup tab)
         if let Some(secret_name) = setup_secret_name
-            && let Ok(secret) = self.secrets.get_decrypted(&self.user_id, secret_name).await
+            && let Ok(secret) = self.secrets.get_decrypted(user_id, secret_name).await
         {
             let val = secret.expose();
             if !val.is_empty() {
@@ -3047,10 +4732,18 @@ impl ExtensionManager {
         name: &str,
         auth: &crate::tools::wasm::AuthCapabilitySchema,
         oauth: &crate::tools::wasm::OAuthConfigSchema,
+        user_id: &str,
     ) -> Result<AuthResult, String> {
-        use crate::cli::oauth_defaults;
+        use crate::auth::oauth;
 
-        let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+        upsert_auth_descriptor(
+            self.settings_store(),
+            user_id,
+            Self::wasm_auth_descriptor(name, AuthDescriptorKind::WasmTool, auth),
+        )
+        .await;
+
+        let builtin = oauth::builtin_credentials(&auth.secret_name);
 
         // Find setup secret names for client_id and client_secret from capabilities.
         // These are the actual names used in the Setup tab (e.g., "google_oauth_client_id"),
@@ -3059,6 +4752,7 @@ impl ExtensionManager {
             self.find_setup_credential_names(name).await;
         let setup_client_id_name = setup_client_id_entry.map(|(n, _)| n);
         let setup_client_secret_name = setup_client_secret_entry.map(|(n, _)| n);
+        let oauth_guidance = oauth.pending_instructions.clone();
 
         // Resolve client_id: setup secrets → inline → env var → builtin
         let client_id = self
@@ -3067,6 +4761,7 @@ impl ExtensionManager {
                 &oauth.client_id_env,
                 builtin.as_ref().map(|c| c.client_id),
                 setup_client_id_name.as_deref(),
+                user_id,
             )
             .await
             .ok_or_else(|| {
@@ -3080,7 +4775,7 @@ impl ExtensionManager {
                     name, env_name
                 );
                 if let Some(override_env) =
-                    crate::cli::oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+                    crate::auth::oauth::builtin_client_id_override_env(&auth.secret_name)
                 {
                     msg.push_str(&format!(", or build with {override_env}"));
                 }
@@ -3095,6 +4790,7 @@ impl ExtensionManager {
                 &oauth.client_secret_env,
                 builtin.as_ref().map(|c| c.client_secret),
                 setup_client_secret_name.as_deref(),
+                user_id,
             )
             .await;
 
@@ -3103,95 +4799,84 @@ impl ExtensionManager {
         let redirect_uri = self
             .gateway_callback_redirect_uri()
             .await
-            .unwrap_or_else(|| format!("{}/callback", oauth_defaults::callback_url()));
+            .unwrap_or_else(|| format!("{}/callback", oauth::callback_url()));
 
         // Merge scopes from all tools sharing this provider
         let merged_scopes = self
-            .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
+            .collect_shared_scopes(&auth.secret_name, &oauth.scopes, user_id)
             .await;
-
-        // Build authorization URL with CSRF state
-        let oauth_result = oauth_defaults::build_oauth_url(
-            &oauth.authorization_url,
-            &client_id,
-            &redirect_uri,
-            &merged_scopes,
-            oauth.use_pkce,
-            &oauth.extra_params,
-        );
-        let auth_url = oauth_result.url.clone();
-        let code_verifier = oauth_result.code_verifier;
-        let expected_state = oauth_result.state;
 
         let display_name = auth
             .display_name
             .clone()
             .unwrap_or_else(|| name.to_string());
 
-        if self.should_use_gateway_mode() {
-            // When an exchange proxy is configured, omit the client_secret if it
-            // was resolved from built-in defaults (desktop app credentials). The
-            // proxy holds the correct web-app secret for platform-registered OAuth
-            // apps. Sending the desktop secret would cause a client_id/secret
-            // mismatch because the container's GOOGLE_OAUTH_CLIENT_ID is the web
-            // app, not the desktop app.
-            let proxy_client_secret = hosted_proxy_client_secret(
+        let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
+            display_name: display_name.clone(),
+            authorization_url: oauth.authorization_url.clone(),
+            token_url: oauth.token_url.clone(),
+            client_id: client_id.clone(),
+            client_secret: oauth::hosted_proxy_client_secret(
                 &client_secret,
                 builtin.as_ref(),
-                oauth_defaults::exchange_proxy_url().is_some(),
-            );
+                oauth::exchange_proxy_url().is_some(),
+            ),
+            redirect_uri: redirect_uri.clone(),
+            access_token_field: oauth.access_token_field.clone(),
+            secret_name: auth.secret_name.clone(),
+            provider: auth.provider.clone(),
+            validation_endpoint: auth.validation_endpoint.clone(),
+            scopes: merged_scopes.clone(),
+            use_pkce: oauth.use_pkce,
+            extra_params: oauth.extra_params.clone(),
+            user_id: user_id.to_string(),
+            secrets: Arc::clone(&self.secrets),
+            sse_manager: self.sse_manager.read().await.clone(),
+            gateway_token: self.oauth_proxy_auth_token.clone(),
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            auto_activate_extension: true,
+        });
 
-            let flow = oauth_defaults::PendingOAuthFlow {
-                extension_name: name.to_string(),
-                display_name: display_name.clone(),
-                token_url: oauth.token_url.clone(),
-                client_id: client_id.clone(),
-                client_secret: proxy_client_secret,
-                redirect_uri: redirect_uri.clone(),
-                code_verifier,
-                access_token_field: oauth.access_token_field.clone(),
-                secret_name: auth.secret_name.clone(),
-                provider: auth.provider.clone(),
-                validation_endpoint: auth.validation_endpoint.clone(),
-                scopes: merged_scopes,
-                user_id: self.user_id.clone(),
-                secrets: Arc::clone(&self.secrets),
-                sse_sender: self.sse_sender.read().await.clone(),
-                gateway_token: self.gateway_token.clone(),
-                token_exchange_extra_params: std::collections::HashMap::new(),
-                client_id_secret_name: None,
-                created_at: std::time::Instant::now(),
-            };
-
+        if self.should_use_gateway_mode() {
             Ok(self
                 .start_gateway_oauth_flow(HostedOAuthFlowStart {
                     name: name.to_string(),
                     kind: ExtensionKind::WasmTool,
-                    auth_url,
-                    expected_state,
-                    flow,
+                    auth_url: launch.auth_url,
+                    expected_state: launch.expected_state,
+                    flow: launch.flow,
+                    instructions: oauth_guidance,
+                    setup_url: auth.setup_url.clone(),
                 })
                 .await)
         } else {
             // TCP listener mode: bind port 9876 and spawn a background task
             // to wait for the callback. This is the original flow for local/desktop use.
-            let listener = oauth_defaults::bind_callback_listener()
+            let listener = oauth::bind_callback_listener()
                 .await
                 .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
 
-            let token_url = oauth.token_url.clone();
-            let access_token_field = oauth.access_token_field.clone();
-            let secret_name = auth.secret_name.clone();
-            let provider = auth.provider.clone();
-            let validation_endpoint = auth.validation_endpoint.clone();
-            let user_id = self.user_id.clone();
-            let secrets = Arc::clone(&self.secrets);
-            let sse_sender = self.sse_sender.read().await.clone();
+            let token_url = launch.flow.token_url.clone();
+            let access_token_field = launch.flow.access_token_field.clone();
+            let secret_name = launch.flow.secret_name.clone();
+            let provider = launch.flow.provider.clone();
+            let validation_endpoint = launch.flow.validation_endpoint.clone();
+            let user_id = launch.flow.user_id.clone();
+            let secrets = Arc::clone(&launch.flow.secrets);
+            let sse_manager = self.sse_manager.read().await.clone();
             let ext_name = name.to_string();
+            let client_secret = client_secret.clone();
+            let redirect_uri = launch.flow.redirect_uri.clone();
+            let code_verifier = launch.flow.code_verifier.clone();
+            let expected_state = launch.expected_state.clone();
 
             let task_handle = tokio::spawn(async move {
                 let result: Result<(), String> = async {
-                    let code = oauth_defaults::wait_for_callback(
+                    let code = oauth::wait_for_callback(
                         listener,
                         "/callback",
                         "code",
@@ -3201,7 +4886,7 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                    let token_response = oauth_defaults::exchange_oauth_code(
+                    let token_response = oauth::exchange_oauth_code(
                         &token_url,
                         &client_id,
                         client_secret.as_deref(),
@@ -3215,15 +4900,12 @@ impl ExtensionManager {
 
                     // Validate the token before storing (catches wrong account, etc.)
                     if let Some(ref validation) = validation_endpoint {
-                        oauth_defaults::validate_oauth_token(
-                            &token_response.access_token,
-                            validation,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        oauth::validate_oauth_token(&token_response.access_token, validation)
+                            .await
+                            .map_err(|e| e.to_string())?;
                     }
 
-                    oauth_defaults::store_oauth_tokens(
+                    oauth::store_oauth_tokens(
                         secrets.as_ref(),
                         &user_id,
                         &secret_name,
@@ -3240,7 +4922,7 @@ impl ExtensionManager {
                 }
                 .await;
 
-                // Broadcast SSE event
+                // Broadcast auth result event
                 let (success, message) = match result {
                     Ok(()) => (true, format!("{} authenticated successfully", display_name)),
                     Err(ref e) => (
@@ -3265,11 +4947,21 @@ impl ExtensionManager {
                     }
                 }
 
-                if let Some(ref sender) = sse_sender {
-                    let _ = sender.send(crate::channels::web::types::SseEvent::AuthCompleted {
-                        extension_name: ext_name,
-                        success,
-                        message,
+                if let Some(ref sse) = sse_manager {
+                    sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
+                        extension_name: ironclaw_common::ExtensionName::from_trusted(ext_name),
+                        state: if success {
+                            ironclaw_common::OnboardingStateDto::Ready
+                        } else {
+                            ironclaw_common::OnboardingStateDto::Failed
+                        },
+                        request_id: None,
+                        message: Some(message),
+                        instructions: None,
+                        auth_url: None,
+                        setup_url: None,
+                        onboarding: None,
+                        thread_id: None,
                     });
                 }
             });
@@ -3285,12 +4977,22 @@ impl ExtensionManager {
                 },
             );
 
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::WasmTool,
-                auth_url,
-                "local".to_string(),
-            ))
+            Ok(match oauth_guidance {
+                Some(instructions) => AuthResult::awaiting_authorization_with_guidance(
+                    name,
+                    ExtensionKind::WasmTool,
+                    launch.auth_url,
+                    "local".to_string(),
+                    instructions,
+                    auth.setup_url.clone(),
+                ),
+                None => AuthResult::awaiting_authorization(
+                    name,
+                    ExtensionKind::WasmTool,
+                    launch.auth_url,
+                    "local".to_string(),
+                ),
+            })
         }
     }
 
@@ -3316,7 +5018,7 @@ impl ExtensionManager {
         let Some(ref oauth) = auth.oauth else {
             return false;
         };
-        let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+        let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
 
         if is_client_id {
             oauth.client_id.is_some()
@@ -3335,41 +5037,193 @@ impl ExtensionManager {
         }
     }
 
+    /// Public wrapper for `check_tool_auth_status()`.
+    ///
+    /// Used by the auth manager to query tool readiness without
+    /// exposing internal extension state. Returns `NoAuth` if the
+    /// extension is not found or has no capabilities file.
+    pub async fn check_tool_auth_status_pub(&self, name: &str, user_id: &str) -> ToolAuthState {
+        self.check_tool_auth_status(name, user_id).await
+    }
+
+    /// Return the concrete secret name that would satisfy the current auth
+    /// requirement for an installed extension, when one exists.
+    pub async fn first_missing_auth_secret_pub(&self, name: &str, user_id: &str) -> Option<String> {
+        let kind = self.determine_installed_kind(name, user_id).await.ok()?;
+        match kind {
+            ExtensionKind::McpServer => {
+                let server = self.get_mcp_server(name, user_id).await.ok()?;
+                if crate::tools::mcp::auth::is_authenticated(&server, &self.secrets, user_id).await
+                {
+                    None
+                } else {
+                    Some(server.token_secret_name())
+                }
+            }
+            ExtensionKind::WasmTool => {
+                let cap = self.load_tool_capabilities(name).await?;
+                let auth = cap.auth?;
+                let token_is_managed = self
+                    .secrets
+                    .exists(user_id, &auth.secret_name)
+                    .await
+                    .unwrap_or(false);
+                let has_env_token = auth
+                    .env_var
+                    .as_ref()
+                    .is_some_and(|v| std::env::var(v).is_ok());
+                if token_is_managed || has_env_token {
+                    None
+                } else {
+                    Some(auth.secret_name)
+                }
+            }
+            ExtensionKind::WasmChannel => {
+                let cap = self.load_channel_capabilities(name).await?;
+                for secret in &cap.setup.required_secrets {
+                    if secret.optional {
+                        continue;
+                    }
+                    if !self
+                        .secrets
+                        .exists(user_id, &secret.name)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        return Some(secret.name.clone());
+                    }
+                }
+                None
+            }
+            ExtensionKind::ChannelRelay => None,
+            ExtensionKind::AcpAgent => None,
+        }
+    }
+
+    async fn is_extension_active(&self, name: &str, kind: ExtensionKind) -> bool {
+        match kind {
+            ExtensionKind::McpServer => self.mcp_clients.read().await.contains_key(name),
+            ExtensionKind::WasmTool => self.tool_registry.has(name).await,
+            ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
+                self.active_channel_names.read().await.contains(name)
+            }
+            ExtensionKind::AcpAgent => true,
+        }
+    }
+
     /// Determine the auth readiness of a WASM tool.
-    async fn check_tool_auth_status(&self, name: &str) -> ToolAuthState {
+    async fn check_tool_auth_status(&self, name: &str, user_id: &str) -> ToolAuthState {
         let Some(cap_file) = self.load_tool_capabilities(name).await else {
             return ToolAuthState::NoAuth;
         };
+
+        if let Some(auth) = cap_file.auth.as_ref() {
+            upsert_auth_descriptor(
+                self.settings_store(),
+                user_id,
+                Self::wasm_auth_descriptor(name, AuthDescriptorKind::WasmTool, auth),
+            )
+            .await;
+        }
+
+        // Multi-tenant scoping: every credential / setup-field check below
+        // must run against the *requesting* user (the `user_id` parameter),
+        // not against `self.user_id` (the manager's owner). The previous
+        // code mixed the two, so a non-owner user could see a tool reported
+        // as "setup-complete" because the owner had configured it.
+        let saved_fields = self
+            .load_tool_setup_fields_for(name, user_id)
+            .await
+            .unwrap_or_default();
+        let setup_is_complete = if let Some(setup) = &cap_file.setup {
+            let secrets_ready = futures::future::join_all(
+                setup
+                    .required_secrets
+                    .iter()
+                    .filter(|s| !s.optional)
+                    .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
+                    .map(|s| self.secrets.exists(user_id, &s.name)),
+            )
+            .await
+            .into_iter()
+            .all(|r| r.unwrap_or(false));
+
+            if !secrets_ready {
+                false
+            } else {
+                let mut fields_ready = true;
+                for field in &setup.required_fields {
+                    if field.optional {
+                        continue;
+                    }
+                    if !self
+                        .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
+                        .await
+                    {
+                        fields_ready = false;
+                        break;
+                    }
+                }
+                fields_ready
+            }
+        } else {
+            true
+        };
+
+        if !setup_is_complete {
+            return ToolAuthState::NeedsSetup;
+        }
 
         // If the tool declares an auth section, the access token is the
         // authoritative signal — setup secrets (client_id/secret) are
         // intermediate and may be auto-resolved via builtins.
         if let Some(ref auth) = cap_file.auth {
-            let has_token = self
+            let token_is_managed = self
                 .secrets
-                .exists(&self.user_id, &auth.secret_name)
+                .exists(user_id, &auth.secret_name)
                 .await
-                .unwrap_or(false)
-                || auth
-                    .env_var
-                    .as_ref()
-                    .is_some_and(|v| std::env::var(v).is_ok());
-            return if has_token {
-                ToolAuthState::Ready
-            } else if auth.oauth.is_some() {
+                .unwrap_or(false);
+            let has_env_token = auth
+                .env_var
+                .as_ref()
+                .is_some_and(|v| std::env::var(v).is_ok());
+
+            if token_is_managed {
+                // Token lives in the secrets store — check whether the merged
+                // scope set of all tools sharing this secret is satisfied.
+                if let Some(ref oauth) = auth.oauth {
+                    let merged = self
+                        .collect_shared_scopes(&auth.secret_name, &oauth.scopes, user_id)
+                        .await;
+                    if self
+                        .needs_scope_expansion(&auth.secret_name, &merged, user_id)
+                        .await
+                    {
+                        return ToolAuthState::NeedsAuth;
+                    }
+                }
+                return ToolAuthState::Ready;
+            }
+
+            if has_env_token {
+                // Externally-managed token (env var) — skip scope checks;
+                // the user is responsible for granting adequate scopes.
+                return ToolAuthState::Ready;
+            }
+
+            return if auth.oauth.is_some() {
                 ToolAuthState::NeedsAuth
             } else {
                 ToolAuthState::NeedsSetup
             };
         }
 
-        // No auth section — fall back to checking setup.required_secrets.
-        let Some(setup) = &cap_file.setup else {
-            return ToolAuthState::NoAuth;
+        // No auth section — setup_is_complete was already checked above,
+        // so if we reach here the setup requirements are satisfied.
+        let setup = match &cap_file.setup {
+            Some(s) => s,
+            None => return ToolAuthState::NoAuth,
         };
-        if setup.required_secrets.is_empty() {
-            return ToolAuthState::NoAuth;
-        }
 
         let all_provided = futures::future::join_all(
             setup
@@ -3377,7 +5231,7 @@ impl ExtensionManager {
                 .iter()
                 .filter(|s| !s.optional)
                 .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
-                .map(|s| self.secrets.exists(&self.user_id, &s.name)),
+                .map(|s| self.secrets.exists(user_id, &s.name)),
         )
         .await
         .into_iter()
@@ -3391,24 +5245,17 @@ impl ExtensionManager {
     }
 
     /// Check auth status for a WASM channel (read-only).
-    async fn auth_wasm_channel_status(&self, name: &str) -> Result<AuthResult, ExtensionError> {
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-
-        if !cap_path.exists() {
+    async fn auth_wasm_channel_status(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<AuthResult, ExtensionError> {
+        let Some(cap_file) = self.load_channel_capabilities(name).await else {
             return Ok(AuthResult::no_auth_required(
                 name,
                 ExtensionKind::WasmChannel,
             ));
-        }
-
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-
-        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        };
 
         let required_secrets = &cap_file.setup.required_secrets;
         if required_secrets.is_empty() {
@@ -3426,7 +5273,7 @@ impl ExtensionManager {
             }
             if !self
                 .secrets
-                .exists(&self.user_id, &secret.name)
+                .exists(user_id, &secret.name)
                 .await
                 .unwrap_or(false)
             {
@@ -3440,26 +5287,43 @@ impl ExtensionManager {
 
         // Prompt for the first missing secret
         let secret = &missing[0];
+        if let Some(auth_result) = self
+            .start_secret_oauth_flow(name, &secret.name, user_id)
+            .await
+        {
+            return Ok(auth_result);
+        }
+
         Ok(AuthResult::awaiting_token(
             name,
             ExtensionKind::WasmChannel,
-            channel_auth_instructions(name, secret),
+            secret.prompt.clone(),
             cap_file.setup.setup_url.clone(),
         ))
     }
 
-    async fn activate_mcp(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+    async fn activate_mcp(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
         // Check if already activated
         {
             let clients = self.mcp_clients.read().await;
             if clients.contains_key(name) {
                 // Already connected, just return the tool names
+                // Use the same normalization as `mcp_tool_id` for the
+                // prefix filter so hyphenated server names match the
+                // underscore-only keys in the registry. `mcp_tool_id(name, "")`
+                // produces `normalized_server_` which is exactly the prefix
+                // every tool registered by this server starts with.
+                let prefix = crate::tools::mcp::mcp_tool_id(name, "");
                 let tools: Vec<String> = self
                     .tool_registry
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
+                    .filter(|t| t.starts_with(&prefix))
                     .collect();
 
                 return Ok(ActivateResult {
@@ -3472,7 +5336,7 @@ impl ExtensionManager {
         }
 
         let server = self
-            .get_mcp_server(name)
+            .get_mcp_server(name, user_id)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
@@ -3481,7 +5345,7 @@ impl ExtensionManager {
             &self.mcp_session_manager,
             &self.mcp_process_manager,
             Some(Arc::clone(&self.secrets)),
-            &self.user_id,
+            user_id,
         )
         .await
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
@@ -3493,27 +5357,37 @@ impl ExtensionManager {
         // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            let msg_lower = msg.to_ascii_lowercase();
-            if msg_lower.contains("requires authentication")
-                || msg.contains("401")
-                || (msg.contains("400")
-                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
-            {
-                ExtensionError::AuthRequired
+            if crate::tools::mcp::is_auth_error_message(&msg) {
+                if server.has_custom_auth_header() {
+                    ExtensionError::ActivationFailed(format!(
+                        "MCP server '{}' rejected its configured Authorization header. Update the configured credential and try again.",
+                        name
+                    ))
+                } else {
+                    ExtensionError::AuthRequired
+                }
             } else {
                 ExtensionError::ActivationFailed(msg)
             }
         })?;
+
+        let mut updated_server = server.clone();
+        updated_server.cached_tools = mcp_tools.clone();
+        self.update_mcp_server(updated_server, user_id)
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
         let tool_impls = client
             .create_tools()
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        let tool_names: Vec<String> = mcp_tools
-            .iter()
-            .map(|t| format!("{}_{}", name, t.name))
-            .collect();
+        // Source the reported names from the wrapper itself, not from the
+        // raw McpTool list. The wrapper canonicalizes dashes to underscores
+        // (see `mcp_tool_id`) so the registry key, the LLM-facing schema,
+        // the `/tools` listing, and the activation result all agree on a
+        // single snake_case identifier.
+        let tool_names: Vec<String> = tool_impls.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
@@ -3531,6 +5405,11 @@ impl ExtensionManager {
             tool_names.len()
         );
 
+        // Invalidate latent provider actions so the newly-activated MCP server
+        // stops appearing in the latent set on the next ensure_extension_ready
+        // cycle.
+        self.invalidate_latent_wasm_provider_actions_cache().await;
+
         Ok(ActivateResult {
             name: name.to_string(),
             kind: ExtensionKind::McpServer,
@@ -3539,7 +5418,51 @@ impl ExtensionManager {
         })
     }
 
-    async fn activate_wasm_tool(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+    fn latent_actions_for_mcp_server(&self, server: &McpServerConfig) -> Vec<LatentProviderAction> {
+        let mut actions = Vec::new();
+
+        actions.push(LatentProviderAction {
+            action_name: server.name.clone(),
+            provider_extension: server.name.clone(),
+            description: format!(
+                "{} The runtime will connect/authenticate this provider automatically before concrete provider actions become available.",
+                server
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Use the '{}' MCP provider.", server.name))
+            ),
+            parameters_schema: serde_json::json!({"type":"object"}),
+        });
+
+        actions.extend(server.cached_tools.iter().map(|tool| {
+            let description = if tool.description.trim().is_empty() {
+                format!(
+                    "Use the '{}' action from the '{}' MCP provider.",
+                    tool.name, server.name
+                )
+            } else {
+                tool.description.clone()
+            };
+
+            LatentProviderAction {
+                action_name: crate::tools::mcp::mcp_tool_id(&server.name, &tool.name),
+                provider_extension: server.name.clone(),
+                description: format!(
+                    "{} The runtime will connect/authenticate this provider automatically before use.",
+                    description
+                ),
+                parameters_schema: tool.input_schema.clone(),
+            }
+        }));
+
+        actions
+    }
+
+    async fn activate_wasm_tool(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
         // Check if already active
         if self.tool_registry.has(name).await {
             return Ok(ActivateResult {
@@ -3553,7 +5476,7 @@ impl ExtensionManager {
         // Check auth status — block activation if required secrets are missing.
         // NeedsAuth (OAuth not yet completed) is allowed because configure() loads
         // the tool first, then starts the OAuth flow to obtain the token.
-        let auth_state = self.check_tool_auth_status(name).await;
+        let auth_state = self.check_tool_auth_status(name, user_id).await;
         if auth_state == ToolAuthState::NeedsSetup {
             return Err(ExtensionError::ActivationFailed(format!(
                 "Tool '{}' requires configuration. Use the setup form to provide credentials.",
@@ -3565,7 +5488,17 @@ impl ExtensionManager {
             ExtensionError::ActivationFailed("WASM runtime not available".to_string())
         })?;
 
-        let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+        // Use the alias-aware helper so a tool installed under the
+        // legacy hyphen filename (`google-drive-tool.wasm`) is found
+        // when looked up via the canonical underscore name
+        // (`google_drive_tool`). Without this, `determine_installed_kind`
+        // happily reports the extension as installed via its own alias
+        // check, but `activate_wasm_tool` then fails with `NotInstalled`
+        // here — and the upstream readiness probe falls back to
+        // "treat as ready", so the agent ends up calling a tool that
+        // can't be activated, hits a 401/403, and confuses itself.
+        // Pinned by `test_activate_wasm_tool_finds_legacy_hyphen_alias`.
+        let wasm_path = Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".wasm");
         if !wasm_path.exists() {
             return Err(ExtensionError::NotInstalled(format!(
                 "WASM tool '{}' not found at {}",
@@ -3574,17 +5507,19 @@ impl ExtensionManager {
             )));
         }
 
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
+        let cap_path =
+            Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".capabilities.json");
         let cap_path_option = if cap_path.exists() {
             Some(cap_path.as_path())
         } else {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
             .with_secrets_store(Arc::clone(&self.secrets));
+        if let Some(ref db) = self.store {
+            loader = loader.with_role_lookup(Arc::clone(db) as Arc<dyn crate::db::UserStore>);
+        }
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
@@ -3620,6 +5555,10 @@ impl ExtensionManager {
 
         tracing::info!("Activated WASM tool '{}'", name);
 
+        // Invalidate latent provider actions so the newly-activated tool stops
+        // appearing in the latent set on the next ensure_extension_ready cycle.
+        self.invalidate_latent_wasm_provider_actions_cache().await;
+
         Ok(ActivateResult {
             name: name.to_string(),
             kind: ExtensionKind::WasmTool,
@@ -3633,14 +5572,21 @@ impl ExtensionManager {
     /// Loads the channel from its WASM file, injects credentials and config,
     /// registers it with the webhook router, and hot-adds it to the channel manager
     /// so its stream feeds into the agent loop.
-    async fn activate_wasm_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+    async fn activate_wasm_channel(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
+        let activation_lock = self.channel_activation_lock(name).await;
+        let _guard = activation_lock.lock().await;
+
         // If already active, re-inject credentials and refresh webhook secret.
         // Handles the case where a channel was loaded at startup before the
         // user saved secrets via the web UI.
         {
             let active = self.active_channel_names.read().await;
             if active.contains(name) {
-                return self.refresh_active_channel(name).await;
+                return self.refresh_active_channel(name, user_id).await;
             }
         }
 
@@ -3667,7 +5613,7 @@ impl ExtensionManager {
         };
 
         // Check auth status first
-        let auth_state = self.check_channel_auth_status(name).await;
+        let auth_state = self.check_channel_auth_status(name, user_id).await;
         if auth_state != ToolAuthState::Ready && auth_state != ToolAuthState::NoAuth {
             return Err(ExtensionError::ActivationFailed(format!(
                 "Channel '{}' requires configuration. Use the setup form to provide credentials.",
@@ -3690,8 +5636,7 @@ impl ExtensionManager {
         let loaded = if let Some(loader) = self.test_wasm_channel_loader.read().await.as_ref() {
             loader(name)?
         } else {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -3707,8 +5652,7 @@ impl ExtensionManager {
 
         #[cfg(not(test))]
         let loaded = {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -3741,9 +5685,26 @@ impl ExtensionManager {
         owner_id: Option<i64>,
     ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
-        let owner_actor_id = owner_id.map(|id| id.to_string());
+        if is_reserved_wasm_channel_name(&channel_name) {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Channel '{}' uses a reserved name and cannot be activated.",
+                channel_name
+            )));
+        }
+
+        // Resolve owner with full fallback: explicit arg -> runtime HashMap -> settings store
+        // -> pairing_store external id -> capabilities file.
+        let owner_actor_id = if let Some(owner_id) = owner_id {
+            Some(owner_id.to_string())
+        } else if let Some(id) = self.current_channel_owner_actor_id(&channel_name).await {
+            Some(id)
+        } else {
+            owner_id_from_capabilities(loaded.capabilities_file.as_ref(), &channel_name)
+        };
+
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
 
@@ -3755,20 +5716,26 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
+        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
-            let resolved_owner_id = owner_id.or(self.current_channel_owner_id(&channel_name).await);
             let mut config_updates = build_wasm_channel_runtime_config_updates(
                 self.tunnel_url.as_deref(),
                 webhook_secret.as_deref(),
-                resolved_owner_id,
+                owner_actor_id.as_deref(),
             );
             config_updates.extend(
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
+            inject_wasm_channel_secret_config_updates(
+                self.secrets.as_ref(),
+                &self.user_id,
+                &channel_name,
+                &mut config_updates,
+            )
+            .await;
 
             if !config_updates.is_empty() {
                 channel_arc.update_config(config_updates).await;
@@ -3783,19 +5750,24 @@ impl ExtensionManager {
 
         // Register with webhook router
         {
+            let host_webhook_secret = if webhook_secret_managed_by_host {
+                webhook_secret.clone()
+            } else {
+                None
+            };
             let webhook_path = format!("/webhook/{}", channel_name);
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
                 path: webhook_path,
                 methods: vec!["POST".to_string()],
-                require_secret: webhook_secret.is_some(),
+                require_secret: host_webhook_secret.is_some(),
             }];
 
             wasm_channel_router
                 .register(
                     Arc::clone(&channel_arc),
                     endpoints,
-                    webhook_secret,
+                    host_webhook_secret,
                     secret_header,
                 )
                 .await;
@@ -3877,7 +5849,7 @@ impl ExtensionManager {
             .insert(channel_name.clone());
 
         // Persist activation state so the channel auto-activates on restart
-        self.persist_active_channels().await;
+        self.persist_active_channels(&self.user_id).await;
 
         tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
 
@@ -3893,7 +5865,11 @@ impl ExtensionManager {
     ///
     /// Called when the user saves new secrets via the setup form for a channel
     /// that was loaded at startup (possibly without credentials).
-    async fn refresh_active_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+    async fn refresh_active_channel(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
         let router = {
             let rt_guard = self.channel_runtime.read().await;
             match rt_guard.as_ref() {
@@ -3927,7 +5903,7 @@ impl ExtensionManager {
             &existing_channel,
             Some(self.secrets.as_ref()),
             name,
-            &self.user_id,
+            user_id,
         )
         .await
         {
@@ -3942,20 +5918,21 @@ impl ExtensionManager {
             }
         };
 
-        // Load capabilities file once to extract all secret names
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        let capabilities_file = match tokio::fs::read(&cap_path).await {
-            Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes).ok(),
-            Err(_) => None,
-        };
+        // Load capabilities file once to extract all secret names. Use
+        // the alias-aware helper so a channel installed under the
+        // legacy hyphen form (e.g. `my-channel.capabilities.json`) is
+        // still resolvable when its canonical name uses underscores.
+        let capabilities_file = self.load_channel_capabilities(name).await;
 
         // Extract all secret names from the capabilities file
         let webhook_secret_name = capabilities_file
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", name));
+        let webhook_secret_managed_by_host = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true);
 
         let sig_key_secret_name = capabilities_file
             .as_ref()
@@ -3965,19 +5942,31 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
+        let owner_actor_id = self
+            .current_channel_owner_actor_id(name)
+            .await
+            .or_else(|| owner_id_from_capabilities(capabilities_file.as_ref(), name));
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
             None,
-            self.current_channel_owner_id(name).await,
+            owner_actor_id.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        inject_wasm_channel_secret_config_updates(
+            self.secrets.as_ref(),
+            &self.user_id,
+            name,
+            &mut config_updates,
+        )
+        .await;
         let mut should_rerun_on_start = false;
 
         // Refresh webhook secret
-        if let Ok(secret) = self
-            .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
-            .await
+        if webhook_secret_managed_by_host
+            && let Ok(secret) = self
+                .secrets
+                .get_decrypted(user_id, &webhook_secret_name)
+                .await
         {
             router
                 .update_secret(name, secret.expose().to_string())
@@ -3991,10 +5980,7 @@ impl ExtensionManager {
 
         // Refresh signature key
         if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Ok(key_secret) = self
-                .secrets
-                .get_decrypted(&self.user_id, sig_key_name)
-                .await
+            && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
         {
             match router
                 .register_signature_key(name, key_secret.expose())
@@ -4013,7 +5999,7 @@ impl ExtensionManager {
         if let Some(ref hmac_secret_name_ref) = hmac_secret_name {
             match self
                 .secrets
-                .get_decrypted(&self.user_id, hmac_secret_name_ref)
+                .get_decrypted(user_id, hmac_secret_name_ref)
                 .await
             {
                 Ok(secret) => {
@@ -4031,14 +6017,47 @@ impl ExtensionManager {
             should_rerun_on_start = true;
         }
 
+        // Sync owner_actor_id from settings store
+        if let Some(owner_id) = owner_actor_id {
+            existing_channel.set_owner_actor_id(Some(owner_id)).await;
+        }
+
         // Re-call on_start() to trigger webhook registration with the
         // now-available credentials (e.g., setWebhook for Telegram).
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
-                Ok(_config) => {
+                Ok(config) => {
+                    // If Channel::start() failed at boot (e.g., missing credentials),
+                    // message_tx is None or closed. Create it now and wire up a
+                    // forwarding task so polling messages reach the agent loop.
+                    if let Some(stream) = existing_channel.ensure_message_channel().await {
+                        let channel_manager = {
+                            let rt_guard = self.channel_runtime.read().await;
+                            rt_guard.as_ref().map(|rt| Arc::clone(&rt.channel_manager))
+                        };
+                        if let Some(cm) = channel_manager {
+                            let inject_tx = cm.inject_sender();
+                            let fwd_name = name.to_string();
+                            tokio::spawn(async move {
+                                use futures::StreamExt;
+                                let mut stream = stream;
+                                while let Some(msg) = stream.next().await {
+                                    if inject_tx.send(msg).await.is_err() {
+                                        tracing::debug!(
+                                            channel = %fwd_name,
+                                            "Inject channel closed, stopping repaired channel forwarding"
+                                        );
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    existing_channel.ensure_polling(&config).await;
                     tracing::info!(
                         channel = %name,
-                        "Re-ran on_start after credential refresh (webhook re-registered)"
+                        "Re-ran on_start after credential refresh (webhook re-registered, polling restarted)"
                     );
                 }
                 Err(e) => {
@@ -4071,9 +6090,9 @@ impl ExtensionManager {
     // ── Channel-relay extension methods ──────────────────────────────────
 
     /// Derive a stable instance ID from the relay config and user_id.
-    fn relay_instance_id(&self, config: &crate::config::RelayConfig) -> String {
+    fn relay_instance_id(&self, config: &crate::config::RelayConfig, user_id: &str) -> String {
         config.instance_id.clone().unwrap_or_else(|| {
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, self.user_id.as_bytes()).to_string()
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, user_id.as_bytes()).to_string()
         })
     }
 
@@ -4081,79 +6100,248 @@ impl ExtensionManager {
     ///
     /// For Slack: initiates OAuth flow (redirect-based).
     /// For Telegram: accepts a bot token, registers it with channel-relay,
-    /// and stores the returned stream token.
-    async fn auth_channel_relay(&self, name: &str) -> Result<AuthResult, ExtensionError> {
-        // Check if already authenticated (has stored team_id)
-        if self.is_relay_channel(name).await {
+    /// and stores the team_id setting.
+    async fn auth_channel_relay(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<AuthResult, ExtensionError> {
+        tracing::trace!(
+            extension = %name,
+            user_id = %user_id,
+            "auth_channel_relay: starting"
+        );
+
+        // Check if already authenticated by looking for a stored team_id.
+        // We intentionally skip the `installed_relay_extensions` in-memory set
+        // here because that set only tracks *installed* extensions — an extension
+        // can be installed (via registry) but not yet authenticated (no OAuth
+        // completed). Checking just `is_relay_channel()` would short-circuit
+        // to "authenticated" even when no team_id exists, preventing the OAuth
+        // flow from being offered to the user.
+        if self.has_stored_team_id(name, user_id).await {
+            tracing::trace!(
+                extension = %name,
+                "auth_channel_relay: already authenticated (team_id in store)"
+            );
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
+        tracing::trace!(
+            extension = %name,
+            "auth_channel_relay: no stored team_id, initiating OAuth"
+        );
+
         // Use relay config captured at startup
-        let relay_config = self.relay_config()?;
+        let relay_config = self.relay_config().map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                error = %e,
+                "auth_channel_relay: relay config not available — \
+                 CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set"
+            );
+            e
+        })?;
+
+        // Allow per-extension URL override from settings
+        let effective_url = self
+            .effective_relay_url(name)
+            .await
+            .unwrap_or_else(|| relay_config.url.clone());
+
+        tracing::trace!(
+            extension = %name,
+            relay_url = %effective_url,
+            "auth_channel_relay: creating relay client for OAuth"
+        );
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url.clone(),
+            effective_url.clone(),
             relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
-        .map_err(|e| ExtensionError::Config(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                relay_url = %effective_url,
+                error = %e,
+                "auth_channel_relay: failed to create relay HTTP client"
+            );
+            ExtensionError::Config(e.to_string())
+        })?;
 
         // Generate CSRF nonce — IronClaw validates this on the callback to ensure
         // the OAuth completion is legitimate. Channel-relay embeds it in the signed
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
+        // Delete any stale nonce before storing the new one.
+        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // because the OAuth callback handler looks up the nonce under
+        // state.owner_id which matches self.user_id.
         let _ = self.secrets.delete(&self.user_id, &state_key).await;
+        // Also best-effort delete any legacy caller-scoped entry so older
+        // per-user nonces don't remain in the secrets table after upgrading.
+        let _ = self.secrets.delete(user_id, &state_key).await;
         self.secrets
             .create(
                 &self.user_id,
                 CreateSecretParams::new(&state_key, &state_nonce),
             )
             .await
-            .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}")))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    extension = %name,
+                    error = %e,
+                    "auth_channel_relay: failed to store OAuth state nonce"
+                );
+                ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}"))
+            })?;
 
         // Channel-relay derives all URLs from trusted instance_url in chat-api.
         // We only pass the nonce for CSRF validation on the callback.
+        tracing::trace!(
+            extension = %name,
+            relay_url = %effective_url,
+            "auth_channel_relay: calling initiate_oauth on channel-relay"
+        );
         match client.initiate_oauth(Some(&state_nonce)).await {
-            Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::ChannelRelay,
-                auth_url,
-                "redirect".to_string(),
-            )),
-            Err(e) => Err(ExtensionError::AuthFailed(e.to_string())),
+            Ok(auth_url) => {
+                tracing::info!(
+                    extension = %name,
+                    "auth_channel_relay: OAuth URL obtained, awaiting user authorization"
+                );
+                Ok(AuthResult::awaiting_authorization(
+                    name,
+                    ExtensionKind::ChannelRelay,
+                    auth_url,
+                    "redirect".to_string(),
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    extension = %name,
+                    relay_url = %effective_url,
+                    error = %e,
+                    "auth_channel_relay: initiate_oauth call to channel-relay failed"
+                );
+                Err(ExtensionError::AuthFailed(e.to_string()))
+            }
         }
     }
 
     /// Activate a channel-relay extension.
-    async fn activate_channel_relay(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+    async fn activate_channel_relay(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
+        tracing::trace!(
+            extension = %name,
+            user_id = %user_id,
+            "activate_channel_relay: starting"
+        );
+
         let team_id_key = format!("relay:{}:team_id", name);
 
-        let store = self.store.as_ref().ok_or(ExtensionError::AuthRequired)?;
-        let team_id = store
-            .get_setting(&self.user_id, &team_id_key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty())
-            .ok_or(ExtensionError::AuthRequired)?;
+        // Get team_id from settings (stored by the OAuth callback)
+        let team_id = if let Some(ref store) = self.store {
+            match store.get_setting(user_id, &team_id_key).await {
+                Ok(Some(v)) => {
+                    let id = v.as_str().map(|s| s.to_string()).unwrap_or_default();
+                    tracing::trace!(
+                        extension = %name,
+                        team_id_empty = id.is_empty(),
+                        "activate_channel_relay: loaded team_id from store"
+                    );
+                    id
+                }
+                Ok(None) => {
+                    tracing::trace!(
+                        extension = %name,
+                        setting_key = %team_id_key,
+                        "activate_channel_relay: no team_id in settings store"
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        extension = %name,
+                        error = %e,
+                        "activate_channel_relay: failed to read team_id from settings store"
+                    );
+                    String::new()
+                }
+            }
+        } else {
+            tracing::trace!(
+                extension = %name,
+                "activate_channel_relay: no settings store available"
+            );
+            String::new()
+        };
+
+        if team_id.is_empty() {
+            tracing::trace!(
+                extension = %name,
+                "activate_channel_relay: team_id is empty, returning AuthRequired"
+            );
+            return Err(ExtensionError::AuthRequired);
+        }
 
         // Use relay config captured at startup
-        let relay_config = self.relay_config()?;
+        let relay_config = self.relay_config().map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                error = %e,
+                "activate_channel_relay: relay config not available"
+            );
+            e
+        })?;
 
-        let instance_id = self.relay_instance_id(relay_config);
+        // Allow per-extension URL override from settings
+        let effective_url = self
+            .effective_relay_url(name)
+            .await
+            .unwrap_or_else(|| relay_config.url.clone());
+
+        tracing::trace!(
+            extension = %name,
+            relay_url = %effective_url,
+            "activate_channel_relay: relay config loaded"
+        );
+
+        let instance_id = self.relay_instance_id(relay_config, user_id);
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url.clone(),
+            effective_url.clone(),
             relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
-        .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                relay_url = %effective_url,
+                error = %e,
+                "activate_channel_relay: failed to create relay HTTP client"
+            );
+            ExtensionError::ActivationFailed(e.to_string())
+        })?;
 
         // Fetch the per-instance signing secret from channel-relay.
         // This must succeed — there is no fallback.
+        tracing::trace!(
+            extension = %name,
+            relay_url = %effective_url,
+            "activate_channel_relay: fetching signing secret from channel-relay"
+        );
         let signing_secret = client.get_signing_secret(&team_id).await.map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                relay_url = %effective_url,
+                error = %e,
+                "activate_channel_relay: failed to fetch signing secret from channel-relay"
+            );
             ExtensionError::Config(format!("Failed to fetch relay signing secret: {e}"))
         })?;
 
@@ -4169,26 +6357,32 @@ impl ExtensionManager {
             event_rx,
         );
 
-        // Callback URL is now set during OAuth flow, not via PUT /callbacks.
-        // The relay webhook endpoint path is still needed for the web gateway.
-        tracing::info!(
-            webhook_path = %relay_config.webhook_path,
-            "Relay channel activated (callback URL set during OAuth)"
-        );
-
         // Hot-add to channel manager
         let cm_guard = self.relay_channel_manager.read().await;
         let channel_mgr = cm_guard.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                extension = %name,
+                "activate_channel_relay: channel manager not initialized"
+            );
             ExtensionError::ActivationFailed("Channel manager not initialized".to_string())
         })?;
 
-        channel_mgr
-            .hot_add(Box::new(channel))
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        channel_mgr.hot_add(Box::new(channel)).await.map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                error = %e,
+                "activate_channel_relay: hot_add to channel manager failed"
+            );
+            ExtensionError::ActivationFailed(e.to_string())
+        })?;
 
         if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
             *cache = Some(signing_secret);
+        } else {
+            tracing::warn!(
+                extension = %name,
+                "activate_channel_relay: failed to cache signing secret (mutex poisoned)"
+            );
         }
 
         // Store the event sender so the web gateway's relay webhook endpoint can push events
@@ -4199,12 +6393,18 @@ impl ExtensionManager {
             .write()
             .await
             .insert(name.to_string());
-        self.persist_active_channels().await;
+        self.persist_active_channels(user_id).await;
 
         // Broadcast status
         let status_msg = "Slack connected via channel relay".to_string();
         self.broadcast_extension_status(name, "active", Some(&status_msg))
             .await;
+
+        tracing::info!(
+            extension = %name,
+            instance_id = %instance_id,
+            "activate_channel_relay: relay channel activated successfully"
+        );
 
         Ok(ActivateResult {
             name: name.to_string(),
@@ -4215,12 +6415,16 @@ impl ExtensionManager {
     }
 
     /// Activate a channel-relay extension from stored credentials (for startup reconnect).
-    pub async fn activate_stored_relay(&self, name: &str) -> Result<(), ExtensionError> {
-        self.activate_channel_relay(name).await?;
+    pub async fn activate_stored_relay(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<(), ExtensionError> {
         self.installed_relay_extensions
             .write()
             .await
             .insert(name.to_string());
+        self.activate_channel_relay(name, user_id).await?;
         Ok(())
     }
 
@@ -4229,9 +6433,21 @@ impl ExtensionManager {
     /// This is a read-only check — it never modifies `installed_relay_extensions`.
     /// To mark a relay extension as installed, use `activate_stored_relay()` or
     /// the explicit install flow.
-    async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
+    async fn determine_installed_kind(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ExtensionKind, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let legacy_name = legacy_extension_alias(&name);
+
         // Check MCP servers first
-        if self.get_mcp_server(name).await.is_ok() {
+        if self.get_mcp_server(&name, user_id).await.is_ok() {
+            return Ok(ExtensionKind::McpServer);
+        }
+        if let Some(ref legacy_name) = legacy_name
+            && self.get_mcp_server(legacy_name, user_id).await.is_ok()
+        {
             return Ok(ExtensionKind::McpServer);
         }
 
@@ -4240,19 +6456,49 @@ impl ExtensionManager {
         if wasm_path.exists() {
             return Ok(ExtensionKind::WasmTool);
         }
+        if let Some(ref legacy_name) = legacy_name
+            && self
+                .wasm_tools_dir
+                .join(format!("{}.wasm", legacy_name))
+                .exists()
+        {
+            return Ok(ExtensionKind::WasmTool);
+        }
 
         // Check WASM channels
         let channel_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
         if channel_path.exists() {
             return Ok(ExtensionKind::WasmChannel);
         }
+        if let Some(ref legacy_name) = legacy_name
+            && self
+                .wasm_channels_dir
+                .join(format!("{}.wasm", legacy_name))
+                .exists()
+        {
+            return Ok(ExtensionKind::WasmChannel);
+        }
 
-        // Check channel-relay extensions (installed in memory or has stored token)
-        if self.installed_relay_extensions.read().await.contains(name) {
+        // Check channel-relay extensions (installed in memory or has stored team_id)
+        if self.installed_relay_extensions.read().await.contains(&name) {
             return Ok(ExtensionKind::ChannelRelay);
         }
-        // Also check if there's a stored team_id (persisted across restarts)
-        if self.is_relay_channel(name).await {
+        if let Some(ref legacy_name) = legacy_name
+            && self
+                .installed_relay_extensions
+                .read()
+                .await
+                .contains(legacy_name)
+        {
+            return Ok(ExtensionKind::ChannelRelay);
+        }
+        // Also check if there's a stored team_id setting (persisted across restarts)
+        if self.is_relay_channel(&name, user_id).await {
+            return Ok(ExtensionKind::ChannelRelay);
+        }
+        if let Some(ref legacy_name) = legacy_name
+            && self.is_relay_channel(legacy_name, user_id).await
+        {
             return Ok(ExtensionKind::ChannelRelay);
         }
 
@@ -4262,15 +6508,139 @@ impl ExtensionManager {
         )))
     }
 
-    /// Reject names containing path separators or traversal sequences.
     fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
-        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Invalid extension name '{}': contains path separator or traversal characters",
-                name
-            )));
+        canonicalize_extension_name(name).map(|_| ())
+    }
+
+    fn setup_fields_setting_key(name: &str) -> String {
+        format!("extensions.{name}.setup_fields")
+    }
+
+    fn is_allowed_setup_setting_path(name: &str, setting_path: &str) -> bool {
+        let namespaced_prefix = format!("extensions.{name}.");
+        setting_path.starts_with(&namespaced_prefix)
+            || ALLOWED_GLOBAL_SETUP_SETTING_PATHS.contains(&setting_path)
+    }
+
+    fn validate_setup_setting_path(name: &str, setting_path: &str) -> Result<(), ExtensionError> {
+        if Self::is_allowed_setup_setting_path(name, setting_path) {
+            return Ok(());
         }
-        Ok(())
+
+        Err(ExtensionError::Other(format!(
+            "Invalid setting_path '{}' for extension '{}': only 'extensions.{}.*' or approved settings may be written",
+            setting_path, name, name
+        )))
+    }
+
+    fn setting_value_is_present(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(s) => !s.trim().is_empty(),
+            serde_json::Value::Array(a) => !a.is_empty(),
+            serde_json::Value::Object(o) => !o.is_empty(),
+            _ => true,
+        }
+    }
+
+    /// Owner-scoped wrapper around [`load_tool_setup_fields_for`]. Used by
+    /// the `configure()` write path which intentionally stores under the
+    /// manager owner regardless of the requesting user (the writes go to
+    /// `self.user_id`, so the matching reads from `configure()` also use
+    /// `self.user_id`).
+    async fn load_tool_setup_fields(
+        &self,
+        name: &str,
+    ) -> Result<HashMap<String, String>, ExtensionError> {
+        let user_id = self.user_id.clone();
+        self.load_tool_setup_fields_for(name, &user_id).await
+    }
+
+    /// Per-user variant. Used by `check_tool_auth_status` and any other
+    /// caller that has a real requesting `user_id` so multi-tenant
+    /// deployments don't accidentally report another user's setup state.
+    async fn load_tool_setup_fields_for(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<HashMap<String, String>, ExtensionError> {
+        let Some(ref store) = self.store else {
+            return Ok(HashMap::new());
+        };
+
+        let key = Self::setup_fields_setting_key(name);
+        match store.get_setting(user_id, &key).await {
+            Ok(Some(value)) => serde_json::from_value::<HashMap<String, String>>(value)
+                .map_err(|e| ExtensionError::Other(format!("Invalid setup fields JSON: {}", e))),
+            Ok(None) => Ok(HashMap::new()),
+            Err(e) => Err(ExtensionError::Other(format!(
+                "Failed to read setup fields for '{}': {}",
+                name, e
+            ))),
+        }
+    }
+
+    async fn save_tool_setup_fields(
+        &self,
+        name: &str,
+        fields: &HashMap<String, String>,
+    ) -> Result<(), ExtensionError> {
+        let store = self.settings_store().ok_or_else(|| {
+            ExtensionError::Other("Settings store unavailable for setup field persistence".into())
+        })?;
+        let key = Self::setup_fields_setting_key(name);
+        let value = serde_json::to_value(fields)
+            .map_err(|e| ExtensionError::Other(format!("Failed to encode setup fields: {}", e)))?;
+        store
+            .set_setting(&self.user_id, &key, &value)
+            .await
+            .map_err(|e| {
+                ExtensionError::Other(format!(
+                    "Failed to persist setup fields for '{}': {}",
+                    name, e
+                ))
+            })
+    }
+
+    /// Owner-scoped wrapper around [`is_tool_setup_field_provided_for`]. Used
+    /// by the `configure()` post-write check that's already operating in
+    /// owner scope.
+    async fn is_tool_setup_field_provided(
+        &self,
+        name: &str,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        saved_fields: &HashMap<String, String>,
+    ) -> bool {
+        let user_id = self.user_id.clone();
+        self.is_tool_setup_field_provided_for(name, &user_id, field, saved_fields)
+            .await
+    }
+
+    /// Per-user variant. Used by `check_tool_auth_status` so the field's
+    /// "provided" check reads settings under the requesting user instead
+    /// of the manager owner.
+    async fn is_tool_setup_field_provided_for(
+        &self,
+        name: &str,
+        user_id: &str,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        saved_fields: &HashMap<String, String>,
+    ) -> bool {
+        if saved_fields
+            .get(&field.name)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return true;
+        }
+
+        if let (Some(store), Some(setting_path)) = (&self.store, &field.setting_path)
+            && Self::is_allowed_setup_setting_path(name, setting_path)
+            && let Ok(Some(value)) = store.get_setting(user_id, setting_path).await
+        {
+            return Self::setting_value_is_present(&value);
+        }
+
+        false
     }
 
     async fn cleanup_expired_auths(&self) {
@@ -4287,35 +6657,37 @@ impl ExtensionManager {
         });
     }
 
-    /// Get the setup schema for an extension (secret fields and their status).
+    /// Get the setup schema for an extension (secret/text fields and their status).
     pub async fn get_setup_schema(
         &self,
         name: &str,
-    ) -> Result<Vec<crate::channels::web::types::SecretFieldInfo>, ExtensionError> {
-        let kind = self.determine_installed_kind(name).await?;
+        user_id: &str,
+    ) -> Result<ExtensionSetupSchema, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name, user_id).await?;
         match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
-                    return Ok(Vec::new());
-                }
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form (e.g.
+                // `my-channel.capabilities.json`) is still resolvable.
+                let cap_file = match self.load_channel_capabilities(name).await {
+                    Some(f) => f,
+                    None => {
+                        return Ok(ExtensionSetupSchema {
+                            secrets: Vec::new(),
+                            fields: Vec::new(),
+                        });
+                    }
+                };
 
-                let mut fields = Vec::new();
+                let mut secrets = Vec::new();
                 for secret in &cap_file.setup.required_secrets {
                     let provided = self
                         .secrets
-                        .exists(&self.user_id, &secret.name)
+                        .exists(user_id, &secret.name)
                         .await
                         .unwrap_or(false);
-                    fields.push(crate::channels::web::types::SecretFieldInfo {
+                    secrets.push(crate::channels::web::types::SecretFieldInfo {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
@@ -4323,26 +6695,43 @@ impl ExtensionManager {
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                Ok(fields)
+                // NOTE: required_fields is not yet supported for WasmChannel;
+                // only WasmTool extensions surface setup fields in the modal.
+                Ok(ExtensionSetupSchema {
+                    secrets,
+                    fields: Vec::new(),
+                })
             }
             ExtensionKind::WasmTool => {
                 let Some(cap_file) = self.load_tool_capabilities(name).await else {
-                    return Ok(Vec::new());
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                    });
                 };
 
+                let mut secrets = Vec::new();
                 let mut fields = Vec::new();
                 if let Some(setup) = &cap_file.setup {
+                    // Per-user scope: this schema is rendered for the
+                    // *requesting* user, so the saved-fields read and the
+                    // field-provided check must use `user_id` rather than
+                    // the manager owner.
+                    let saved_fields = self
+                        .load_tool_setup_fields_for(name, user_id)
+                        .await
+                        .unwrap_or_default();
+
                     for secret in &setup.required_secrets {
-                        // Skip OAuth client_id/secret fields that resolve automatically
                         if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
                             continue;
                         }
                         let provided = self
                             .secrets
-                            .exists(&self.user_id, &secret.name)
+                            .exists(user_id, &secret.name)
                             .await
                             .unwrap_or(false);
-                        fields.push(crate::channels::web::types::SecretFieldInfo {
+                        secrets.push(crate::channels::web::types::SecretFieldInfo {
                             name: secret.name.clone(),
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
@@ -4350,366 +6739,96 @@ impl ExtensionManager {
                             auto_generate: false,
                         });
                     }
-                }
-                Ok(fields)
-            }
-            _ => Ok(Vec::new()),
-        }
-    }
 
-    async fn configure_telegram_binding(
-        &self,
-        name: &str,
-        secrets: &std::collections::HashMap<String, String>,
-    ) -> Result<TelegramBindingResult, ExtensionError> {
-        let explicit_token = secrets
-            .get("telegram_bot_token")
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let bot_token = if let Some(token) = explicit_token.clone() {
-            token
-        } else {
-            match self
-                .secrets
-                .get_decrypted(&self.user_id, "telegram_bot_token")
-                .await
-            {
-                Ok(secret) => {
-                    let token = secret.expose().trim().to_string();
-                    if token.is_empty() {
-                        return Err(ExtensionError::ValidationFailed(
-                            "Telegram bot token is required before owner verification".to_string(),
-                        ));
+                    for field in &setup.required_fields {
+                        let provided = self
+                            .is_tool_setup_field_provided_for(name, user_id, field, &saved_fields)
+                            .await;
+                        fields.push(crate::channels::web::types::SetupFieldInfo {
+                            name: field.name.clone(),
+                            prompt: field.prompt.clone(),
+                            optional: field.optional,
+                            provided,
+                            input_type: field.input_type,
+                        });
                     }
-                    token
                 }
-                Err(crate::secrets::SecretError::NotFound(_)) => {
-                    return Err(ExtensionError::ValidationFailed(
-                        "Telegram bot token is required before owner verification".to_string(),
-                    ));
-                }
-                Err(err) => {
-                    return Err(ExtensionError::Config(format!(
-                        "Failed to read stored Telegram bot token: {err}"
-                    )));
-                }
+                Ok(ExtensionSetupSchema { secrets, fields })
             }
-        };
-
-        let existing_owner_id = self.current_channel_owner_id(name).await;
-        let binding = self
-            .resolve_telegram_binding(name, &bot_token, existing_owner_id)
-            .await?;
-
-        match &binding {
-            TelegramBindingResult::Bound(data) => {
-                self.set_channel_owner_id(name, data.owner_id).await?;
-                if let Some(username) = data.bot_username.as_deref()
-                    && let Some(store) = self.store.as_ref()
-                {
-                    store
-                        .set_setting(
-                            &self.user_id,
-                            &bot_username_setting_key(name),
-                            &serde_json::json!(username),
-                        )
-                        .await
-                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
-                }
+            ExtensionKind::ChannelRelay => {
+                let relay_url_key = format!("extensions.{name}.relay_url");
+                let current_url = if let Some(ref store) = self.store {
+                    match store.get_setting(&self.user_id, &relay_url_key).await {
+                        Ok(value_opt) => value_opt
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .filter(|s| !s.is_empty()),
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                setting_key = %relay_url_key,
+                                error = %e,
+                                "get_setup_schema: failed to read relay_url from settings"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let env_url = self.relay_config.as_ref().map(|c| c.url.as_str());
+                Ok(ExtensionSetupSchema {
+                    secrets: Vec::new(),
+                    fields: vec![crate::channels::web::types::SetupFieldInfo {
+                        name: "relay_url".to_string(),
+                        prompt: format!(
+                            "Channel-relay service URL (leave empty to use env default{})",
+                            env_url.map(|u| format!(": {u}")).unwrap_or_default()
+                        ),
+                        optional: true,
+                        provided: current_url.is_some(),
+                        input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                    }],
+                })
             }
-            TelegramBindingResult::Pending(challenge) => {
-                if let Some(deep_link) = challenge.deep_link.as_deref()
-                    && let Some(username) = deep_link
-                        .strip_prefix("https://t.me/")
-                        .and_then(|rest| rest.split('?').next())
-                        .filter(|value| !value.trim().is_empty())
-                    && let Some(store) = self.store.as_ref()
-                {
-                    store
-                        .set_setting(
-                            &self.user_id,
-                            &bot_username_setting_key(name),
-                            &serde_json::json!(username),
-                        )
-                        .await
-                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
-                }
-            }
-        }
-
-        Ok(binding)
-    }
-
-    async fn resolve_telegram_binding(
-        &self,
-        name: &str,
-        bot_token: &str,
-        existing_owner_id: Option<i64>,
-    ) -> Result<TelegramBindingResult, ExtensionError> {
-        #[cfg(test)]
-        if let Some(resolver) = self.test_telegram_binding_resolver.read().await.as_ref() {
-            return resolver(bot_token, existing_owner_id);
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-
-        let get_me_url = format!("https://api.telegram.org/bot{bot_token}/getMe");
-        let get_me_resp = client
-            .get(&get_me_url)
-            .send()
-            .await
-            .map_err(|e| telegram_request_error("getMe", &e))?;
-        let get_me_status = get_me_resp.status();
-        if !get_me_status.is_success() {
-            return Err(ExtensionError::ValidationFailed(format!(
-                "Telegram token validation failed (HTTP {get_me_status})"
-            )));
-        }
-
-        let get_me: TelegramGetMeResponse = get_me_resp
-            .json()
-            .await
-            .map_err(|e| telegram_response_parse_error("getMe", &e))?;
-        if !get_me.ok {
-            return Err(ExtensionError::ValidationFailed(
-                get_me
-                    .description
-                    .unwrap_or_else(|| "Telegram getMe returned ok=false".to_string()),
-            ));
-        }
-
-        let bot_username = get_me
-            .result
-            .and_then(|result| result.username)
-            .filter(|username| !username.trim().is_empty());
-
-        if let Some(owner_id) = existing_owner_id {
-            self.clear_pending_telegram_verification(name).await;
-            return Ok(TelegramBindingResult::Bound(TelegramBindingData {
-                owner_id,
-                bot_username: bot_username.clone(),
-                binding_state: TelegramOwnerBindingState::Existing,
-            }));
-        }
-
-        let pending_challenge = self.get_pending_telegram_verification(name).await;
-
-        let challenge = if let Some(challenge) = pending_challenge {
-            challenge
-        } else {
-            return Ok(TelegramBindingResult::Pending(
-                self.issue_telegram_verification_challenge(
-                    &client,
-                    name,
-                    bot_token,
-                    bot_username.as_deref(),
-                )
-                .await?,
-            ));
-        };
-
-        let now = unix_timestamp_secs();
-        if challenge.expires_at_unix <= now {
-            self.clear_pending_telegram_verification(name).await;
-            return Ok(TelegramBindingResult::Pending(
-                self.issue_telegram_verification_challenge(
-                    &client,
-                    name,
-                    bot_token,
-                    bot_username.as_deref(),
-                )
-                .await?,
-            ));
-        }
-
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(TELEGRAM_OWNER_BIND_TIMEOUT_SECS);
-        let mut offset = 0_i64;
-
-        while std::time::Instant::now() < deadline {
-            let remaining_secs = deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs()
-                .max(1);
-            let poll_timeout_secs = TELEGRAM_GET_UPDATES_TIMEOUT_SECS.min(remaining_secs);
-
-            let resp = client
-                .get(format!(
-                    "https://api.telegram.org/bot{bot_token}/getUpdates"
-                ))
-                .query(&[
-                    ("offset", offset.to_string()),
-                    ("timeout", poll_timeout_secs.to_string()),
-                    (
-                        "allowed_updates",
-                        "[\"message\",\"edited_message\"]".to_string(),
-                    ),
-                ])
-                .send()
-                .await
-                .map_err(|e| telegram_request_error("getUpdates", &e))?;
-
-            if !resp.status().is_success() {
-                return Err(ExtensionError::Other(format!(
-                    "Telegram getUpdates failed (HTTP {})",
-                    resp.status()
-                )));
-            }
-
-            let updates: TelegramGetUpdatesResponse = resp
-                .json()
-                .await
-                .map_err(|e| telegram_response_parse_error("getUpdates", &e))?;
-
-            if !updates.ok {
-                return Err(ExtensionError::Other(updates.description.unwrap_or_else(
-                    || "Telegram getUpdates returned ok=false".to_string(),
-                )));
-            }
-
-            let mut bound_owner_id = None;
-            for update in updates.result {
-                offset = offset.max(update.update_id + 1);
-                let message = update.message.or(update.edited_message);
-                if let Some(message) = message
-                    && message.chat.chat_type == "private"
-                    && let Some(from) = message.from
-                    && !from.is_bot
-                    && let Some(text) = message.text.as_deref()
-                    && telegram_message_matches_verification_code(text, &challenge.code)
-                {
-                    bound_owner_id = Some(from.id);
-                }
-            }
-
-            if let Some(owner_id) = bound_owner_id {
-                if let Err(err) = send_telegram_text_message(
-                    &client,
-                    &format!("https://api.telegram.org/bot{bot_token}/sendMessage"),
-                    owner_id,
-                    "Verification received. Finishing setup...",
-                )
-                .await
-                {
-                    tracing::warn!(
-                        channel = name,
-                        owner_id,
-                        error = %err,
-                        "Failed to send Telegram verification acknowledgment"
-                    );
-                }
-
-                self.clear_pending_telegram_verification(name).await;
-                if offset > 0 {
-                    let _ = client
-                        .get(format!(
-                            "https://api.telegram.org/bot{bot_token}/getUpdates"
-                        ))
-                        .query(&[("offset", offset.to_string()), ("timeout", "0".to_string())])
-                        .send()
-                        .await;
-                }
-
-                return Ok(TelegramBindingResult::Bound(TelegramBindingData {
-                    owner_id,
-                    bot_username,
-                    binding_state: TelegramOwnerBindingState::VerifiedNow,
-                }));
-            }
-        }
-
-        self.clear_pending_telegram_verification(name).await;
-        Err(ExtensionError::ValidationFailed(
-            "Telegram owner verification timed out. Request a new code and try again.".to_string(),
-        ))
-    }
-
-    async fn notify_telegram_owner_verified(
-        &self,
-        channel_name: &str,
-        binding: Option<&TelegramBindingData>,
-    ) {
-        let Some(binding) = binding else {
-            return;
-        };
-        if binding.binding_state != TelegramOwnerBindingState::VerifiedNow {
-            return;
-        }
-
-        let channel_manager = {
-            let rt_guard = self.channel_runtime.read().await;
-            rt_guard.as_ref().map(|rt| Arc::clone(&rt.channel_manager))
-        };
-        let Some(channel_manager) = channel_manager else {
-            tracing::debug!(
-                channel = channel_name,
-                owner_id = binding.owner_id,
-                "Skipping Telegram owner confirmation message because channel runtime is unavailable"
-            );
-            return;
-        };
-
-        if let Err(err) = channel_manager
-            .broadcast(
-                channel_name,
-                &binding.owner_id.to_string(),
-                OutgoingResponse::text(
-                    "Telegram owner verified. This bot is now active and ready for you.",
-                ),
-            )
-            .await
-        {
-            tracing::warn!(
-                channel = channel_name,
-                owner_id = binding.owner_id,
-                error = %err,
-                "Failed to send Telegram owner verification confirmation"
-            );
+            _ => Ok(ExtensionSetupSchema {
+                secrets: Vec::new(),
+                fields: Vec::new(),
+            }),
         }
     }
 
-    /// Save setup secrets for an extension, validating names against the capabilities schema.
+    /// Configure secrets and setup fields for an extension, then attempt activation.
     ///
-    /// Configure secrets for an extension: validate, store, auto-generate, and activate.
-    ///
-    /// This is the single entrypoint for providing secrets to any extension.
+    /// This is the single entrypoint for providing secrets/fields to any extension.
     /// Both the chat auth flow and the Extensions tab setup form call this method.
     ///
     /// - Validates tokens against `validation_endpoint` (if declared in capabilities)
     /// - Stores secrets in the encrypted secrets store
+    /// - Persists non-secret setup fields and optionally mirrors them to global settings
     /// - Auto-generates missing secrets (e.g., webhook keys)
     /// - Activates the extension after configuration
     pub async fn configure(
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
+        fields: &std::collections::HashMap<String, String>,
+        user_id: &str,
     ) -> Result<ConfigureResult, ExtensionError> {
-        let kind = self.determine_installed_kind(name).await?;
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
-        // Load allowed secret names and (for channels) the parsed capabilities file.
-        // The capabilities file is parsed once here and reused for validation_endpoint
-        // and auto-generation below, avoiding redundant I/O + JSON parsing.
+        // Load allowed secret names and tool setup field definitions from capabilities.
         let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
-        let allowed: std::collections::HashSet<String> = match kind {
+        let (allowed_secrets, setup_fields): (
+            std::collections::HashSet<String>,
+            Vec<crate::tools::wasm::ToolFieldSetupSchema>,
+        ) = match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
-                    return Err(ExtensionError::Other(format!(
-                        "Capabilities file not found for '{}'",
-                        name
-                    )));
-                }
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form is still resolvable.
+                let cap_file = self.load_channel_capabilities(&name).await.ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
+                })?;
                 let names = cap_file
                     .setup
                     .required_secrets
@@ -4717,48 +6836,72 @@ impl ExtensionManager {
                     .map(|s| s.name.clone())
                     .collect();
                 channel_cap_file = Some(cap_file);
-                names
+                (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
-                let cap_file = self.load_tool_capabilities(name).await.ok_or_else(|| {
+                let cap_file = self.load_tool_capabilities(&name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
                 })?;
                 let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut required_fields = Vec::new();
                 if let Some(ref s) = cap_file.setup {
                     names.extend(s.required_secrets.iter().map(|s| s.name.clone()));
+                    required_fields = s.required_fields.clone();
                 }
-                // Also allow storing the auth token secret directly
                 if let Some(ref auth) = cap_file.auth {
                     names.insert(auth.secret_name.clone());
                 }
-                if names.is_empty() {
+                if names.is_empty() && required_fields.is_empty() {
                     return Err(ExtensionError::Other(format!(
-                        "Tool '{}' has no setup or auth schema — no secrets to configure",
+                        "Tool '{}' has no setup or auth schema — nothing to configure",
                         name
                     )));
                 }
-                names
+                (names, required_fields)
             }
             ExtensionKind::McpServer => {
                 let server = self
-                    .get_mcp_server(name)
+                    .get_mcp_server(&name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
-                names
+                (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
-                let mut names = std::collections::HashSet::new();
-                names.insert(format!("relay:{}:stream_token", name));
-                names
+                let relay_fields = vec![crate::tools::wasm::ToolFieldSetupSchema {
+                    name: "relay_url".to_string(),
+                    prompt: "Channel-relay service URL override".to_string(),
+                    optional: true,
+                    setting_path: Some(format!("extensions.{name}.relay_url")),
+                    input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                }];
+                (std::collections::HashSet::new(), relay_fields)
+            }
+            ExtensionKind::AcpAgent => {
+                return Err(ExtensionError::Other(
+                    "ACP agents do not require setup through the extension manager".to_string(),
+                ));
             }
         };
+
+        let allowed_fields: std::collections::HashSet<String> =
+            setup_fields.iter().map(|f| f.name.clone()).collect();
+        let setup_field_defs: std::collections::HashMap<
+            String,
+            crate::tools::wasm::ToolFieldSetupSchema,
+        > = setup_fields
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
 
         // Validate secrets against the validation_endpoint if declared in capabilities.
         // The endpoint URL template uses {secret_name} placeholders that are
         // substituted with the provided secret value before making the request.
-        if let Some(ref cap_file) = channel_cap_file
+        // Skip for Telegram — validate_telegram_token() below does the same getMe
+        // call but also extracts bot_username, avoiding a redundant API round-trip.
+        if name != TELEGRAM_CHANNEL_NAME
+            && let Some(ref cap_file) = channel_cap_file
             && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
             && let Some(secret_def) = cap_file
                 .setup
@@ -4769,16 +6912,9 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
-                // not query parameters, so URL-encoding breaks the endpoint.
-                // For other extensions, keep encoding to handle special chars in query parameters.
-                let url = if name == "telegram" {
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
-                } else {
-                    let encoded =
-                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
-                };
+                let encoded =
+                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -4789,9 +6925,16 @@ impl ExtensionManager {
                     .get(&url)
                     .send()
                     .await
-                    // Transport errors are infrastructure failures, not token issues
                     .map_err(|e| {
-                        ExtensionError::Other(format!("Token validation request failed: {}", e))
+                        // Log the raw error at debug level (may contain sensitive URL paths)
+                        // but return a generic message to callers.
+                        tracing::debug!(
+                            is_timeout = e.is_timeout(),
+                            is_connect = e.is_connect(),
+                            status = e.status().map(|s| s.as_u16()),
+                            "Token validation request failed"
+                        );
+                        ExtensionError::Other("Token validation request failed".to_string())
                     })?;
                 if !resp.status().is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
@@ -4804,7 +6947,7 @@ impl ExtensionManager {
 
         // Validate and store each submitted secret
         for (secret_name, secret_value) in secrets {
-            if !allowed.contains(secret_name.as_str()) {
+            if !allowed_secrets.contains(secret_name.as_str()) {
                 return Err(ExtensionError::Other(format!(
                     "Unknown secret '{}' for extension '{}'",
                     secret_name, name
@@ -4817,9 +6960,84 @@ impl ExtensionManager {
             let params =
                 CreateSecretParams::new(secret_name, trimmed_value).with_provider(name.to_string());
             self.secrets
-                .create(&self.user_id, params)
+                .create(user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        }
+
+        let mut stored_fields = self.load_tool_setup_fields(&name).await.unwrap_or_default();
+
+        for (field_name, field_value) in fields {
+            if !allowed_fields.contains(field_name.as_str()) {
+                return Err(ExtensionError::Other(format!(
+                    "Unknown field '{}' for extension '{}'",
+                    field_name, name
+                )));
+            }
+            let trimmed = field_value.trim();
+            let field_def = setup_field_defs.get(field_name);
+
+            // Empty value on an optional field with a setting_path: clear the
+            // stored override so the system reverts to the env/default value.
+            if trimmed.is_empty() {
+                if let Some(def) = field_def
+                    && def.optional
+                {
+                    stored_fields.remove(field_name);
+                    if let Some(setting_path) = &def.setting_path {
+                        Self::validate_setup_setting_path(&name, setting_path)?;
+                        if let Some(store) = self.settings_store() {
+                            let _ = store.delete_setting(&self.user_id, setting_path).await;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            stored_fields.insert(field_name.clone(), trimmed.to_string());
+
+            if let Some(field_def) = field_def
+                && let Some(setting_path) = &field_def.setting_path
+            {
+                Self::validate_setup_setting_path(&name, setting_path)?;
+                let store = self.settings_store().ok_or_else(|| {
+                    ExtensionError::Other(
+                        "Settings store unavailable for setup field persistence".to_string(),
+                    )
+                })?;
+                store
+                    .set_setting(
+                        &self.user_id,
+                        setting_path,
+                        &serde_json::Value::String(trimmed.to_string()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::Other(format!(
+                            "Failed to set '{}' for extension '{}': {}",
+                            setting_path, name, e
+                        ))
+                    })?;
+            }
+        }
+
+        if !allowed_fields.is_empty() && !fields.is_empty() {
+            self.save_tool_setup_fields(&name, &stored_fields).await?;
+        }
+
+        for field_def in setup_field_defs.values() {
+            if field_def.optional {
+                continue;
+            }
+            if !self
+                .is_tool_setup_field_provided(&name, field_def, &stored_fields)
+                .await
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Required field '{}' is missing for extension '{}'",
+                    field_def.name, name
+                )));
+            }
         }
 
         // Auto-generate any missing secrets (channel-only feature)
@@ -4831,7 +7049,7 @@ impl ExtensionManager {
                         .is_some_and(|v| !v.trim().is_empty());
                     let already_stored = self
                         .secrets
-                        .exists(&self.user_id, &secret_def.name)
+                        .exists(user_id, &secret_def.name)
                         .await
                         .unwrap_or(false);
                     if !already_provided && !already_stored {
@@ -4843,10 +7061,10 @@ impl ExtensionManager {
                         let params = CreateSecretParams::new(&secret_def.name, &hex_value)
                             .with_provider(name.to_string());
                         self.secrets
-                            .create(&self.user_id, params)
+                            .create(user_id, params)
                             .await
                             .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-                        tracing::info!(
+                        tracing::debug!(
                             "Auto-generated secret '{}' for channel '{}'",
                             secret_def.name,
                             name
@@ -4856,51 +7074,70 @@ impl ExtensionManager {
             }
         }
 
-        let mut telegram_binding = None;
-        if kind == ExtensionKind::WasmChannel && name == TELEGRAM_CHANNEL_NAME {
-            match self.configure_telegram_binding(name, secrets).await? {
-                TelegramBindingResult::Bound(binding) => {
-                    telegram_binding = Some(binding);
-                }
-                TelegramBindingResult::Pending(verification) => {
-                    return Ok(ConfigureResult {
-                        message: format!(
-                            "Configuration saved for '{}'. {}",
-                            name, verification.instructions
-                        ),
-                        activated: false,
-                        auth_url: None,
-                        verification: Some(verification),
-                    });
-                }
+        // Validate Telegram bot token and persist bot_username for mention detection.
+        if kind == ExtensionKind::WasmChannel
+            && name == TELEGRAM_CHANNEL_NAME
+            && let Some(token) = secrets
+                .get("telegram_bot_token")
+                .filter(|v| !v.trim().is_empty())
+        {
+            let bot_username = validate_telegram_token(token).await?;
+            if let Some(ref username) = bot_username
+                && let Some(store) = self.store.as_ref()
+                && let Err(e) = store
+                    .set_setting(
+                        &self.user_id,
+                        &bot_username_setting_key(&name),
+                        &serde_json::json!(username),
+                    )
+                    .await
+            {
+                tracing::debug!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to persist bot username; mention detection may be degraded"
+                );
             }
         }
 
         // For tools, save and attempt auto-activation, then check auth.
         if kind == ExtensionKind::WasmTool {
-            match self.activate_wasm_tool(name).await {
+            match self.activate_wasm_tool(&name, user_id).await {
                 Ok(result) => {
-                    // Delete existing OAuth token so auth() starts a fresh flow.
-                    // Done AFTER activation succeeds to avoid losing tokens on failure.
-                    // This covers Reconfigure: user wants to re-auth (switch account, update creds).
-                    if let Some(cap) = self.load_tool_capabilities(name).await
+                    // OAuth reconfigure: if the caller is starting a fresh
+                    // OAuth flow (e.g. the user clicked "Reconfigure" to
+                    // switch accounts), wipe the existing access/scopes/refresh
+                    // records so the `auth()` call below kicks off a new
+                    // OAuth handshake instead of reporting `Authenticated`.
+                    //
+                    // We MUST NOT do this when the caller is providing a new
+                    // credential via the `secrets` map (the manual-paste /
+                    // `submit_auth_token` path), because deleting the
+                    // credential we *just wrote* leaves the user authenticated
+                    // against nothing — the resume runs, the wrapper sees no
+                    // token, the gate re-fires, the user is asked for the
+                    // same token they just typed in, the cycle repeats.
+                    //
+                    // The signal is whether the auth secret_name appears in
+                    // the submitted `secrets` map. If yes, the caller knows
+                    // what they're doing and we leave it alone. If no, the
+                    // caller wants a fresh OAuth flow.
+                    //
+                    // Done AFTER activation succeeds so a failed activation
+                    // doesn't lose the user's previous tokens.
+                    if let Some(cap) = self.load_tool_capabilities(&name).await
                         && let Some(ref auth_cfg) = cap.auth
                         && auth_cfg.oauth.is_some()
+                        && !secrets.contains_key(&auth_cfg.secret_name)
                     {
+                        let _ = self.secrets.delete(user_id, &auth_cfg.secret_name).await;
                         let _ = self
                             .secrets
-                            .delete(&self.user_id, &auth_cfg.secret_name)
+                            .delete(user_id, &format!("{}_scopes", auth_cfg.secret_name))
                             .await;
                         let _ = self
                             .secrets
-                            .delete(&self.user_id, &format!("{}_scopes", auth_cfg.secret_name))
-                            .await;
-                        let _ = self
-                            .secrets
-                            .delete(
-                                &self.user_id,
-                                &format!("{}_refresh_token", auth_cfg.secret_name),
-                            )
+                            .delete(user_id, &format!("{}_refresh_token", auth_cfg.secret_name))
                             .await;
                     }
 
@@ -4909,7 +7146,7 @@ impl ExtensionManager {
                     let mut auth_url = None;
                     // Box::pin breaks the async recursion cycle:
                     // auth() → auth_wasm_tool() → (OAuth) → configure() → auth()
-                    if let Ok(auth_result) = Box::pin(self.auth(name)).await {
+                    if let Ok(auth_result) = Box::pin(self.auth(&name, user_id)).await {
                         auth_url = auth_result.auth_url().map(String::from);
                     }
                     let message = if auth_url.is_some() {
@@ -4926,8 +7163,10 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message,
                         activated: true,
+                        pairing_required: false,
                         auth_url,
-                        verification: None,
+                        onboarding_state: None,
+                        onboarding: None,
                     });
                 }
                 Err(e) => {
@@ -4939,42 +7178,88 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
+                        pairing_required: false,
                         auth_url: None,
-                        verification: None,
+                        onboarding_state: None,
+                        onboarding: None,
                     });
                 }
             }
         }
 
+        if kind == ExtensionKind::WasmChannel
+            && let Ok(auth_result) = Box::pin(self.auth(&name, user_id)).await
+            && auth_result.auth_url().is_some()
+        {
+            return Ok(ConfigureResult {
+                message: format!(
+                    "Configuration saved for '{}'. Complete OAuth in your browser.",
+                    name
+                ),
+                activated: false,
+                pairing_required: false,
+                auth_url: auth_result.auth_url().map(String::from),
+                onboarding_state: None,
+                onboarding: None,
+            });
+        }
+
         // Activate the extension now that secrets are saved.
         // Dispatch by kind — WasmTool was already handled above with an early return.
         let activate_result = match kind {
-            ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
-            ExtensionKind::McpServer => self.activate_mcp(name).await,
-            ExtensionKind::ChannelRelay => self.activate_channel_relay(name).await,
-            ExtensionKind::WasmTool => {
-                // WasmTool is handled above and returns early; this branch is unreachable.
+            ExtensionKind::WasmChannel => self.activate_wasm_channel(&name, user_id).await,
+            ExtensionKind::McpServer => self.activate_mcp(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.activate_channel_relay(&name, user_id).await,
+            ExtensionKind::WasmTool | ExtensionKind::AcpAgent => {
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
+                    pairing_required: false,
                     auth_url: None,
-                    verification: None,
+                    onboarding_state: None,
+                    onboarding: None,
                 });
             }
         };
 
         match activate_result {
             Ok(result) => {
-                self.activation_errors.write().await.remove(name);
-                self.broadcast_extension_status(name, "active", None).await;
-                if name == TELEGRAM_CHANNEL_NAME {
-                    self.notify_telegram_owner_verified(name, telegram_binding.as_ref())
-                        .await;
+                self.activation_errors.write().await.remove(&name);
+                self.broadcast_extension_status(&name, "active", None).await;
+
+                // Check if the channel needs pairing (no owner binding yet).
+                let needs_pairing = kind == ExtensionKind::WasmChannel
+                    && !self.has_wasm_channel_owner_binding(&name).await
+                    && !self.has_wasm_channel_pairing(&name).await;
+
+                if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
+                    let onboarding = crate::channels::web::handlers::extensions::derive_onboarding(
+                        &name,
+                        Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
+                    );
+                    sse.broadcast_for_user(
+                        user_id,
+                        ironclaw_common::OnboardingStateDto::pairing_required(
+                            ironclaw_common::ExtensionName::from_trusted(name.clone()),
+                            None,
+                            None,
+                            None,
+                            Some(format!(
+                                "Send a message to your {} bot, then paste the pairing code here.",
+                                name
+                            )),
+                            onboarding
+                                .1
+                                .as_ref()
+                                .and_then(|o| serde_json::to_value(o).ok()),
+                        ),
+                    );
                 }
-                let message = if name == TELEGRAM_CHANNEL_NAME {
+
+                let message = if needs_pairing {
                     format!(
-                        "Configuration saved, Telegram owner verified, and '{}' activated. {}",
-                        name, result.message
+                        "Configuration saved and '{}' activated. Send a message to your bot to get a pairing code.",
+                        name
                     )
                 } else {
                     format!(
@@ -4985,8 +7270,22 @@ impl ExtensionManager {
                 Ok(ConfigureResult {
                     message,
                     activated: true,
+                    pairing_required: needs_pairing,
                     auth_url: None,
-                    verification: None,
+                    onboarding_state: if needs_pairing {
+                        Some(crate::channels::web::types::ChannelOnboardingState::PairingRequired)
+                    } else {
+                        None
+                    },
+                    onboarding: if needs_pairing {
+                        crate::channels::web::handlers::extensions::derive_onboarding(
+                            &name,
+                            Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
+                        )
+                        .1
+                    } else {
+                        None
+                    },
                 })
             }
             Err(e) => {
@@ -5000,7 +7299,7 @@ impl ExtensionManager {
                     .write()
                     .await
                     .insert(name.to_string(), error_msg.clone());
-                self.broadcast_extension_status(name, "failed", Some(&error_msg))
+                self.broadcast_extension_status(&name, "failed", Some(&error_msg))
                     .await;
                 Ok(ConfigureResult {
                     message: format!(
@@ -5008,8 +7307,10 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
+                    pairing_required: false,
                     auth_url: None,
-                    verification: None,
+                    onboarding_state: None,
+                    onboarding: None,
                 })
             }
         }
@@ -5024,19 +7325,16 @@ impl ExtensionManager {
         &self,
         name: &str,
         token: &str,
+        user_id: &str,
     ) -> Result<ConfigureResult, ExtensionError> {
-        let kind = self.determine_installed_kind(name).await?;
+        let kind = self.determine_installed_kind(name, user_id).await?;
         let secret_name = match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                // Use the alias-aware helper so a channel installed
+                // under the legacy hyphen form is still resolvable.
+                let cap_file = self.load_channel_capabilities(name).await.ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities not found for '{}'", name))
+                })?;
                 // Pick the first *missing* non-optional secret so re-configure
                 // of a second secret works for multi-secret channels.
                 let mut target = None;
@@ -5044,12 +7342,7 @@ impl ExtensionManager {
                     if s.optional {
                         continue;
                     }
-                    if !self
-                        .secrets
-                        .exists(&self.user_id, &s.name)
-                        .await
-                        .unwrap_or(false)
-                    {
+                    if !self.secrets.exists(user_id, &s.name).await.unwrap_or(false) {
                         target = Some(s.name.clone());
                         break;
                     }
@@ -5076,7 +7369,7 @@ impl ExtensionManager {
                 if let Some(ref auth) = cap.auth {
                     if !self
                         .secrets
-                        .exists(&self.user_id, &auth.secret_name)
+                        .exists(user_id, &auth.secret_name)
                         .await
                         .unwrap_or(false)
                     {
@@ -5085,12 +7378,7 @@ impl ExtensionManager {
                         // Auth secret exists, find first missing setup secret
                         let mut found = None;
                         for s in &setup.required_secrets {
-                            if !self
-                                .secrets
-                                .exists(&self.user_id, &s.name)
-                                .await
-                                .unwrap_or(false)
-                            {
+                            if !self.secrets.exists(user_id, &s.name).await.unwrap_or(false) {
                                 found = Some(s.name.clone());
                                 break;
                             }
@@ -5114,17 +7402,25 @@ impl ExtensionManager {
             }
             ExtensionKind::McpServer => {
                 let server = self
-                    .get_mcp_server(name)
+                    .get_mcp_server(name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 server.token_secret_name()
             }
-            ExtensionKind::ChannelRelay => format!("relay:{}:stream_token", name),
+            ExtensionKind::ChannelRelay => {
+                return Err(ExtensionError::AuthRequired);
+            }
+            ExtensionKind::AcpAgent => {
+                return Err(ExtensionError::Other(
+                    "ACP agents do not use token-based authentication".to_string(),
+                ));
+            }
         };
 
         let mut secrets = std::collections::HashMap::new();
         secrets.insert(secret_name, token.to_string());
-        self.configure(name, &secrets).await
+        self.configure(name, &secrets, &std::collections::HashMap::new(), user_id)
+            .await
     }
 
     /// Read a capabilities.json file and revoke its credential mappings from
@@ -5372,28 +7668,26 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use futures::stream;
-
+    use crate::channels::ChannelManager;
     use crate::channels::wasm::{
-        ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
-        WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
-    };
-    use crate::channels::{
-        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+        ChannelCapabilities, ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
-        ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
-        TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, hosted_proxy_client_secret, infer_kind_from_url,
-        normalize_hosted_callback_url, send_telegram_text_message,
-        telegram_message_matches_verification_code,
+        FallbackDecision, TELEGRAM_TEST_API_BASE_ENV, build_wasm_channel_runtime_config_updates,
+        combine_install_errors, fallback_decision, find_local_tool_source_in, infer_kind_from_url,
+        kind_allows_local_discovery, normalize_hosted_callback_url,
+        read_crate_name_from_cargo_toml, send_telegram_text_message, telegram_bot_api_url,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+        AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult, RegistryEntry,
+        ToolAuthState,
     };
     use crate::pairing::PairingStore;
+    use crate::secrets::CreateSecretParams;
+    use crate::tools::mcp::McpServerConfig;
+    use crate::tools::mcp::config::NEARAI_MCP_SERVER_NAME;
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -5414,55 +7708,6 @@ mod tests {
                 "{label} mismatch: expected {:?}, got {:?}",
                 expected, actual
             ))
-        }
-    }
-
-    #[derive(Clone)]
-    struct RecordingChannel {
-        name: String,
-        broadcasts: Arc<tokio::sync::Mutex<Vec<(String, OutgoingResponse)>>>,
-    }
-
-    #[async_trait]
-    impl Channel for RecordingChannel {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, crate::error::ChannelError> {
-            Ok(Box::pin(stream::empty()))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), crate::error::ChannelError> {
-            Ok(())
-        }
-
-        async fn send_status(
-            &self,
-            _status: StatusUpdate,
-            _metadata: &serde_json::Value,
-        ) -> Result<(), crate::error::ChannelError> {
-            Ok(())
-        }
-
-        async fn broadcast(
-            &self,
-            user_id: &str,
-            response: OutgoingResponse,
-        ) -> Result<(), crate::error::ChannelError> {
-            self.broadcasts
-                .lock()
-                .await
-                .push((user_id.to_string(), response));
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
-            Ok(())
         }
     }
 
@@ -5494,6 +7739,22 @@ mod tests {
             kind: ExtensionKind::WasmTool,
             message: "Installed".to_string(),
         })
+    }
+
+    fn nearai_registry_entry() -> RegistryEntry {
+        RegistryEntry {
+            name: NEARAI_MCP_SERVER_NAME.to_string(),
+            display_name: "NEAR AI".to_string(),
+            kind: ExtensionKind::McpServer,
+            description: "Use NEAR AI built-in tools like web search".to_string(),
+            keywords: vec!["nearai".to_string(), "search".to_string()],
+            source: ExtensionSource::McpUrl {
+                url: "https://private.near.ai/mcp".to_string(),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::Dcr,
+            version: None,
+        }
     }
 
     fn make_fallback_source() -> Option<Box<ExtensionSource>> {
@@ -5650,11 +7911,35 @@ mod tests {
     // after startup (e.g. via the web UI) would fail with "WASM runtime not
     // available" because the ExtensionManager had `wasm_tool_runtime: None`.
 
+    async fn make_test_store() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        crate::testing::test_db().await
+    }
+
     /// Build a minimal ExtensionManager suitable for unit tests.
     fn make_test_manager_with_dirs(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> crate::extensions::manager::ExtensionManager {
+        make_test_manager_with_catalog(wasm_runtime, tools_dir, channels_dir, store, Vec::new())
+    }
+
+    /// Build an ExtensionManager seeded with explicit registry catalog entries.
+    ///
+    /// `make_test_manager_with_dirs` constructs the manager with an empty
+    /// catalog, which means `ExtensionRegistry::new()` only contains the
+    /// (conditional) channel-relay builtin and `registry.search("")` returns
+    /// nothing in tests. Use this helper when you need the manager's registry
+    /// to know about a specific tool/server entry — e.g. exercising
+    /// `latent_provider_actions` registry-discovery paths or
+    /// `ensure_extension_ready` auto-install paths.
+    fn make_test_manager_with_catalog(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+        channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
+        catalog_entries: Vec<RegistryEntry>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
@@ -5679,10 +7964,10 @@ mod tests {
             wasm_runtime,
             tools_dir,
             channels_dir,
-            None, // tunnel_url
-            "test".to_string(),
-            None, // db
-            vec![],
+            None,               // tunnel_url
+            "test".to_string(), // user_id
+            store,
+            catalog_entries,
         )
     }
 
@@ -5690,7 +7975,1196 @@ mod tests {
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir)
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    fn write_test_tool(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let tools_dir = dir.join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"not-a-real-wasm").expect("wasm");
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        tools_dir
+    }
+
+    fn write_test_channel(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let channels_dir = dir.join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::write(
+            channels_dir.join(format!("{name}.wasm")),
+            b"not-a-real-wasm",
+        )
+        .expect("wasm");
+        std::fs::write(
+            channels_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        channels_dir
+    }
+
+    #[tokio::test]
+    async fn load_startup_active_channels_falls_back_to_configured_when_unset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let actual = manager
+            .load_startup_active_channels(
+                "test",
+                vec!["telegram".to_string(), "discord-bot".to_string()],
+            )
+            .await;
+
+        assert_eq!(actual, vec!["telegram", "discord_bot"]);
+    }
+
+    #[tokio::test]
+    async fn load_startup_active_channels_prefers_persisted_empty_state_over_configured() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting("test", "activated_channels", &serde_json::json!([]))
+            .await
+            .expect("seed activated_channels");
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let actual = manager
+            .load_startup_active_channels("test", vec!["telegram".to_string()])
+            .await;
+
+        assert!(
+            actual.is_empty(),
+            "an explicit empty activated_channels setting should keep all channels inactive"
+        );
+    }
+
+    fn make_test_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::Builder;
+
+        let mut tar_data = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut tar_data, Compression::default());
+            let mut builder = Builder::new(encoder);
+            for (path, data) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *path, *data)
+                    .expect("append tar entry");
+            }
+            builder.into_inner().expect("finish tar");
+        }
+        tar_data
+    }
+
+    async fn store_test_secret(
+        manager: &crate::extensions::manager::ExtensionManager,
+        name: &str,
+        value: &str,
+    ) {
+        manager
+            .secrets
+            .create("test", CreateSecretParams::new(name, value))
+            .await
+            .expect("store secret");
+    }
+
+    struct ScopedNearAiEnv {
+        original_base_url: Option<String>,
+        original_api_key: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedNearAiEnv {
+        fn set(base_url: &str, api_key: &str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original_base_url = std::env::var("NEARAI_BASE_URL").ok();
+            let original_api_key = std::env::var("NEARAI_API_KEY").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::set_var("NEARAI_BASE_URL", base_url);
+                std::env::set_var("NEARAI_API_KEY", api_key);
+            }
+            Self {
+                original_base_url,
+                original_api_key,
+                _mutex: guard,
+            }
+        }
+
+        fn unset() -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original_base_url = std::env::var("NEARAI_BASE_URL").ok();
+            let original_api_key = std::env::var("NEARAI_API_KEY").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("NEARAI_BASE_URL");
+                std::env::remove_var("NEARAI_API_KEY");
+            }
+            Self {
+                original_base_url,
+                original_api_key,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedNearAiEnv {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref value) = self.original_base_url {
+                    std::env::set_var("NEARAI_BASE_URL", value);
+                } else {
+                    std::env::remove_var("NEARAI_BASE_URL");
+                }
+
+                if let Some(ref value) = self.original_api_key {
+                    std::env::set_var("NEARAI_API_KEY", value);
+                } else {
+                    std::env::remove_var("NEARAI_API_KEY");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ensure_extension_ready_reports_needs_auth_for_wasm_channel() {
+        // Serialize against tests that mutate IRONCLAW_OAUTH_CALLBACK_URL
+        // (e.g. `auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor`):
+        // without the env lock the auth path nondeterministically returns
+        // "awaiting_authorization" instead of "awaiting_token".
+        let _env_guard = crate::config::helpers::lock_env();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "gmail_channel",
+            &serde_json::json!({
+                "name": "gmail_channel",
+                "description": "gmail channel",
+                "setup": {
+                    "required_secrets": [
+                        {"name": "google_oauth_token", "prompt": "Google OAuth token"}
+                    ],
+                    "setup_url": "https://example.com/setup"
+                }
+            })
+            .to_string(),
+        );
+        crate::auth::upsert_auth_descriptor(
+            Some(store.as_ref()),
+            "test",
+            crate::auth::AuthDescriptor {
+                kind: crate::auth::AuthDescriptorKind::SkillCredential,
+                secret_name: "google_oauth_token".to_string(),
+                integration_name: "gmail".to_string(),
+                display_name: Some("Google".to_string()),
+                provider: Some("google".to_string()),
+                setup_url: None,
+                oauth: Some(crate::auth::OAuthFlowDescriptor {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id: Some("client-id".to_string()),
+                    client_id_env: None,
+                    client_secret: Some("client-secret".to_string()),
+                    client_secret_env: None,
+                    scopes: vec!["openid".to_string()],
+                    use_pkce: true,
+                    extra_params: std::collections::HashMap::new(),
+                    access_token_field: "access_token".to_string(),
+                    validation_url: None,
+                }),
+            },
+        )
+        .await;
+        let manager =
+            make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, Some(store));
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "gmail_channel",
+                "test",
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                credential_name,
+                auth,
+                ..
+            } => {
+                assert_eq!(credential_name.as_deref(), Some("google_oauth_token"));
+                assert_eq!(auth.status_str(), "awaiting_token");
+            }
+            other => panic!("expected needs auth outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_wasm_tar_gz_accepts_single_noncanonical_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+        let target_wasm = dir.path().join("web-search.wasm");
+        let target_caps = dir.path().join("web-search.capabilities.json");
+        let tar_gz = make_test_tar_gz(&[
+            ("web_search_tool.wasm", b"\0asmfallback"),
+            (
+                "web-search-tool.capabilities.json",
+                br#"{"name":"web-search-tool"}"#,
+            ),
+        ]);
+
+        manager
+            .extract_wasm_tar_gz("web-search", &tar_gz, &target_wasm, &target_caps)
+            .expect("extract tar.gz");
+
+        assert_eq!(
+            std::fs::read(&target_wasm).expect("read wasm"),
+            b"\0asmfallback"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target_caps).expect("read capabilities"),
+            r#"{"name":"web-search-tool"}"#
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn auth_wasm_channel_status_uses_persisted_secret_oauth_descriptor() {
+        let _env_guard = crate::config::helpers::lock_env();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://example.com/oauth/callback",
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "gmail_channel",
+            &serde_json::json!({
+                "name": "gmail_channel",
+                "description": "gmail channel",
+                "setup": {
+                    "required_secrets": [
+                        {"name": "google_oauth_token", "prompt": "Google OAuth token"}
+                    ],
+                    "setup_url": "https://example.com/setup"
+                }
+            })
+            .to_string(),
+        );
+        crate::auth::upsert_auth_descriptor(
+            Some(store.as_ref()),
+            "test",
+            crate::auth::AuthDescriptor {
+                kind: crate::auth::AuthDescriptorKind::SkillCredential,
+                secret_name: "google_oauth_token".to_string(),
+                integration_name: "gmail".to_string(),
+                display_name: Some("Google".to_string()),
+                provider: Some("google".to_string()),
+                setup_url: None,
+                oauth: Some(crate::auth::OAuthFlowDescriptor {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id: Some("client-id".to_string()),
+                    client_id_env: None,
+                    client_secret: Some("client-secret".to_string()),
+                    client_secret_env: None,
+                    scopes: vec!["openid".to_string(), "email".to_string()],
+                    use_pkce: true,
+                    extra_params: std::collections::HashMap::new(),
+                    access_token_field: "access_token".to_string(),
+                    validation_url: None,
+                }),
+            },
+        )
+        .await;
+        let manager =
+            make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, Some(store));
+
+        let auth = manager
+            .auth_wasm_channel_status("gmail_channel", "test")
+            .await
+            .expect("channel auth status");
+
+        assert_eq!(auth.status_str(), "awaiting_authorization");
+        assert!(
+            auth.auth_url()
+                .is_some_and(|url| url.contains("accounts.google.com")),
+            "expected hosted google auth url, got {auth:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_extension_ready_explicit_auth_leaves_activation_to_later() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "ready_tool",
+            r#"{
+                "auth": {
+                    "secret_name": "ready_tool_token"
+                }
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        store_test_secret(&manager, "ready_tool_token", "token").await;
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "ready_tool",
+                "test",
+                crate::extensions::EnsureReadyIntent::ExplicitAuth,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::Ready {
+                phase, activation, ..
+            } => {
+                assert_eq!(phase, crate::extensions::ExtensionPhase::NeedsActivation);
+                assert!(activation.is_none());
+            }
+            other => panic!("expected ready outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_include_inactive_wasm_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "latent_tool",
+            r#"{
+                "description": "latent test tool"
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        let actions = manager.latent_provider_actions("test").await;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_cache_invalidates_when_wasm_tool_is_removed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "latent_tool",
+            r#"{
+                "description": "latent test tool"
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        let first = manager.latent_provider_actions("test").await;
+        assert!(
+            first
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+
+        manager
+            .remove("latent_tool", "test")
+            .await
+            .expect("remove latent tool");
+
+        let second = manager.latent_provider_actions("test").await;
+        assert!(
+            !second
+                .iter()
+                .any(|action| action.action_name == "latent_tool")
+        );
+    }
+
+    /// Regression for nearai/ironclaw#1921's sibling: registry-backed wasm
+    /// tools that are not yet installed should appear as latent provider
+    /// actions so the agent can request them by name and trigger
+    /// auto-install. This pins the registry-discovery half of
+    /// `build_latent_wasm_provider_actions`, which the previous merge
+    /// silently broke when it lost the `user_id` parameter and the
+    /// `push_action` closure during a refactor.
+    ///
+    /// Note: action names use the canonical form (`web_search`) because the
+    /// registry runs every entry through `canonicalize_entries` on
+    /// construction.
+    #[tokio::test]
+    async fn latent_provider_actions_include_registry_backed_uninstalled_wasm_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            source: ExtensionSource::WasmDownload {
+                wasm_url: "https://example.com/web_search.wasm".to_string(),
+                capabilities_url: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+        let manager = make_test_manager_with_catalog(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            vec![entry],
+        );
+
+        let actions = manager.latent_provider_actions("test").await;
+        let web_search = actions
+            .iter()
+            .find(|action| action.action_name == "web_search")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected registry-backed web_search latent action; got: {:?}",
+                    actions.iter().map(|a| &a.action_name).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(web_search.provider_extension, "web_search");
+        assert!(
+            web_search.description.contains("Search the web"),
+            "latent action description should carry the registry entry's description, got: {}",
+            web_search.description
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_actions_include_cached_inactive_mcp_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.description = Some("Notion MCP".to_string());
+        server.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion pages".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }),
+            annotations: None,
+        }];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let actions = manager.latent_provider_actions("test").await;
+        assert!(actions.iter().any(|action| action.action_name == "notion"));
+        let search = actions
+            .iter()
+            .find(|action| action.action_name == "notion_search")
+            .expect("cached latent mcp action");
+        assert_eq!(search.provider_extension, "notion");
+        assert_eq!(
+            search.parameters_schema["properties"]["query"]["type"],
+            "string"
+        );
+    }
+
+    /// Regression: latent provider actions for an MCP server with a
+    /// hyphenated name must produce action_names with underscores, not
+    /// hyphens. The `latent_actions_for_mcp_server` method uses
+    /// `mcp_tool_id(&server.name, &tool.name)` which normalizes ALL
+    /// non-identifier chars to `_`. Without this, the latent action
+    /// `my-server_search` would never match the registered tool
+    /// `my_server_search` when the server activates later.
+    #[tokio::test]
+    async fn latent_provider_actions_normalize_hyphenated_server_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("my-mcp-server", "https://example.com/mcp");
+        server.cached_tools = vec![
+            crate::tools::mcp::McpTool {
+                name: "search-all".to_string(),
+                description: "Search everything".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: None,
+            },
+            crate::tools::mcp::McpTool {
+                name: "get_item".to_string(),
+                description: "Get an item".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: None,
+            },
+        ];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let actions = manager.latent_provider_actions("test").await;
+
+        // The umbrella action for the server itself.
+        assert!(
+            actions.iter().any(|a| a.action_name == "my-mcp-server"),
+            "umbrella action should use the raw server name"
+        );
+
+        // Individual tool actions must have normalized names.
+        let search = actions
+            .iter()
+            .find(|a| a.action_name == "my_mcp_server_search_all")
+            .expect("hyphenated server + tool name must normalize to underscores");
+        assert_eq!(search.provider_extension, "my-mcp-server");
+
+        let get_item = actions
+            .iter()
+            .find(|a| a.action_name == "my_mcp_server_get_item")
+            .expect("already-underscore tool name must still work with hyphenated server");
+        assert_eq!(get_item.provider_extension, "my-mcp-server");
+
+        // Negative: the old (pre-fix) hyphenated form must NOT appear.
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_name == "my-mcp-server_search-all"),
+            "hyphenated action_name must not survive normalization"
+        );
+    }
+
+    /// Regression: configuring or removing an MCP server must invalidate
+    /// the cached `latent_wasm_provider_actions` map. The cache is built by
+    /// scanning the registry for uninstalled `WasmTool`/`McpServer` entries;
+    /// without invalidation, a registry-backed MCP entry that the user just
+    /// configured (or just removed) would remain in the stale cache and
+    /// either be filtered as "active" forever, or reappear as latent until
+    /// some unrelated operation evicted the cache.
+    #[tokio::test]
+    async fn latent_wasm_provider_actions_cache_invalidates_on_mcp_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "warm_cache_tool",
+            r#"{ "description": "warm the cache" }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        // Warm the per-user latent cache.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be populated after first call"
+        );
+
+        // add_mcp_server must invalidate the cache.
+        let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after add_mcp_server"
+        );
+
+        // Re-warm the cache, then verify remove_mcp_server invalidates it.
+        let _ = manager.latent_provider_actions("test").await;
+        assert!(
+            manager
+                .latent_wasm_provider_actions
+                .read()
+                .await
+                .contains_key("test"),
+            "cache should be repopulated"
+        );
+        manager
+            .remove_mcp_server("notion", "test")
+            .await
+            .expect("remove mcp server");
+        assert!(
+            manager.latent_wasm_provider_actions.read().await.is_empty(),
+            "cache should be cleared after remove_mcp_server"
+        );
+    }
+
+    #[tokio::test]
+    async fn latent_provider_action_resolves_cached_inactive_mcp_subtool_by_exact_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion pages".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        }];
+        manager
+            .add_mcp_server(server, "test")
+            .await
+            .expect("add mcp server");
+
+        let action = manager
+            .latent_provider_action("notion_search", "test")
+            .await
+            .expect("latent provider action");
+        assert_eq!(action.provider_extension, "notion");
+        assert_eq!(action.action_name, "notion_search");
+    }
+
+    /// Auto-install path for registry-backed wasm tools.
+    ///
+    /// `ensure_extension_ready` should:
+    ///   1. See `web_search` is not installed,
+    ///   2. Look it up in the registry catalog,
+    ///   3. Run the buildable install path which copies the artifact and
+    ///      capabilities sidecar into `wasm_tools_dir`,
+    ///   4. Call `auth(name, user_id)` which loads the new capabilities file,
+    ///      finds an `auth.secret_name = "brave_api_key"` declaration with no
+    ///      OAuth config, and returns `AwaitingToken`,
+    ///   5. Map that to `EnsureReadyOutcome::NeedsAuth { credential_name:
+    ///      Some("brave_api_key"), .. }`.
+    ///
+    /// The fixture stages a fake wasm artifact at the build path
+    /// `find_wasm_artifact` searches and a capabilities sidecar in the same
+    /// directory (`install_wasm_files` copies both into `wasm_tools_dir`).
+    /// `WasmBuildable.build_dir` points at the tempdir, so no network and
+    /// no real `cargo` invocation are needed.
+    #[tokio::test]
+    async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_explicit_activate() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+
+        // Stage the buildable source layout that the install path expects:
+        //   <build_dir>/target/wasm32-wasip2/release/web_search.wasm
+        //   <build_dir>/web_search.capabilities.json
+        let build_dir = dir.path().join("build");
+        let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join("web_search.wasm");
+        // Minimal valid wasm header (`\x00asm` + version 1) so any later
+        // validation reading the magic bytes is satisfied.
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let caps_path = build_dir.join("web_search.capabilities.json");
+        std::fs::write(
+            &caps_path,
+            serde_json::json!({
+                "description": "Test web search tool",
+                "auth": {
+                    "secret_name": "brave_api_key",
+                    "display_name": "Brave Search",
+                    "instructions": "Get an API key from https://api.search.brave.com/",
+                },
+            })
+            .to_string(),
+        )
+        .expect("write capabilities");
+
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web via Brave Search".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            // `WasmBuildable.source_dir` is unused on the buildable install
+            // path (only `build_dir` + `crate_name` matter), but the field
+            // is required so we point it at the same tempdir for clarity.
+            source: ExtensionSource::WasmBuildable {
+                source_dir: build_dir.to_string_lossy().into_owned(),
+                build_dir: Some(build_dir.to_string_lossy().into_owned()),
+                crate_name: Some("web_search".to_string()),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+
+        let manager = make_test_manager_with_catalog(
+            None,
+            tools_dir.clone(),
+            channels_dir,
+            None,
+            vec![entry],
+        );
+
+        let outcome = manager
+            .ensure_extension_ready(
+                "web_search",
+                "test",
+                crate::extensions::EnsureReadyIntent::ExplicitActivate,
+            )
+            .await
+            .expect("ensure ready");
+
+        match outcome {
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                credential_name, ..
+            } => {
+                assert_eq!(
+                    credential_name.as_deref(),
+                    Some("brave_api_key"),
+                    "auto-install path should surface the capabilities-declared secret name"
+                );
+            }
+            other => panic!("expected NeedsAuth outcome, got {other:?}"),
+        }
+
+        // Auto-install must have produced the wasm file in the tools dir,
+        // so determine_installed_kind now resolves to WasmTool.
+        let kind = manager
+            .determine_installed_kind("web_search", "test")
+            .await
+            .expect("installed kind");
+        assert_eq!(kind, ExtensionKind::WasmTool);
+        assert!(
+            tools_dir.join("web_search.wasm").exists(),
+            "auto-install should have copied the wasm artifact into wasm_tools_dir"
+        );
+        assert!(
+            tools_dir.join("web_search.capabilities.json").exists(),
+            "auto-install should have copied the capabilities sidecar into wasm_tools_dir"
+        );
+    }
+
+    /// Regression: latent provider actions called by the LLM
+    /// (`UseCapability` intent) must NOT silently install a registry
+    /// extension. The bridge needs to surface this as `NotInstalled` so the
+    /// caller can route through the install/approval gate instead of
+    /// downloading and activating arbitrary code on the LLM's behalf.
+    #[tokio::test]
+    async fn ensure_extension_ready_use_capability_does_not_auto_install() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+
+        let build_dir = dir.path().join("build");
+        let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join("web_search.wasm");
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+        let caps_path = build_dir.join("web_search.capabilities.json");
+        std::fs::write(&caps_path, "{}").expect("write capabilities");
+
+        let entry = RegistryEntry {
+            name: "web_search".to_string(),
+            display_name: "Web Search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Search the web via Brave Search".to_string(),
+            keywords: vec!["search".into(), "web".into()],
+            source: ExtensionSource::WasmBuildable {
+                source_dir: build_dir.to_string_lossy().into_owned(),
+                build_dir: Some(build_dir.to_string_lossy().into_owned()),
+                crate_name: Some("web_search".to_string()),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+        };
+
+        let manager = make_test_manager_with_catalog(
+            None,
+            tools_dir.clone(),
+            channels_dir,
+            None,
+            vec![entry],
+        );
+
+        let result = manager
+            .ensure_extension_ready(
+                "web_search",
+                "test",
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::NotInstalled(_))),
+            "UseCapability must surface NotInstalled, not auto-install; got {result:?}"
+        );
+        assert!(
+            !tools_dir.join("web_search.wasm").exists(),
+            "UseCapability path must NOT have copied the wasm artifact into wasm_tools_dir"
+        );
+    }
+    #[test]
+    fn test_setting_value_is_present() {
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::Value::Null
+            )
+        );
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("   ")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("openai")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!(["x"])
+            )
+        );
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_persists_env_backed_config() {
+        let _env = ScopedNearAiEnv::set("https://cloud-api.near.ai/v1/", "test-nearai-key");
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let result = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect("install nearai from registry");
+
+            assert_eq!(result.name, NEARAI_MCP_SERVER_NAME);
+
+            let servers =
+                crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), "test")
+                    .await
+                    .expect("load mcp servers");
+            let server = servers
+                .get(NEARAI_MCP_SERVER_NAME)
+                .expect("persisted nearai server");
+
+            assert_eq!(server.url, "https://cloud-api.near.ai/mcp");
+            assert_ne!(server.url, "https://private.near.ai/mcp");
+            assert_eq!(
+                server.headers.get("Authorization").map(String::as_str),
+                Some("Bearer test-nearai-key")
+            );
+        });
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_requires_env() {
+        let _env = ScopedNearAiEnv::unset();
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let err = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect_err("missing env should fail install");
+
+            assert!(
+                matches!(err, ExtensionError::InstallFailed(ref msg) if msg.contains("requires NEARAI_BASE_URL and NEARAI_API_KEY")),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_reports_invalid_env_config() {
+        let _env = ScopedNearAiEnv::set("not a url", "test-nearai-key");
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let err = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect_err("invalid env should fail install");
+
+            assert!(
+                matches!(err, ExtensionError::InstallFailed(ref msg) if msg.contains("derived MCP server configuration is invalid")),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn test_is_tool_setup_field_provided_ignores_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting(
+                "test",
+                "nearai.session_token",
+                &serde_json::json!({"token":"secret"}),
+            )
+            .await
+            .expect("set disallowed setting");
+
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let field = crate::tools::wasm::ToolFieldSetupSchema {
+            name: "provider".to_string(),
+            prompt: "Provider".to_string(),
+            optional: false,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+            setting_path: Some("nearai.session_token".to_string()),
+        };
+
+        let provided = mgr
+            .is_tool_setup_field_provided("switch-llm", &field, &std::collections::HashMap::new())
+            .await;
+        assert!(
+            !provided,
+            "disallowed setting paths must not be treated as readable setup fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_writes_allowlisted_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "switch-llm",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "llm_backend",
+                            "prompt": "Provider",
+                            "setting_path": "llm_backend"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("llm_backend".to_string(), "openai".to_string());
+
+        let result = mgr
+            .configure(
+                "switch-llm",
+                &std::collections::HashMap::new(),
+                &fields,
+                "test-user",
+            )
+            .await
+            .expect("save configuration");
+
+        assert!(
+            !result.activated,
+            "tool should not auto-activate without runtime"
+        );
+        // NOTE: `restart_required` was removed as dead code in PR #2103 —
+        // no extension actually used it; channels hot-activate. Keeping
+        // the rest of the assertion: the configure call must persist the
+        // allowlisted setting through to the store.
+        assert_eq!(
+            store
+                .get_setting("test", "llm_backend")
+                .await
+                .expect("get setting"),
+            Some(serde_json::json!("openai"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "evil-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "session",
+                            "prompt": "Session",
+                            "setting_path": "nearai.session_token"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("session".to_string(), "overwrite".to_string());
+
+        let err = match mgr
+            .configure(
+                "evil-tool",
+                &std::collections::HashMap::new(),
+                &fields,
+                "test-user",
+            )
+            .await
+        {
+            Ok(_) => panic!("disallowed setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "nearai.session_token")
+                .await
+                .expect("get disallowed setting"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_admin_only_global_base_url_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "base-url-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "base_url",
+                            "prompt": "Base URL",
+                            "setting_path": "ollama_base_url"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert(
+            "base_url".to_string(),
+            "http://192.168.1.50:11434".to_string(),
+        );
+
+        let err = match mgr
+            .configure(
+                "base-url-tool",
+                &std::collections::HashMap::new(),
+                &fields,
+                "test-user",
+            )
+            .await
+        {
+            Ok(_) => panic!("admin-only global setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "ollama_base_url")
+                .await
+                .expect("get admin-only setting"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -5704,7 +9178,7 @@ mod tests {
         let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
         let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf());
 
-        let err = mgr.activate("nonexistent").await.unwrap_err();
+        let err = mgr.activate("nonexistent", "test").await.unwrap_err();
         let msg = err.to_string();
         assert!(
             !msg.contains("WASM runtime not available"),
@@ -5718,6 +9192,155 @@ mod tests {
         );
     }
 
+    /// Regression: a tool installed under the legacy hyphenated form
+    /// (e.g. `google-drive-tool.wasm`) must be findable by
+    /// `activate_wasm_tool` when looked up via the canonical underscore
+    /// form (`google_drive_tool`). Before consolidating the file lookup
+    /// helpers, `determine_installed_kind` correctly resolved the alias
+    /// (so the extension reported as "installed") but `activate_wasm_tool`
+    /// hard-coded `dir.join("{name}.wasm")` and missed it. The disagreement
+    /// surfaced as an `Extension not installed: WASM tool 'google_drive_tool'
+    /// not found at <path>` error in the readiness probe, which the upstream
+    /// wrapper then swallowed as `ToolReadiness::Ready`, sending the agent
+    /// off to call a tool that couldn't activate.
+    ///
+    /// This test asserts that activation gets *past* the file-existence
+    /// check for a hyphen-named file. It will still fail later (the bytes
+    /// aren't a real WASM module), but the failure must be a load error,
+    /// NOT an `Extension not installed` error from line 5294.
+    #[tokio::test]
+    async fn test_activate_wasm_tool_finds_legacy_hyphen_alias() {
+        // Two tools, one each with a legacy hyphen and a canonical-underscore
+        // file name on disk. We then try to activate them by their canonical
+        // names — both should resolve to a real path on disk.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        // Hyphenated file → canonical lookup name has underscores.
+        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+            .expect("hyphen file");
+        // Canonical file → no alias needed.
+        std::fs::write(tools_dir.join("gmail.wasm"), b"not-a-real-wasm").expect("canonical file");
+
+        let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
+        let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
+        let mgr = make_test_manager(Some(runtime), tools_dir);
+
+        // Hyphen → canonical lookup. Must NOT return NotInstalled / not found.
+        let err = mgr
+            .activate("google_drive_tool", "test")
+            .await
+            .expect_err("byte stream is not real WASM");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found")
+                && !msg.contains("not installed")
+                && !msg.contains("Not installed"),
+            "activate_wasm_tool must find google-drive-tool.wasm via legacy alias \
+             when looked up as `google_drive_tool`; got: {msg}"
+        );
+
+        // Canonical name with no alias still works.
+        let err = mgr
+            .activate("gmail", "test")
+            .await
+            .expect_err("byte stream is not real WASM");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found") && !msg.contains("not installed"),
+            "canonical name lookup must still work; got: {msg}"
+        );
+    }
+
+    /// Mirror of the above for `activate_wasm_channel` — the same bug
+    /// existed in the channel activation path.
+    #[tokio::test]
+    async fn test_activate_wasm_channel_finds_legacy_hyphen_alias() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::write(channels_dir.join("my-channel.wasm"), b"not-a-real-wasm")
+            .expect("hyphen file");
+        // Capabilities file under the same hyphen alias.
+        std::fs::write(channels_dir.join("my-channel.capabilities.json"), b"{}")
+            .expect("hyphen caps");
+
+        let mgr = make_test_manager_with_dirs(
+            None, // no WASM tool runtime needed for the channel path
+            dir.path().join("tools"),
+            channels_dir,
+            None,
+        );
+
+        let err = mgr
+            .activate("my_channel", "test")
+            .await
+            .expect_err("activation will fail later");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found") && !msg.contains("not installed"),
+            "activate_wasm_channel must find my-channel.wasm via legacy alias \
+             when looked up as `my_channel`; got: {msg}"
+        );
+    }
+
+    /// Regression test for the v2 Drive trace: `auth_wasm_tool` used to
+    /// open `wasm_tools_dir.join("{canonical}.capabilities.json")`
+    /// directly without trying the legacy hyphen alias. A tool installed
+    /// as `google-drive-tool.capabilities.json` (the pre-v0.23 layout)
+    /// would silently report `no_auth_required` even though the file on
+    /// disk declared OAuth, which broke both the pre-flight readiness
+    /// gate and the post-flight auth detector. Now the function delegates
+    /// to `load_tool_capabilities`, which goes through
+    /// `existing_extension_file_path` like every other lookup.
+    #[tokio::test]
+    async fn test_auth_wasm_tool_finds_legacy_hyphen_alias() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        // Write the wasm + capabilities under the LEGACY hyphen names.
+        // The capabilities file declares an OAuth secret so a missed
+        // alias would mistakenly report `NoAuthRequired` instead of
+        // `AwaitingAuthorization`.
+        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+            .expect("hyphen wasm file");
+        let caps_json = r#"{
+            "name": "google-drive-tool",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "instructions": "Please provide your Google API token."
+            }
+        }"#;
+        std::fs::write(
+            tools_dir.join("google-drive-tool.capabilities.json"),
+            caps_json,
+        )
+        .expect("hyphen caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Look up by the canonical underscore name. Before the fix this
+        // returned `NoAuthRequired` because `auth_wasm_tool` joined
+        // `google_drive_tool.capabilities.json` directly and that file
+        // doesn't exist on disk.
+        let result = mgr
+            .auth("google_drive_tool", "test")
+            .await
+            .expect("auth lookup must succeed");
+        match result.status {
+            crate::extensions::AuthStatus::AwaitingToken { .. } => {}
+            other => panic!(
+                "expected AwaitingToken (legacy-hyphen capabilities file should be found \
+                 and parsed); got {:?}",
+                other
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn test_activate_wasm_tool_without_runtime_fails_with_runtime_error() {
         // When the ExtensionManager has no WASM runtime (None), activation
@@ -5728,7 +9351,7 @@ mod tests {
 
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        let err = mgr.activate("fake").await.unwrap_err();
+        let err = mgr.activate("fake", "test").await.unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("WASM runtime not available"),
@@ -5763,7 +9386,7 @@ mod tests {
     #[tokio::test]
     async fn test_upgrade_no_installed_extensions() {
         let manager = make_manager_with_temp_dirs();
-        let result = manager.upgrade(None).await.unwrap();
+        let result = manager.upgrade(None, "test").await.unwrap();
         assert!(result.results.is_empty());
         assert!(result.message.contains("No WASM extensions installed"));
     }
@@ -5772,7 +9395,7 @@ mod tests {
     async fn test_upgrade_mcp_server_rejected() {
         let manager = make_manager_with_temp_dirs();
         // MCP servers can't be upgraded via tool_upgrade
-        let err = manager.upgrade(Some("some-mcp")).await;
+        let err = manager.upgrade(Some("some-mcp"), "test").await;
         // It will fail with NotInstalled because there's no MCP server named "some-mcp",
         // but if it were installed, the MCP code path would be rejected.
         assert!(err.is_err());
@@ -5798,7 +9421,7 @@ mod tests {
 
         let manager = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
 
-        let result = manager.upgrade(Some("test-channel")).await.unwrap();
+        let result = manager.upgrade(Some("test-channel"), "test").await.unwrap();
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].status, "already_up_to_date");
     }
@@ -5823,7 +9446,10 @@ mod tests {
 
         let manager = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
 
-        let result = manager.upgrade(Some("custom-channel")).await.unwrap();
+        let result = manager
+            .upgrade(Some("custom-channel"), "test")
+            .await
+            .unwrap();
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].status, "not_in_registry");
     }
@@ -5894,12 +9520,48 @@ mod tests {
         }
     }
 
+    fn make_test_loaded_channel_with_capabilities(
+        runtime: Arc<WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<PairingStore>,
+        config_json: serde_json::Value,
+    ) -> LoadedChannel {
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {}", name),
+        ));
+        let capabilities =
+            ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));
+
+        let cap_file_json = serde_json::json!({
+            "type": "channel",
+            "name": name,
+            "setup": { "required_secrets": [] },
+            "capabilities": { "channel": { "allowed_paths": [format!("/webhook/{}", name)] } },
+            "config": config_json
+        });
+        let cap_file = ChannelCapabilitiesFile::from_json(&cap_file_json.to_string()).unwrap();
+
+        LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: Some(cap_file),
+        }
+    }
+
     #[test]
     fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
         let updates = build_wasm_channel_runtime_config_updates(
             Some("https://example.test"),
             Some("secret-123"),
-            Some(424242),
+            Some("424242"),
         );
 
         require_eq(
@@ -5914,8 +9576,76 @@ mod tests {
         )?;
         require_eq(
             updates.get("owner_id"),
-            Some(&serde_json::json!(424242)),
-            "owner_id",
+            Some(&serde_json::json!(424242_i64)),
+            "integer-compatible owner_id is injected as a JSON number",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_hot_activation_uses_capabilities_owner_id_fallback() -> Result<(), String> {
+        let manager = make_manager_with_temp_dirs();
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        // LoadedChannel with capabilities config containing owner_id
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "telegram",
+            Arc::clone(&pairing_store),
+            serde_json::json!({ "owner_id": 99887766 }),
+        );
+
+        // Activate with no runtime owner_id — should fall back to capabilities
+        let result = manager
+            .complete_loaded_wasm_channel_activation(
+                "telegram",
+                loaded,
+                &channel_manager,
+                &router,
+                None,
+            )
+            .await
+            .map_err(|e| format!("activation failed: {e}"))?;
+
+        require_eq(
+            result.name,
+            "telegram".to_string(),
+            "activation result name",
+        )?;
+
+        // Verify the channel got the capabilities-derived owner_actor_id
+        let channel = router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .ok_or_else(|| "telegram channel not registered".to_string())?;
+        require_eq(
+            channel.owner_actor_id_for_test().await,
+            Some("99887766".to_string()),
+            "owner_actor_id should come from capabilities fallback",
+        )?;
+
+        // Verify config was injected. The shared `build_runtime_config_updates`
+        // helper parses integer-compatible owner ids back to a JSON number, so
+        // assert the numeric representation the helper produces today.
+        let config = channel.get_config().await;
+        require_eq(
+            config.get("owner_id"),
+            Some(&serde_json::json!(99887766_i64)),
+            "config owner_id should be restored from capabilities fallback",
         )
     }
 
@@ -5933,7 +9663,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -5950,280 +9680,6 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn test_telegram_hot_activation_configure_uses_mock_loader_and_persists_state()
-    -> Result<(), String> {
-        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
-        let channels_dir = dir.path().join("channels");
-        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
-        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
-            .map_err(|err| format!("write wasm: {err}"))?;
-        std::fs::write(
-            channels_dir.join("telegram.capabilities.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "type": "channel",
-                "name": "telegram",
-                "setup": {
-                    "required_secrets": [
-                        {
-                            "name": "telegram_bot_token",
-                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
-                            "optional": false
-                        }
-                    ]
-                },
-                "capabilities": {
-                    "channel": {
-                        "allowed_paths": ["/webhook/telegram"]
-                    }
-                },
-                "config": {
-                    "owner_id": null
-                }
-            }))
-            .map_err(|err| format!("serialize capabilities: {err}"))?,
-        )
-        .map_err(|err| format!("write capabilities: {err}"))?;
-
-        let (db, _db_tmp) = crate::testing::test_db().await;
-        let manager = {
-            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-            use crate::testing::credentials::TEST_CRYPTO_KEY;
-            use crate::tools::ToolRegistry;
-            use crate::tools::mcp::process::McpProcessManager;
-            use crate::tools::mcp::session::McpSessionManager;
-
-            let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
-            let crypto = Arc::new(
-                SecretsCrypto::new(master_key)
-                    .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
-            );
-
-            ExtensionManager::new(
-                Arc::new(McpSessionManager::new()),
-                Arc::new(McpProcessManager::new()),
-                Arc::new(InMemorySecretsStore::new(crypto)),
-                Arc::new(ToolRegistry::new()),
-                None,
-                None,
-                dir.path().join("tools"),
-                channels_dir.clone(),
-                None,
-                "test".to_string(),
-                Some(db),
-                Vec::new(),
-            )
-        };
-
-        let channel_manager = Arc::new(ChannelManager::new());
-        let runtime = Arc::new(
-            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
-                .map_err(|err| format!("runtime: {err}"))?,
-        );
-        let pairing_store = Arc::new(PairingStore::with_base_dir(
-            dir.path().join("pairing-state"),
-        ));
-        let router = Arc::new(WasmChannelRouter::new());
-        manager
-            .set_channel_runtime(
-                Arc::clone(&channel_manager),
-                Arc::clone(&runtime),
-                Arc::clone(&pairing_store),
-                Arc::clone(&router),
-                std::collections::HashMap::new(),
-            )
-            .await;
-        manager
-            .set_test_wasm_channel_loader(Arc::new({
-                let runtime = Arc::clone(&runtime);
-                let pairing_store = Arc::clone(&pairing_store);
-                move |name| {
-                    Ok(make_test_loaded_channel(
-                        Arc::clone(&runtime),
-                        name,
-                        Arc::clone(&pairing_store),
-                    ))
-                }
-            }))
-            .await;
-        manager
-            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
-                if existing_owner_id.is_some() {
-                    return Err(ExtensionError::Other(
-                        "owner binding should be derived during setup".to_string(),
-                    ));
-                }
-                Ok(TelegramBindingResult::Bound(TelegramBindingData {
-                    owner_id: 424242,
-                    bot_username: Some("test_hot_bot".to_string()),
-                    binding_state: TelegramOwnerBindingState::VerifiedNow,
-                }))
-            }))
-            .await;
-
-        manager
-            .activation_errors
-            .write()
-            .await
-            .insert("telegram".to_string(), "stale failure".to_string());
-
-        let result = manager
-            .configure(
-                "telegram",
-                &std::collections::HashMap::from([(
-                    "telegram_bot_token".to_string(),
-                    "123456789:ABCdefGhI".to_string(),
-                )]),
-            )
-            .await
-            .map_err(|err| format!("configure succeeds: {err}"))?;
-
-        require(result.activated, "expected hot activation to succeed")?;
-        require(
-            result.message.contains("activated"),
-            format!("unexpected message: {}", result.message),
-        )?;
-        require(
-            !manager
-                .activation_errors
-                .read()
-                .await
-                .contains_key("telegram"),
-            "successful configure should clear stale activation errors",
-        )?;
-        require(
-            manager
-                .active_channel_names
-                .read()
-                .await
-                .contains("telegram"),
-            "telegram should be marked active after hot activation",
-        )?;
-        require(
-            channel_manager.get_channel("telegram").await.is_some(),
-            "telegram should be hot-added to the running channel manager",
-        )?;
-        require_eq(
-            manager.load_persisted_active_channels().await,
-            vec!["telegram".to_string()],
-            "persisted active channels",
-        )?;
-        require_eq(
-            manager.current_channel_owner_id("telegram").await,
-            Some(424242),
-            "current owner id",
-        )?;
-        require(
-            manager.has_wasm_channel_owner_binding("telegram").await,
-            "telegram should report an explicit owner binding after setup".to_string(),
-        )?;
-        let owner_setting = manager
-            .store
-            .as_ref()
-            .ok_or_else(|| "db-backed manager missing".to_string())?
-            .get_setting("test", "channels.wasm_channel_owner_ids.telegram")
-            .await
-            .map_err(|err| format!("owner_id setting query: {err}"))?;
-        require_eq(
-            owner_setting,
-            Some(serde_json::json!(424242)),
-            "owner setting",
-        )?;
-        let bot_username_setting = manager
-            .store
-            .as_ref()
-            .ok_or_else(|| "db-backed manager missing".to_string())?
-            .get_setting("test", &bot_username_setting_key("telegram"))
-            .await
-            .map_err(|err| format!("bot username setting query: {err}"))?;
-        require_eq(
-            bot_username_setting,
-            Some(serde_json::json!("test_hot_bot")),
-            "bot username setting",
-        )
-    }
-
-    #[tokio::test]
-    async fn test_telegram_hot_activation_returns_verification_challenge_before_binding()
-    -> Result<(), String> {
-        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
-        let channels_dir = dir.path().join("channels");
-        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
-        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
-            .map_err(|err| format!("write wasm: {err}"))?;
-        std::fs::write(
-            channels_dir.join("telegram.capabilities.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "type": "channel",
-                "name": "telegram",
-                "setup": {
-                    "required_secrets": [
-                        {
-                            "name": "telegram_bot_token",
-                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
-                            "optional": false
-                        }
-                    ]
-                },
-                "capabilities": {
-                    "channel": {
-                        "allowed_paths": ["/webhook/telegram"]
-                    }
-                }
-            }))
-            .map_err(|err| format!("serialize capabilities: {err}"))?,
-        )
-        .map_err(|err| format!("write capabilities: {err}"))?;
-
-        let manager =
-            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
-        manager
-            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
-                if existing_owner_id.is_some() {
-                    return Err(ExtensionError::Other(
-                        "owner binding should not exist before verification".to_string(),
-                    ));
-                }
-                Ok(TelegramBindingResult::Pending(VerificationChallenge {
-                    code: "iclaw-7qk2m9".to_string(),
-                    instructions:
-                        "Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically."
-                            .to_string(),
-                    deep_link: Some("https://t.me/test_hot_bot?start=iclaw-7qk2m9".to_string()),
-                }))
-            }))
-            .await;
-
-        let result = manager
-            .configure(
-                "telegram",
-                &std::collections::HashMap::from([(
-                    "telegram_bot_token".to_string(),
-                    "123456789:ABCdefGhI".to_string(),
-                )]),
-            )
-            .await
-            .map_err(|err| format!("configure returned challenge: {err}"))?;
-
-        require(
-            !result.activated,
-            "expected setup to pause for verification",
-        )?;
-        require(
-            result.verification.as_ref().map(|v| v.code.as_str()) == Some("iclaw-7qk2m9"),
-            "expected verification code in configure result",
-        )?;
-        require(
-            !manager
-                .active_channel_names
-                .read()
-                .await
-                .contains("telegram"),
-            "telegram should not activate until owner verification completes",
-        )
     }
 
     #[cfg(feature = "libsql")]
@@ -6298,7 +9754,7 @@ mod tests {
             )
             .map_err(|e| format!("runtime init failed: {e}"))?,
         );
-        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new_noop());
         let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         let mut owner_ids = std::collections::HashMap::new();
         owner_ids.insert("telegram".to_string(), 12345_i64);
@@ -6313,102 +9769,213 @@ mod tests {
         Ok(())
     }
 
+    /// Regression for nearai/ironclaw#1921 — caller-level coverage.
+    ///
+    /// The web extensions list handler used to derive
+    /// `activation_status` from `derive_activation_status(ext, has_owner_binding)`,
+    /// silently dropping the underlying classifier's `has_paired` axis. A
+    /// helper-level unit test on `derive_activation_status` could not catch
+    /// the bug because the wrapper hardcoded the dropped argument to `false`.
+    ///
+    /// This test goes through the real caller path:
+    ///   ExtensionManager::has_wasm_channel_pairing
+    ///     -> PairingStore::read_allow_from
+    ///       -> libsql channel_identities query
+    ///
+    /// It seeds a real `channel_identities` row via `PairingStore::approve`
+    /// and verifies the manager method reports `true`. If the manager method
+    /// stops querying the pairing store (or the pairing store's wiring breaks),
+    /// this test fails. Combined with the unit test for
+    /// `derive_activation_status`'s 3-argument signature, the wrapper-bug
+    /// shape from #1921 has nowhere to hide.
+    ///
+    /// See `.claude/rules/testing.md` ("Test Through the Caller, Not Just
+    /// the Helper") for the rule motivating this test.
+    #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_notify_telegram_owner_verified_sends_confirmation_for_new_binding()
-    -> Result<(), String> {
-        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
-        let manager =
-            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+    async fn test_has_wasm_channel_pairing_reflects_db_backed_identities() -> Result<(), String> {
+        use crate::db::{Database, UserStore};
+        use crate::ownership::{OwnerId, OwnershipCache};
+        use crate::pairing::PairingStore;
 
-        let channel_manager = Arc::new(ChannelManager::new());
-        let broadcasts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        channel_manager
-            .add(Box::new(RecordingChannel {
-                name: "telegram".to_string(),
-                broadcasts: Arc::clone(&broadcasts),
-            }))
-            .await;
+        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+        let db_path = dir.path().join("pairing-1921.db");
 
-        manager
-            .channel_runtime
-            .write()
+        let db = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
+        );
+        db.run_migrations()
             .await
-            .replace(ChannelRuntimeState {
-                channel_manager,
-                wasm_channel_runtime: Arc::new(
-                    WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
-                        .map_err(|err| format!("runtime: {err}"))?,
-                ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
-                wasm_channel_router: Arc::new(WasmChannelRouter::new()),
-                wasm_channel_owner_ids: std::collections::HashMap::new(),
-            });
+            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
 
+        // FK on channel_identities.owner_id requires a real user row.
+        db.get_or_create_user(crate::db::UserRecord {
+            id: "owner-1921".to_string(),
+            role: "member".to_string(),
+            display_name: "owner-1921".to_string(),
+            status: "active".to_string(),
+            email: None,
+            last_login_at: None,
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .map_err(|e| format!("get_or_create_user failed: {e}"))?;
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).ok();
+        std::fs::create_dir_all(&channels_dir).ok();
+
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
+        use crate::tools::ToolRegistry;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(
+            SecretsCrypto::new(master_key)
+                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
+        );
+
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::new(InMemorySecretsStore::new(crypto)),
+            Arc::new(ToolRegistry::new()),
+            None,
+            None,
+            tools_dir,
+            channels_dir,
+            None,
+            "owner-1921".to_string(),
+            Some(db.clone() as Arc<dyn crate::db::Database>),
+            Vec::new(),
+        );
+
+        // Wire a real DB-backed PairingStore into the channel runtime.
+        // The other runtime members can be stubs because this test only
+        // exercises the pairing-store read path.
+        let pairing_store = Arc::new(PairingStore::new(
+            db.clone() as Arc<dyn crate::db::Database>,
+            Arc::new(OwnershipCache::new()),
+        ));
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::default(),
+            )
+            .map_err(|e| format!("runtime init failed: {e}"))?,
+        );
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
         manager
-            .notify_telegram_owner_verified(
-                "telegram",
-                Some(&TelegramBindingData {
-                    owner_id: 424242,
-                    bot_username: Some("test_hot_bot".to_string()),
-                    binding_state: TelegramOwnerBindingState::VerifiedNow,
-                }),
+            .set_channel_runtime(
+                channels,
+                runtime,
+                Arc::clone(&pairing_store),
+                router,
+                std::collections::HashMap::new(),
             )
             .await;
 
-        let sent = broadcasts.lock().await;
-        require_eq(sent.len(), 1, "broadcast count")?;
-        require_eq(sent[0].0.clone(), "424242".to_string(), "broadcast user_id")?;
-        require(
-            sent[0].1.content.contains("Telegram owner verified"),
-            "confirmation DM should acknowledge owner verification",
-        )
+        // No identities yet → has_wasm_channel_pairing must report false.
+        if manager.has_wasm_channel_pairing("telegram").await {
+            return Err(
+                "has_wasm_channel_pairing returned true with no channel_identities seeded \
+                 (the pairing store is likely returning stale or wrong data)"
+                    .to_string(),
+            );
+        }
+
+        // Seed a real channel_identities row via the pairing store's
+        // public flow (upsert pending request → approve with code).
+        let request = pairing_store
+            .upsert_request("telegram", "user_2026", None)
+            .await
+            .map_err(|e| format!("upsert_request failed: {e}"))?;
+        pairing_store
+            .approve("telegram", &request.code, &OwnerId::from("owner-1921"))
+            .await
+            .map_err(|e| format!("approve failed: {e}"))?;
+
+        // The manager method must now reflect the new identity row. If it
+        // does not, the wrapper bug from #1921 is back in some form.
+        if !manager.has_wasm_channel_pairing("telegram").await {
+            return Err(
+                "has_wasm_channel_pairing returned false after seeding a channel_identities \
+                 row — the wrapper is silently dropping the paired-state axis (#1921)"
+                    .to_string(),
+            );
+        }
+
+        // Other channels with no identities must still report false to
+        // pin the channel-name dimension. (A bug that ignored the channel
+        // name and returned true for any channel with any identity in
+        // the table would slip through the previous assertion alone.)
+        if manager.has_wasm_channel_pairing("discord").await {
+            return Err("has_wasm_channel_pairing leaked across channel names — \
+                 'discord' has no identities but reported paired"
+                .to_string());
+        }
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_notify_telegram_owner_verified_skips_existing_binding() -> Result<(), String> {
-        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
-        let manager =
-            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
-
+    async fn test_activate_wasm_channel_rejects_reserved_runtime_name() -> Result<(), String> {
+        let manager = make_manager_with_temp_dirs();
         let channel_manager = Arc::new(ChannelManager::new());
-        let broadcasts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        channel_manager
-            .add(Box::new(RecordingChannel {
-                name: "telegram".to_string(),
-                broadcasts: Arc::clone(&broadcasts),
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        manager
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                move |_name| {
+                    Ok(make_test_loaded_channel(
+                        Arc::clone(&runtime),
+                        "cli",
+                        Arc::clone(&pairing_store),
+                    ))
+                }
             }))
             .await;
 
-        manager
-            .channel_runtime
-            .write()
-            .await
-            .replace(ChannelRuntimeState {
-                channel_manager,
-                wasm_channel_runtime: Arc::new(
-                    WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
-                        .map_err(|err| format!("runtime: {err}"))?,
-                ),
-                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
-                wasm_channel_router: Arc::new(WasmChannelRouter::new()),
-                wasm_channel_owner_ids: std::collections::HashMap::new(),
-            });
+        let err = match manager.activate_wasm_channel("anything", "test").await {
+            Ok(_) => return Err("reserved channel activation should fail".to_string()),
+            Err(err) => err,
+        };
 
-        manager
-            .notify_telegram_owner_verified(
-                "telegram",
-                Some(&TelegramBindingData {
-                    owner_id: 424242,
-                    bot_username: Some("test_hot_bot".to_string()),
-                    binding_state: TelegramOwnerBindingState::Existing,
-                }),
-            )
-            .await;
-
+        let msg = err.to_string();
         require(
-            broadcasts.lock().await.is_empty(),
-            "existing owner bindings should not trigger another confirmation DM",
-        )
+            msg.contains("reserved name"),
+            format!("unexpected error message: {msg}"),
+        )?;
+        require(
+            channel_manager.get_channel("cli").await.is_none(),
+            "reserved channel should not be hot-added".to_string(),
+        )?;
+
+        Ok(())
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────
@@ -6517,7 +10084,7 @@ mod tests {
         );
 
         // Calling determine_installed_kind for a non-installed name returns NotInstalled
-        let result = mgr.determine_installed_kind("slack-relay").await;
+        let result = mgr.determine_installed_kind("slack-relay", "test").await;
         assert!(result.is_err(), "Should return NotInstalled");
 
         // Crucially: installed_relay_extensions must still be empty
@@ -6532,8 +10099,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        // With no DB store, is_relay_channel always returns false
-        assert!(!mgr.is_relay_channel("slack-relay").await);
+        // No store configured, no team_id → not a relay channel
+        assert!(!mgr.is_relay_channel("slack-relay", "test").await);
     }
 
     #[tokio::test]
@@ -6541,11 +10108,47 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        let err = mgr.activate_channel_relay("slack-relay").await.unwrap_err();
+        let err = mgr
+            .activate_channel_relay("slack-relay", "test")
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ExtensionError::AuthRequired),
             "expected AuthRequired, got: {err:?}"
         );
+    }
+
+    /// Regression: installed-but-not-authenticated relay must NOT short-circuit
+    /// `auth_channel_relay()` to "authenticated".  Previously, `auth_channel_relay`
+    /// called `is_relay_channel()` which checked the in-memory
+    /// `installed_relay_extensions` set; that returned `true` even when no team_id
+    /// existed in the store, so the OAuth URL was never offered.
+    #[tokio::test]
+    async fn test_auth_channel_relay_installed_without_team_id_is_not_authenticated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // Mark as installed (simulates clicking Install in the UI)
+        mgr.installed_relay_extensions
+            .write()
+            .await
+            .insert("slack-relay".to_string());
+
+        // Without a stored team_id, auth should NOT return authenticated.
+        // It should fail because relay config is missing (no CHANNEL_RELAY_URL),
+        // but the key assertion is that it does NOT return Ok(authenticated).
+        let result = mgr.auth_channel_relay("slack-relay", "test").await;
+        match result {
+            Ok(ref auth_result) if auth_result.is_authenticated() => {
+                panic!(
+                    "auth_channel_relay returned authenticated for installed-but-no-team-id relay; \
+                     expected either an OAuth URL or a config error"
+                );
+            }
+            _ => {
+                // Config error (no relay URL) or awaiting_authorization — both are correct
+            }
+        }
     }
 
     #[tokio::test]
@@ -6553,7 +10156,13 @@ mod tests {
         // Regression: remove() only checked channel_runtime for shutdown, missing
         // relay-only mode where only relay_channel_manager is set.
         let dir = tempfile::tempdir().expect("temp dir");
-        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(store),
+        );
 
         // Set up relay channel manager with a stub channel
         let cm = Arc::new(crate::channels::ChannelManager::new());
@@ -6580,12 +10189,14 @@ mod tests {
                 .await
                 .expect("store team_id");
         }
+        store_test_secret(&mgr, "relay:slack-relay:oauth_state", "nonce").await;
+        store_test_secret(&mgr, "relay:slack-relay:stream_token", "legacy-token").await;
 
         // Verify channel exists before removal
         assert!(cm.get_channel("slack-relay").await.is_some());
 
         // Remove should succeed and shut down the channel
-        let result = mgr.remove("slack-relay").await;
+        let result = mgr.remove("slack-relay", "test").await;
         assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
 
         // installed_relay_extensions should be cleared
@@ -6607,6 +10218,30 @@ mod tests {
         assert!(
             cm.get_channel("slack-relay").await.is_none(),
             "relay channel should be removed from the channel manager"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "relay:slack-relay:oauth_state")
+                .await
+                .expect("oauth state exists query"),
+            "relay oauth_state secret should be removed"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "relay:slack-relay:stream_token")
+                .await
+                .expect("stream token exists query"),
+            "relay legacy stream token should be removed"
+        );
+        assert_eq!(
+            mgr.store
+                .as_ref()
+                .expect("store")
+                .get_setting("test", "relay:slack-relay:team_id")
+                .await
+                .expect("team_id query"),
+            None,
+            "relay team_id setting should be removed"
         );
     }
 
@@ -6639,8 +10274,8 @@ mod tests {
         let secrets = Arc::clone(&mgr.secrets);
         mgr.pending_oauth_flows().write().await.insert(
             "gmail-state".to_string(),
-            crate::cli::oauth_defaults::PendingOAuthFlow {
-                extension_name: "gmail".to_string(),
+            crate::auth::oauth::PendingOAuthFlow {
+                extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
                 display_name: "Gmail".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client123".to_string(),
@@ -6654,17 +10289,20 @@ mod tests {
                 scopes: vec![],
                 user_id: "test".to_string(),
                 secrets: Arc::clone(&secrets),
-                sse_sender: None,
+                sse_manager: None,
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             },
         );
         mgr.pending_oauth_flows().write().await.insert(
             "other-state".to_string(),
-            crate::cli::oauth_defaults::PendingOAuthFlow {
-                extension_name: "web-search".to_string(),
+            crate::auth::oauth::PendingOAuthFlow {
+                extension_name: ironclaw_common::ExtensionName::new("web-search").unwrap(),
                 display_name: "Web Search".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client456".to_string(),
@@ -6678,15 +10316,18 @@ mod tests {
                 scopes: vec![],
                 user_id: "test".to_string(),
                 secrets,
-                sse_sender: None,
+                sse_manager: None,
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             },
         );
 
-        let result = mgr.remove("gmail").await;
+        let result = mgr.remove("gmail", "test").await;
         assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
 
         tokio::task::yield_now().await;
@@ -6716,11 +10357,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_telegram_token_rejects_invalid_format_before_request() {
+        let err = super::validate_telegram_token("bad/token?#fragment")
+            .await
+            .expect_err("invalid format should be rejected");
+        assert!(matches!(err, ExtensionError::ValidationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_tool_deletes_unique_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "github",
+            r#"{
+                "name": "github",
+                "auth": { "secret_name": "github_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "github_client_secret", "prompt": "GitHub client secret for testing cleanup behavior." }
+                    ]
+                },
+                "http": {
+                    "credentials": {
+                        "service_token": {
+                            "secret_name": "github_service_token",
+                            "location": { "type": "bearer" }
+                        }
+                    }
+                },
+                "webhook": {
+                    "hmac_secret_name": "github_webhook_secret"
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        store_test_secret(&mgr, "github_token", "access-token").await;
+        store_test_secret(&mgr, "github_token_refresh_token", "refresh-token").await;
+        store_test_secret(&mgr, "github_token_scopes", "repo workflow").await;
+        store_test_secret(&mgr, "github_client_secret", "client-secret").await;
+        store_test_secret(&mgr, "github_service_token", "service-token").await;
+        store_test_secret(&mgr, "github_webhook_secret", "webhook-secret").await;
+
+        mgr.remove("github", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            "github_token",
+            "github_token_refresh_token",
+            "github_token_scopes",
+            "github_client_secret",
+            "github_service_token",
+            "github_webhook_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "secret {secret_name} should be deleted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_tool_cleans_secrets_when_other_tool_has_no_capabilities() {
+        // Contract under the "skip missing caps" fix: a bare WASM file
+        // without a `.capabilities.json` sidecar contributes ZERO secret
+        // references to the cleanup scan (rather than aborting the scan
+        // and forcing every install to retain its secrets forever). When
+        // we remove `github`, the only declared reference to
+        // `shared_token` is gone, the broken.wasm tool declares nothing,
+        // and the cleanup proceeds.
+        //
+        // Previously the scan errored out on the missing caps file, the
+        // remove() caller logged a warning, and ALL secrets were
+        // retained — see serrrfirat's #2050 review: "no secrets are
+        // cleaned up for any extension when this happens. Orphaned
+        // secrets accumulate."
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "github",
+            r#"{
+                "name": "github",
+                "auth": { "secret_name": "shared_token" }
+            }"#,
+        );
+        std::fs::write(tools_dir.join("broken.wasm"), b"fake-tool").expect("write tool");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        store_test_secret(&mgr, "shared_token", "access-token").await;
+        store_test_secret(&mgr, "shared_token_refresh_token", "refresh-token").await;
+        store_test_secret(&mgr, "shared_token_scopes", "repo").await;
+
+        mgr.remove("github", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            "shared_token",
+            "shared_token_refresh_token",
+            "shared_token_scopes",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "secret {secret_name} should be cleaned up after removing the only \
+                 tool that referenced it; the bare broken.wasm has no capabilities \
+                 file so it contributes no references"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_tool_keeps_shared_secrets_until_last_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_test_tool(
+            dir.path(),
+            "google-calendar",
+            r#"{
+                "name": "google-calendar",
+                "auth": { "secret_name": "google_oauth_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
+                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "google-drive",
+            r#"{
+                "name": "google-drive",
+                "auth": { "secret_name": "google_oauth_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
+                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                    ]
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        for (secret_name, value) in [
+            ("google_oauth_token", "access-token"),
+            ("google_oauth_token_refresh_token", "refresh-token"),
+            ("google_oauth_token_scopes", "calendar drive"),
+            ("google_oauth_client_id", "client-id"),
+            ("google_oauth_client_secret", "client-secret"),
+        ] {
+            store_test_secret(&mgr, secret_name, value).await;
+        }
+
+        mgr.remove("google-calendar", "test")
+            .await
+            .expect("first remove should succeed");
+
+        for secret_name in [
+            "google_oauth_token",
+            "google_oauth_token_refresh_token",
+            "google_oauth_token_scopes",
+            "google_oauth_client_id",
+            "google_oauth_client_secret",
+        ] {
+            assert!(
+                mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "shared secret {secret_name} should remain while google-drive is still installed"
+            );
+        }
+
+        mgr.remove("google-drive", "test")
+            .await
+            .expect("second remove should succeed");
+
+        for secret_name in [
+            "google_oauth_token",
+            "google_oauth_token_refresh_token",
+            "google_oauth_token_scopes",
+            "google_oauth_client_id",
+            "google_oauth_client_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "shared secret {secret_name} should be deleted after the last tool is removed"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_remove_wasm_channel_clears_activation_error_and_deletes_files() {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone());
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");
@@ -6732,7 +10575,7 @@ mod tests {
             .await
             .insert("telegram".to_string(), "channel failed".to_string());
 
-        let result = mgr.remove("telegram").await;
+        let result = mgr.remove("telegram", "test").await;
         assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
 
         assert!(
@@ -6747,6 +10590,192 @@ mod tests {
             !cap_path.exists(),
             "channel capabilities file should be deleted on remove"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_channel_deletes_setup_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "telegram",
+            r#"{
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Telegram bot token used to verify uninstall cleanup behavior."
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "http": {
+                        "credentials": {
+                            "tenant_token": {
+                                "secret_name": "telegram_service_token",
+                                "location": { "type": "bearer" }
+                            }
+                        }
+                    },
+                    "channel": {
+                        "webhook": {
+                            "secret_header": "X-Telegram-Bot-Api-Secret-Token",
+                            "secret_name": "telegram_webhook_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        store_test_secret(&mgr, "telegram_bot_token", "123:telegram-token").await;
+        store_test_secret(&mgr, "telegram_service_token", "tenant-service-token").await;
+        store_test_secret(&mgr, "telegram_webhook_secret", "webhook-secret").await;
+
+        mgr.remove("telegram", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            "telegram_bot_token",
+            "telegram_service_token",
+            "telegram_webhook_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "channel secret {secret_name} should be deleted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_mcp_server_deletes_stored_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("notion", "https://example.com/mcp");
+        mgr.add_mcp_server(server.clone(), "test")
+            .await
+            .expect("add mcp server");
+
+        store_test_secret(&mgr, &server.token_secret_name(), "access-token").await;
+        store_test_secret(&mgr, &server.refresh_token_secret_name(), "refresh-token").await;
+        store_test_secret(&mgr, &server.client_id_secret_name(), "client-id").await;
+
+        mgr.remove("notion", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            server.token_secret_name(),
+            server.refresh_token_secret_name(),
+            server.client_id_secret_name(),
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", &secret_name)
+                    .await
+                    .expect("exists query"),
+                "MCP secret {secret_name} should be deleted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_mcp_server_persists_auth_descriptor() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("notion", "https://example.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("notion-client").with_endpoints(
+                "https://example.com/oauth/authorize",
+                "https://example.com/oauth/token",
+            ),
+        );
+
+        mgr.add_mcp_server(server.clone(), "test")
+            .await
+            .expect("add mcp server");
+
+        let descriptor = crate::auth::auth_descriptor_for_secret(
+            Some(store.as_ref()),
+            "test",
+            &server.token_secret_name(),
+        )
+        .await
+        .expect("persisted mcp auth descriptor");
+
+        assert_eq!(descriptor.kind, crate::auth::AuthDescriptorKind::McpServer);
+        assert_eq!(descriptor.integration_name, "notion");
+        assert_eq!(descriptor.provider.as_deref(), Some("mcp:notion"));
+        let oauth = descriptor.oauth.expect("oauth descriptor");
+        assert_eq!(
+            oauth.authorization_url,
+            "https://example.com/oauth/authorize"
+        );
+        assert_eq!(oauth.token_url, "https://example.com/oauth/token");
+        assert_eq!(oauth.client_id.as_deref(), Some("notion-client"));
+    }
+
+    #[tokio::test]
+    async fn test_auth_mcp_build_url_uses_explicit_oauth_endpoints() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("notion", "https://example.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("notion-client")
+                .with_endpoints(
+                    "https://example.com/oauth/authorize",
+                    "https://example.com/oauth/token",
+                )
+                .with_scopes(vec!["search:read".to_string()]),
+        );
+
+        let auth = mgr
+            .auth_mcp_build_url("notion", &server, "test")
+            .await
+            .expect("build auth url");
+
+        assert_eq!(auth.status_str(), "awaiting_authorization");
+        assert!(
+            auth.auth_url()
+                .is_some_and(|url| url.contains("https://example.com/oauth/authorize")),
+            "expected explicit auth endpoint in URL, got {auth:?}"
+        );
+
+        let descriptor = crate::auth::auth_descriptor_for_secret(
+            Some(store.as_ref()),
+            "test",
+            &server.token_secret_name(),
+        )
+        .await
+        .expect("persisted mcp auth descriptor");
+        let oauth = descriptor.oauth.expect("oauth descriptor");
+        assert_eq!(
+            oauth.authorization_url,
+            "https://example.com/oauth/authorize"
+        );
+        assert_eq!(oauth.token_url, "https://example.com/oauth/token");
+        assert_eq!(oauth.scopes, vec!["search:read".to_string()]);
     }
 
     #[test]
@@ -6879,9 +10908,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_true_for_tunnel_url() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -6903,9 +10930,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_without_tunnel() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6926,9 +10951,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_for_loopback_tunnel() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6956,9 +10979,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            let guard = crate::config::helpers::ENV_MUTEX
-                .lock()
-                .expect("env mutex poisoned");
+            let guard = crate::config::helpers::lock_env();
             let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
             // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
@@ -6979,6 +11000,55 @@ mod tests {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
                 } else {
                     std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var(self.key, val);
+                } else {
+                    std::env::remove_var(self.key);
                 }
             }
         }
@@ -7016,9 +11086,7 @@ mod tests {
 
     #[test]
     fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::set_var(
@@ -7044,9 +11112,7 @@ mod tests {
 
     #[test]
     fn gateway_callback_redirect_uri_trims_trailing_slash_from_env_callback() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::set_var(
@@ -7154,7 +11220,7 @@ mod tests {
             .expect("store SECRET_A");
 
         // configure_token should target SECRET_B (the first missing one)
-        let _result = mgr.configure_token("multi", "value-b").await;
+        let _result = mgr.configure_token("multi", "value-b", "test").await;
         // configure will fail at activation (no real WASM runtime), but the
         // secret should still have been stored before activation was attempted.
         // Check that SECRET_B was stored.
@@ -7164,6 +11230,243 @@ mod tests {
                 .await
                 .unwrap_or(false),
             "configure_token should have stored SECRET_B (the first missing secret)"
+        );
+    }
+
+    /// Regression for the silent OAuth-token-deletion bug in `configure()`:
+    /// when the user pasted a token via the auth gate, `configure()` wrote
+    /// it to the secrets store, then immediately deleted it (along with
+    /// the `_scopes` and `_refresh_token` siblings) on the post-activation
+    /// "Reconfigure" cleanup path. The user's token was wiped within
+    /// milliseconds of being stored, the resume hit `auth_wasm_tool` with
+    /// `token_exists=false`, and the auth gate re-fired in a loop —
+    /// every manual paste of an OAuth token landed in this trap.
+    ///
+    /// The fix gates the deletion on whether the caller is *also* providing
+    /// a fresh OAuth secret in the same `configure()` call. If yes (the
+    /// `submit_auth_token` path), keep the credential we just wrote. If no
+    /// (the explicit Reconfigure flow that wants a brand-new OAuth dance),
+    /// the deletion still runs.
+    ///
+    /// We exercise the production `configure()` flow on an OAuth-backed
+    /// tool. activate_wasm_tool short-circuits to `Ok` when the tool is
+    /// already in the registry, so the test pre-registers a stub tool to
+    /// reach the post-activation deletion code without a real WASM
+    /// runtime.
+    #[tokio::test]
+    async fn test_configure_preserves_oauth_token_when_caller_provides_it() {
+        use crate::tools::{Tool, ToolError, ToolOutput};
+        use async_trait::async_trait;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        // Capabilities file with an OAuth section so the deletion path
+        // is reachable. The actual `oauth.token_url` etc. don't matter
+        // — we never call them; we just need `auth.oauth.is_some()`.
+        std::fs::write(tools_dir.join("oauth-tool.wasm"), b"not-a-real-wasm")
+            .expect("wasm placeholder");
+        let caps = serde_json::json!({
+            "name": "oauth-tool",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "oauth_tool_token",
+                "display_name": "Test OAuth",
+                "oauth": {
+                    "authorization_url": "https://example.com/authz",
+                    "token_url": "https://example.com/token",
+                    "scopes": ["read"]
+                }
+            }
+        });
+        std::fs::write(
+            tools_dir.join("oauth-tool.capabilities.json"),
+            serde_json::to_string(&caps).expect("ser caps"),
+        )
+        .expect("caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Stub Tool that just exists in the registry under the
+        // canonicalised name. activate_wasm_tool sees `tool_registry.has`
+        // returns true and returns Ok without touching the runtime.
+        struct StubTool;
+        #[async_trait]
+        impl Tool for StubTool {
+            fn name(&self) -> &str {
+                "oauth_tool"
+            }
+            fn description(&self) -> &str {
+                "stub"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Err(ToolError::ExecutionFailed("stub".into()))
+            }
+        }
+        // Register the stub under the canonical (snake) name so
+        // `is_extension_active("oauth_tool", WasmTool)` returns true.
+        mgr.tool_registry.register(Arc::new(StubTool)).await;
+
+        // Caller provides the OAuth token in the same configure() call.
+        // Without the fix, configure() writes it then immediately deletes it.
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(
+            "oauth_tool_token".to_string(),
+            "fresh-token-value".to_string(),
+        );
+        let fields = std::collections::HashMap::new();
+
+        // Run configure(). It will write the token, hit the
+        // already-active short-circuit in activate_wasm_tool, then
+        // reach the deletion guard. With the fix, the guard skips
+        // because `secrets.contains_key("oauth_tool_token")` is true.
+        let result = mgr.configure("oauth-tool", &secrets, &fields, "test").await;
+        assert!(
+            result.is_ok(),
+            "configure() should succeed: {:?}",
+            result.err()
+        );
+
+        // The CRITICAL assertion: the OAuth token must still be in the
+        // store. Pre-fix, this returns false because `configure()`
+        // deleted it. Post-fix, this returns true because the deletion
+        // is gated on the caller NOT providing the secret themselves.
+        let token_present = mgr
+            .secrets
+            .exists("test", "oauth_tool_token")
+            .await
+            .unwrap_or(false);
+        assert!(
+            token_present,
+            "configure() must preserve the OAuth token when the caller \
+             provides it via the secrets map. The post-activation Reconfigure \
+             cleanup must only run when the caller is starting a fresh OAuth \
+             flow (no token in the secrets map)."
+        );
+    }
+
+    /// Mirror of the above for the explicit Reconfigure flow: when the
+    /// caller does NOT provide a token, `configure()` SHOULD delete the
+    /// existing OAuth records so that `auth()` kicks off a fresh OAuth
+    /// dance. This is the original-intended behaviour the fix preserves.
+    #[tokio::test]
+    async fn test_configure_clears_oauth_token_for_reconfigure_flow() {
+        use crate::tools::{Tool, ToolError, ToolOutput};
+        use async_trait::async_trait;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        std::fs::write(tools_dir.join("oauth-reconfig.wasm"), b"not-a-real-wasm")
+            .expect("wasm placeholder");
+        let caps = serde_json::json!({
+            "name": "oauth-reconfig",
+            "version": "0.1.0",
+            "description": "test",
+            "auth": {
+                "secret_name": "oauth_reconfig_token",
+                "display_name": "Test OAuth",
+                "oauth": {
+                    "authorization_url": "https://example.com/authz",
+                    "token_url": "https://example.com/token",
+                    "scopes": ["read"]
+                }
+            }
+        });
+        std::fs::write(
+            tools_dir.join("oauth-reconfig.capabilities.json"),
+            serde_json::to_string(&caps).expect("ser caps"),
+        )
+        .expect("caps file");
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        struct StubTool;
+        #[async_trait]
+        impl Tool for StubTool {
+            fn name(&self) -> &str {
+                "oauth_reconfig"
+            }
+            fn description(&self) -> &str {
+                "stub"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Err(ToolError::ExecutionFailed("stub".into()))
+            }
+        }
+        mgr.tool_registry.register(Arc::new(StubTool)).await;
+
+        // Pre-store an OAuth token (and a refresh sibling) to simulate
+        // a user who already authenticated previously.
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("oauth_reconfig_token", "old-token"),
+            )
+            .await
+            .expect("seed token");
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "oauth_reconfig_token_refresh_token",
+                    "old-refresh",
+                ),
+            )
+            .await
+            .expect("seed refresh");
+
+        // Caller invokes configure with EMPTY secrets — this is the
+        // explicit Reconfigure path. The post-activation cleanup
+        // should run and wipe the existing OAuth records.
+        let secrets = std::collections::HashMap::new();
+        let fields = std::collections::HashMap::new();
+        let result = mgr
+            .configure("oauth-reconfig", &secrets, &fields, "test")
+            .await;
+        assert!(
+            result.is_ok(),
+            "configure() should succeed: {:?}",
+            result.err()
+        );
+
+        // Both records should now be gone — the Reconfigure cleanup ran.
+        let token_present = mgr
+            .secrets
+            .exists("test", "oauth_reconfig_token")
+            .await
+            .unwrap_or(false);
+        let refresh_present = mgr
+            .secrets
+            .exists("test", "oauth_reconfig_token_refresh_token")
+            .await
+            .unwrap_or(false);
+        assert!(
+            !token_present,
+            "Reconfigure flow (empty secrets map) must wipe the existing OAuth \
+             access token so `auth()` triggers a fresh handshake."
+        );
+        assert!(
+            !refresh_present,
+            "Reconfigure flow must also wipe the refresh token sibling for \
+             symmetric cleanup."
         );
     }
 
@@ -7194,7 +11497,7 @@ mod tests {
         let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
 
         // auth() should return a result without storing anything
-        let result = mgr.auth("test-ch").await;
+        let result = mgr.auth("test-ch", "test").await;
         assert!(result.is_ok(), "auth should succeed: {:?}", result.err());
 
         // No secrets should have been created
@@ -7237,7 +11540,7 @@ mod tests {
         let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
 
         let result = mgr
-            .auth("telegram")
+            .auth("telegram", "test")
             .await
             .map_err(|err| format!("telegram auth status: {err}"))?;
         let instructions = result
@@ -7246,13 +11549,7 @@ mod tests {
 
         require(
             instructions.contains("Telegram Bot API token"),
-            "telegram auth instructions should still ask for the bot token",
-        )?;
-        require(
-            instructions.contains("one-time verification code")
-                && instructions.contains("/start CODE")
-                && instructions.contains("finish setup automatically"),
-            "telegram auth instructions should explain the owner verification step",
+            "telegram auth instructions should ask for the bot token from the capabilities prompt",
         )
     }
 
@@ -7319,29 +11616,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_telegram_message_matches_verification_code_variants() -> Result<(), String> {
-        require(
-            telegram_message_matches_verification_code("iclaw-7qk2m9", "iclaw-7qk2m9"),
-            "plain verification code should match",
-        )?;
-        require(
-            telegram_message_matches_verification_code("/start iclaw-7qk2m9", "iclaw-7qk2m9"),
-            "/start payload should match",
-        )?;
-        require(
-            telegram_message_matches_verification_code(
-                "Hi! My code is: iclaw-7qk2m9",
-                "iclaw-7qk2m9",
-            ),
-            "conversational message containing the code should match",
-        )?;
-        require(
-            !telegram_message_matches_verification_code("/start something-else", "iclaw-7qk2m9"),
-            "wrong verification code should not match",
-        )
-    }
-
     #[tokio::test]
     async fn test_configure_dispatches_activation_by_kind() {
         // Regression: configure() must dispatch to the correct activation method
@@ -7360,16 +11634,17 @@ mod tests {
             .await
             .insert("test-relay".to_string());
 
-        // configure() should dispatch to activate_channel_relay(), not
-        // activate_wasm_channel(). Both will fail (no runtime configured),
-        // but the error should be about relay config, not WASM channels.
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert(
-            "relay:test-relay:stream_token".to_string(),
-            "tok".to_string(),
-        );
-
-        let result = mgr.configure("test-relay", &secrets).await;
+        // configure() with empty secrets should dispatch to
+        // activate_channel_relay(), not activate_wasm_channel(). Relay auth
+        // is OAuth-only so there are no manual secrets to pass.
+        let result = mgr
+            .configure(
+                "test-relay",
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                "test",
+            )
+            .await;
         assert!(
             result.is_ok(),
             "configure should return Ok: {:?}",
@@ -7377,7 +11652,6 @@ mod tests {
         );
 
         let result = result.unwrap();
-        // Activation will fail (no relay config), but secrets should still be stored
         assert!(
             !result.activated,
             "activation should fail without relay config"
@@ -7386,15 +11660,6 @@ mod tests {
             !result.message.contains("WASM"),
             "error should not mention WASM — got: {}",
             result.message
-        );
-
-        // Verify the secret was stored
-        assert!(
-            mgr.secrets
-                .exists("test", "relay:test-relay:stream_token")
-                .await
-                .unwrap_or(false),
-            "configure should have stored the relay stream token"
         );
     }
     #[test]
@@ -7425,16 +11690,19 @@ mod tests {
 
     #[test]
     fn test_telegram_token_colon_preserved_in_validation_url() {
+        // ScopedEnvVar holds ENV_MUTEX for the test's lifetime, preventing
+        // a concurrent test from setting IRONCLAW_TEST_TELEGRAM_API_BASE_URL.
+        // Setting to "" is equivalent to unset — telegram_api_base_url()
+        // filters empty values. ScopedEnvVar restores the previous value on drop.
+        let _env = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, "");
+
         // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
         // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
         // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
         // Fixed by removing URL-encoding and using the token directly.
-        let endpoint_template = "https://api.telegram.org/bot{telegram_bot_token}/getMe";
-        let secret_name = "telegram_bot_token";
         let token = "123456789:AABBccDDeeFFgg_Test-Token";
 
-        // Simulate the fixed validation URL building logic
-        let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
+        let url = telegram_bot_api_url(token, "getMe");
 
         // Verify colon is preserved
         let expected = "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe";
@@ -7453,15 +11721,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_telegram_bot_api_url_uses_test_override_env_var() {
+        let _guard = ScopedEnvVar::set(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:19001/");
+
+        let url = telegram_bot_api_url("123:abc", "getMe");
+        assert_eq!(url, "http://127.0.0.1:19001/bot123:abc/getMe");
+    }
+
     // ── proxy_client_secret suppression ─────────────────────────────
 
     #[test]
     fn test_proxy_client_secret_suppressed_when_builtin_matches_with_exchange_proxy() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin_ref, true);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin_ref, true);
         assert_eq!(
             result, None,
             "built-in desktop secret must be suppressed when the exchange proxy is configured"
@@ -7470,10 +11746,11 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_kept_when_not_builtin_with_exchange_proxy() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let secret = Some("user-entered-custom-secret".to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        let result =
+            crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("user-entered-custom-secret".to_string()),
@@ -7483,11 +11760,11 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_kept_without_exchange_proxy_even_for_builtin_secret() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin_ref, false);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin_ref, false);
         assert_eq!(
             result, secret,
             "built-in secret must be kept when the callback will exchange directly"
@@ -7496,9 +11773,9 @@ mod tests {
 
     #[test]
     fn test_proxy_client_secret_none_stays_none() {
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin = crate::auth::oauth::builtin_credentials("google_oauth_token");
 
-        let result = hosted_proxy_client_secret(&None, builtin.as_ref(), true);
+        let result = crate::auth::oauth::hosted_proxy_client_secret(&None, builtin.as_ref(), true);
         assert_eq!(
             result, None,
             "None secret stays None even when the exchange proxy is configured"
@@ -7508,15 +11785,738 @@ mod tests {
     #[test]
     fn test_proxy_client_secret_no_builtin_provider() {
         // MCP/non-Google providers have no builtin credentials
-        let builtin = crate::cli::oauth_defaults::builtin_credentials("mcp_notion_access_token");
+        let builtin = crate::auth::oauth::builtin_credentials("mcp_notion_access_token");
         assert!(builtin.is_none());
 
         let secret = Some("dcr-secret".to_string());
-        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        let result =
+            crate::auth::oauth::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("dcr-secret".to_string()),
             "non-builtin provider secret must be kept"
         );
+    }
+
+    #[tokio::test]
+    async fn test_shared_google_oauth_status_requires_scope_expansion_for_second_tool()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        let name = "google-docs";
+        let scope = "https://www.googleapis.com/auth/documents";
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
+            .map_err(|err| format!("write {name}.wasm: {err}"))?;
+
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [scope],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize {name}: {err}"))?,
+        )
+        .map_err(|err| format!("write {name}.capabilities.json: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir.clone());
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "token")
+                    .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store token: {err}"))?;
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token_scopes",
+                    "https://www.googleapis.com/auth/documents",
+                )
+                .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store scopes: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::Ready
+        );
+
+        std::fs::write(tools_dir.join("google-slides.wasm"), b"\0asm")
+            .map_err(|err| format!("write google-slides.wasm: {err}"))?;
+        let slides_caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/presentations"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join("google-slides.capabilities.json"),
+            serde_json::to_vec(&slides_caps)
+                .map_err(|err| format!("serialize google-slides: {err}"))?,
+        )
+        .map_err(|err| format!("write google-slides.capabilities.json: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::NeedsAuth,
+            "adding the second shared-auth Google tool should require reauth for the existing tool"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-slides", "test").await,
+            ToolAuthState::NeedsAuth,
+            "second Google tool should require scope expansion when the shared token lacks its scope",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_google_oauth_returns_blocked_app_guidance_with_builtin_client()
+    -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "setup_url": "https://console.cloud.google.com/apis/credentials",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    },
+                    "pending_instructions": "If the provider blocks the shared OAuth app, configure your own Google OAuth Client ID and Client Secret in Setup or via GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+                }
+            }
+        });
+        std::fs::write(tools_dir.join("gmail.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("gmail.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        mgr.enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        let result = mgr
+            .auth("gmail", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        assert!(
+            result.auth_url().is_some(),
+            "oauth auth_url should be present"
+        );
+        let instructions = result
+            .instructions()
+            .expect("builtin Google OAuth should include guidance");
+        assert!(instructions.contains("shared OAuth app"));
+        assert!(instructions.contains("GOOGLE_OAUTH_CLIENT_ID"));
+        assert!(instructions.contains("GOOGLE_OAUTH_CLIENT_SECRET"));
+        assert_eq!(
+            result.setup_url(),
+            Some("https://console.cloud.google.com/apis/credentials")
+        );
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Env-var-provided tokens must always return Ready — the user manages
+    /// scopes externally, so the scope-expansion check must not apply.
+    /// Uses `HOME` as env_var since it always exists, avoiding `set_var`
+    /// which is unsafe in multi-threaded test runs.
+    #[tokio::test]
+    async fn test_env_var_token_skips_scope_expansion() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/documents"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-docs.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-docs.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        // No managed token in secrets store — only the env var (HOME) is present.
+        let mgr = make_test_manager(None, tools_dir);
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::Ready,
+            "env-var token should be Ready without scope expansion check"
+        );
+
+        Ok(())
+    }
+
+    /// When both a managed token AND an env-var token exist, the managed
+    /// path (with scope expansion checks) must take priority.
+    #[tokio::test]
+    async fn test_managed_token_takes_priority_over_env_var() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        // Both tools point env_var at HOME (always set) so the env-var path
+        // would return Ready — but the managed token path should win.
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/documents"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-docs.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-docs.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        // Second tool requires an additional scope.
+        let slides_caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/presentations"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-slides.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-slides.capabilities.json"),
+            serde_json::to_vec(&slides_caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Store a managed token with only the docs scope.
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "managed-token")
+                    .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store token: {err}"))?;
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token_scopes",
+                    "https://www.googleapis.com/auth/documents",
+                )
+                .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store scopes: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::NeedsAuth,
+            "managed token path must win: merged scopes unsatisfied despite env var being set"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-slides", "test").await,
+            ToolAuthState::NeedsAuth,
+            "slides scope missing from managed token even though env var is set"
+        );
+
+        Ok(())
+    }
+
+    // ── find_local_tool_source_in ──────────────────────────────────────
+
+    #[test]
+    fn find_local_tool_source_finds_tools_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_tool_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tool-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_hyphenated_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("my-portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_portfolio\"",
+        )
+        .unwrap();
+
+        // Search with underscored name should find hyphenated directory
+        let result = find_local_tool_source_in("my_portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_direct_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_without_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        // No Cargo.toml
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_ignores_cargo_toml_directory() {
+        // Regression: a directory named `Cargo.toml` must not satisfy the
+        // manifest check — only a real file should qualify the candidate.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(tool_dir.join("Cargo.toml")).unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_when_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = find_local_tool_source_in("nonexistent", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_tool_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        // Name is "portfolio_tool" but directory is just "portfolio"
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio_tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_hyphen_tool_suffix() {
+        // Regression: input `portfolio-tool` (hyphen form) must still match
+        // `tools-src/portfolio/` after suffix stripping. Internally the
+        // candidate list is built from the underscore-normalized name, so a
+        // single `_tool` strip must cover both `_tool` and `-tool` inputs.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio-tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_tools_src_over_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools_src_dir = dir.path().join("tools-src").join("portfolio");
+        let direct_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tools_src_dir).unwrap();
+        std::fs::create_dir_all(&direct_dir).unwrap();
+        std::fs::write(
+            tools_src_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+        std::fs::write(
+            direct_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        // tools-src/ should be preferred since it's checked first
+        assert_eq!(result, Some(tools_src_dir));
+    }
+
+    // ── kind_allows_local_discovery ────────────────────────────────────
+
+    #[test]
+    fn kind_allows_local_discovery_accepts_wasm_kinds() {
+        assert!(kind_allows_local_discovery(None));
+        assert!(kind_allows_local_discovery(Some(ExtensionKind::WasmTool)));
+        assert!(kind_allows_local_discovery(Some(
+            ExtensionKind::WasmChannel
+        )));
+    }
+
+    #[test]
+    fn kind_allows_local_discovery_rejects_non_wasm_kinds() {
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::McpServer)));
+        assert!(!kind_allows_local_discovery(Some(
+            ExtensionKind::ChannelRelay
+        )));
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::AcpAgent)));
+    }
+
+    // ── install_from_local_source (caller-level) ───────────────────────
+
+    /// Stage a buildable WASM source layout and return (source_dir, tools_dir).
+    fn stage_buildable_source(dir: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
+        stage_buildable_source_at(dir, "portfolio", crate_name)
+    }
+
+    /// Stage a buildable WASM source layout under `<dir>/<source_subdir>/`
+    /// with a `Cargo.toml` declaring `[package] name = <crate_name>` and a
+    /// `<crate_name>.wasm` artifact. Returns the source directory.
+    fn stage_buildable_source_at(
+        dir: &std::path::Path,
+        source_subdir: &str,
+        crate_name: &str,
+    ) -> std::path::PathBuf {
+        let source_dir = dir.join(source_subdir);
+        let artifact_dir = source_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join(format!("{}.wasm", crate_name));
+        // Minimal valid wasm header (`\x00asm` + version 1).
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+        let caps_path = source_dir.join(format!("{}.capabilities.json", crate_name));
+        std::fs::write(&caps_path, "{}").expect("write capabilities");
+        std::fs::write(
+            source_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{}\"\n", crate_name),
+        )
+        .expect("write Cargo.toml");
+        source_dir
+    }
+
+    /// Caller-level test: driving `install_from_local_source` end-to-end
+    /// verifies the wrapper logic (kind defaulting, target_dir selection,
+    /// source_str conversion, message annotation) — none of which is
+    /// exercised by unit tests on `find_local_tool_source_in`.
+    #[tokio::test]
+    async fn install_from_local_source_installs_wasm_tool_with_provenance_message() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, None)
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.name, "portfolio");
+        assert_eq!(result.kind, ExtensionKind::WasmTool);
+        // Message must include "LOCAL" and the source path so provenance is visible.
+        assert!(
+            result.message.contains("LOCAL"),
+            "message should mark source as LOCAL: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains(&source_dir.display().to_string()),
+            "message should include source path: {}",
+            result.message
+        );
+        // Wasm artifact must have been copied to the tools dir.
+        assert!(
+            tools_dir.join("portfolio.wasm").exists(),
+            "install should copy wasm to tools dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_from_local_source_routes_wasm_channel_to_channels_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir.clone(), None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, Some(ExtensionKind::WasmChannel))
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.kind, ExtensionKind::WasmChannel);
+        // Channel kind must install into the channels dir, not the tools dir.
+        assert!(
+            channels_dir.join("portfolio.wasm").exists(),
+            "wasm channel should land in channels dir"
+        );
+        assert!(
+            !tools_dir.join("portfolio.wasm").exists(),
+            "wasm channel should NOT land in tools dir"
+        );
+    }
+
+    /// Regression test for the suffix-stripping name-mismatch bug: when
+    /// `find_local_tool_source` matches a directory via suffix stripping
+    /// (input `portfolio_tool` -> dir `portfolio/`), the compiled binary
+    /// on disk is named after the Cargo crate (`portfolio.wasm`), not the
+    /// extension name (`portfolio_tool.wasm`). `install_from_local_source`
+    /// must parse `Cargo.toml` and pass the real crate name to the artifact
+    /// lookup, otherwise every suffix-matched install fails.
+    #[tokio::test]
+    async fn install_from_local_source_resolves_artifact_via_crate_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // Crate name differs from the requested install name: crate is
+        // `portfolio`, install is requested as `portfolio_tool`.
+        let source_dir = stage_buildable_source_at(dir.path(), "portfolio", "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio_tool", &source_dir, None)
+            .await
+            .expect("install should resolve artifact via Cargo.toml crate name");
+
+        assert_eq!(result.name, "portfolio_tool");
+        // The installed wasm is named after the install name, not the crate.
+        assert!(
+            tools_dir.join("portfolio_tool.wasm").exists(),
+            "install should copy wasm under the requested extension name"
+        );
+    }
+
+    /// Regression test: a non-UTF-8 source path must produce a clear
+    /// `InstallFailed` error rather than being silently lossy-converted into
+    /// a build dir that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_from_local_source_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // 0x80 is an invalid UTF-8 start byte.
+        let bad: &OsStr = OsStr::from_bytes(b"/tmp/\x80not-utf8");
+        let bad_path = std::path::Path::new(bad);
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install_from_local_source("portfolio", bad_path, None)
+            .await
+            .expect_err("non-UTF-8 source path must be rejected");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("UTF-8"),
+                    "error message should mention UTF-8: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_crate_name_from_cargo_toml(dir.path()),
+            Some("my_crate".to_string())
+        );
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_crate_name_from_cargo_toml(dir.path()), None);
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_underscore_over_hyphen() {
+        // Determinism regression: when both underscore and hyphen variants
+        // exist as real directories in the same search dir, the underscore
+        // (canonical) form must win on every run.
+        let dir = tempfile::tempdir().unwrap();
+        let underscore_dir = dir.path().join("tools-src").join("my_tool");
+        let hyphen_dir = dir.path().join("tools-src").join("my-tool");
+        std::fs::create_dir_all(&underscore_dir).unwrap();
+        std::fs::create_dir_all(&hyphen_dir).unwrap();
+        std::fs::write(
+            underscore_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_tool\"",
+        )
+        .unwrap();
+        std::fs::write(
+            hyphen_dir.join("Cargo.toml"),
+            "[package]\nname = \"my-tool\"",
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            let result = find_local_tool_source_in("my_tool", dir.path());
+            assert_eq!(
+                result,
+                Some(underscore_dir.clone()),
+                "underscore variant must win deterministically"
+            );
+        }
     }
 }

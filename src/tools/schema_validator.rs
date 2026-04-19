@@ -42,11 +42,38 @@ pub fn validate_strict_schema(
     }
 }
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recursively validate an object-typed schema node.
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
-    // Rule 1: must have "type": "object"
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
+    let has_combinators = has_object_combinator_variants(schema);
+
+    // Rule 1: must have "type": "object" (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -54,16 +81,67 @@ fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
             return errors;
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(check_object_schema(variant, &variant_path));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
+            }
             return errors;
         }
     };
@@ -354,8 +432,8 @@ mod tests {
     fn test_all_simple_tool_schemas() {
         use crate::tools::Tool;
         use crate::tools::builtin::{
-            ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, ReadFileTool, ShellTool,
-            TimeTool, WriteFileTool,
+            ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, PlanUpdateTool,
+            ReadFileTool, ShellTool, TimeTool, WriteFileTool,
         };
 
         let tools: Vec<Box<dyn Tool>> = vec![
@@ -368,6 +446,7 @@ mod tests {
             Box::new(WriteFileTool::new()),
             Box::new(ListDirTool::new()),
             Box::new(ApplyPatchTool::new()),
+            Box::new(PlanUpdateTool::new()),
         ];
 
         let mut failures = Vec::new();
@@ -423,12 +502,12 @@ mod tests {
     fn test_skill_tool_schemas() {
         use std::sync::Arc;
 
-        use crate::skills::catalog::SkillCatalog;
-        use crate::skills::registry::SkillRegistry;
         use crate::tools::Tool;
         use crate::tools::builtin::{
             SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
         };
+        use ironclaw_skills::catalog::SkillCatalog;
+        use ironclaw_skills::registry::SkillRegistry;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.keep();
