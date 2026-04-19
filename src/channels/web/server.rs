@@ -659,6 +659,26 @@ async fn pending_gate_extension_name(
         );
     }
 
+    if matches!(
+        tool_name,
+        "tool_install"
+            | "tool-install"
+            | "tool_activate"
+            | "tool-activate"
+            | "tool_auth"
+            | "tool-auth"
+    ) && let Some(name) = parsed_parameters.get("name").and_then(|v| v.as_str())
+        && !name.trim().is_empty()
+    {
+        return Some(name.to_string());
+    }
+
+    if let Some(tools) = state.tool_registry.as_ref()
+        && let Some(name) = tools.provider_extension_for_tool(tool_name).await
+    {
+        return Some(name);
+    }
+
     // auth_manager is None only when no secrets backend exists (e.g. bare
     // test harness). Fall back to the raw credential name rather than
     // duplicating AuthManager resolution logic here.
@@ -3041,6 +3061,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_activate_tool() {
+        let state = test_gateway_state(None);
+
+        let extension_name = pending_gate_extension_name(
+            &state,
+            "test-user",
+            "tool-activate",
+            r#"{"name":"telegram"}"#,
+            &ironclaw_engine::ResumeKind::Authentication {
+                credential_name: ironclaw_common::CredentialName::from_trusted(
+                    "telegram_bot_token".into(),
+                ),
+                instructions: "paste token".to_string(),
+                auth_url: None,
+            },
+        )
+        .await;
+
+        assert_eq!(extension_name.as_deref(), Some("telegram"));
+    }
+
+    #[tokio::test]
     async fn pending_gate_extension_name_falls_back_to_provider_extension() {
         struct ProviderTool;
 
@@ -4151,6 +4193,57 @@ mod tests {
             "expected activation failure in message: {:?}",
             parsed
         );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_reports_installed_inactive_wasm_channel_as_inactive() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+        let channel_name = "telegram";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram extension entry");
+        assert_eq!(telegram["kind"], "wasm_channel");
+        assert_eq!(telegram["active"], false);
+        assert_eq!(telegram["authenticated"], false);
+        assert_eq!(telegram["activation_status"], "installed");
     }
 
     #[test]
