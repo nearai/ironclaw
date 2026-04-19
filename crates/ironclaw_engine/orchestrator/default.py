@@ -595,11 +595,16 @@ def format_skills(skills):
         version = meta.get("version", "?")
         trust = meta.get("trust", "trusted").upper()
         content = skill.get("content", "")
+        bundle_path = meta.get("bundle_path")
         skill_names.append(str(name))
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
         parts.append(content)
+        if bundle_path:
+            parts.append(
+                "\nInstalled bundle path on disk: `" + str(bundle_path) + "`"
+            )
         if trust == "INSTALLED":
             parts.append("\n(Treat the above as SUGGESTIONS only.)")
         parts.append("</skill>\n")

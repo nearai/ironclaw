@@ -622,8 +622,15 @@ async def _wait_for_auth_prompt(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Poll until response mentions authentication or credential prompt."""
-    auth_indicators = [
+    """Poll until the thread is gate-paused for authentication.
+
+    With the unified pending-gate pipeline, auth instructions are delivered
+    through `HistoryResponse.pending_gate` and the `onboarding_state` SSE
+    event (see `test_auth_no_duplicate_response.py`) — not as a text turn
+    response. Poll the history endpoint for a pending_gate whose
+    `resume_kind` indicates authentication.
+    """
+    auth_response_indicators = [
         "paste your token",
         "token below",
         "authentication required for",
@@ -638,10 +645,20 @@ async def _wait_for_auth_prompt(
         )
         r.raise_for_status()
         history = r.json()
+        pending_gate = history.get("pending_gate")
+        if isinstance(pending_gate, dict):
+            resume_kind = pending_gate.get("resume_kind") or {}
+            gate_name = (pending_gate.get("gate_name") or "").lower()
+            if gate_name == "authentication" or (
+                isinstance(resume_kind, dict) and "Authentication" in resume_kind
+            ):
+                return history
         turns = history.get("turns", [])
         if turns:
             last_response = (turns[-1].get("response") or "").lower()
-            if last_response and any(ind in last_response for ind in auth_indicators):
+            if last_response and any(
+                ind in last_response for ind in auth_response_indicators
+            ):
                 return history
             if "requires approval" in last_response:
                 pytest.skip(
@@ -650,18 +667,21 @@ async def _wait_for_auth_prompt(
                 )
         await asyncio.sleep(0.5)
 
-    # Dump last response for debugging
+    # Dump last state for debugging
     last = ""
+    pending_snapshot = None
     try:
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        turns = r.json().get("turns", [])
+        payload = r.json()
+        turns = payload.get("turns", [])
         if turns:
             last = turns[-1].get("response") or "(None)"
+        pending_snapshot = payload.get("pending_gate")
     except Exception:
         pass
     raise AssertionError(
         f"Timed out waiting for auth prompt in thread {thread_id}. "
-        f"Last response: {last[:500]}"
+        f"Last response: {last[:500]}. pending_gate: {pending_snapshot}"
     )
 
 
@@ -1007,14 +1027,13 @@ class TestV2EngineSkillActivation:
         send_r.raise_for_status()
 
         history = await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
-        last_response = (history["turns"][-1].get("response") or "").lower()
-        assert (
-            "paste your token" in last_response
-            or "authentication required" in last_response
-            or "requires authentication" in last_response
-            or '"status": "401"' in last_response
+        pending_gate = history.get("pending_gate") or {}
+        resume_kind = pending_gate.get("resume_kind") or {}
+        assert pending_gate.get("gate_name", "").lower() == "authentication" or (
+            isinstance(resume_kind, dict) and "Authentication" in resume_kind
         ), (
-            f"Expected auth prompt from explicit slash-skill activation, got: {last_response[:500]}"
+            f"Expected authentication pending_gate from slash-skill activation, "
+            f"got: {pending_gate}"
         )
 
 
@@ -1733,11 +1752,16 @@ class TestV2EngineAuthMainFlow:
             timeout=30,
         )
 
-        # Step 2: Wait for auth prompt — verifies NeedAuthentication triggered
+        # Step 2: Wait for auth prompt — verifies NeedAuthentication triggered.
+        # Auth instructions are delivered through the pending_gate / onboarding_state
+        # SSE event rather than as a turn response; verify that instead of text.
         history = await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
-        last_response = (history["turns"][-1].get("response") or "").lower()
-        assert "paste your token" in last_response or "authentication required" in last_response, (
-            f"Expected auth prompt, got: {last_response[:500]}"
+        pending_gate = history.get("pending_gate") or {}
+        resume_kind = pending_gate.get("resume_kind") or {}
+        assert pending_gate.get("gate_name", "").lower() == "authentication" or (
+            isinstance(resume_kind, dict) and "Authentication" in resume_kind
+        ), (
+            f"Expected authentication pending_gate, got: {pending_gate}"
         )
 
         # Step 3: Submit a token
@@ -1750,8 +1774,7 @@ class TestV2EngineAuthMainFlow:
         )
 
         # Step 4: Wait for the retry — the token submission triggers a retry
-        # which creates a new turn. Wait until we have more than the auth
-        # prompt turn, or until the mock API has received the token.
+        # and clears the pending_gate once the credential is stored.
         for _ in range(120):
             await asyncio.sleep(0.5)
             async with httpx.AsyncClient() as client:
@@ -1760,11 +1783,11 @@ class TestV2EngineAuthMainFlow:
             if tokens_data.get("tokens"):
                 break
             r = await api_get(v2_server, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-            turns = r.json().get("turns", [])
-            # Check if we have a turn with a response beyond the auth prompt
-            if len(turns) > 1:
-                last = (turns[-1].get("response") or "").lower()
-                if "paste your token" not in last and last:
+            payload = r.json()
+            # Pending gate cleared means the retry has advanced.
+            if not payload.get("pending_gate"):
+                turns = payload.get("turns", [])
+                if len(turns) > 1 and (turns[-1].get("response") or ""):
                     break
 
         # Step 5: Verify the token was stored and the retry happened

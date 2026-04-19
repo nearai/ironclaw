@@ -3115,18 +3115,26 @@ async fn handle_with_engine_inner(
     }
 
     // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input
-    // so both engine paths enforce the same inbound protections.
-    let validation = agent.safety().validate_input(content);
-    if !validation.is_valid {
-        let details = validation
-            .errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Ok(BridgeOutcome::Respond(format!(
-            "Input rejected by safety validation: {details}"
-        )));
+    // so both engine paths enforce the same inbound protections. When the
+    // message carries attachments, an empty text body is legitimate (the
+    // attachment is the payload); skip the validator's empty-input rejection
+    // but still apply length / policy checks against the text.
+    let trimmed_content = content.trim();
+    let skip_empty_check =
+        trimmed_content.is_empty() && !message.attachments.is_empty();
+    if !skip_empty_check {
+        let validation = agent.safety().validate_input(content);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(BridgeOutcome::Respond(format!(
+                "Input rejected by safety validation: {details}"
+            )));
+        }
     }
 
     let violations = agent.safety().check_policy(content);
