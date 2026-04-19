@@ -104,19 +104,21 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
-            // Pick the right prompt for the agent based on where the image
-            // actually lives. Engine v2 persists the file to disk and then
-            // clears `data` to keep the outbound prompt small, so an empty
-            // `data` with a set `local_path` is a saved-to-disk image, not
-            // a missing one.
-            let body = if att.data.is_empty() {
-                if att.local_path.is_some() {
-                    "[Image attached — the raw bytes have been persisted to the project file path above. Reference that path when you need the image; don't try to load it from memory.]"
-                } else {
-                    "[Image attached — visual content not available in this conversation.]"
-                }
-            } else {
+            // Pick the right prompt for the agent based on whether the
+            // image bytes reached the model. Engine v2 persists the file to
+            // disk but leaves `data` populated so `augment_with_attachments`
+            // can emit a multimodal `image_parts` entry — that's the path
+            // that actually sends the image to the LLM. An empty `data`
+            // with a `local_path` set can only happen if a downstream
+            // caller cleared the buffer (or if the channel elided it); in
+            // that case the model doesn't see the pixels and must go
+            // through the project file path instead.
+            let body = if !att.data.is_empty() {
                 "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
+            } else if att.local_path.is_some() {
+                "[Image attached — the raw bytes are not in this turn's multimodal context, but the file has been persisted at the project file path above. Reference that path when you need the image.]"
+            } else {
+                "[Image attached — visual content not available in this conversation.]"
             };
             let body = format_attachment_body(att.local_path.as_deref(), body.to_string());
 

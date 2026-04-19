@@ -250,12 +250,17 @@ async fn persist_project_attachments(
         attachment.local_path = Some(relative_path.clone());
         // Build the index note while `data` is still populated so the
         // fallback to `data.len()` in `attachment_index_note` reports the
-        // real payload size when `size_bytes` wasn't pre-filled. Clear the
-        // buffer afterwards so the outbound agent prompt doesn't re-embed
-        // the raw bytes it just persisted to disk.
+        // real payload size when `size_bytes` wasn't pre-filled.
         notes.push(attachment_index_note(message, attachment, &relative_path));
-        attachment.data.clear();
-        attachment.data.shrink_to_fit();
+        // Intentionally *don't* clear `attachment.data` here. The caller
+        // (`handle_with_engine_inner` in this file) immediately feeds the
+        // same slice to `augment_with_attachments`, which only emits
+        // multimodal `image_parts` for images when `att.data` is non-empty.
+        // Clearing the buffer here would silently drop every uploaded image
+        // from the engine-v2 LLM request — the file is on disk but the
+        // model never sees the bytes. The `persisted_attachments` Vec is
+        // local to the request and is dropped once the engine dispatch
+        // returns, so "storage hygiene" is a no-op anyway.
     }
 
     notes

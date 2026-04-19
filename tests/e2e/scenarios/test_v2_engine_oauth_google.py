@@ -450,6 +450,17 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
 
 @pytest.fixture(autouse=True)
 async def _pin_mock_drive_api_url(mock_llm_server, mock_google_api):
+    """Point the mock LLM's tool-call URL at this module's Google Drive mock.
+
+    The mock LLM uses a single module-level `_github_api_url` to compose
+    every tool-call URL it synthesizes (GitHub, Drive, and any other
+    per-test HTTP destination that needs to look real to the engine). The
+    control endpoint is historically named `/__mock/set_github_api_url`
+    because the Drive test suite was added later and reused the same
+    knob — see `mock_llm.py`. A rename would cascade into every test file
+    that calls the endpoint, so the fixture keeps the existing wire name
+    and documents the shared nature here.
+    """
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{mock_llm_server}/__mock/set_github_api_url",
