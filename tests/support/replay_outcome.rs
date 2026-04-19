@@ -188,7 +188,9 @@ impl ReplayOutcome {
                 }
                 StatusUpdate::AuthRequired { extension_name, .. } => {
                     *kind_counts.entry("AuthRequired".into()).or_default() += 1;
-                    EventSummary::AuthRequired { extension_name }
+                    EventSummary::AuthRequired {
+                        extension_name: extension_name.into(),
+                    }
                 }
                 StatusUpdate::AuthCompleted {
                     extension_name,
@@ -197,7 +199,7 @@ impl ReplayOutcome {
                 } => {
                     *kind_counts.entry("AuthCompleted".into()).or_default() += 1;
                     EventSummary::AuthCompleted {
-                        extension_name,
+                        extension_name: extension_name.into(),
                         success,
                     }
                 }
