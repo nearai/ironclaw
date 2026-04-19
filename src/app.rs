@@ -274,6 +274,36 @@ impl AppBuilder {
         let handles = self.handles.as_ref().unwrap_or(&empty_handles);
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
+        // Safety gate: if we auto-generated a fresh master key this run
+        // but the secrets table already carries rows from a prior key,
+        // those rows are undecryptable and silently continuing would
+        // shadow unrecoverable data. Fail loudly (and fail-closed on
+        // probe error) so the user can restore the original key before
+        // any new writes pile on top.
+        //
+        // Roll back the persistence `auto_generate_and_persist` already
+        // committed: otherwise a subsequent restart would read the
+        // newly-written key as `source = Env/Keychain, generated =
+        // false`, skip this gate, and silently accept the wrong key.
+        // Rollback keeps the gate re-firing on every start until the
+        // user restores the real key or clears the stale rows.
+        if let Some(ref secrets) = store
+            && let Err(gate_err) = crate::secrets::verify_generated_key_safe(
+                self.config.secrets.generated,
+                secrets.as_ref(),
+            )
+            .await
+        {
+            if self.config.secrets.generated {
+                crate::secrets::rollback_generated_key_persistence(
+                    self.config.secrets.source,
+                    &crate::bootstrap::ironclaw_env_path(),
+                )
+                .await;
+            }
+            return Err(gate_err.into());
+        }
+
         if let Some(ref secrets) = store {
             // Migrate any plaintext API keys from the settings table to the
             // encrypted secrets store. Idempotent — safe to run on every startup.

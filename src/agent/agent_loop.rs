@@ -578,9 +578,9 @@ impl Agent {
         &self,
         message_content: &str,
         user_id: &str,
-    ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
+    ) -> (Vec<ironclaw_skills::LoadedSkill>, String, Vec<String>) {
         let Some(registry) = self.skill_registry() else {
-            return (vec![], message_content.to_string());
+            return (vec![], message_content.to_string(), vec![]);
         };
         // Snapshot the skill list + distinct setup markers under the read
         // lock, then drop the guard before any await. The marker checks
@@ -600,7 +600,7 @@ impl Agent {
             }
             Err(e) => {
                 tracing::error!("Skill registry lock poisoned: {}", e);
-                return (vec![], message_content.to_string());
+                return (vec![], message_content.to_string(), vec![]);
             }
         };
 
@@ -640,7 +640,7 @@ impl Agent {
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
-        let scored = ironclaw_skills::prefilter_skills(
+        let outcome = ironclaw_skills::prefilter_skills(
             &rewritten,
             &available,
             skills_cfg.max_active_skills,
@@ -648,10 +648,20 @@ impl Agent {
             &satisfied,
         );
 
+        // Feedback notes: start with the selector's own notes (chain-load,
+        // budget, marker-skipped companions) and prepend a note for each
+        // explicit `/mention` force-activation so the UI can explain why
+        // a skill loaded even when it didn't score.
+        let mut feedback: Vec<String> = explicit
+            .iter()
+            .map(|s| format!("{}: force-activated via /mention", s.name()))
+            .collect();
+        feedback.extend(outcome.notes);
+
         // Merge: explicit mentions first, then scored (dedup by name)
         let mut selected: Vec<ironclaw_skills::LoadedSkill> =
             explicit.into_iter().cloned().collect();
-        for skill in scored {
+        for skill in outcome.selected {
             if !selected
                 .iter()
                 .any(|s| s.manifest.name == skill.manifest.name)
@@ -672,7 +682,7 @@ impl Agent {
             );
         }
 
-        (selected, rewritten)
+        (selected, rewritten, feedback)
     }
 
     /// Send initial engine thread list and routines to the TUI channel so
