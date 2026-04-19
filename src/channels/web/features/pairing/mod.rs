@@ -10,22 +10,33 @@
 //! # Identity boundary
 //!
 //! The `{channel}` URL path is untrusted input. The slice validates it
-//! through [`ExtensionName::new`] at the handler boundary, which rejects
+//! through [`ExtensionName::new`] at the handler boundary — which rejects
 //! path-traversal / control / mixed-script / oversized values with 400 *at
 //! the boundary* instead of silently canonicalizing into a lookup that
-//! would mismatch anyway. Every downstream API takes `&str`, so the
-//! typed value is squeezed back to a string slice via `.as_str()` at the
-//! call site — that's still a net win because the construction is audited
-//! in exactly one place.
+//! would mismatch anyway — then discards the typed value and carries the
+//! pre-fold lowercased `String` through the handler. The validator's
+//! canonical form folds `-` into `_`, but the pairing store keys off the
+//! *un-folded* lowercased name (see `crate::pairing::normalize_channel_name`
+//! in `src/pairing/mod.rs`). WASM channels like `slack-relay` (see
+//! `src/channels/wasm/setup.rs` and `crate::channels::relay::DEFAULT_RELAY_NAME`)
+//! store hyphenated rows, and querying `slack_relay` would miss them —
+//! returning empty lists / failing approvals silently. When the wider
+//! codebase harmonizes `ExtensionName` with WASM-channel naming, this
+//! discard-and-keep-the-raw-string dance can go away.
+//!
+//! The [`AppEvent::OnboardingState.extension_name`] and
+//! [`dispatch_onboarding_ready_followup`] call sites both take
+//! [`ExtensionName`], so those re-wrap via [`ExtensionName::from_trusted`]
+//! at the call site — the value has already passed validation, just with
+//! the hyphen-fold axis stripped off.
 //!
 //! # Why lowercasing happens before `ExtensionName::new`
 //!
 //! Pairing storage and webhook routes are keyed by lowercase channel
 //! names. A mixed-case URL path must resolve to the same backend row as
 //! the corresponding webhook, so we `to_ascii_lowercase()` *before*
-//! constructing the [`ExtensionName`] — the validator would reject
-//! uppercase input outright, and callers would otherwise need to know
-//! that ahead of time.
+//! running validation — the validator would reject uppercase input
+//! outright, and callers would otherwise need to know that ahead of time.
 
 use std::sync::Arc;
 
@@ -46,13 +57,22 @@ use crate::channels::web::types::{
     PairingRequestInfo,
 };
 
-fn parse_channel(channel: String) -> Result<ExtensionName, (StatusCode, String)> {
-    ExtensionName::new(channel.to_ascii_lowercase()).map_err(|e| {
+/// Validate an untrusted URL-path channel segment and return the lowercased
+/// (but **un-canonicalized**) form used as the pairing persistence key.
+///
+/// [`ExtensionName::new`] runs for its rejection semantics (path traversal,
+/// invalid chars, oversize, edge/consecutive underscores) but its returned
+/// value is discarded because it folds `-` into `_` — see the module
+/// docstring for why the store keys off the un-folded name.
+fn parse_channel(channel: String) -> Result<String, (StatusCode, String)> {
+    let lowered = channel.to_ascii_lowercase();
+    ExtensionName::new(&lowered).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Invalid channel name: {e}"),
         )
-    })
+    })?;
+    Ok(lowered)
 }
 
 /// `GET /api/pairing/{channel}` — admin-only list of pending pairing requests.
@@ -67,7 +87,7 @@ pub(crate) async fn pairing_list_handler(
         "Pairing store not available".to_string(),
     ))?;
     let requests: Vec<crate::db::PairingRequestRecord> =
-        store.list_pending(channel.as_str()).await.map_err(|e| {
+        store.list_pending(&channel).await.map_err(|e| {
             tracing::warn!(error = %e, "pairing list failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -86,7 +106,7 @@ pub(crate) async fn pairing_list_handler(
         .collect();
 
     Ok(Json(PairingListResponse {
-        channel: channel.into_inner(),
+        channel,
         requests: infos,
     }))
 }
@@ -102,7 +122,7 @@ pub(crate) async fn pairing_approve_handler(
     Json(req): Json<PairingApproveRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let channel = parse_channel(channel)?;
-    let flow = crate::pairing::PairingCodeChallenge::new(channel.as_str());
+    let flow = crate::pairing::PairingCodeChallenge::new(&channel);
     let Some(code) =
         crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, &req.code)
     else {
@@ -116,7 +136,7 @@ pub(crate) async fn pairing_approve_handler(
         "Pairing store not available".to_string(),
     ))?;
     let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
-    let approval = match store.approve(channel.as_str(), &code, &owner_id).await {
+    let approval = match store.approve(&channel, &code, &owner_id).await {
         Ok(approval) => approval,
         Err(crate::error::DatabaseError::NotFound { .. }) => {
             return Ok(Json(ActionResponse::fail(
@@ -134,7 +154,7 @@ pub(crate) async fn pairing_approve_handler(
     // Propagate owner binding to the running channel.
     let propagation_failed = if let Some(ext_mgr) = state.extension_manager.as_ref() {
         match ext_mgr
-            .complete_pairing_approval(channel.as_str(), &approval.external_id)
+            .complete_pairing_approval(&channel, &approval.external_id)
             .await
         // dispatch-exempt: runtime channel mutation; pairing tool migration tracked as follow-up
         {
@@ -164,7 +184,7 @@ pub(crate) async fn pairing_approve_handler(
         state.sse.broadcast_for_user(
             &user.user_id,
             AppEvent::OnboardingState {
-                extension_name: channel.clone(),
+                extension_name: ExtensionName::from_trusted(channel.clone()),
                 state: OnboardingStateDto::Failed,
                 request_id: None,
                 message: Some(message.clone()),
@@ -182,7 +202,7 @@ pub(crate) async fn pairing_approve_handler(
     state.sse.broadcast_for_user(
         &user.user_id,
         AppEvent::OnboardingState {
-            extension_name: channel.clone(),
+            extension_name: ExtensionName::from_trusted(channel.clone()),
             state: OnboardingStateDto::Ready,
             request_id: None,
             message: Some("Pairing approved.".to_string()),
@@ -199,7 +219,9 @@ pub(crate) async fn pairing_approve_handler(
     {
         dispatch_engine_external_callback(&state, &user.user_id, thread_id, request_id).await?;
     } else if let Some(thread_id) = req.thread_id.as_deref() {
-        dispatch_onboarding_ready_followup(&state, &user.user_id, thread_id, &channel).await?;
+        let extension_name = ExtensionName::from_trusted(channel);
+        dispatch_onboarding_ready_followup(&state, &user.user_id, thread_id, &extension_name)
+            .await?;
     }
 
     Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
@@ -208,24 +230,33 @@ pub(crate) async fn pairing_approve_handler(
 #[cfg(test)]
 mod tests {
     //! `parse_channel` is the boundary that turns an untrusted URL-path
-    //! segment into a validated [`ExtensionName`]. Every pairing handler
+    //! segment into the lowercased pairing key. Every pairing handler
     //! calls it as the first line, so an error here is what triggers the
     //! 400 that the PR #2665 review (Copilot) asked to lock in. These
-    //! tests pin both sides of the contract: accept the names pairing
-    //! actually uses, reject the shapes that can't correspond to a real
-    //! extension (path traversal, invalid charset, edge underscores,
-    //! oversize). If `ExtensionName`'s rules grow, this test module is
-    //! the first place the stricter behavior will surface.
+    //! tests pin four contracts:
+    //!
+    //! 1. Accept the names pairing actually uses (lowercase, snake_case).
+    //! 2. Lowercase mixed-case URL paths.
+    //! 3. **Preserve hyphens** — `ExtensionName::new` canonicalizes `-`
+    //!    to `_`, but the pairing store keys off the un-folded name, so
+    //!    `slack-relay` (a real live WASM channel) must stay addressable.
+    //! 4. Reject shapes that can't correspond to a real channel (path
+    //!    traversal, invalid charset, edge/consecutive underscores,
+    //!    oversize) with `StatusCode::BAD_REQUEST`.
+    //!
+    //! If `ExtensionName`'s rules grow, or if `parse_channel`'s return
+    //! type is re-typed into an `ExtensionName`, this test module is the
+    //! first place the regression will surface.
     use super::*;
 
     #[test]
     fn parse_channel_accepts_lowercase_snake_case() {
         let parsed = parse_channel("telegram".to_string()).expect("lowercase name must validate");
-        assert_eq!(parsed.as_str(), "telegram");
+        assert_eq!(parsed, "telegram");
 
         let parsed =
             parse_channel("slack_relay".to_string()).expect("snake_case name must validate");
-        assert_eq!(parsed.as_str(), "slack_relay");
+        assert_eq!(parsed, "slack_relay");
     }
 
     #[test]
@@ -237,7 +268,27 @@ mod tests {
         // dashboard-entered channel name — exactly the silent-drop regression
         // this test guards against.
         let parsed = parse_channel("Telegram".to_string()).expect("mixed case must lowercase");
-        assert_eq!(parsed.as_str(), "telegram");
+        assert_eq!(parsed, "telegram");
+    }
+
+    #[test]
+    fn parse_channel_preserves_hyphens_for_slack_relay() {
+        // Regression for the PR #2665 Copilot review: a previous revision of
+        // `parse_channel` returned `ExtensionName::new(...)` directly, which
+        // canonicalizes `-` into `_`. But the live WASM channel name (see
+        // `crate::channels::relay::DEFAULT_RELAY_NAME` and
+        // `src/channels/wasm/setup.rs`) is `slack-relay` — stored and keyed
+        // hyphenated in the pairing store. Folding to `slack_relay` would
+        // silently miss every real pairing row. This test pins the un-folded
+        // form so the regression can't reoccur without a visible signal.
+        let parsed = parse_channel("slack-relay".to_string())
+            .expect("slack-relay must validate and retain hyphens");
+        assert_eq!(parsed, "slack-relay");
+
+        // Case-sensitivity still folds through `to_ascii_lowercase()`.
+        let parsed = parse_channel("SLACK-RELAY".to_string())
+            .expect("uppercase slack-relay must validate and retain hyphens");
+        assert_eq!(parsed, "slack-relay");
     }
 
     #[test]

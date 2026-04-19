@@ -53,11 +53,9 @@ pub(crate) fn derive_onboarding(
 ) {
     match activation_status {
         Some(ExtensionActivationStatus::Pairing) => {
-            // `channel_name` here is the registry-sourced `Extension.name`,
+            // `channel_name` is the registry-sourced `Extension.name`,
             // which already passed validation at install time — no
-            // re-sanitization needed. Once `Extension.name` becomes an
-            // `ExtensionName` outright, this parameter will be typed and
-            // the trust assumption becomes a compile-time invariant.
+            // re-sanitization needed.
             let state = ChannelOnboardingState::PairingRequired;
             let info = ChannelOnboardingInfo {
                 state,

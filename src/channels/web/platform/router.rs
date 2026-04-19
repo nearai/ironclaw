@@ -71,8 +71,10 @@ use crate::channels::web::platform::static_files::{
     project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
-// Feature handlers still inline in `server.rs` pending migration into
-// `features/<slice>/`. Kept `pub(crate)` so the router can reference them
+// Feature handlers live in a split during the ironclaw#2599 migration:
+// already-migrated slices (logs, oauth, pairing, status) under
+// `features/<slice>/`, everything else still in `server.rs`. Each slice
+// keeps its handlers `pub(crate)` so the router can reference them
 // without exposing them outside the crate.
 use crate::channels::web::features::logs::{
     logs_events_handler, logs_level_get_handler, logs_level_set_handler,
