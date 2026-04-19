@@ -6,6 +6,7 @@ use ironclaw_engine::{
     ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, ThreadMessage,
     TokenUsage,
 };
+use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::llm::{
@@ -13,14 +14,54 @@ use crate::llm::{
     sanitize_tool_messages,
 };
 
-/// Convert the provider's per-call cost into the f64 the engine accumulates.
-/// Returns 0.0 for unknown providers (e.g. subscription-billed Codex) to match
-/// their `cost_per_token() == (0, 0)` contract.
-fn cost_usd_from(provider: &Arc<dyn LlmProvider>, input_tokens: u32, output_tokens: u32) -> f64 {
-    provider
-        .calculate_cost(input_tokens, output_tokens)
-        .to_f64()
-        .unwrap_or(0.0)
+/// Compute the USD cost of a single completion response, honoring the
+/// provider's prompt-caching pricing. Mirrors the formula in
+/// `src/agent/cost_guard.rs::CostGuard::record_llm_call` so engine v2's
+/// `Thread::total_cost_usd` matches what `max_budget_usd` / v1's daily
+/// budget enforcer would have computed:
+///
+/// * uncached input tokens are priced at `cost_per_token().0`;
+/// * cache-read tokens are discounted by `cache_read_discount()` (10x
+///   off for Anthropic, 2x for OpenAI);
+/// * cache-write tokens are multiplied by `cache_write_multiplier()`
+///   (1.25× for Anthropic 5m TTL, 2× for 1h);
+/// * output tokens are priced at `cost_per_token().1`.
+///
+/// Returns 0.0 for subscription-billed providers that report
+/// `cost_per_token() == (0, 0)` (e.g. OpenAI Codex via ChatGPT OAuth).
+fn cost_usd_from(
+    provider: &Arc<dyn LlmProvider>,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+) -> f64 {
+    let (input_rate, output_rate) = provider.cost_per_token();
+
+    // `input_tokens` is the provider-reported total. Cache tokens are
+    // already counted inside that total, so the uncached remainder is
+    // what's left after subtracting both buckets.
+    let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
+    let uncached_input = input_tokens.saturating_sub(cached_total);
+
+    // Guard against providers reporting a zero discount — treat zero as
+    // "no discount" rather than attempting a div-by-zero.
+    let discount = provider.cache_read_discount();
+    let effective_discount = if discount.is_zero() {
+        Decimal::ONE
+    } else {
+        discount
+    };
+
+    let cache_read_cost = input_rate * Decimal::from(cache_read_input_tokens) / effective_discount;
+    let cache_write_cost =
+        input_rate * Decimal::from(cache_creation_input_tokens) * provider.cache_write_multiplier();
+    let cost = input_rate * Decimal::from(uncached_input)
+        + cache_read_cost
+        + cache_write_cost
+        + output_rate * Decimal::from(output_tokens);
+
+    cost.to_f64().unwrap_or(0.0)
 }
 
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
@@ -112,6 +153,8 @@ impl LlmBackend for LlmBridgeAdapter {
                         provider,
                         response.input_tokens,
                         response.output_tokens,
+                        response.cache_read_input_tokens,
+                        response.cache_creation_input_tokens,
                     ),
                 },
             });
@@ -186,7 +229,13 @@ impl LlmBackend for LlmBridgeAdapter {
                 output_tokens: u64::from(response.output_tokens),
                 cache_read_tokens: u64::from(response.cache_read_input_tokens),
                 cache_write_tokens: u64::from(response.cache_creation_input_tokens),
-                cost_usd: cost_usd_from(provider, response.input_tokens, response.output_tokens),
+                cost_usd: cost_usd_from(
+                    provider,
+                    response.input_tokens,
+                    response.output_tokens,
+                    response.cache_read_input_tokens,
+                    response.cache_creation_input_tokens,
+                ),
             },
         })
     }
@@ -1455,6 +1504,92 @@ And also check the token price:\n\
         assert!(
             output.usage.cost_usd.is_finite(),
             "cost_usd must be finite, never NaN/Inf"
+        );
+    }
+
+    /// Providers that expose prompt caching (Anthropic 5m TTL: 10× read
+    /// discount, 1.25× write multiplier) must see cost computed with the
+    /// three-bucket formula, not the flat `input × rate` approximation.
+    /// Pins the fix for the Copilot/Gemini review comment on #2660 —
+    /// before the fix, cost_usd undercounted cache-writes and
+    /// over-counted cache-reads, leaving `max_budget_usd` gates inert
+    /// against heavy-cache workloads.
+    #[tokio::test]
+    async fn complete_prices_cache_tokens_with_discount_and_multiplier() {
+        /// Anthropic Sonnet 5m-TTL rates: $3/MTok input, $15/MTok output,
+        /// read discount 10, write multiplier 1.25.
+        struct AnthropicCachingProvider;
+        #[async_trait]
+        impl LlmProvider for AnthropicCachingProvider {
+            fn model_name(&self) -> &str {
+                "anthropic-caching-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (
+                    rust_decimal_macros::dec!(0.000003),
+                    rust_decimal_macros::dec!(0.000015),
+                )
+            }
+            fn cache_read_discount(&self) -> Decimal {
+                rust_decimal_macros::dec!(10)
+            }
+            fn cache_write_multiplier(&self) -> Decimal {
+                rust_decimal_macros::dec!(1.25)
+            }
+            async fn complete(
+                &self,
+                _req: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                // Total input = 10_000; 2_000 cache-read, 1_000 cache-write,
+                // 7_000 uncached. Output = 500.
+                Ok(crate::llm::CompletionResponse {
+                    content: "ok".into(),
+                    input_tokens: 10_000,
+                    output_tokens: 500,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 2_000,
+                    cache_creation_input_tokens: 1_000,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicCachingProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
+            .await
+            .unwrap();
+
+        // uncached = 10_000 - 2_000 - 1_000 = 7_000
+        // uncached_cost    = 7_000 * 0.000003          = 0.021
+        // cache_read_cost  = 2_000 * 0.000003 / 10     = 0.0006
+        // cache_write_cost = 1_000 * 0.000003 * 1.25   = 0.00375
+        // output_cost      = 500   * 0.000015          = 0.0075
+        // total            = 0.021 + 0.0006 + 0.00375 + 0.0075 = 0.03285
+        let expected = 0.032_85_f64;
+        assert!(
+            (output.usage.cost_usd - expected).abs() < 1e-9,
+            "expected cost_usd ≈ {expected}, got {}",
+            output.usage.cost_usd
+        );
+
+        // The naive `(input+output) × rate` approximation the old helper
+        // computed would have been: 10_000 * 0.000003 + 500 * 0.000015
+        // = 0.0375 — i.e. ~14% over-counted vs. the correct 0.03285.
+        // Pin that we are NOT computing that value.
+        let naive = 10_000.0 * 0.000_003 + 500.0 * 0.000_015;
+        assert!(
+            (output.usage.cost_usd - naive).abs() > 1e-6,
+            "cost_usd {} must not match the pre-fix naive formula {}",
+            output.usage.cost_usd,
+            naive
         );
     }
 }
