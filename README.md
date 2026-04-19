@@ -1,5 +1,8 @@
 # LunarWing
 
+<img width="1920" height="1920" alt="can you make transparent bg" src="https://github.com/user-attachments/assets/df542eab-ffc2-4873-8982-2070e1c0c0b1" />
+
+
 The LunarWing project is a hard fork of the Ironclaw project originally developed by NearAI. The fork was initially started in Febuary 2026 and continues to expand far beyond what NearAI's project is currently capable of.
 
 LunarWing adds much needed features to the project. There are far too many improvements to merge them all upstream.
