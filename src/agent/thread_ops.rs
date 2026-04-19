@@ -1401,7 +1401,10 @@ impl Agent {
         //
         // Take + verify under a single lock to prevent TOCTOU races where a
         // concurrent operation could modify the thread between take and restore.
-        let (pending, actual_thread_id) = {
+        // Capture the target conversation channel too so persistence stays bound
+        // to the original thread even when approval resolves from another surface
+        // (for example, a gateway click approving a Slack-origin thread).
+        let (pending, actual_thread_id, persistence_channel) = {
             let mut sess = session.lock().await;
 
             // Check the target thread's state first (immutable borrow).
@@ -1428,6 +1431,10 @@ impl Agent {
                             "Error: approval not authorized for this channel",
                         ));
                     }
+                    let conversation_channel = thread
+                        .source_channel
+                        .clone()
+                        .unwrap_or_else(|| message.channel.clone());
                     let pending = match thread.take_pending_approval() {
                         Some(p) => p,
                         None => {
@@ -1448,7 +1455,7 @@ impl Agent {
                         ));
                     }
 
-                    (pending, thread_id)
+                    (pending, thread_id, conversation_channel)
                 }
                 Some(state) => {
                     // Resolved thread isn't awaiting approval — search other
@@ -1567,6 +1574,10 @@ impl Agent {
                             "Error: approval not authorized for this channel",
                         ));
                     }
+                    let conversation_channel = t
+                        .source_channel
+                        .clone()
+                        .unwrap_or_else(|| message.channel.clone());
                     let pending = match t.take_pending_approval() {
                         Some(pending) => pending,
                         None => {
@@ -1587,7 +1598,7 @@ impl Agent {
                         ));
                     }
 
-                    (pending, target_tid)
+                    (pending, target_tid, conversation_channel)
                 }
                 None => {
                     return Err(Error::from(crate::error::JobError::NotFound {
@@ -1682,7 +1693,7 @@ impl Agent {
             if let Some((turn_number, user_message_id, user_input, started_at)) = resumed_turn {
                 self.persist_processing_live_state(
                     thread_id,
-                    &message.channel,
+                    &persistence_channel,
                     &message.user_id,
                     ProcessingLiveState {
                         turn_number,
@@ -2128,8 +2139,12 @@ impl Agent {
                     }
                 }
 
-                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
-                    .await;
+                self.clear_conversation_live_state(
+                    thread_id,
+                    &persistence_channel,
+                    &message.user_id,
+                )
+                .await;
 
                 let _ = self
                     .channels
@@ -2162,6 +2177,7 @@ impl Agent {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
+                        &persistence_channel,
                         message,
                         ext_name,
                         instructions.clone(),
@@ -2217,7 +2233,7 @@ impl Agent {
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                         turn_number,
                         &tool_calls,
@@ -2226,7 +2242,7 @@ impl Agent {
                     .await;
                     self.persist_assistant_response(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                         &response,
                     )
@@ -2258,7 +2274,7 @@ impl Agent {
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                     )
                     .await;
@@ -2296,7 +2312,7 @@ impl Agent {
                         .unwrap_or_default();
                     self.persist_tool_calls(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                         turn_number,
                         &tool_calls,
@@ -2314,7 +2330,7 @@ impl Agent {
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                     )
                     .await;
@@ -2325,7 +2341,7 @@ impl Agent {
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
-                        &message.channel,
+                        &persistence_channel,
                         &message.user_id,
                     )
                     .await;
@@ -2349,7 +2365,7 @@ impl Agent {
                         // User message already persisted at turn start; save rejection response
                         self.persist_assistant_response(
                             thread_id,
-                            &message.channel,
+                            &persistence_channel,
                             &message.user_id,
                             &rejection,
                         )
@@ -2385,6 +2401,7 @@ impl Agent {
         &self,
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
+        persistence_channel: &str,
         message: &IncomingMessage,
         ext_name: ironclaw_common::ExtensionName,
         instructions: String,
@@ -2399,7 +2416,7 @@ impl Agent {
                     // User message already persisted at turn start; save auth instructions
                     self.persist_assistant_response(
                         thread_id,
-                        &message.channel,
+                        persistence_channel,
                         &message.user_id,
                         &instructions,
                     )
@@ -2912,7 +2929,9 @@ mod tests {
         }
     }
 
-    async fn make_thread_ops_test_agent() -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
+    async fn make_thread_ops_test_agent_with_store(
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
         struct StaticLlmProvider;
 
         #[async_trait::async_trait]
@@ -2965,7 +2984,7 @@ mod tests {
 
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
-            store: None,
+            store,
             settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
@@ -3030,6 +3049,10 @@ mod tests {
         );
 
         (agent, statuses)
+    }
+
+    async fn make_thread_ops_test_agent() -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
+        make_thread_ops_test_agent_with_store(None).await
     }
 
     #[test]
@@ -4115,6 +4138,82 @@ mod tests {
             target_b.pending_approval.is_none(),
             "matched approval should be consumed"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_process_approval_persists_cross_channel_rejection_to_source_conversation() {
+        use crate::agent::session::{PendingApproval, Session, Thread};
+        use crate::db::{ConversationStore, Database};
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("thread-ops-approval.db");
+        let db = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("libsql local backend"),
+        );
+        db.run_migrations().await.expect("run migrations");
+
+        let thread_id = Uuid::new_v4();
+        db.ensure_conversation(thread_id, "slack", "test-user", None, Some("slack"))
+            .await
+            .expect("ensure slack conversation");
+
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id, Some("slack"));
+        thread.await_approval(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "echo hi"}),
+            display_parameters: serde_json::json!({"cmd": "echo hi"}),
+            description: "Run shell command".to_string(),
+            tool_call_id: "call_shell".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        });
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+        let session = Arc::new(Mutex::new(session));
+
+        let store: Arc<dyn crate::db::Database> = db.clone();
+        let (agent, _statuses) = make_thread_ops_test_agent_with_store(Some(store)).await;
+
+        let message = IncomingMessage::new("gateway", "test-user", "no");
+        let result = agent
+            .process_approval(
+                &message,
+                Arc::clone(&session),
+                thread_id,
+                None,
+                false,
+                false,
+            )
+            .await
+            .expect("cross-channel rejection should succeed");
+        match result {
+            SubmissionResult::Response { content } => {
+                assert!(content.contains("Tool 'shell' was rejected"));
+            }
+            other => panic!("expected rejection response, got: {other:?}"),
+        }
+
+        let messages = db
+            .list_conversation_messages(thread_id)
+            .await
+            .expect("list conversation messages");
+        assert_eq!(
+            messages.len(),
+            1,
+            "rejection should persist into slack thread"
+        );
+        assert_eq!(messages[0].role, "assistant");
+        assert!(messages[0].content.contains("Tool 'shell' was rejected"));
     }
 
     /// Regression test for #1487: process_approval on a missing thread should error.

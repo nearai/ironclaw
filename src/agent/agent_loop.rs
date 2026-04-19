@@ -105,7 +105,7 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 /// approval or downgraded to regular user input.
 ///
 /// Returns `true` when the message should be routed as an approval (there IS
-/// a pending approval in the current thread or elsewhere in the session, or
+/// an awaiting approval in the current thread or elsewhere in the session, or
 /// it's an explicit slash command). Returns `false` when the message should be
 /// treated as regular `UserInput`.
 ///
@@ -114,10 +114,10 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 fn should_route_as_approval(
     thread_state: ThreadState,
     raw_content: &str,
-    has_pending_approval_in_session: bool,
+    has_awaiting_approval_in_session: bool,
 ) -> bool {
     thread_state == ThreadState::AwaitingApproval
-        || has_pending_approval_in_session
+        || has_awaiting_approval_in_session
         || raw_content.trim().starts_with('/')
 }
 
@@ -1971,14 +1971,16 @@ impl Agent {
                 message: "Auth gate resolution requires ENGINE_V2".to_string(),
             }),
             Submission::ApprovalResponse { approved, always } => {
-                let (thread_state, has_pending_approval_in_session) = {
+                let (thread_state, has_awaiting_approval_in_session) = {
                     let sess = session.lock().await;
                     (
                         sess.threads
                             .get(&thread_id)
                             .map(|t| t.state)
                             .unwrap_or(ThreadState::Idle),
-                        sess.threads.values().any(|t| t.pending_approval.is_some()),
+                        sess.threads.values().any(|t| {
+                            t.state == ThreadState::AwaitingApproval && t.pending_approval.is_some()
+                        }),
                     )
                 };
                 // NOTE: TOCTOU possible — state could change between check
@@ -1986,7 +1988,7 @@ impl Agent {
                 if should_route_as_approval(
                     thread_state,
                     &message.content,
-                    has_pending_approval_in_session,
+                    has_awaiting_approval_in_session,
                 ) {
                     self.process_approval(message, session, thread_id, None, approved, always)
                         .await
@@ -2549,6 +2551,59 @@ mod tests {
             "always",
             true
         ));
+    }
+
+    #[test]
+    fn interrupted_thread_with_stale_pending_approval_does_not_trigger_session_scan() {
+        use super::should_route_as_approval;
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let current_thread_id = Uuid::new_v4();
+        let interrupted_thread_id = Uuid::new_v4();
+
+        let current_thread = Thread::with_id(current_thread_id, session_id, Some("gateway"));
+
+        let mut interrupted_thread =
+            Thread::with_id(interrupted_thread_id, session_id, Some("slack"));
+        interrupted_thread.await_approval(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "echo hi"}),
+            display_parameters: serde_json::json!({"cmd": "echo hi"}),
+            description: "Run shell command".to_string(),
+            tool_call_id: "call_shell".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        });
+        interrupted_thread.interrupt();
+        assert_eq!(interrupted_thread.state, ThreadState::Interrupted);
+        assert!(
+            interrupted_thread.pending_approval.is_some(),
+            "interrupt() currently preserves pending approval metadata"
+        );
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(current_thread_id, current_thread);
+        session
+            .threads
+            .insert(interrupted_thread_id, interrupted_thread);
+
+        let has_awaiting_approval_in_session = session.threads.values().any(|thread| {
+            thread.state == ThreadState::AwaitingApproval && thread.pending_approval.is_some()
+        });
+        assert!(
+            !has_awaiting_approval_in_session,
+            "only AwaitingApproval threads should count for approval routing"
+        );
+        assert!(
+            !should_route_as_approval(ThreadState::Idle, "yes", has_awaiting_approval_in_session),
+            "stale interrupted approvals must downgrade bare keywords to UserInput"
+        );
     }
 
     /// The thread-resolution guard must only early-reject `ExecApproval`

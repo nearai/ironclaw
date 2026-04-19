@@ -61,11 +61,11 @@ impl WasmChannelRouter {
         }
     }
 
-    /// Register a channel with its endpoints.
+    /// Register or replace a channel's HTTP registration.
     ///
     /// # Arguments
     /// * `channel` - The WASM channel to register
-    /// * `endpoints` - HTTP endpoints to register for this channel
+    /// * `endpoints` - Complete HTTP endpoint set for this channel
     /// * `secret` - Optional webhook secret for validation
     /// * `secret_header` - Optional HTTP header name for secret validation
     ///   (e.g., "X-Telegram-Bot-Api-Secret-Token"). Defaults to "X-Webhook-Secret".
@@ -78,11 +78,13 @@ impl WasmChannelRouter {
     ) {
         let name = channel.channel_name().to_string();
 
-        // Store the channel
+        // Store the channel.
         self.channels.write().await.insert(name.clone(), channel);
 
-        // Register path mappings
+        // Replace all path mappings for this channel so refreshes can revoke
+        // stale routes when Socket Mode becomes the sole authenticated ingress.
         let mut path_map = self.path_to_channel.write().await;
+        path_map.retain(|_, existing_name| existing_name != &name);
         for endpoint in endpoints {
             path_map.insert(endpoint.path.clone(), name.clone());
             tracing::info!(
@@ -92,15 +94,22 @@ impl WasmChannelRouter {
                 "Registered WASM channel HTTP endpoint"
             );
         }
+        drop(path_map);
 
-        // Store secret if provided
+        // Replace secret/header state too so refreshes can clear revoked auth.
+        let mut secrets = self.secrets.write().await;
         if let Some(s) = secret {
-            self.secrets.write().await.insert(name.clone(), s);
+            secrets.insert(name.clone(), s);
+        } else {
+            secrets.remove(&name);
         }
+        drop(secrets);
 
-        // Store secret header if provided
+        let mut secret_headers = self.secret_headers.write().await;
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            secret_headers.insert(name, h);
+        } else {
+            secret_headers.remove(&name);
         }
     }
 
@@ -227,6 +236,16 @@ impl WasmChannelRouter {
             .write()
             .await
             .insert(channel_name.to_string(), secret.to_string());
+    }
+
+    /// Remove an Ed25519 signature key for a channel.
+    pub async fn clear_signature_key(&self, channel_name: &str) {
+        self.signature_keys.write().await.remove(channel_name);
+    }
+
+    /// Remove an HMAC signing secret for a channel.
+    pub async fn clear_hmac_secret(&self, channel_name: &str) {
+        self.hmac_secrets.write().await.remove(channel_name);
     }
 
     /// Get the HMAC signing secret for a channel.
@@ -745,6 +764,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_register_replaces_existing_paths_and_clears_webhook_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "slack".to_string(),
+            path: "/webhook/slack".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        router
+            .register(
+                Arc::clone(&channel),
+                endpoints,
+                Some("secret123".to_string()),
+                Some("X-Slack-Signature".to_string()),
+            )
+            .await;
+        assert!(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some()
+        );
+        assert!(router.requires_secret("slack").await);
+        assert_eq!(router.get_secret_header("slack").await, "X-Slack-Signature");
+
+        router.register(channel, vec![], None, None).await;
+        assert!(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_none(),
+            "refresh should remove stale webhook route"
+        );
+        assert!(
+            !router.requires_secret("slack").await,
+            "refresh should clear stale webhook secret"
+        );
+        assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
+        assert!(
+            router.get_channel("slack").await.is_some(),
+            "channel registration should remain for Socket Mode lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn test_router_unregister() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
@@ -840,6 +907,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_clear_hmac_secret_removes_value() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+        router.register(channel, vec![], None, None).await;
+
+        router
+            .register_hmac_secret("slack", "my-slack-signing-secret")
+            .await;
+        assert!(router.get_hmac_secret("slack").await.is_some());
+
+        router.clear_hmac_secret("slack").await;
+        assert!(router.get_hmac_secret("slack").await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_no_hmac_secret_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
@@ -892,6 +974,23 @@ mod tests {
 
         let key = router.get_signature_key("discord").await;
         assert_eq!(key, Some(fake_pub_key.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_clear_signature_key_removes_value() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("discord");
+        router.register(channel, vec![], None, None).await;
+
+        let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
+        router
+            .register_signature_key("discord", valid_key)
+            .await
+            .unwrap();
+        assert!(router.get_signature_key("discord").await.is_some());
+
+        router.clear_signature_key("discord").await;
+        assert!(router.get_signature_key("discord").await.is_none());
     }
 
     #[tokio::test]
