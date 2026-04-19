@@ -10,7 +10,7 @@ use axum::{
 use secrecy::SecretString;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
@@ -22,7 +22,7 @@ const API_KEY_UNCHANGED: &str = "••••••••";
 /// Prefers the `CachedSettingsStore` so writes invalidate the cache
 /// (keeping the agent loop's view consistent). Falls back to the raw
 /// `Database` when no cached store is configured.
-pub(super) fn resolve_settings_store(
+pub(crate) fn resolve_settings_store(
     state: &GatewayState,
 ) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
     if let Some(ref sc) = state.settings_cache {
@@ -955,14 +955,18 @@ mod tests {
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
             secrets_store: Some(secrets),
             db_auth: None,
             pairing_store: None,

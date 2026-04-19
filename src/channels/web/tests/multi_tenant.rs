@@ -353,7 +353,7 @@ mod workspace_pool {
 #[cfg(feature = "libsql")]
 mod jobs_isolation {
     use super::*;
-    use crate::channels::web::handlers::jobs::{
+    use crate::channels::web::features::jobs::{
         jobs_cancel_handler, jobs_prompt_handler, jobs_restart_handler, jobs_summary_handler,
     };
     // SandboxStore methods are accessed through the Database supertrait.
@@ -561,7 +561,7 @@ mod jobs_isolation {
 #[cfg(feature = "libsql")]
 mod routines_isolation {
     use super::*;
-    use crate::channels::web::handlers::routines::{
+    use crate::channels::web::features::routines::{
         routines_delete_handler, routines_detail_handler, routines_list_handler,
         routines_summary_handler, routines_toggle_handler,
     };

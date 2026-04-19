@@ -27,6 +27,11 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::channels::web::auth::{CombinedAuthState, auth_middleware};
+use crate::channels::web::features::jobs::{
+    job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
+    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
+    jobs_summary_handler,
+};
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -38,26 +43,12 @@ use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
     frontend_widgets_handler,
 };
-use crate::channels::web::handlers::jobs::{
-    job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
-    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
-    jobs_summary_handler,
-};
 use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
     memory_write_handler,
-};
-use crate::channels::web::handlers::routines::{
-    routines_delete_handler, routines_detail_handler, routines_list_handler,
-    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
-};
-use crate::channels::web::handlers::settings::{
-    settings_delete_handler, settings_export_handler, settings_get_handler,
-    settings_import_handler, settings_list_handler, settings_set_handler,
-    settings_tools_list_handler, settings_tools_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -70,15 +61,21 @@ use crate::channels::web::platform::static_files::{
     project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
-// Feature handlers live in a split during the ironclaw#2599 migration:
-// already-migrated slices (chat, logs, oauth, pairing, status) under
-// `features/<slice>/`, everything else still in `server.rs`. Each slice
-// keeps its handlers `pub(crate)` so the router can reference them
-// without exposing them outside the crate.
+// Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
+// every route composed below comes from one of these or from a
+// transitional `handlers/*.rs` file (auth, engine, frontend, llm,
+// memory, secrets, skills, system_prompt, tokens, tool_policy, users,
+// webhooks). No feature handler lives in `server.rs` — that file is a
+// backward-compat re-export shim waiting on stage 6 deletion.
 use crate::channels::web::features::chat::{
     chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler, chat_events_handler,
     chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
     chat_threads_handler, chat_ws_handler,
+};
+use crate::channels::web::features::extensions::{
+    extensions_activate_handler, extensions_install_handler, extensions_list_handler,
+    extensions_readiness_handler, extensions_registry_handler, extensions_remove_handler,
+    extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
 };
 use crate::channels::web::features::logs::{
     logs_events_handler, logs_level_get_handler, logs_level_set_handler,
@@ -87,13 +84,16 @@ use crate::channels::web::features::oauth::{
     oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
 };
 use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
-use crate::channels::web::features::status::gateway_status_handler;
-use crate::channels::web::server::{
-    extensions_activate_handler, extensions_install_handler, extensions_list_handler,
-    extensions_readiness_handler, extensions_registry_handler, extensions_remove_handler,
-    extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
-    routines_runs_handler,
+use crate::channels::web::features::routines::{
+    routines_delete_handler, routines_detail_handler, routines_list_handler, routines_runs_handler,
+    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
 };
+use crate::channels::web::features::settings::{
+    settings_delete_handler, settings_export_handler, settings_get_handler,
+    settings_import_handler, settings_list_handler, settings_set_handler,
+    settings_tools_list_handler, settings_tools_set_handler,
+};
+use crate::channels::web::features::status::gateway_status_handler;
 
 /// Start the gateway HTTP server.
 ///

@@ -7233,7 +7233,7 @@ impl ExtensionManager {
                     && !self.has_wasm_channel_pairing(&name).await;
 
                 if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
-                    let onboarding = crate::channels::web::handlers::extensions::derive_onboarding(
+                    let onboarding = crate::channels::web::features::extensions::derive_onboarding(
                         &name,
                         Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                     );
@@ -7278,7 +7278,7 @@ impl ExtensionManager {
                         None
                     },
                     onboarding: if needs_pairing {
-                        crate::channels::web::handlers::extensions::derive_onboarding(
+                        crate::channels::web::features::extensions::derive_onboarding(
                             &name,
                             Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                         )
