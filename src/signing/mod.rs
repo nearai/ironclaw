@@ -48,24 +48,21 @@ impl SigningService {
         std::fs::create_dir_all(&keys_dir)
             .map_err(|e| SigningError::KeyInit(format!("Failed to create keys dir: {e}")))?;
 
-        let signing_key =
-            match signet_core::load_signing_key(&keys_dir, "ironclaw", None) {
-                Ok(key) => {
-                    tracing::debug!("Loaded existing signing key 'ironclaw'");
-                    key
-                }
-                Err(_) => {
-                    tracing::info!("No signing key found, generating new Ed25519 keypair");
-                    signet_core::generate_and_save(
-                        &keys_dir, "ironclaw", None, None, None,
-                    )
+        let signing_key = match signet_core::load_signing_key(&keys_dir, "ironclaw", None) {
+            Ok(key) => {
+                tracing::debug!("Loaded existing signing key 'ironclaw'");
+                key
+            }
+            Err(_) => {
+                tracing::info!("No signing key found, generating new Ed25519 keypair");
+                signet_core::generate_and_save(&keys_dir, "ironclaw", None, None, None)
                     .map_err(|e| SigningError::KeyInit(e.to_string()))?;
 
-                    // Load the key we just generated
-                    signet_core::load_signing_key(&keys_dir, "ironclaw", None)
-                        .map_err(|e| SigningError::KeyInit(e.to_string()))?
-                }
-            };
+                // Load the key we just generated
+                signet_core::load_signing_key(&keys_dir, "ironclaw", None)
+                    .map_err(|e| SigningError::KeyInit(e.to_string()))?
+            }
+        };
 
         // Ensure audit directory exists
         let audit_dir = signet_dir.join("audit");
@@ -114,12 +111,7 @@ impl SigningService {
             parent_receipt_id: None,
         };
 
-        let receipt = match signet_core::sign(
-            &self.signing_key,
-            &action,
-            "ironclaw",
-            user_id,
-        ) {
+        let receipt = match signet_core::sign(&self.signing_key, &action, "ironclaw", user_id) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(tool = %tool_name, error = %e, "Failed to sign tool call");
@@ -152,7 +144,7 @@ impl SigningService {
 }
 
 /// Truncate a string at a safe char boundary.
-fn truncate_safe(s: &str, max_bytes: usize) -> &str {
+pub fn truncate_safe(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
@@ -228,8 +220,7 @@ mod tests {
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::set_var("SIGNET_HOME", dir.path().as_os_str()) };
 
-        let service =
-            SigningService::init(HashSet::new()).expect("should init");
+        let service = SigningService::init(HashSet::new()).expect("should init");
         for i in 0..5 {
             service.sign_action(
                 "shell",
@@ -239,7 +230,9 @@ mod tests {
                 "user-1",
             );
         }
-        let status = service.verify_chain().expect("chain verification should succeed");
+        let status = service
+            .verify_chain()
+            .expect("chain verification should succeed");
         assert!(status.valid, "chain should be valid after sequential signs");
         assert_eq!(status.total_records, 5, "should have 5 audit records");
 
@@ -253,8 +246,7 @@ mod tests {
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::set_var("SIGNET_HOME", dir.path().as_os_str()) };
 
-        let service =
-            SigningService::init(HashSet::new()).expect("should init");
+        let service = SigningService::init(HashSet::new()).expect("should init");
         let receipt = service.sign_action(
             "http_fetch",
             &serde_json::json!({"url": "https://example.com"}),

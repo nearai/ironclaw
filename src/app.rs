@@ -70,6 +70,8 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Cryptographic signing service for tool call audit chain.
+    pub signing: Option<Arc<crate::signing::SigningService>>,
     /// In-process write-through cache: `(channel, external_id)` → `Identity`.
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
@@ -1133,6 +1135,24 @@ impl AppBuilder {
         // that every tool name is known.  Existing entries are never overwritten.
         seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
 
+        // Initialize cryptographic signing (best-effort).
+        let signing = if self.config.signing.enabled {
+            match crate::signing::SigningService::init(
+                self.config.signing.skip_tools.iter().cloned().collect(),
+            ) {
+                Ok(s) => {
+                    tracing::debug!("Signing service initialized");
+                    Some(Arc::new(s))
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Signing service unavailable, continuing without signing");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -1162,6 +1182,7 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
             builder,
+            signing,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
         })
     }
