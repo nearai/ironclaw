@@ -1,187 +1,382 @@
-/* Shared IronClaw theme tokens */
+/* IronClaw theme tokens.
+ *
+ * Phase A of the design-system adoption ported from Defuse
+ * (defuse-protocol/defuse-frontend) introduces Radix Themes-style
+ * 12-step scales as the substrate underneath the semantic tokens the
+ * split surface stylesheets consume.
+ *
+ *   --sand-{1..12}     neutral / surface / text — OmniSwap gray scale
+ *   --accent-{1..12}   brand emerald-green     — OmniSwap accent scale
+ *   --accent-a{1..12}  alpha variants of the accent scale (dark mode)
+ *
+ * Radix convention:
+ *   1–2  app background / subtle surface
+ *   3    component background
+ *   4    hovered component background
+ *   5    active / selected component background
+ *   6    subtle border
+ *   7    UI element border
+ *   8    hovered UI element border
+ *   9    solid (brand) background               <- `--accent` anchors here
+ *  10    hovered solid background
+ *  11    low-contrast text
+ *  12    high-contrast text
+ *
+ * Every legacy token (`--bg`, `--text`, `--accent`, …) is kept, but
+ * redefined below as an alias onto the new scales — so the 20 split
+ * surface stylesheets under `styles/` require zero changes. Future
+ * components should consume the semantic `--color-*`, `--shadow-*`,
+ * `--radius-*` tokens directly. */
 
 :root {
-  --bg: #09090b;
-  --bg-secondary: #0f0f11;
-  --bg-tertiary: #1a1a1e;
-  --border: rgba(255, 255, 255, 0.08);
-  --text: #fafafa;
-  --text-secondary: #a1a1aa;
-  --accent: #34d399;
-  --accent-hover: #2fc48d;
-  --accent-soft: rgba(52, 211, 153, 0.15);
-  --success: #34d399;
-  --info: #60a5fa;
-  --warning: #F5A623;
-  --danger: #E64C4C;
-  --code-bg: #111113;
-  --radius: 8px;
-  --radius-lg: 12px;
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
-  --bg-modal: #1a1a1a;
-  --border-modal: #333;
-  --border-soft: #2a2a2a;
-  --text-tertiary: #e0e0e0;
-  --text-muted: #888;
-  --text-dimmed: #666;
-  --text-on-accent: #09090b;
-  --accent-brand: #00D894;
-  --accent-brand-hover: #00be82;
-  --warning-bg: #1e1400;
-  --warning-border: #3a2a00;
-  --warning-text: #facc15;
-  --tab-bg: rgba(9, 9, 11, 0.75);
-  --popover-bg: rgba(15, 15, 17, 0.9);
-  --badge-sandbox-bg: rgba(136, 132, 216, 0.15);
-  --badge-sandbox-text: #b4b0e8;
-  --hover-surface: rgba(255, 255, 255, 0.03);
-  --focus-ring: rgba(52, 211, 153, 0.1);
-  --accent-subtle: rgba(52, 211, 153, 0.15);
-  --accent-border-subtle: rgba(52, 211, 153, 0.3);
-  --danger-subtle: rgba(230, 76, 76, 0.15);
-  --danger-border-subtle: rgba(230, 76, 76, 0.3);
-  --warning-subtle: rgba(245, 166, 35, 0.15);
-  --border-hover: rgba(255, 255, 255, 0.15);
-  --user-msg-bg: rgba(52, 211, 153, 0.08);
-  --user-msg-border: rgba(52, 211, 153, 0.2);
-  --danger-error-bg: rgba(230, 76, 76, 0.1);
-  --accent-tee-bg: rgba(52, 211, 153, 0.1);
-  --accent-tee-border: rgba(52, 211, 153, 0.25);
-  --accent-tee-hover: rgba(52, 211, 153, 0.18);
-  --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
-  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --danger-error-border: rgba(230, 76, 76, 0.2);
-  --note-bg: rgba(255, 255, 255, 0.04);
-  --overlay-heavy: rgba(0, 0, 0, 0.6);
-  --highlight-bg: rgba(52, 211, 153, 0.3);
-  --hover-subtle: rgba(255, 255, 255, 0.06);
-  --transition-fast: 150ms ease;
-  --transition-base: 0.2s ease;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.2);
-  --shadow-lg: 0 12px 40px rgba(0,0,0,0.5), 0 4px 12px rgba(0,0,0,0.3);
-  --glow-accent: 0 0 20px rgba(52,211,153,0.1);
-  --glass-bg: rgba(9,9,11,0.72);
-  --glass-blur: blur(16px) saturate(180%);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.05);
+  /* ===========================================================
+   * 12-step neutral scale (dark theme default).
+   * Adopted wholesale from Defuse OmniSwap `--os*d`. Green-tinged
+   * gray that pairs with the emerald accent.
+   * =========================================================== */
+  --sand-1:  #080c0a;
+  --sand-2:  #121614;
+  --sand-3:  #1b1f1d;
+  --sand-4:  #252927;
+  --sand-5:  #3d4140;
+  --sand-6:  #4e5251;
+  --sand-7:  #6e7270;
+  --sand-8:  #9b9f9e;
+  --sand-9:  #cacecc;
+  --sand-10: #dadedc;
+  --sand-11: #e9edec;
+  --sand-12: #fcfdfc;
+
+  /* Alpha variants for overlays, dividers, and translucent surfaces.
+   * White-on-dark — these track the steps above but as rgba(255,255,255,a)
+   * so they composite correctly over any background. */
+  --sand-a1:  rgba(255, 255, 255, 0.020);
+  --sand-a2:  rgba(255, 255, 255, 0.032);
+  --sand-a3:  rgba(255, 255, 255, 0.050);
+  --sand-a4:  rgba(255, 255, 255, 0.080);
+  --sand-a5:  rgba(255, 255, 255, 0.120);
+  --sand-a6:  rgba(255, 255, 255, 0.170);
+  --sand-a7:  rgba(255, 255, 255, 0.260);
+  --sand-a8:  rgba(255, 255, 255, 0.420);
+  --sand-a9:  rgba(255, 255, 255, 0.620);
+  --sand-a10: rgba(255, 255, 255, 0.720);
+  --sand-a11: rgba(255, 255, 255, 0.850);
+  --sand-a12: rgba(255, 255, 255, 0.980);
+
+  /* ===========================================================
+   * 12-step accent scale (emerald / mint family).
+   *
+   * Adopted from Defuse OmniSwap `--osa*d`. In dark mode the
+   * OmniSwap accent is the light-mode scale reversed (1↔12), so the
+   * "solid" brand color at step 9 is a light mint. Current IronClaw
+   * emerald (#34d399) lives between steps 8 and 9 in this palette —
+   * very close but slightly more mint than before.
+   * =========================================================== */
+  --accent-1:  #031c12;
+  --accent-2:  #042a1b;
+  --accent-3:  #094b30;
+  --accent-4:  #0a5b38;
+  --accent-5:  #097345;
+  --accent-6:  #0b9053;
+  --accent-7:  #17b267;
+  --accent-8:  #3bcc81;
+  --accent-9:  #73e2a5;   /* brand anchor (interactive solid) */
+  --accent-10: #aaf0c5;
+  --accent-11: #d3f8df;
+  --accent-12: #edfcf3;
+
+  /* Alpha variants — emerald composited over any background. */
+  --accent-a1:  rgba(115, 226, 165, 0.050);
+  --accent-a2:  rgba(115, 226, 165, 0.080);
+  --accent-a3:  rgba(115, 226, 165, 0.120);
+  --accent-a4:  rgba(115, 226, 165, 0.170);
+  --accent-a5:  rgba(115, 226, 165, 0.230);
+  --accent-a6:  rgba(115, 226, 165, 0.320);
+  --accent-a7:  rgba(115, 226, 165, 0.450);
+  --accent-a8:  rgba(115, 226, 165, 0.620);
+  --accent-a9:  rgba(115, 226, 165, 0.820);
+  --accent-a10: rgba(170, 240, 197, 0.870);
+  --accent-a11: rgba(211, 248, 223, 0.920);
+  --accent-a12: rgba(237, 252, 243, 0.970);
+
+  /* Contrast text-on-solid-accent — used for button foregrounds when the
+   * background is `--accent-9`. Defuse sets this to the inverted step 1. */
+  --accent-contrast: #031c12;
+
+  /* ===========================================================
+   * Semantic role aliases.
+   *
+   * New components should consume THESE, not raw scale steps.
+   * Roles outlive palette swaps.
+   * =========================================================== */
+  --color-bg:                var(--sand-1);
+  --color-surface:           var(--sand-2);
+  --color-surface-elevated:  var(--sand-3);
+  --color-surface-hover:     var(--sand-a3);
+  --color-border:            var(--sand-a5);
+  --color-border-hover:      var(--sand-a7);
+  --color-text:              var(--sand-12);
+  --color-text-muted:        var(--sand-10);
+  --color-text-subtle:       var(--sand-8);
+  --color-label:             var(--sand-12);
+  --color-warning:           rgba(245, 166, 35, 0.22);
+  --color-warning-foreground: #facc15;
+
+  /* ===========================================================
+   * Layered shadow system.
+   *
+   * Replaces the earlier single `--shadow` with named elevations
+   * matching Defuse's paper/widget/card hierarchy.
+   * =========================================================== */
+  --shadow-paper:  0 1px 0 var(--sand-a4), 0 8px 24px -8px rgba(0, 0, 0, 0.35);
+  --shadow-widget: 0 0 0 1px var(--sand-a4), 0 12px 32px -12px rgba(0, 0, 0, 0.50);
+  --shadow-card:   0 1px 2px var(--sand-a3), 0 4px 16px -6px rgba(0, 0, 0, 0.40);
+  --shadow-inset:  inset 0 1px 0 var(--sand-a3);
+
+  /* ===========================================================
+   * Extended radius scale — picks up Defuse's `4xl` (30 px) for
+   * the big rounded-card / paper aesthetic.
+   * =========================================================== */
+  --radius-xl:  16px;
+  --radius-2xl: 20px;
+  --radius-4xl: 30px;
+
+  /* ===========================================================
+   * Extended type scale — display sizes for hero / widget headers.
+   * Small UI sizes remain unchanged (defined below).
+   * =========================================================== */
+  --text-4xl: 32px;
+  --text-5xl: 48px;
+  --text-6xl: 64px;
+  --tracking-display: 0.02em;
+  --tracking-6xl:     0.04em;
+
+  /* ===========================================================
+   * Font stacks.
+   *
+   * Geist (Vercel, free via Google Fonts) is a geometric humanist
+   * sans that's the closest free lookalike of Defuse's proprietary
+   * CircularXXSub. DM Sans and IBM Plex Mono stay in the fallback
+   * chain so unstyled renders before the webfont loads still use a
+   * similar-feeling face. The Google Fonts <link> is in index.html
+   * / admin.html — CSP already allows `fonts.googleapis.com` and
+   * `fonts.gstatic.com`.
+   * =========================================================== */
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'DM Sans', 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+
+  /* ===========================================================
+   * Legacy semantic tokens — kept for backward compatibility with
+   * the 20 split surface stylesheets under `styles/`. Each one is
+   * now an alias onto a scale step or role token above, so touching
+   * the palette here instantly reskins the whole app without
+   * changing a single line in `styles/**/*.css`.
+   * =========================================================== */
+  --bg:                    var(--color-bg);
+  --bg-secondary:          var(--color-surface);
+  --bg-tertiary:           var(--color-surface-elevated);
+  --bg-overlay:            rgba(0, 0, 0, 0.50);
+  --bg-modal:              var(--sand-3);
+  --bg-hover:              var(--color-surface-hover);
+  --border:                var(--color-border);
+  --border-modal:          var(--sand-a7);
+  --border-soft:           var(--sand-a4);
+  --border-hover:          var(--color-border-hover);
+  --text:                  var(--color-text);
+  --text-secondary:        var(--sand-8);
+  --text-tertiary:         var(--sand-10);
+  --text-muted:            var(--sand-7);
+  --text-dimmed:           var(--sand-6);
+  --text-on-accent:        var(--accent-contrast);
+  --text-on-danger:        #ffffff;
+
+  --accent:                var(--accent-9);
+  --accent-hover:          var(--accent-8);
+  --accent-brand:          var(--accent-9);
+  --accent-brand-hover:    var(--accent-8);
+  --accent-soft:           var(--accent-a3);
+  --accent-subtle:         var(--accent-a3);
+  --accent-border-subtle:  var(--accent-a6);
+  --accent-dim:            var(--accent-a2);
+  --accent-tee-bg:         var(--accent-a2);
+  --accent-tee-border:     var(--accent-a5);
+  --accent-tee-hover:      var(--accent-a4);
+
+  --success:               var(--accent-9);
+  --info:                  #60a5fa;
+  --warning:               #F5A623;
+  --warning-bg:            rgba(245, 166, 35, 0.05);
+  --warning-border:        rgba(245, 166, 35, 0.25);
+  --warning-text:          #facc15;
+  --warning-subtle:        rgba(245, 166, 35, 0.15);
+  --warning-soft:          rgba(245, 166, 35, 0.15);
+  --danger:                #E64C4C;
+  --danger-subtle:         rgba(230, 76, 76, 0.15);
+  --danger-border-subtle:  rgba(230, 76, 76, 0.30);
+  --danger-error-bg:       rgba(230, 76, 76, 0.10);
+  --danger-error-border:   rgba(230, 76, 76, 0.20);
+  --danger-soft:           rgba(230, 76, 76, 0.15);
+
+  --code-bg:               var(--sand-2);
+  --tab-bg:                rgba(8, 12, 10, 0.75);
+  --popover-bg:            rgba(18, 22, 20, 0.92);
+  --badge-sandbox-bg:      rgba(136, 132, 216, 0.15);
+  --badge-sandbox-text:    #b4b0e8;
+
+  --hover-surface:         var(--sand-a1);
+  --hover-subtle:          var(--sand-a2);
+  --focus-ring:            var(--accent-a3);
+
+  --user-msg-bg:           var(--accent-a2);
+  --user-msg-border:       var(--accent-a5);
+
+  --note-bg:               var(--sand-a1);
+  --overlay-heavy:         rgba(0, 0, 0, 0.60);
+  --highlight-bg:          var(--accent-a6);
+  --surface-highlight:     inset 0 1px 0 var(--sand-a2);
+
+  /* Radius + shadow legacy aliases. */
+  --radius:      8px;
+  --radius-lg:   12px;
+  --shadow:      0 2px 8px rgba(0, 0, 0, 0.40);
+  --shadow-sm:   0 1px 2px rgba(0,0,0,0.30), 0 1px 3px rgba(0,0,0,0.15);
+  --shadow-md:   0 4px 12px rgba(0,0,0,0.40), 0 2px 4px rgba(0,0,0,0.20);
+  --shadow-lg:   0 12px 40px rgba(0,0,0,0.50), 0 4px 12px rgba(0,0,0,0.30);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.40);
+  --glow-accent: 0 0 20px var(--accent-a4);
+  --glass-bg:    rgba(8, 12, 10, 0.72);
+  --glass-blur:  blur(16px) saturate(180%);
+
+  /* Motion tokens. */
+  --transition-fast:   150ms ease;
+  --transition-base:   0.2s ease;
+  --transition-slow:   300ms ease;
+  --duration-instant:  100ms;
+  --duration-fast:     150ms;
+  --duration-base:     250ms;
+  --duration-slow:     400ms;
+  --ease-spring:        cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-spring-gentle: cubic-bezier(0.22, 1.20, 0.36, 1);
+  --ease-out-expo:      cubic-bezier(0.16, 1.00, 0.30, 1);
+  --ease-in-out:        cubic-bezier(0.40, 0, 0.20, 1);
+
+  /* Spacing + small-UI type scale — unchanged. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
   --space-8: 32px;
-  --text-xs: 11px;
-  --text-sm: 13px;
+  --text-xs:   11px;
+  --text-sm:   13px;
   --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
-  --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
+  --text-lg:   16px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+  --text-3xl:  36px;
 }
 
+/* ==============================================================
+ * Light theme — the OmniSwap scales are literally reversed
+ * between modes, so the role tokens stay defined in :root above
+ * and we redefine only the scales + a couple of alpha overlays.
+ * ============================================================== */
 [data-theme="light"] {
-  --bg: #ffffff;
-  --bg-secondary: #f5f5f7;
-  --bg-tertiary: #ebebed;
-  --border: rgba(0, 0, 0, 0.1);
-  --text: #1a1a2e;
-  --text-secondary: #555555;
-  --accent: #059669;
-  --accent-hover: #047857;
-  --success: #059669;
-  --info: #2563eb;
-  --warning: #d97706;
-  --danger: #dc2626;
-  --code-bg: #f0f0f2;
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.3);
-  --bg-modal: #ffffff;
-  --border-modal: #e0e0e0;
-  --border-soft: #e5e5e5;
-  --text-tertiary: #333333;
-  --text-muted: #777777;
-  --text-dimmed: #999999;
-  --text-on-accent: #ffffff;
-  --accent-brand: #059669;
-  --accent-brand-hover: #047857;
-  --warning-bg: #fffbeb;
-  --warning-border: #fde68a;
-  --warning-text: #92400e;
-  --tab-bg: rgba(255, 255, 255, 0.9);
-  --popover-bg: rgba(255, 255, 255, 0.95);
-  --badge-sandbox-bg: rgba(136, 132, 216, 0.1);
+  /* Reversed neutral scale (sand). */
+  --sand-1:  #fcfdfc;
+  --sand-2:  #e9edec;
+  --sand-3:  #dadedc;
+  --sand-4:  #cacecc;
+  --sand-5:  #9b9f9e;
+  --sand-6:  #6e7270;
+  --sand-7:  #4e5251;
+  --sand-8:  #3d4140;
+  --sand-9:  #252927;
+  --sand-10: #1b1f1d;
+  --sand-11: #121614;
+  --sand-12: #080c0a;
+
+  --sand-a1:  rgba(0, 0, 0, 0.020);
+  --sand-a2:  rgba(0, 0, 0, 0.032);
+  --sand-a3:  rgba(0, 0, 0, 0.050);
+  --sand-a4:  rgba(0, 0, 0, 0.080);
+  --sand-a5:  rgba(0, 0, 0, 0.120);
+  --sand-a6:  rgba(0, 0, 0, 0.170);
+  --sand-a7:  rgba(0, 0, 0, 0.260);
+  --sand-a8:  rgba(0, 0, 0, 0.420);
+  --sand-a9:  rgba(0, 0, 0, 0.620);
+  --sand-a10: rgba(0, 0, 0, 0.720);
+  --sand-a11: rgba(0, 0, 0, 0.850);
+  --sand-a12: rgba(0, 0, 0, 0.980);
+
+  /* Reversed accent scale (osa — light mode is the literal scale). */
+  --accent-1:  #edfcf3;
+  --accent-2:  #d3f8df;
+  --accent-3:  #aaf0c5;
+  --accent-4:  #73e2a5;
+  --accent-5:  #3bcc81;
+  --accent-6:  #17b267;
+  --accent-7:  #0b9053;
+  --accent-8:  #097345;
+  --accent-9:  #0a5b38;   /* brand anchor — forest emerald on light */
+  --accent-10: #094b30;
+  --accent-11: #042a1b;
+  --accent-12: #031c12;
+
+  --accent-a1:  rgba(10, 91, 56, 0.040);
+  --accent-a2:  rgba(10, 91, 56, 0.070);
+  --accent-a3:  rgba(10, 91, 56, 0.110);
+  --accent-a4:  rgba(10, 91, 56, 0.160);
+  --accent-a5:  rgba(10, 91, 56, 0.220);
+  --accent-a6:  rgba(10, 91, 56, 0.310);
+  --accent-a7:  rgba(10, 91, 56, 0.440);
+  --accent-a8:  rgba(10, 91, 56, 0.600);
+  --accent-a9:  rgba(10, 91, 56, 0.800);
+  --accent-a10: rgba(9, 75, 48, 0.870);
+  --accent-a11: rgba(4, 42, 27, 0.920);
+  --accent-a12: rgba(3, 28, 18, 0.970);
+
+  --accent-contrast: #edfcf3;
+
+  /* Light-mode overrides for the few legacy tokens that aren't a
+   * pure scale-step reference. */
+  --bg-overlay:       rgba(0, 0, 0, 0.30);
+  --bg-modal:         var(--sand-1);
+  --border-modal:     var(--sand-a6);
+  --text-secondary:   var(--sand-8);
+  --text-tertiary:    var(--sand-10);
+  --text-muted:       var(--sand-7);
+  --text-dimmed:      var(--sand-6);
+  --text-on-accent:   #ffffff;
+
+  --accent-hover:     var(--accent-10);
+
+  --tab-bg:           rgba(255, 255, 255, 0.90);
+  --popover-bg:       rgba(255, 255, 255, 0.95);
+  --badge-sandbox-bg: rgba(136, 132, 216, 0.10);
   --badge-sandbox-text: #6b67b0;
-  --hover-surface: rgba(0, 0, 0, 0.03);
-  --focus-ring: rgba(5, 150, 105, 0.15);
-  --accent-subtle: rgba(5, 150, 105, 0.1);
-  --accent-border-subtle: rgba(5, 150, 105, 0.3);
-  --danger-subtle: rgba(220, 38, 38, 0.1);
-  --danger-border-subtle: rgba(220, 38, 38, 0.2);
-  --warning-subtle: rgba(217, 119, 6, 0.1);
-  --border-hover: rgba(0, 0, 0, 0.15);
-  --user-msg-bg: rgba(5, 150, 105, 0.08);
-  --user-msg-border: rgba(5, 150, 105, 0.2);
-  --danger-error-bg: rgba(220, 38, 38, 0.06);
-  --accent-tee-bg: rgba(5, 150, 105, 0.08);
-  --accent-tee-border: rgba(5, 150, 105, 0.2);
-  --accent-tee-hover: rgba(5, 150, 105, 0.15);
-  --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
-  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+
+  --warning-bg:       #fffbeb;
+  --warning-border:   #fde68a;
+  --warning-text:     #92400e;
+  --warning-subtle:   rgba(217, 119, 6, 0.10);
+  --warning-soft:     rgba(217, 119, 6, 0.10);
+  --danger:           #dc2626;
+  --danger-subtle:    rgba(220, 38, 38, 0.10);
+  --danger-border-subtle: rgba(220, 38, 38, 0.20);
+  --danger-error-bg:  rgba(220, 38, 38, 0.06);
   --danger-error-border: rgba(220, 38, 38, 0.15);
-  --note-bg: rgba(0, 0, 0, 0.02);
-  --overlay-heavy: rgba(0, 0, 0, 0.4);
-  --highlight-bg: rgba(5, 150, 105, 0.2);
-  --hover-subtle: rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  --glow-accent: 0 0 20px rgba(5,150,105,0.08);
-  --glass-bg: rgba(255,255,255,0.85);
-  --glass-blur: blur(16px) saturate(180%);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.8);
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
-  --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
+  --danger-soft:      rgba(220, 38, 38, 0.10);
+
+  --info:             #2563eb;
+  --warning:          #d97706;
+
+  --shadow:      0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-sm:   0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md:   0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-lg:   0 25px 50px -12px rgba(0, 0, 0, 0.10);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --glow-accent: 0 0 20px var(--accent-a3);
+  --glass-bg:    rgba(255, 255, 255, 0.85);
+  --surface-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.80);
 }
