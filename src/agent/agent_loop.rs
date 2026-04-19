@@ -674,33 +674,86 @@ impl Agent {
     ///    The `/skill-name` is replaced with the skill's description so the
     ///    sentence reads naturally for the LLM.
     /// 2. **Implicit**: keyword/pattern scoring against the message content.
-    pub(super) fn select_active_skills(
+    ///
+    /// One-time setup skills (`*-setup` persona bundles) declare a
+    /// `setup_marker` workspace path in their activation frontmatter. Before
+    /// scoring, we check the workspace for each distinct marker referenced
+    /// by loaded skills and pass the satisfied set to the selector — any
+    /// skill whose marker is present is excluded from candidates so it
+    /// doesn't keep burning the activation budget after onboarding has
+    /// already run. To re-trigger setup, delete the marker file.
+    pub(super) async fn select_active_skills(
         &self,
         message_content: &str,
+        user_id: &str,
     ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string());
         };
-        let guard = match registry.read() {
-            Ok(g) => g,
+        // Snapshot the skill list + distinct setup markers under the read
+        // lock, then drop the guard before any await. The marker checks
+        // and the prefilter call don't need the registry lock and we
+        // shouldn't hold a poisonable RwLock across an await point.
+        let (available, distinct_markers) = match registry.read() {
+            Ok(guard) => {
+                let skills_clone: Vec<ironclaw_skills::LoadedSkill> = guard.skills().to_vec();
+                let mut markers: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for s in &skills_clone {
+                    if let Some(m) = &s.manifest.activation.setup_marker {
+                        markers.insert(m.clone());
+                    }
+                }
+                (skills_clone, markers)
+            }
             Err(e) => {
                 tracing::error!("Skill registry lock poisoned: {}", e);
                 return (vec![], message_content.to_string());
             }
         };
-        let available = guard.skills();
+
+        // Resolve which setup markers are satisfied by the current
+        // workspace. A marker is "satisfied" iff its path exists.
+        // Without a workspace, we conservatively treat all markers as
+        // unsatisfied (setup skills can still activate). Errors checking
+        // a marker are logged and treated as unsatisfied.
+        let mut satisfied: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(ws) = self.deps.workspace.as_ref() {
+            // Scope the workspace to the requesting user so multi-user
+            // channels check the correct user's marker state.
+            let scoped_ws = if ws.user_id() == user_id {
+                std::sync::Arc::clone(ws)
+            } else {
+                std::sync::Arc::new(ws.scoped_to_user(user_id))
+            };
+            for marker in &distinct_markers {
+                match scoped_ws.exists(marker).await {
+                    Ok(true) => {
+                        satisfied.insert(marker.clone());
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            marker = %marker,
+                            "setup-marker existence check failed (treating as unsatisfied): {e}"
+                        );
+                    }
+                }
+            }
+        }
 
         // Phase 1: Extract explicit /skill-name mentions
         let (explicit, rewritten) =
-            ironclaw_skills::extract_skill_mentions(message_content, available);
+            ironclaw_skills::extract_skill_mentions(message_content, &available);
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
         let scored = ironclaw_skills::prefilter_skills(
             &rewritten,
-            available,
+            &available,
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
+            &satisfied,
         );
 
         // Merge: explicit mentions first, then scored (dedup by name)

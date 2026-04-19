@@ -475,6 +475,98 @@ pub async fn frontend_widget_file_handler(
     ))
 }
 
+/// `GET /api/engine/projects/{id}/widgets` — discover and return resolved
+/// widgets from a project's `projects/{slug}/.system/widgets/` directory.
+///
+/// Project widgets are loaded dynamically by the frontend when the user
+/// drills into a project, not statically inlined into the HTML like global
+/// widgets. The response includes the full JS/CSS so the frontend can
+/// mount them immediately without additional fetches.
+pub async fn project_widgets_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<ResolvedWidget>>, (StatusCode, String)> {
+    // Resolve project name to derive the workspace slug.
+    let slug = {
+        let project = crate::bridge::get_engine_project(&project_id, &user.user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Project not found".to_string()))?;
+
+        project
+            .name
+            .to_lowercase()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+    };
+    let widgets_dir = format!("projects/{slug}/.system/widgets/");
+
+    let workspace = resolve_workspace(&state, &user).await?;
+    let layout = read_layout_config(&workspace).await;
+
+    let entries = match workspace.list(&widgets_dir).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("failed to list project widgets at {widgets_dir}: {e}");
+            Vec::new()
+        }
+    };
+
+    let mut widgets = Vec::new();
+    for entry in entries {
+        if !entry.is_directory {
+            continue;
+        }
+        let name = entry.name().to_string();
+        if !is_safe_widget_id(&name) {
+            continue;
+        }
+        let manifest_path = format!("{widgets_dir}{name}/manifest.json");
+        let Ok(doc) = workspace.read(&manifest_path).await else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<WidgetManifest>(&doc.content) else {
+            continue;
+        };
+        if !is_safe_widget_id(&manifest.id) || manifest.id != name {
+            continue;
+        }
+
+        let js_path = format!("{widgets_dir}{name}/index.js");
+        let Ok(js_doc) = workspace.read(&js_path).await else {
+            continue;
+        };
+        if js_doc.content.len() > MAX_WIDGET_JS_BYTES {
+            continue;
+        }
+
+        let css = workspace
+            .read(&format!("{widgets_dir}{name}/style.css"))
+            .await
+            .ok()
+            .map(|d| d.content)
+            .filter(|c| !c.trim().is_empty() && c.len() <= MAX_WIDGET_CSS_BYTES)
+            .map(|raw| ironclaw_gateway::scope_css(&raw, &manifest.id));
+
+        let enabled = layout
+            .widgets
+            .get(&manifest.id)
+            .map(|w| w.enabled)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+
+        widgets.push(ResolvedWidget {
+            manifest,
+            js: js_doc.content,
+            css,
+        });
+    }
+
+    Ok(Json(widgets))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

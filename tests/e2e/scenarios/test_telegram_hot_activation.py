@@ -113,6 +113,11 @@ async def wait_for_toast(page, text: str, *, timeout: int = 5000):
     )
 
 
+async def _active_thread_id(page):
+    await page.wait_for_function("() => !!currentThreadId", timeout=10000)
+    return await page.evaluate("() => currentThreadId")
+
+
 async def test_telegram_setup_card_shows_bot_token_field(page):
     async def handle_ext_list(route):
         await route.fulfill(
@@ -162,6 +167,7 @@ async def test_telegram_setup_card_shows_bot_token_field(page):
 async def test_telegram_hot_activation_transitions_installed_to_pairing(page):
     phase = {"value": "installed"}
     captured_setup_payloads = []
+    thread_id = await _active_thread_id(page)
 
     async def handle_ext_list(route):
         extensions = {
@@ -227,6 +233,26 @@ async def test_telegram_hot_activation_transitions_installed_to_pairing(page):
     await input_el.wait_for(state="visible", timeout=5000)
     await input_el.fill("123456789:ABCdefGhI")
     await card.locator(".ext-onboarding .btn-ext.activate", has_text="Save").click()
+
+    await page.evaluate(
+        """(threadId) => {
+          handleOnboardingState({
+            extension_name: 'telegram',
+            state: 'pairing_required',
+            request_id: 'req-telegram-hot-activation',
+            thread_id: threadId,
+            instructions: 'Open your Telegram bot, send it any message, then paste the pairing code here.',
+            onboarding: {
+              state: 'pairing_required',
+              requires_pairing: true,
+              pairing_title: 'Claim ownership for Telegram',
+              pairing_instructions: 'Open your Telegram bot, send it any message, then paste the pairing code here.',
+              restart_instructions: 'If you close this claim step, send another message in the channel to get a new pairing code.'
+            }
+          });
+        }""",
+        thread_id,
+    )
 
     await page.locator(SEL["pairing_card"]).wait_for(state="attached", timeout=5000)
     await card.locator(SEL["ext_pairing_label"]).wait_for(state="visible", timeout=5000)
@@ -382,6 +408,8 @@ async def test_telegram_auth_gate_uses_extension_name_for_configure_modal(page):
 
 async def test_telegram_configure_modal_submit_then_cancel_pairing_and_restart(page):
     setup_payloads = []
+    pairing_request_id = "req-telegram-pairing"
+    thread_id = await _active_thread_id(page)
 
     async def handle_setup(route):
         if route.request.method == "GET":
@@ -445,10 +473,31 @@ async def test_telegram_configure_modal_submit_then_cancel_pairing_and_restart(p
     await modal.locator(".btn-ext.activate").click()
     await modal.wait_for(state="hidden", timeout=5000)
 
+    await page.evaluate(
+        """({ threadId, requestId }) => {
+          handleOnboardingState({
+            extension_name: 'telegram',
+            state: 'pairing_required',
+            request_id: requestId,
+            thread_id: threadId,
+            instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code here.',
+            onboarding: {
+              state: 'pairing_required',
+              requires_pairing: true,
+              pairing_title: 'Claim ownership for Telegram',
+              pairing_instructions: 'Open your Telegram bot, send it any message such as hi or /start, wait for the pairing code reply, then paste that code into IronClaw. Telegram bots cannot message you first.',
+              restart_instructions: 'If you close this claim step, send another message in the channel to get a new pairing code.'
+            }
+          });
+        }""",
+        {"threadId": thread_id, "requestId": pairing_request_id},
+    )
+
     pairing_card = page.locator(SEL["pairing_card"])
     await pairing_card.wait_for(state="visible", timeout=5000)
     assert "pairing code" in await pairing_card.text_content()
     assert await pairing_card.locator(SEL["pairing_restart"]).count() == 1
+    assert await pairing_card.get_attribute("data-request-id") == pairing_request_id
 
     await pairing_card.locator(SEL["pairing_cancel_btn"]).click()
     await pairing_card.wait_for(state="hidden", timeout=5000)
@@ -472,5 +521,122 @@ async def test_telegram_configure_modal_submit_then_cancel_pairing_and_restart(p
     )
     await page.locator(SEL["pairing_card"]).wait_for(state="visible", timeout=5000)
     assert setup_payloads == [
-        {"secrets": {"telegram_bot_token": "123456789:ABCdefGhI"}, "fields": {}}
+        {
+            "request_id": "req-telegram-configure",
+            "thread_id": thread_id,
+            "secrets": {"telegram_bot_token": "123456789:ABCdefGhI"},
+            "fields": {},
+        }
+    ]
+
+
+async def test_telegram_pairing_sse_request_id_wins_over_setup_response(page):
+    captured_pairing_payloads = []
+    thread_id = await _active_thread_id(page)
+    pairing_request_id = "req-telegram-pairing-sse"
+
+    async def handle_setup(route):
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "name": "telegram",
+                        "kind": "wasm_channel",
+                        "secrets": [
+                            {
+                                "name": "telegram_bot_token",
+                                "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                                "provided": False,
+                                "optional": False,
+                                "auto_generate": False,
+                            }
+                        ],
+                        "fields": [],
+                        "onboarding_state": "setup_required",
+                        "onboarding": _TELEGRAM_INSTALLED["onboarding"],
+                    }
+                ),
+            )
+            return
+
+        await page.evaluate(
+            """({ threadId, requestId }) => {
+              handleOnboardingState({
+                extension_name: 'telegram',
+                state: 'pairing_required',
+                request_id: requestId,
+                thread_id: threadId,
+                instructions: 'Open your Telegram bot and enter the pairing code.',
+                onboarding: {
+                  state: 'pairing_required',
+                  requires_pairing: true,
+                  pairing_title: 'Claim ownership for Telegram',
+                  pairing_instructions: 'Open your Telegram bot and enter the pairing code.',
+                  restart_instructions: 'Send another Telegram message to get a new code.'
+                }
+              });
+            }""",
+            {"threadId": thread_id, "requestId": pairing_request_id},
+        )
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "success": True,
+                    "activated": True,
+                    "message": "Configuration saved and 'telegram' activated.",
+                    "onboarding_state": "pairing_required",
+                    "onboarding": _TELEGRAM_PAIRING["onboarding"],
+                }
+            ),
+        )
+
+    async def handle_pairing_approve(route):
+        captured_pairing_payloads.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"success": True, "message": "Pairing approved."}),
+        )
+
+    await page.route("**/api/extensions/telegram/setup", handle_setup)
+    await page.route("**/api/pairing/telegram/approve", handle_pairing_approve)
+
+    await page.evaluate(
+        """(threadId) => {
+          handleOnboardingState({
+            extension_name: 'telegram',
+            state: 'auth_required',
+            instructions: 'Enter your Telegram Bot API token (from @BotFather)',
+            auth_url: null,
+            request_id: 'req-telegram-configure-race',
+            thread_id: threadId,
+          });
+        }""",
+        thread_id,
+    )
+
+    modal = page.locator(SEL["configure_overlay"])
+    await modal.wait_for(state="visible", timeout=5000)
+    await modal.locator(SEL["configure_input"]).fill("123456789:ABCdefGhI")
+    await modal.locator(".btn-ext.activate").click()
+    await modal.wait_for(state="hidden", timeout=5000)
+
+    pairing_card = page.locator(SEL["pairing_card"])
+    await pairing_card.wait_for(state="visible", timeout=5000)
+    assert await pairing_card.get_attribute("data-request-id") == pairing_request_id
+
+    await pairing_card.locator(SEL["auth_token_input"]).fill("PAIR-1234")
+    await pairing_card.locator(SEL["pairing_submit_btn"]).click()
+    await pairing_card.wait_for(state="hidden", timeout=5000)
+
+    assert captured_pairing_payloads == [
+        {
+            "code": "PAIR-1234",
+            "thread_id": thread_id,
+            "request_id": pairing_request_id,
+        }
     ]

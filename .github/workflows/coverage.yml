@@ -86,10 +86,7 @@ jobs:
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
       - name: Install cargo-component
-        run: |
-          if ! command -v cargo-component >/dev/null 2>&1; then
-            cargo install cargo-component --locked
-          fi
+        uses: ./.github/actions/install-cargo-component
 
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
@@ -150,10 +147,7 @@ jobs:
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
       - name: Install cargo-component
-        run: |
-          if ! command -v cargo-component >/dev/null 2>&1; then
-            cargo install cargo-component --locked
-          fi
+        uses: ./.github/actions/install-cargo-component
 
       - name: Build WASM channels
         run: ./scripts/build-wasm-extensions.sh --channels
