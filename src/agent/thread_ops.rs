@@ -1049,7 +1049,7 @@ impl Agent {
             return None;
         }
 
-        match store
+        let result = match store
             .add_conversation_message(thread_id, "user", user_input)
             .await
         {
@@ -1084,9 +1084,11 @@ impl Agent {
                 .await;
                 None
             }
-        }
+        };
 
         crate::db::set_title_if_missing(store.as_ref(), thread_id, user_input).await;
+
+        result
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
