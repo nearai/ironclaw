@@ -847,9 +847,9 @@ pub(crate) fn extract_last_event_id(
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQuery {
-    thread_id: Option<String>,
-    limit: Option<usize>,
-    before: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) before: Option<String>,
 }
 
 /// Check whether an Origin header value points to a local address.
