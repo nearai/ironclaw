@@ -46,3 +46,4 @@ Our scope is large and is mainly concerned with adding many essential features f
 * introduce more stable, better, codex apc support
 * continue to work on and improve self-healing solution
 * Introduce GPLv3 into deny.toml for rust cargo crate licensing compatibility
+* Further testing of new, enhanced multiservice multitenant features
