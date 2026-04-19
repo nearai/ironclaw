@@ -39,7 +39,7 @@ use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::traits::store::Store;
 use crate::types::error::EngineError;
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
@@ -601,6 +601,7 @@ async fn handle_llm_complete(
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
+    let has_explicit_messages = explicit_messages.is_some();
 
     if let Err(e) = reconcile_dynamic_tool_lease(
         thread,
@@ -646,45 +647,94 @@ async fn handle_llm_complete(
         metadata: HashMap::new(),
     };
 
-    match deps.llm.complete(&messages, &actions, &config).await {
-        Ok(output) => {
-            total_tokens.input_tokens += output.usage.input_tokens;
-            total_tokens.output_tokens += output.usage.output_tokens;
-            total_tokens.cost_usd += output.usage.cost_usd;
+    let mut compacted_messages = None;
+    let output = match deps.llm.complete(&messages, &actions, &config).await {
+        Ok(output) => output,
+        Err(EngineError::TokenLimitExceeded { used, limit }) => {
+            let retry_messages = compact_thread_messages_for_retry(&messages);
+            let tokens_before = crate::executor::compaction::estimate_tokens(&messages);
+            let tokens_after = crate::executor::compaction::estimate_tokens(&retry_messages);
+            if !has_explicit_messages
+                || (retry_messages.len() >= messages.len() && tokens_after >= tokens_before)
+            {
+                return ExtFunctionResult::Error(monty::MontyException::new(
+                    monty::ExcType::RuntimeError,
+                    Some(format!(
+                        "LLM call failed: {}",
+                        EngineError::TokenLimitExceeded { used, limit }
+                    )),
+                ));
+            }
 
-            let usage = serde_json::json!({
-                "input_tokens": output.usage.input_tokens,
-                "output_tokens": output.usage.output_tokens,
-                "cost_usd": output.usage.cost_usd,
-            });
+            tracing::warn!(
+                used,
+                limit,
+                tokens_before,
+                tokens_after,
+                messages_before = messages.len(),
+                messages_after = retry_messages.len(),
+                "orchestrator llm call exceeded context window, compacting and retrying"
+            );
 
-            let result = match output.response {
-                LlmResponse::Text(text) => {
-                    serde_json::json!({"type": "text", "content": text, "usage": usage})
+            match deps.llm.complete(&retry_messages, &actions, &config).await {
+                Ok(output) => {
+                    compacted_messages = Some(retry_messages);
+                    output
                 }
-                LlmResponse::Code { code, .. } => {
-                    serde_json::json!({"type": "code", "code": code, "usage": usage})
+                Err(retry_err) => {
+                    return ExtFunctionResult::Error(monty::MontyException::new(
+                        monty::ExcType::RuntimeError,
+                        Some(format!(
+                            "LLM call failed after compaction retry: {retry_err}"
+                        )),
+                    ));
                 }
-                LlmResponse::ActionCalls { calls, content } => {
-                    // Single source of truth for the Python interchange
-                    // shape — must round-trip via `python_json_to_action_calls`.
-                    let calls_json = action_calls_to_python_json(&calls);
-                    serde_json::json!({
-                        "type": "actions",
-                        "content": content,
-                        "calls": calls_json,
-                        "usage": usage
-                    })
-                }
-            };
-
-            ExtFunctionResult::Return(json_to_monty(&result))
+            }
         }
-        Err(e) => ExtFunctionResult::Error(monty::MontyException::new(
-            monty::ExcType::RuntimeError,
-            Some(format!("LLM call failed: {e}")),
-        )),
+        Err(e) => {
+            return ExtFunctionResult::Error(monty::MontyException::new(
+                monty::ExcType::RuntimeError,
+                Some(format!("LLM call failed: {e}")),
+            ));
+        }
+    };
+
+    total_tokens.input_tokens += output.usage.input_tokens;
+    total_tokens.output_tokens += output.usage.output_tokens;
+    total_tokens.cost_usd += output.usage.cost_usd;
+
+    let usage = serde_json::json!({
+        "input_tokens": output.usage.input_tokens,
+        "output_tokens": output.usage.output_tokens,
+        "cost_usd": output.usage.cost_usd,
+    });
+
+    let mut result = match output.response {
+        LlmResponse::Text(text) => {
+            serde_json::json!({"type": "text", "content": text, "usage": usage})
+        }
+        LlmResponse::Code { code, .. } => {
+            serde_json::json!({"type": "code", "code": code, "usage": usage})
+        }
+        LlmResponse::ActionCalls { calls, content } => {
+            // Single source of truth for the Python interchange
+            // shape — must round-trip via `python_json_to_action_calls`.
+            let calls_json = action_calls_to_python_json(&calls);
+            serde_json::json!({
+                "type": "actions",
+                "content": content,
+                "calls": calls_json,
+                "usage": usage
+            })
+        }
+    };
+
+    if let Some(compacted) = compacted_messages {
+        result["compacted_messages"] =
+            serde_json::Value::Array(thread_messages_to_python_json(&compacted));
     }
+
+    ExtFunctionResult::Return(json_to_monty(&result))
 }
 
 /// Handle `__execute_code_step__(code, state)`.
@@ -2180,33 +2230,7 @@ fn build_orchestrator_inputs(
     } else {
         &thread.internal_messages
     };
-    let context: Vec<serde_json::Value> = bootstrap_messages
-        .iter()
-        .map(|m| {
-            // Serialize action_calls through the Python interchange shape
-            // (`{name, call_id, params}`) so the bootstrap context is
-            // round-trip compatible with `python_json_to_action_calls`.
-            // Using bare `m.action_calls` here produces the canonical Rust
-            // serde format (`{action_name, id, parameters}`), which the
-            // Python orchestrator passes back verbatim on the next
-            // `__llm_complete__` call — and `python_json_to_action_calls`
-            // then fails with "missing field `name`", orphaning every
-            // subsequent tool result. This is the SECOND code path (after
-            // `handle_llm_complete`) that feeds action_calls into the
-            // Python working transcript; both must use the same shape.
-            let calls_json = m
-                .action_calls
-                .as_ref()
-                .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
-            serde_json::json!({
-                "role": format!("{:?}", m.role),
-                "content": m.content,
-                "action_name": m.action_name,
-                "action_call_id": m.action_call_id,
-                "action_calls": calls_json,
-            })
-        })
-        .collect();
+    let context = thread_messages_to_python_json(bootstrap_messages);
 
     // Build config
     let config = serde_json::json!({
@@ -2312,6 +2336,76 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+/// Serialize engine thread messages into the Python orchestrator transcript shape.
+fn thread_messages_to_python_json(messages: &[ThreadMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            // Serialize action_calls through the Python interchange shape
+            // (`{name, call_id, params}`) so the bootstrap context and any
+            // caller-level compaction retries stay round-trip compatible with
+            // `python_json_to_action_calls`.
+            let calls_json = m
+                .action_calls
+                .as_ref()
+                .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+            serde_json::json!({
+                "role": format!("{:?}", m.role),
+                "content": m.content,
+                "action_name": m.action_name,
+                "action_call_id": m.action_call_id,
+                "action_calls": calls_json,
+            })
+        })
+        .collect()
+}
+
+/// Compact thread messages for a single retry after a context-overflow error.
+///
+/// Keeps all `System` messages that appeared before the last `User` message,
+/// inserts a short note, then preserves the last `User` message and everything
+/// after it (the current turn's assistant/action-result context).
+fn compact_thread_messages_for_retry(messages: &[ThreadMessage]) -> Vec<ThreadMessage> {
+    let mut compacted = Vec::new();
+    let last_user_idx = messages.iter().rposition(|m| m.role == MessageRole::User);
+
+    if let Some(idx) = last_user_idx {
+        for msg in &messages[..idx] {
+            if msg.role == MessageRole::System {
+                compacted.push(msg.clone());
+            }
+        }
+
+        if idx > 0 {
+            compacted.push(ThreadMessage::system(
+                "[Note: Earlier conversation history was automatically compacted \
+                 to fit within the context window. The most recent exchange is preserved below.]",
+            ));
+        }
+
+        compacted.extend_from_slice(&messages[idx..]);
+    } else {
+        for msg in messages {
+            if msg.role == MessageRole::System {
+                compacted.push(msg.clone());
+            }
+        }
+        if compacted.len() < messages.len() {
+            compacted.push(ThreadMessage::system(
+                "[Note: Earlier conversation history was automatically compacted \
+                 to fit within the context window.]",
+            ));
+        }
+        for msg in messages {
+            if msg.role != MessageRole::System {
+                compacted.push(msg.clone());
+            }
+        }
+    }
+
+    compacted
 }
 
 /// Extract the last `n` characters from `s`.
@@ -3337,6 +3431,259 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    struct ContextOverflowRetryLlm {
+        captured: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ContextOverflowRetryLlm {
+        fn model_name(&self) -> &str {
+            "context-overflow-retry"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(messages.to_vec());
+
+            let compacted = messages.iter().any(|msg| {
+                msg.role == MessageRole::System
+                    && msg
+                        .content
+                        .contains("automatically compacted to fit within the context window")
+            });
+
+            if compacted {
+                Ok(crate::traits::llm::LlmOutput {
+                    response: crate::types::step::LlmResponse::Text("FINAL(\"done\")".into()),
+                    usage: crate::types::step::TokenUsage::default(),
+                })
+            } else {
+                Err(EngineError::TokenLimitExceeded {
+                    used: 150_000,
+                    limit: 128_000,
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_retries_after_context_overflow_with_compacted_messages() {
+        let concrete = Arc::new(ContextOverflowRetryLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are helpful."},
+            {"role": "User", "content": "First question"},
+            {"role": "Assistant", "content": "First answer"},
+            {"role": "User", "content": "Second question"},
+            {"role": "Assistant", "content": "Second answer"},
+            {"role": "User", "content": "Current request"}
+        ]);
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&messages),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let response = match result {
+            ExtFunctionResult::Return(obj) => monty_to_json(&obj),
+            other => panic!("expected successful retry result, got {other:?}"),
+        };
+
+        assert_eq!(response["type"], "text");
+        assert_eq!(response["content"], "FINAL(\"done\")");
+        let compacted = response["compacted_messages"]
+            .as_array()
+            .expect("compacted messages should be returned to the orchestrator state");
+        assert!(
+            compacted.len() < messages.as_array().unwrap().len(),
+            "retry payload should be smaller than the original transcript"
+        );
+        assert_eq!(compacted[0]["role"], "System");
+        assert!(
+            compacted.iter().any(|msg| msg["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("automatically compacted to fit within the context window")),
+            "compaction note should be preserved for the retry"
+        );
+        assert_eq!(
+            compacted.last().and_then(|msg| msg["content"].as_str()),
+            Some("Current request")
+        );
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 2, "LLM should be retried exactly once");
+        assert_eq!(
+            captured[0].last().map(|m| m.content.as_str()),
+            Some("Current request")
+        );
+        assert!(
+            captured[1]
+                .iter()
+                .any(|msg| msg.content.contains("automatically compacted")),
+            "second call should receive the compacted retry transcript"
+        );
+    }
+
+    struct StatefulOverflowOrchestratorLlm {
+        captured: tokio::sync::Mutex<Vec<Vec<ThreadMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for StatefulOverflowOrchestratorLlm {
+        fn model_name(&self) -> &str {
+            "stateful-overflow-orchestrator"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(messages.to_vec());
+
+            let has_compaction_note = messages.iter().any(|msg| {
+                msg.role == MessageRole::System
+                    && msg
+                        .content
+                        .contains("automatically compacted to fit within the context window")
+            });
+            let has_progress_message = messages
+                .iter()
+                .any(|msg| msg.role == MessageRole::Assistant && msg.content == "Still working");
+
+            if !has_compaction_note {
+                return Err(EngineError::TokenLimitExceeded {
+                    used: 150_000,
+                    limit: 128_000,
+                });
+            }
+
+            let text = if has_progress_message {
+                "FINAL(\"done\")"
+            } else {
+                "Still working"
+            };
+
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text(text.into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_orchestrator_persists_compacted_messages_after_retry() {
+        let concrete = Arc::new(StatefulOverflowOrchestratorLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let (_tx, mut signal_rx) = crate::runtime::messaging::signal_channel(8);
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let persisted_state = serde_json::json!({
+            "working_messages": [
+                {"role": "System", "content": "You are helpful."},
+                {"role": "User", "content": "First question"},
+                {"role": "Assistant", "content": "First answer"},
+                {"role": "User", "content": "Second question"},
+                {"role": "Assistant", "content": "Second answer"},
+                {"role": "User", "content": "Current request"}
+            ]
+        });
+
+        let result = execute_orchestrator(
+            DEFAULT_ORCHESTRATOR,
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            &mut signal_rx,
+            None,
+            None,
+            None,
+            &persisted_state,
+        )
+        .await
+        .expect("orchestrator should recover after context overflow");
+
+        match result.outcome {
+            ThreadOutcome::Completed { response } => {
+                assert_eq!(response.as_deref(), Some("Still working"));
+            }
+            other => panic!("expected completed outcome, got {other:?}"),
+        }
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 2, "expected overflow + retry");
+        assert!(
+            captured[1]
+                .iter()
+                .any(|msg| msg.content.contains("automatically compacted")),
+            "retry call should receive compacted messages"
+        );
+        assert!(
+            thread
+                .internal_messages
+                .iter()
+                .any(|msg| msg.content.contains("automatically compacted")),
+            "compacted transcript should be persisted back into orchestrator state"
+        );
+        assert!(
+            thread
+                .internal_messages
+                .iter()
+                .any(|msg| msg.content == "Still working"),
+            "post-retry assistant output should be appended onto the compacted transcript"
+        );
     }
 
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────

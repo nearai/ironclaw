@@ -39,6 +39,20 @@ impl LlmBridgeAdapter {
     }
 }
 
+fn map_provider_error(error: crate::error::LlmError) -> EngineError {
+    match error {
+        crate::error::LlmError::ContextLengthExceeded { used, limit } => {
+            EngineError::TokenLimitExceeded {
+                used: used as u64,
+                limit: limit as u64,
+            }
+        }
+        other => EngineError::Llm {
+            reason: other.to_string(),
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl LlmBackend for LlmBridgeAdapter {
     async fn complete(
@@ -77,9 +91,7 @@ impl LlmBackend for LlmBridgeAdapter {
             let response = provider
                 .complete(request)
                 .await
-                .map_err(|e| EngineError::Llm {
-                    reason: e.to_string(),
-                })?;
+                .map_err(map_provider_error)?;
 
             // Check for code blocks in the response (CodeAct/RLM pattern)
             let llm_response = match extract_code_block(&response.content) {
@@ -113,13 +125,10 @@ impl LlmBackend for LlmBridgeAdapter {
         }
 
         // Call provider
-        let response =
-            provider
-                .complete_with_tools(request)
-                .await
-                .map_err(|e| EngineError::Llm {
-                    reason: e.to_string(),
-                })?;
+        let response = provider
+            .complete_with_tools(request)
+            .await
+            .map_err(map_provider_error)?;
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
@@ -1138,6 +1147,85 @@ And also check the token price:\n\
 
     /// Mock LLM provider that returns tool calls with template refs in
     /// their parameters, simulating Qwen-style parallel call behavior.
+    struct ContextOverflowProvider;
+
+    #[async_trait]
+    impl LlmProvider for ContextOverflowProvider {
+        fn model_name(&self) -> &str {
+            "context-overflow-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            Err(LlmError::ContextLengthExceeded {
+                used: 150_000,
+                limit: 128_000,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::ContextLengthExceeded {
+                used: 150_000,
+                limit: 128_000,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_context_overflow_to_engine_token_limit() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(ContextOverflowProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let err = adapter
+            .complete(
+                &[ThreadMessage::user("this overflows")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .expect_err("context overflow should propagate as engine token limit");
+
+        assert!(matches!(
+            err,
+            EngineError::TokenLimitExceeded {
+                used: 150_000,
+                limit: 128_000
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_maps_context_overflow_to_engine_token_limit() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(ContextOverflowProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let err = adapter
+            .complete(
+                &[ThreadMessage::user("this overflows")],
+                &[test_action("search")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .expect_err("context overflow should propagate as engine token limit");
+
+        assert!(matches!(
+            err,
+            EngineError::TokenLimitExceeded {
+                used: 150_000,
+                limit: 128_000
+            }
+        ));
+    }
+
     struct TemplateRefProvider;
 
     #[async_trait]
