@@ -111,7 +111,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Streaming draft replies | ✅ | ❌ | Partial replies via draft message updates |
 | Configurable stream modes | ✅ | ❌ | Per-channel stream behavior |
-| Thread ownership | ✅ | 🚧 | Thread-level ownership tracking plus reply participation memory |
+| Thread ownership | ✅ | 🚧 | Reply participation memory is restart-stable and TTL-bounded; once the bot joins a thread, follow-ups inherit channel visibility. Full thread-level ownership tracking is still missing |
 | Download-file action | ✅ | ❌ | On-demand attachment downloads via message actions |
 
 ### Mattermost-Specific Features (since Mar 2026)
