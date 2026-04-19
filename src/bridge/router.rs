@@ -225,7 +225,8 @@ async fn persist_project_attachments(
 }
 
 fn resolve_project_root() -> PathBuf {
-    crate::bootstrap::ironclaw_base_dir().join("projects")
+    let base_dir = crate::bootstrap::ironclaw_base_dir();
+    base_dir.parent().map(PathBuf::from).unwrap_or(base_dir)
 }
 
 async fn save_attachment_index_notes(

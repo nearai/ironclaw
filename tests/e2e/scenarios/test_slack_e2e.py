@@ -177,10 +177,11 @@ async def approve_slack_pairing(base_url: str, code: str) -> None:
 async def active_slack(slack_e2e_server):
     """Ensure Slack is installed, configured, and clean for each test."""
     base_url = slack_e2e_server["base_url"]
+    http_url = slack_e2e_server["http_url"]
     fake_slack_url = slack_e2e_server["fake_slack_url"]
     channels_dir = slack_e2e_server["channels_dir"]
 
-    await activate_slack(base_url, fake_slack_url, channels_dir)
+    await activate_slack(base_url, http_url, fake_slack_url, channels_dir)
     await reset_fake_slack(fake_slack_url)
     return slack_e2e_server
 

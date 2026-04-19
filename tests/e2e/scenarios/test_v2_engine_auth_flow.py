@@ -1061,7 +1061,7 @@ class TestV2EngineAttachments:
 
         notes_path_match = re.search(r'project_path="([^"]*v2-notes\.txt)"', user_input)
         assert notes_path_match, user_input
-        saved_notes_path = ROOT / notes_path_match.group(1)
+        saved_notes_path = Path(_V2_HOME_TMPDIR.name) / notes_path_match.group(1)
         assert saved_notes_path.exists(), saved_notes_path
         assert saved_notes_path.read_bytes() == b"V2 attachment note.\nForwarded through engine v2."
 
