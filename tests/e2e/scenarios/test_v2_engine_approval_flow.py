@@ -337,10 +337,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        history = await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate, not response text)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Reply "yes" to approve — goes through SubmissionParser as ApprovalResponse
         await api_post(
@@ -384,10 +382,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Deny
         await api_post(
@@ -436,9 +432,7 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        await _wait_for_response(
-            base, thread_id_1, timeout=60, expect_substring="requires approval",
-        )
+        await _wait_for_approval(base, thread_id_1, timeout=60)
 
         await api_post(
             base, "/api/chat/send",
@@ -619,9 +613,7 @@ async def test_always_approve_survives_restart(restartable_v2_server):
         timeout=30,
     )
 
-    await _wait_for_response(
-        base, thread_id, timeout=60, expect_substring="requires approval",
-    )
+    await _wait_for_approval(base, thread_id, timeout=60)
 
     await api_post(
         base, "/api/chat/send",
