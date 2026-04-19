@@ -33,7 +33,7 @@ LunarWing and its core contributers are not affiliated with NearAI.
 * Improved Scheduling System
 * Support for external agentic coding tools developed independently from upstream.
 * Better support for logging common errors which still plague the upstream project.
-* Self healing, advanced healthchecks for bridge services, Ironclaw itself, and even optional self healing solutions for routines
+* Self healing, advanced healthchecks for channel bridge services, the running LunarWing binary/daemon/service itself, and even optional self healing solutions for routines in the case of routine failures. 
 
 ## Additionally, there is a custom HTTP proxy for TensorZero routing setups with optimized tool_choice routing for open source coding agent applications.
 ### Project Scope
@@ -41,9 +41,9 @@ LunarWing and its core contributers are not affiliated with NearAI.
 Our scope is large and is mainly concerned with adding many essential features from Upstream which are still missing, including advanced health checking and self-repair mechanisms. The LunarWing team is more interested in providing useful features instead of support for proprietary chinese document editing tools or other crapware. Our vision for LunarWing is expressed in our MANIFESTO.
 
 #### Things to do in the immediate term:
-* add the custom tools, channels, scripts, etc to the repo in proper form
+* add ALL the rest of the custom tools, channels, scripts, etc to the repo in proper form
 * update MANIFESTO
-* introduce more stable, better, codex apc support
+* introduce more stable, better, codex apc/acpx support. 
 * continue to work on and improve self-healing solution
 * Introduce GPLv3 into deny.toml for rust cargo crate licensing compatibility
 * Further testing of new, enhanced multiservice multitenant features
