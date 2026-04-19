@@ -2186,6 +2186,8 @@ pub(crate) async fn gateway_status_handler(
         }
     };
 
+    let active_config = state.active_config.read().await.clone();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit_hash,
@@ -2198,9 +2200,9 @@ pub(crate) async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
-        llm_backend: state.active_config.llm_backend.clone(),
-        llm_model: state.active_config.llm_model.clone(),
-        enabled_channels: state.active_config.enabled_channels.clone(),
+        llm_backend: active_config.llm_backend,
+        llm_model: active_config.llm_model,
+        enabled_channels: active_config.enabled_channels,
         engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
     })
 }
@@ -2534,6 +2536,9 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -2545,7 +2550,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
             secrets_store: None,
             db_auth,
             pairing_store,
@@ -2588,6 +2593,9 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -2599,7 +2607,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,

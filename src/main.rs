@@ -823,6 +823,13 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
+        gw = gw.with_llm_session_manager(Arc::clone(&components.session));
+        if let Some(ref reload) = components.llm_reload {
+            gw = gw.with_llm_reload(Arc::clone(reload));
+        }
+        if let Some(toml_path) = toml_path {
+            gw = gw.with_config_toml_path(std::path::PathBuf::from(toml_path));
+        }
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));

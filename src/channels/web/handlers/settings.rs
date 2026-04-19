@@ -179,7 +179,107 @@ pub async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if llm_setting_requires_reload(&key) {
+        reload_llm_after_settings_change(&state).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Setting keys whose value is consumed by `build_provider_chain` and whose
+/// change should therefore trigger a hot-reload of the LLM provider chain.
+///
+/// Keep this list narrow: every key added here causes an extra
+/// `Config::from_db_with_toml` round-trip plus a chain rebuild (retry, cache,
+/// circuit breaker wrappers), so non-LLM settings must not be listed.
+fn llm_setting_requires_reload(key: &str) -> bool {
+    matches!(
+        key,
+        "llm_backend"
+            | "selected_model"
+            | "llm_model"
+            | "llm_custom_providers"
+            | "llm_builtin_overrides"
+            | "ollama_base_url"
+            | "openai_compatible_base_url"
+            | "bedrock_region"
+            | "bedrock_cross_region"
+            | "bedrock_profile"
+    )
+}
+
+/// Rebuild the active provider chain from the latest settings and atomically
+/// swap the running primary/cheap providers.
+///
+/// Returns `Ok(())` when the reload completes *or* when hot-reload is not
+/// wired into this gateway instance (test harnesses, CLI-only runs). A
+/// missing subsystem is logged at `warn!` so operators can distinguish
+/// "setting landed, provider still stale because hot-reload is disabled"
+/// from "setting landed and new provider is live".
+async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), StatusCode> {
+    let Some(reloader) = state.llm_reload.as_ref() else {
+        tracing::warn!(
+            "LLM setting changed but llm_reload is not wired into the gateway; \
+             provider chain will keep using the pre-change config until restart"
+        );
+        return Ok(());
+    };
+    let store_opt = state.store.as_ref(); // dispatch-exempt: read-only re-resolve of LlmConfig for chain rebuild
+    let Some(store) = store_opt else {
+        tracing::warn!(
+            "LLM setting changed but no database store is configured; \
+             cannot reload provider chain"
+        );
+        return Ok(());
+    };
+    let Some(session_manager) = state.llm_session_manager.as_ref() else {
+        tracing::warn!(
+            "LLM setting changed but llm_session_manager is not wired into the gateway; \
+             cannot reload provider chain"
+        );
+        return Ok(());
+    };
+
+    // Re-resolve at the owner scope because LlmConfig is admin-scope resolved
+    // (same precedence layers `AppBuilder::init_config` uses at startup).
+    let config = crate::config::Config::from_db_with_toml(
+        store.as_ref(),
+        &state.owner_id,
+        state.config_toml_path.as_deref(),
+        true,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to reload config for LLM hot reload: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    reloader
+        .reload(&config.llm, Arc::clone(session_manager))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to hot-reload LLM provider: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Refresh the active-config snapshot the status handler reads.
+    let active_model = state
+        .llm_provider
+        .as_ref()
+        .map(|provider| provider.active_model_name())
+        .unwrap_or_else(|| config.llm.active_model_name());
+    {
+        let mut active = state.active_config.write().await;
+        active.llm_backend = config.llm.backend.clone();
+        active.llm_model = active_model;
+    }
+
+    tracing::info!(
+        backend = %config.llm.backend,
+        "LLM provider chain hot-reloaded from updated settings"
+    );
+
+    Ok(())
 }
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
@@ -305,6 +405,10 @@ pub async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if llm_setting_requires_reload(&key) {
+        reload_llm_after_settings_change(&state).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -354,6 +458,10 @@ pub async fn settings_import_handler(
             tracing::error!("Failed to import settings: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    if body.settings.keys().any(|k| llm_setting_requires_reload(k)) {
+        reload_llm_after_settings_change(&state).await?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -952,6 +1060,9 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -962,7 +1073,9 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: Some(secrets),
             db_auth: None,
             pairing_store: None,
@@ -1283,6 +1396,158 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// Drive through `settings_set_handler` and verify that writing an
+    /// LLM-relevant admin-scope key triggers `reload_llm_after_settings_change`,
+    /// which rebuilds the provider chain and atomically swaps it.
+    ///
+    /// Per `.claude/rules/testing.md` (Test Through the Caller, Not Just
+    /// the Helper), the reload predicate and the swap helper are both
+    /// unit-tested — but a test that drives the actual handler is needed to
+    /// catch regressions where the handler forgets to call the reload path,
+    /// gets the wrapper missing from state, or stops threading the new model
+    /// into `active_config`.
+    #[tokio::test]
+    async fn settings_set_handler_triggers_llm_provider_hot_reload() {
+        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+
+        let secrets = test_secrets_store();
+        let (db, _tmp) = crate::testing::test_db().await;
+
+        // Starting config: NEAR AI backend with "model-start".
+        let mut initial = LlmConfig {
+            backend: "nearai".to_string(),
+            session: SessionConfig::default(),
+            nearai: crate::llm::config::NearAiConfig {
+                model: "model-start".to_string(),
+                cheap_model: None,
+                base_url: "https://api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            openai_codex: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        initial.nearai.model = "model-start".to_string();
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("build initial provider chain");
+        assert_eq!(primary.active_model_name(), "model-start");
+
+        // Seed admin-scope settings that `Config::from_db_with_toml` reads
+        // so the reloaded chain resolves nearai_model from `selected_model`.
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        db.set_setting(admin_scope, "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed llm_backend");
+        db.set_setting(
+            admin_scope,
+            "selected_model",
+            &serde_json::json!("model-start"),
+        )
+        .await
+        .expect("seed selected_model");
+
+        let mut state = test_gateway_state(Arc::clone(&secrets));
+        state.store = Some(Arc::clone(&db));
+        state.llm_provider = Some(Arc::clone(&primary));
+        state.llm_reload = Some(Arc::clone(&reload_handle));
+        state.llm_session_manager = Some(Arc::clone(&session));
+        // Owner scope is the user_id that `Config::from_db_with_toml` is
+        // called with — we set it to admin scope so the settings reload
+        // reads the same rows we just seeded.
+        state.owner_id = admin_scope.to_string();
+        let state = Arc::new(state);
+
+        // Act: the admin user writes selected_model=model-swapped to the
+        // admin scope via the normal settings handler.
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: admin_scope.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("model-swapped"),
+            }),
+        )
+        .await
+        .expect("settings_set_handler should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Assert: the same swappable wrapper now reports the new model.
+        assert_eq!(
+            primary.active_model_name(),
+            "model-swapped",
+            "llm_reload should have swapped the inner provider",
+        );
+
+        // And the status snapshot was updated in the same critical section.
+        let active = state.active_config.read().await;
+        assert_eq!(active.llm_backend, "nearai");
+        assert_eq!(active.llm_model, "model-swapped");
+    }
+
+    /// When `llm_reload` is not wired into the gateway (test harnesses,
+    /// CLI-only runs), the handler must still return success: the setting
+    /// lands in the DB, and the missing-wiring path is logged at `warn!`
+    /// so operators can see the provider chain will stay stale until
+    /// restart. Exercising this explicitly guards against regressions that
+    /// would turn the warning into a 500.
+    #[tokio::test]
+    async fn settings_set_handler_succeeds_without_hot_reload_wiring() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        // Sanity: this state deliberately has no llm_reload.
+        assert!(state.llm_reload.is_none());
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("ignored-value"),
+            }),
+        )
+        .await
+        .expect("handler should not 500 when llm_reload is None");
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
