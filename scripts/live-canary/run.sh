@@ -205,7 +205,7 @@ main() {
   case "${LANE}" in
     deterministic-replay)
       IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live "${SCENARIO}"
-      IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live_mission ""
+      IRONCLAW_LIVE_TEST=1 run_cargo_test e2e_live_mission ""
       IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live_personas ""
       ;;
     public-smoke)
