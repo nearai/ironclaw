@@ -23,6 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
+      # `has_boundary_check` fires when the gateway-boundaries guardrail
+      # itself changes (either the checker script or this workflow). Keeps
+      # the check from being silently skipped by a PR that only edits
+      # scripts/.github — see serrrfirat's review on PR #2647.
+      has_boundary_check: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_boundary_check }}
     steps:
       - id: non_pr
         if: github.event_name != 'pull_request'
@@ -46,6 +51,16 @@ jobs:
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
+          fi
+
+          BOUNDARY_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'scripts/check_gateway_boundaries.py' \
+            '.github/workflows/code_style.yml' \
+            | head -1)
+          if [ -n "$BOUNDARY_CHANGES" ]; then
+            echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Dynamic matrix: SLIM (1 leg) for non-main PRs; FULL (3 legs) for PRs
@@ -210,7 +225,12 @@ jobs:
   gateway-boundaries:
     name: Gateway platform/feature boundaries
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    # Also run when the checker script or this workflow itself is edited —
+    # otherwise a PR touching only `scripts/check_gateway_boundaries.py`
+    # or `.github/workflows/code_style.yml` would skip this job and still
+    # satisfy the roll-up, weakening the guardrail. See serrrfirat's
+    # review on PR #2647.
+    if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository

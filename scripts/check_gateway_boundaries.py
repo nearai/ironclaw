@@ -19,13 +19,31 @@ Forbidden patterns (matched inside `use ...` statements or fully-qualified
 type paths — comments and string literals are stripped first):
 
 - `crate::channels::web::handlers::` and `crate::channels::web::features::`
-- `super::handlers::` and `super::features::`
-- `super::super::handlers::` and `super::super::features::`
+- `crate::channels::web::server::` (the `server.rs` compatibility shim —
+  routing through it re-creates the same platform → feature back-edge the
+  shim is meant to be migrated away from)
+- `super::handlers::`, `super::features::`, and `super::server::`
+- `super::super::handlers::`, `super::super::features::`, and
+  `super::super::server::`
+
+Grouped `use` statements that span multiple lines are matched across the
+joined statement, so
+
+    use crate::channels::web::{
+        handlers::auth::login_handler,
+        platform::state::GatewayState,
+    };
+
+is rejected even though `handlers::` never appears on the same line as
+`crate::channels::web::`.
 
 Allowed:
 
 - `platform/router.rs` (explicit skip — the composition point).
-- Any test module inside a platform file (`#[cfg(test)]` or `mod tests`).
+- Any test module inside a platform file (`#[cfg(test)]` or `mod tests {`):
+  the whole `{ ... }` body is blanked before pattern matching, so
+  caller-level regression tests in platform files are free to import
+  handler/feature modules.
 - Type re-exports inside `platform/` that flow *downward* (platform type
   → handlers), since those land in the handler's file, not in a platform
   file.
@@ -54,14 +72,33 @@ EXEMPT_RELATIVE_PATHS = {"router.rs"}
 FORBIDDEN_PATTERNS = [
     re.compile(r"\bcrate::channels::web::handlers::"),
     re.compile(r"\bcrate::channels::web::features::"),
+    # The `server.rs` compatibility shim hides platform → feature back-edges
+    # behind a re-export, so rejecting it is what the reviewer requested
+    # while the shim still exists. The allowlist below carries the specific
+    # pre-existing call sites that are tracked for follow-up migration.
+    re.compile(r"\bcrate::channels::web::server::"),
     # `super::` and `super::super::` resolve differently depending on the
-    # file's depth, but any path through them that lands on a handler or
-    # feature module is a back-edge. Match conservatively.
+    # file's depth, but any path through them that lands on a handler,
+    # feature, or the `server.rs` shim is a back-edge. Match conservatively.
     re.compile(r"\bsuper::handlers::"),
     re.compile(r"\bsuper::features::"),
+    re.compile(r"\bsuper::server::"),
     re.compile(r"\bsuper::super::handlers::"),
     re.compile(r"\bsuper::super::features::"),
+    re.compile(r"\bsuper::super::server::"),
 ]
+
+# Grouped-import pattern: `use crate::channels::web::{ ... handlers:: ... }`
+# or the same via `super::{ ... }` / `super::super::{ ... }`. The per-line
+# scan above misses these because the forbidden segment lands on a
+# continuation line. We match across newlines (sanitized text already has
+# comments and string literals blanked) and report the line where the
+# offending segment actually appears.
+GROUPED_FORBIDDEN_PATTERN = re.compile(
+    r"\b(?:crate::channels::web|super(?:::super)?)::\{"
+    r"[^{}]*?\b(?P<forbidden>handlers|features|server)::",
+    re.DOTALL,
+)
 
 # Narrow allowlist of pre-existing back-edges, each tied to a specific
 # migration target. Entries are `(platform_file, forbidden_path_prefix)`;
@@ -79,6 +116,15 @@ ALLOWLIST: set[tuple[str, str]] = {
     # frontend_widgets_handler) that share the same helpers. Tracked as a
     # follow-up under ironclaw#2599; see the stage 5 commit message.
     ("static_files.rs", "crate::channels::web::handlers::frontend"),
+    # platform/ws.rs reaches through the `server.rs` compatibility shim for
+    # a handful of types and helpers that have not yet moved into
+    # `platform/*` (GatewayState re-export, PerUserRateLimiter / RateLimiter
+    # constructors, ActiveConfigSnapshot, images_to_attachments, and the
+    # legacy v1 auth-token handlers). Each is tracked for relocation under
+    # ironclaw#2599; this allowlist entry shrinks as individual items move.
+    # Added in stage 5 when `crate::channels::web::server::` was promoted to
+    # a forbidden pattern.
+    ("ws.rs", "crate::channels::web::server::"),
 }
 
 
@@ -254,15 +300,65 @@ def _is_allowlisted(path: pathlib.Path, line: str) -> bool:
     return False
 
 
+_TEST_MODULE_START = re.compile(
+    # `#[cfg(test)]` (optionally with whitespace/newlines) then an optional
+    # `pub `, then `mod IDENT {`, *or* a bare `mod tests {`.
+    r"(?:#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+\w+|\bmod\s+tests)\s*\{"
+)
+
+
+def _blank_test_modules(sanitized: str) -> str:
+    """Blank the body of every `#[cfg(test)] mod ... { ... }` and
+    `mod tests { ... }` block. Line numbers and brace structure outside
+    the blanked body are preserved so subsequent scans still report
+    accurate locations.
+    """
+    out = list(sanitized)
+    n = len(sanitized)
+    last_end = 0
+    for m in _TEST_MODULE_START.finditer(sanitized):
+        if m.start() < last_end:
+            # Nested inside an already-blanked test module.
+            continue
+        open_pos = m.end() - 1  # position of the opening `{`
+        depth = 1
+        j = open_pos + 1
+        while j < n and depth > 0:
+            ch = sanitized[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            j += 1
+        # `j` now points one past the matching `}` (or EOF on malformed
+        # input). Blank everything strictly inside the braces so the
+        # braces themselves stay visible to any outer tooling.
+        for k in range(open_pos + 1, max(open_pos + 1, j - 1)):
+            if out[k] != "\n" and out[k] != "\t":
+                out[k] = " "
+        last_end = j
+    return "".join(out)
+
+
 def _find_violations(path: pathlib.Path) -> list[Violation]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    sanitized = _strip_comments_and_strings(text)
+    sanitized = _blank_test_modules(_strip_comments_and_strings(text))
+    original_lines = text.splitlines()
+    sanitized_lines = sanitized.splitlines()
     violations: list[Violation] = []
-    for idx, line in enumerate(sanitized.splitlines(), start=1):
+    flagged_lines: set[int] = set()
+
+    def _original_at(line_number: int) -> str:
+        idx = line_number - 1
+        if 0 <= idx < len(original_lines):
+            return original_lines[idx]
+        return ""
+
+    # Per-line scan for same-line forbidden paths.
+    for idx, line in enumerate(sanitized_lines, start=1):
         for pattern in FORBIDDEN_PATTERNS:
             if pattern.search(line):
-                # Report the *original* line so operators see the real text.
-                original = text.splitlines()[idx - 1] if idx - 1 < len(text.splitlines()) else line
+                original = _original_at(idx)
                 if _is_allowlisted(path, original):
                     break
                 violations.append(
@@ -273,7 +369,29 @@ def _find_violations(path: pathlib.Path) -> list[Violation]:
                         pattern=pattern.pattern,
                     )
                 )
+                flagged_lines.add(idx)
                 break  # one violation per line is enough
+
+    # Grouped-import scan for forbidden paths split across a
+    # multi-line `use crate::channels::web::{ ... }` statement.
+    for m in GROUPED_FORBIDDEN_PATTERN.finditer(sanitized):
+        forbidden_start = m.start("forbidden")
+        line_number = sanitized.count("\n", 0, forbidden_start) + 1
+        if line_number in flagged_lines:
+            continue
+        original = _original_at(line_number)
+        if _is_allowlisted(path, original):
+            continue
+        violations.append(
+            Violation(
+                path=path,
+                line_number=line_number,
+                line=original.rstrip(),
+                pattern=GROUPED_FORBIDDEN_PATTERN.pattern,
+            )
+        )
+        flagged_lines.add(line_number)
+
     return violations
 
 
@@ -391,6 +509,117 @@ class _Tests(unittest.TestCase):
         try:
             violations = _find_violations(p)
             self.assertEqual(violations, [])
+        finally:
+            p.unlink()
+
+    def test_detects_grouped_crate_web_import(self) -> None:
+        # Regression for serrrfirat's review on PR #2647: a grouped
+        # `use crate::channels::web::{ handlers::... }` escaped the
+        # per-line scan because the forbidden segment lands on a
+        # continuation line.
+        src = (
+            "use crate::channels::web::{\n"
+            "    handlers::auth::login_handler,\n"
+            "    platform::state::GatewayState,\n"
+            "};\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(len(violations), 1)
+            # Reported at the continuation line where `handlers::` appears.
+            self.assertEqual(violations[0].line_number, 2)
+        finally:
+            p.unlink()
+
+    def test_detects_grouped_super_import(self) -> None:
+        src = "use super::{handlers::auth::login_handler, state::GatewayState};\n"
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(len(violations), 1)
+        finally:
+            p.unlink()
+
+    def test_detects_server_shim_back_edge(self) -> None:
+        # Regression for serrrfirat's review on PR #2647: the `server.rs`
+        # compatibility shim still creates a platform → feature dependency,
+        # so routing through it must be rejected from non-router platform
+        # modules.
+        src = "use crate::channels::web::server::chat_send_handler;\n"
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(len(violations), 1)
+        finally:
+            p.unlink()
+
+    def test_skips_cfg_test_module(self) -> None:
+        # Regression for the docstring/impl mismatch called out by both
+        # reviewers on PR #2647: `#[cfg(test)] mod tests { ... }` blocks
+        # must be exempt so caller-level regression tests in platform
+        # files are free to import handler/feature modules.
+        src = (
+            "use crate::channels::web::platform::state::GatewayState;\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use crate::channels::web::handlers::auth::login_handler;\n"
+            "}\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(violations, [])
+        finally:
+            p.unlink()
+
+    def test_skips_mod_tests_without_cfg(self) -> None:
+        src = (
+            "mod tests {\n"
+            "    use crate::channels::web::features::oauth::foo;\n"
+            "}\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(violations, [])
+        finally:
+            p.unlink()
+
+    def test_still_flags_production_code_after_test_module(self) -> None:
+        # The test-module skip must not blanket-ignore the rest of the file.
+        src = (
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use crate::channels::web::handlers::auth::login_handler;\n"
+            "}\n"
+            "\n"
+            "use crate::channels::web::features::oauth::callback_handler;\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(len(violations), 1)
+            self.assertEqual(violations[0].line_number, 6)
         finally:
             p.unlink()
 
