@@ -1,0 +1,41 @@
+{
+  "name": "llm-context",
+  "display_name": "LLM Context",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Fetch pre-extracted web content from Brave Search for grounding LLM answers (RAG, fact-checking)",
+  "keywords": [
+    "search",
+    "web",
+    "brave",
+    "rag",
+    "grounding",
+    "llm",
+    "context"
+  ],
+  "source": {
+    "dir": "tools-src/llm-context",
+    "capabilities": "llm-context-tool.capabilities.json",
+    "crate_name": "llm-context-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/download/v0.19.0/tool-llm-context-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "d9ced2b1226b879135891e0ee40e072c7c95412e1b2462925a23853e1f92497e"
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Brave",
+    "secrets": [
+      "brave_api_key"
+    ],
+    "shared_auth": "Same API key as Web Search tool (brave_api_key)",
+    "setup_url": "https://brave.com/search/api/"
+  },
+  "tags": [
+    "default",
+    "search"
+  ]
+}

@@ -1,0 +1,13 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=@CMAKE_INSTALL_PREFIX@
+libdir=@LIB_INSTALL_DIR@
+sharedlibdir=@LIB_INSTALL_DIR@
+includedir=@INCLUDE_INSTALL_DIR@
+
+Name: @PROJECT_NAME@
+Description: Signal Protocol C Library
+Version: @SIGNAL_PROTOCOL_C_VERSION@
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -l@PROJECT_NAME@
+Cflags: -I${includedir}/signal

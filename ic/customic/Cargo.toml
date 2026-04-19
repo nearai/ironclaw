@@ -1,0 +1,308 @@
+[workspace]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "job_prompt"]
+exclude = [
+    "channels-src/discord",
+    "channels-src/telegram",
+    "channels-src/slack",
+    "channels-src/whatsapp",
+    "tools-src/github",
+    "tools-src/gmail",
+    "tools-src/google-calendar",
+    "tools-src/google-docs",
+    "tools-src/google-drive",
+    "tools-src/google-sheets",
+    "tools-src/google-slides",
+    "tools-src/slack",
+    "tools-src/telegram",
+    "fuzz",
+    "crates/ironclaw_safety/fuzz",
+]
+
+[package]
+name = "ironclaw"
+version = "0.24.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.wix]
+upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
+path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
+license = false
+eula = false
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+eventsource-stream = "0.2"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database - PostgreSQL (default, feature-gated)
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
+refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false }
+rustls-native-certs = { version = "0.8", optional = true }
+
+# Database - libSQL/Turso (optional embedded database)
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+dotenvy = "0.15"
+toml = "0.8"
+
+# Core types
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+rust_decimal_macros = "1"
+
+# Async traits
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Terminal
+crossterm = "0.29"
+rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
+termimad = "0.34"
+
+# Channel integrations
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
+
+# ACP (Agent Client Protocol) bridge
+agent-client-protocol = "0.10"
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# Cron scheduling for routines
+cron = "0.13"
+
+# Internal crates
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
+ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
+ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
+
+# Safety/sanitization
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }
+regex = "1"
+aho-corasick = "1"
+
+# YAML parsing for SKILL.md frontmatter
+serde_yml = "0.0.12"
+
+# Filesystem paths
+dirs = "6"
+fs4 = "0.6"
+
+# Semantic versioning
+semver = "1"
+
+# Secrecy for sensitive values
+secrecy = { version = "0.10", features = ["serde"] }
+
+# URL parsing and encoding
+url = "2"
+urlencoding = "2"
+
+# Open URLs in browser
+open = "5"
+
+# Vector embeddings for semantic search
+# The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
+pgvector = { version = "0.4", features = ["postgres"], optional = true }
+
+# WASM sandbox for untrusted tool execution
+wasmtime = { version = "28", features = ["component-model"] }
+wasmtime-wasi = "28"  # WASI support for component model
+wasmparser = "0.220"  # WASM binary parsing for validation
+
+# Cryptography for secrets management
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+blake3 = "1"
+rand = "0.8"
+subtle = "2"  # Constant-time comparisons for token validation
+
+# Multi-provider LLM support
+rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+
+# AWS Bedrock (native Converse API, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
+# Docker sandbox
+bollard = "0.18"
+
+# Archive extraction for WASM extension bundles
+flate2 = "1"
+tar = "0.4"
+
+# Document text extraction
+pdf-extract = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# HTTP proxy for sandboxed network access
+hyper = { version = "1.5", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
+http-body-util = "0.1"
+bytes = "1"
+base64 = "0.22.1"
+mime_guess = "2.0.5"
+clap_complete = "4.5.0"
+lru = "0.16.3"
+
+# XMPP channel
+tokio-xmpp = { version = "5", features = ["starttls"] }
+xmpp-parsers = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# HTML to Markdown conversion (feature gated)
+html-to-markdown-rs = { version = "2.3", optional = true }
+readabilityrs = { version = "0.1.2", optional = true }
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
+hex = "0.4.3"
+
+# OpenClaw import (feature gated)
+json5 = { version = "0.4", optional = true }
+
+# macOS keychain
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+# Linux secret-service (GNOME Keyring, KWallet)
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+zbus = "4"
+
+[build-dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-test = "0.2"
+tokio-tungstenite = "0.26"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+pretty_assertions = "1"
+tempfile = "3"
+insta = "1.46.3"
+criterion = "0.5"
+
+[[bench]]
+name = "safety_check"
+harness = false
+
+[[bench]]
+name = "safety_pipeline"
+harness = false
+
+[features]
+default = ["postgres", "libsql", "html-to-markdown"]
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:postgres-types",
+    "dep:refinery",
+    "dep:pgvector",
+    "rust_decimal/db-tokio-postgres",
+]
+libsql = ["dep:libsql"]
+# Opt-in feature for especially heavy integration-test targets that run in a
+# dedicated CI job instead of the default Rust test matrix.
+integration = []
+html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+import = ["dep:json5", "libsql"]
+
+[[test]]
+name = "e2e_thread_scheduling"
+required-features = ["libsql", "integration"]
+
+[[test]]
+name = "html_to_markdown"
+required-features = ["html-to-markdown"]
+
+[profile.release]
+strip = true          # Remove debug symbols from release binaries
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "fat"           # Full cross-crate LTO (slow build, better codegen)
+codegen-units = 1     # Single codegen unit for maximum optimization
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.30.3"
+# Ignore out-of-date generated CI so custom release.yml jobs are allowed
+allow-dirty = ["ci"]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "msi"]
+# Publish jobs to run in CI
+publish-jobs = []
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# The archive format to use for windows builds (defaults .zip)
+windows-archive = ".tar.gz"
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.gz"
+# Which actions to run on pull requests
+pr-run-mode = "skip"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = true
+# Cache intermediate build artifacts to speed up the release pipelines
+cache-builds = true
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
+x86_64-pc-windows-msvc = "windows-2022"
+x86_64-apple-darwin = "macos-15-intel"
+aarch64-apple-darwin = "macos-14"

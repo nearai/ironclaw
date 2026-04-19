@@ -1,0 +1,37 @@
+package near:agent;
+
+world sandboxed-tool {
+    export tool: interface {
+        record request {
+            params: string,
+        }
+        record response {
+            output: option<string>,
+            error: option<string>,
+        }
+        execute: func(req: request) -> response;
+        schema: func() -> string;
+        description: func() -> string;
+    }
+    
+    import host: interface {
+        enum log-level {
+            trace,
+            debug,
+            info,
+            warn,
+            error,
+        }
+        log: func(level: log-level, message: string);
+        now-millis: func() -> u64;
+        workspace-read: func(path: string) -> option<string>;
+        record http-response {
+            status: u16,
+            headers-json: string,
+            body: list<u8>,
+        }
+        http-request: func(method: string, url: string, headers-json: string, body: option<list<u8>>) -> result<http-response, string>;
+        tool-invoke: func(alias: string, params-json: string) -> result<string, string>;
+        secret-exists: func(name: string) -> bool;
+    }
+}

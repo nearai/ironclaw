@@ -1,0 +1,201 @@
+name: Run Tests
+on:
+  workflow_call:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            # Keep product feature coverage broad without pulling in the
+            # test-only `integration` feature, which is exercised separately
+            # in the heavy integration job below.
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels (for integration tests)
+        run: ./scripts/build-wasm-extensions.sh --channels
+      - name: Run Tests
+        run: cargo test ${{ matrix.flags }} -- --nocapture
+
+  heavy-integration-tests:
+    name: Heavy Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: heavy-integration
+      - name: Build Telegram WASM channel
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
+      - name: Run thread scheduling integration tests
+        run: cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
+      - name: Run Telegram thread-scope regression test
+        run: cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
+
+  telegram-tests:
+    name: Telegram Channel Tests
+    if: >
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'staging'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Telegram Channel Tests
+        run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+
+  windows-build:
+    name: Windows Build (${{ matrix.name }})
+    if: >
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'staging'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.name }}
+      - name: Check compilation
+        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+
+  wasm-wit-compat:
+    name: WASM WIT Compatibility
+    if: >
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'staging'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-extensions
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build all WASM extensions against current WIT
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Instantiation test (host linker compatibility)
+        run: cargo test --all-features wit_compat -- --nocapture
+
+  bench-compile:
+    name: Benchmark Compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
+
+  docker-build:
+    name: Docker Build
+    if: >
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'staging'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Build Docker image
+        run: docker build -t ironclaw-test:ci .
+
+  version-check:
+    name: Version Bump Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check version bumps for changed extensions
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: ./scripts/check-version-bumps.sh
+
+  # Roll-up job for branch protection
+  run-tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    steps:
+      - run: |
+          # Unit tests must always pass
+          if [[ "${{ needs.tests.result }}" != "success" ]]; then
+            echo "Unit tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.heavy-integration-tests.result }}" != "success" ]]; then
+            echo "Heavy integration tests failed"
+            exit 1
+          fi
+          # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
+          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
+            case "$job" in
+              telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
+              wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
+              docker-build) result="${{ needs.docker-build.result }}" ;;
+              windows-build) result="${{ needs.windows-build.result }}" ;;
+              version-check) result="${{ needs.version-check.result }}" ;;
+              bench-compile) result="${{ needs.bench-compile.result }}" ;;
+            esac
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "$job failed"
+              exit 1
+            fi
+          done

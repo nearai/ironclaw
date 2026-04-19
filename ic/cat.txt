@@ -1,0 +1,157 @@
+/// - HTTPS URLs pointing at private/loopback/link-local IPs
+/// - HTTP URLs pointing at anything other than localhost/127.0.0.1/::1
+///
+/// This is intended for config-time validation of base URLs like
+/// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
+pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
+        key: field_name.to_string(),
+        message: format!("invalid URL '{}': {}", url, e),
+    })?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!("only http/https URLs are allowed, got '{}'", scheme),
+        });
+    }
+
+    let host = parsed.host_str().ok_or_else(|| ConfigError::InvalidValue {
+        key: field_name.to_string(),
+        message: "URL is missing a host".to_string(),
+    })?;
+
+    let host_lower = host.to_lowercase();
+
+    // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
+    // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
+    if scheme == "http" {
+        let is_localhost = host_lower == "localhost"
+            || host_lower == "127.0.0.1"
+            || host_lower == "::1"
+            || host_lower == "[::1]"
+            || host_lower.ends_with(".localhost");
+--
+    }
+
+    // --- validate_base_url tests (regression for #1103) ---
+
+    #[test]
+    fn validate_base_url_allows_https() {
+        // Use IP literals to avoid DNS resolution in sandboxed test environments.
+        assert!(validate_base_url("https://8.8.8.8", "TEST").is_ok());
+        assert!(validate_base_url("https://8.8.8.8/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_allows_http_localhost() {
+        assert!(validate_base_url("http://localhost:11434", "TEST").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:11434", "TEST").is_ok());
+        assert!(validate_base_url("http://[::1]:11434", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_http_remote() {
+        assert!(validate_base_url("http://evil.example.com", "TEST").is_err());
+        assert!(validate_base_url("http://192.168.1.1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_non_http_schemes() {
+        assert!(validate_base_url("file:///etc/passwd", "TEST").is_err());
+        assert!(validate_base_url("ftp://evil.com", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_cloud_metadata() {
+        assert!(validate_base_url("https://169.254.169.254", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_private_ips() {
+        assert!(validate_base_url("https://10.0.0.1", "TEST").is_err());
+        assert!(validate_base_url("https://192.168.1.1", "TEST").is_err());
+        assert!(validate_base_url("https://172.16.0.1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_cgn_range() {
+        // Carrier-grade NAT: 100.64.0.0/10
+        assert!(validate_base_url("https://100.64.0.1", "TEST").is_err());
+        assert!(validate_base_url("https://100.127.255.254", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv4_mapped_ipv6() {
+        // ::ffff:10.0.0.1 is an IPv4-mapped IPv6 address pointing to private IP
+        assert!(validate_base_url("https://[::ffff:10.0.0.1]", "TEST").is_err());
+        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ula_ipv6() {
+        // fc00::/7 — unique local addresses
+        assert!(validate_base_url("https://[fc00::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[fd12:3456:789a::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_handles_url_with_credentials() {
+        // URLs with embedded credentials — validate_base_url checks the host,
+        // not the credentials. Use IP literal to avoid DNS in sandboxed envs.
+        let result = validate_base_url("https://user:pass@8.8.8.8", "TEST");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_empty_and_invalid() {
+        assert!(validate_base_url("", "TEST").is_err());
+        assert!(validate_base_url("not-a-url", "TEST").is_err());
+        assert!(validate_base_url("://missing-scheme", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_unspecified_ipv4() {
+        assert!(validate_base_url("https://0.0.0.0", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_loopback_https() {
+        // IPv6 loopback is allowed over HTTP (localhost equivalent),
+        // but must be rejected over HTTPS as a dangerous IP.
+        assert!(validate_base_url("https://[::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_link_local() {
+        // fe80::/10 — link-local addresses
+        assert!(validate_base_url("https://[fe80::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_multicast() {
+        // ff00::/8 — multicast addresses
+        assert!(validate_base_url("https://[ff02::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_unspecified() {
+        // :: — unspecified address
+        assert!(validate_base_url("https://[::]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_dns_failure() {
+        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to resolve"),
+            "Expected DNS resolution failure, got: {err}"
+        );
+    }
+}

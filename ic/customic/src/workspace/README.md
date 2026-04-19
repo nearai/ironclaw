@@ -1,0 +1,139 @@
+# Workspace & Memory System
+
+Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents with a flexible filesystem-like structure.
+
+## Key Principles
+
+1. **"Memory is database, not RAM"** - If you want to remember something, write it explicitly
+2. **Flexible structure** - Create any directory/file hierarchy you need
+3. **Self-documenting** - Use README.md files to describe directory structure
+4. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
+
+## Filesystem Structure
+
+```
+workspace/
+├── README.md              <- Root runbook/index
+├── MEMORY.md              <- Long-term curated memory
+├── HEARTBEAT.md           <- Periodic checklist
+├── IDENTITY.md            <- Agent name, nature, vibe
+├── SOUL.md                <- Core values
+├── AGENTS.md              <- Behavior instructions
+├── USER.md                <- User context
+├── TOOLS.md               <- Environment-specific tool notes
+├── BOOTSTRAP.md           <- First-run ritual (deleted after onboarding)
+├── context/               <- Identity-related docs
+│   ├── vision.md
+│   └── priorities.md
+├── daily/                 <- Daily logs
+│   ├── 2024-01-15.md
+│   └── 2024-01-16.md
+├── projects/              <- Arbitrary structure
+│   └── alpha/
+│       ├── README.md
+│       └── notes.md
+└── ...
+```
+
+## Using the Workspace
+
+```rust
+use std::sync::Arc;
+use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
+
+// Create workspace for a user (wraps embeddings in a default LRU cache)
+let workspace = Workspace::new("user_123", pool)
+    .with_embeddings(Arc::new(OpenAiEmbeddings::new(api_key)));
+
+// For tests: skip the cache layer (avoids unnecessary overhead with mocks)
+// let workspace = Workspace::new("user_123", pool)
+//     .with_embeddings_uncached(Arc::new(MockEmbeddings::new(1536)));
+
+// Read/write any path
+let doc = workspace.read("projects/alpha/notes.md").await?;
+workspace.write("context/priorities.md", "# Priorities\n\n1. Feature X").await?;
+workspace.append("daily/2024-01-15.md", "Completed task X").await?;
+
+// Convenience methods for well-known files
+workspace.append_memory("User prefers dark mode").await?;
+workspace.append_daily_log("Session note").await?;
+
+// List directory contents
+let entries = workspace.list("projects/").await?;
+
+// Search (hybrid FTS + vector)
+let results = workspace.search("dark mode preference", 5).await?;
+
+// Get system prompt from identity files
+let prompt = workspace.system_prompt().await?;
+```
+
+## Memory Tools
+
+Four tools for LLM use:
+
+- **`memory_search`** - Hybrid search, MUST be called before answering questions about prior work
+- **`memory_write`** - Write to any path (memory, daily_log, or custom paths)
+- **`memory_read`** - Read any file by path
+- **`memory_tree`** - View workspace structure as a tree (depth parameter, default 1)
+
+## Hybrid Search (RRF)
+
+Combines full-text search and vector similarity using Reciprocal Rank Fusion:
+
+```
+score(d) = Σ 1/(k + rank(d)) for each method where d appears
+```
+
+Default k=60. Results from both methods are combined, with documents appearing in both getting boosted scores.
+
+**Backend differences:**
+- **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
+- **libSQL:** FTS5 for keyword search + vector search via `libsql_vector_idx` (dimension set dynamically by `ensure_vector_index()` during startup)
+
+## Multi-Scope Reads & Identity Isolation
+
+When a workspace has additional read scopes (via `with_additional_read_scopes`), read operations can span multiple user scopes — a user with scopes `["alice", "shared"]` can read documents from both.
+
+**Identity files are exempt from multi-scope reads.** The system prompt reads identity and configuration files from the **primary scope only** (`read_primary()`), never from secondary scopes:
+
+| File | Read method | Rationale |
+|------|------------|-----------|
+| AGENTS.md | `read_primary()` | Agent instructions are per-user |
+| SOUL.md | `read_primary()` | Core values are per-user |
+| USER.md | `read_primary()` | User context is per-user |
+| IDENTITY.md | `read_primary()` | Identity is per-user |
+| TOOLS.md | `read_primary()` | Tool config is per-user |
+| BOOTSTRAP.md | `read_primary()` | Onboarding is per-user |
+| MEMORY.md | `read()` | Shared memory is a feature |
+| daily/*.md | `read()` | Shared daily logs are a feature |
+
+**Why:** Without this, a user with read access to another scope could silently inherit that scope's identity if their own copy is missing. The agent would present itself as the wrong user — a correctness and security issue.
+
+**Design rule:** If you want shared identity across users, seed the same content into each user's scope at setup time. Don't rely on multi-scope fallback for identity files.
+
+## Heartbeat System
+
+Proactive periodic execution (default: 30 minutes):
+
+1. Reads `HEARTBEAT.md` checklist
+2. Runs agent turn with checklist prompt
+3. If findings, notifies via channel
+4. If nothing, agent replies "HEARTBEAT_OK" (no notification)
+
+```rust
+use crate::agent::{HeartbeatConfig, spawn_heartbeat};
+
+let config = HeartbeatConfig::default()
+    .with_interval(Duration::from_secs(60 * 30))
+    .with_notify("user_123", "telegram");
+
+spawn_heartbeat(config, workspace, llm, response_tx);
+```
+
+## Chunking Strategy
+
+Documents are chunked for search indexing:
+- Default: 800 words per chunk (roughly 800 tokens for English)
+- 15% overlap between chunks for context preservation
+- Minimum chunk size: 50 words (tiny trailing chunks merge with previous)

@@ -1,0 +1,39 @@
+{
+  "name": "xmpp",
+  "display_name": "XMPP Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Talk to IronClaw over XMPP through the local xmpp-bridge service",
+  "keywords": [
+    "xmpp",
+    "jabber",
+    "chat",
+    "messaging",
+    "omemo"
+  ],
+  "source": {
+    "dir": "channels-src/xmpp",
+    "capabilities": "xmpp.capabilities.json",
+    "crate_name": "xmpp-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": null,
+      "sha256": null
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "XMPP",
+    "secrets": [
+      "xmpp_password",
+      "xmpp_bridge_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://github.com/nearai/ironclaw/tree/main/bridges/xmpp-bridge"
+  },
+  "tags": [
+    "messaging"
+  ]
+}

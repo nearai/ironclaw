@@ -1,0 +1,24 @@
+[package]
+name = "xmpp-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Local XMPP bridge for the IronClaw installable XMPP channel"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+futures = "0.3"
+ironclaw = { path = "../.." }
+openclaw-xmpp-bridge-contract = { path = "../../openclaw-ports/xmpp/bridge" }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+secrecy = "0.10"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true
+
+[workspace]

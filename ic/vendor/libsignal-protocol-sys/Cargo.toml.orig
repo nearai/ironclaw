@@ -1,0 +1,20 @@
+[package]
+name = "libsignal-protocol-sys"
+version = "0.1.0"
+authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+readme = "../README.md"
+build = "build.rs"
+links = "signal-protocol-c"
+description = "*-sys crate for the libsignal-protocol-c library."
+repository = "https://github.com/Michael-F-Bryan/libsignal-protocol-rs"
+homepage = "https://github.com/Michael-F-Bryan/libsignal-protocol-rs"
+categories = ["external-ffi-bindings", "cryptography"]
+keywords = ["signal", "libsignal", "whisper", "protocol", "sys"]
+
+[build-dependencies]
+cmake = "0.1.38"
+
+[lib]
+path = "lib.rs"

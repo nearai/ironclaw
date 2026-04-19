@@ -1,0 +1,64 @@
+{
+  "name": "gotify",
+  "display_name": "Gotify Notifications",
+  "description": "Send push notifications to a self-hosted Gotify server",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "gotify",
+      "description": "Send a push notification via Gotify. Parameters (JSON object): message (string, REQUIRED), title (string, default: Kageho), priority (integer: 1-3=low, 5-7=medium, 8-10=high, default: 3). Example: {\"message\": \"hello\", \"priority\": 5}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Notification title. Defaults to 'Kageho' if not provided."
+          },
+          "message": {
+            "type": "string",
+            "description": "Notification body text. Supports markdown."
+          },
+          "priority": {
+            "type": "integer",
+            "description": "Notification priority: 1-3=low (chat), 5-7=medium (cron/research), 8-10=high (urgent). Defaults to 3.",
+            "default": 3
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    }
+  ],
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "gotify.darkc.sobe.world",
+          "path_prefix": "/"
+        }
+      ],
+      "credentials": {
+        "gotify": {
+          "secret_name": "gotify_app_token",
+          "location": {
+            "type": "header",
+            "name": "X-Gotify-Key"
+          },
+          "host_patterns": [
+            "gotify.darkc.sobe.world"
+          ]
+        }
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "gotify_app_token",
+        "gotify_url"
+      ]
+    }
+  },
+  "setup": {
+    "required_secrets": []
+  }
+}

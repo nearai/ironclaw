@@ -1,0 +1,140 @@
+{
+    "version": "0.1.0",
+    "wit_version": "0.3.0",
+    "type": "channel",
+    "name": "xmpp",
+    "description": "XMPP messaging channel backed by a local xmpp-bridge process",
+    "setup": {
+        "required_secrets": [
+            {
+                "name": "xmpp_password",
+                "prompt": "Enter the XMPP account password used by the local xmpp-bridge",
+                "optional": false
+            },
+            {
+                "name": "xmpp_bridge_token",
+                "prompt": "Optional shared secret expected by the local xmpp-bridge API",
+                "optional": true
+            }
+        ],
+        "required_fields": [
+            {
+                "name": "xmpp_jid",
+                "prompt": "Enter the XMPP account JID (for example bot@example.com)",
+                "optional": false
+            },
+            {
+                "name": "bridge_url",
+                "prompt": "Enter the local xmpp-bridge base URL (for example http://127.0.0.1:8787)",
+                "optional": false
+            },
+            {
+                "name": "dm_policy",
+                "prompt": "DM policy: open, allowlist, or pairing",
+                "optional": true
+            },
+            {
+                "name": "allow_from",
+                "prompt": "Allowed DM sender bare JIDs (comma-separated, or * for open access)",
+                "optional": true
+            },
+            {
+                "name": "rooms",
+                "prompt": "Allowed room bare JIDs (comma-separated, or * for open access)",
+                "optional": true
+            },
+            {
+                "name": "encrypted_rooms",
+                "prompt": "Room bare JIDs that must use encrypted groupchat handling (comma-separated)",
+                "optional": true
+            },
+            {
+                "name": "allow_plaintext_fallback",
+                "prompt": "Allow plaintext fallback when OMEMO is unavailable (true or false)",
+                "optional": true
+            },
+            {
+                "name": "max_messages_per_hour",
+                "prompt": "Optional outbound XMPP message cap per hour (0 = unlimited)",
+                "optional": true
+            },
+            {
+                "name": "resource",
+                "prompt": "Optional XMPP resource override",
+                "optional": true
+            },
+            {
+                "name": "device_id",
+                "prompt": "Optional OMEMO device ID override",
+                "optional": true
+            },
+            {
+                "name": "omemo_store_dir",
+                "prompt": "Optional OMEMO store directory override",
+                "optional": true
+            }
+        ],
+        "setup_url": "https://github.com/nearai/ironclaw/tree/main/bridges/xmpp-bridge"
+    },
+    "capabilities": {
+        "http": {
+            "allowlist": [
+                {
+                    "host": "127.0.0.1",
+                    "path_prefix": "/v1/"
+                },
+                {
+                    "host": "localhost",
+                    "path_prefix": "/v1/"
+                }
+            ],
+            "credentials": {
+                "xmpp_bridge_auth": {
+                    "secret_name": "xmpp_bridge_token",
+                    "location": {
+                        "type": "bearer"
+                    },
+                    "host_patterns": [
+                        "127.0.0.1",
+                        "localhost"
+                    ]
+                }
+            },
+            "rate_limit": {
+                "requests_per_minute": 120,
+                "requests_per_hour": 7200
+            }
+        },
+        "secrets": {
+            "allowed_names": [
+                "xmpp_*"
+            ]
+        },
+        "channel": {
+            "allow_polling": true,
+            "min_poll_interval_ms": 30000,
+            "workspace_prefix": "channels/xmpp/",
+            "emit_rate_limit": {
+                "messages_per_minute": 240,
+                "messages_per_hour": 14400
+            }
+        }
+    },
+    "config": {
+        "display_name": "XMPP",
+        "bridge_url": "http://127.0.0.1:8787",
+        "xmpp_jid": null,
+        "xmpp_password": null,
+        "dm_policy": "allowlist",
+        "allow_from": "",
+        "rooms": "",
+        "encrypted_rooms": "",
+        "allow_plaintext_fallback": true,
+        "max_messages_per_hour": 0,
+        "resource": null,
+        "device_id": null,
+        "omemo_store_dir": null,
+        "polling_enabled": true,
+        "poll_interval_ms": 30000
+    }
+}

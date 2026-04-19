@@ -1,0 +1,50 @@
+[Unit]
+Description=Ironclaw AI Agent Service
+Documentation=https://github.com/IronclawCustomTools/ironclaw
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=starforce
+Group=starforce
+WorkingDirectory=/home/starforce/ironclaw
+
+# Environment variables from run.sh
+Environment="ALLOW_PRIVATE_IPS=1"
+Environment="PGSSLMODE=disable"
+Environment="HTTP_PORT=9098"
+Environment="LLM_BASE_URL=http://192.168.1.157:3000/openai/v1"
+Environment="HTTP_WEBHOOK_SECRET=aaaaaaaaaaaaaaaaaaaaaaaaaaaa:3"
+
+# Main executable
+ExecStart=/home/starforce/ironclaw/target/release/ironclaw run
+
+# Graceful shutdown
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=30
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Allow write access to ironclaw directory
+ReadWritePaths=/home/starforce/ironclaw
+ReadWritePaths=/tmp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ironclaw
+
+[Install]
+WantedBy=multi-user.target

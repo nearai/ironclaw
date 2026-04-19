@@ -1,0 +1,70 @@
+{
+  "model_name": "test-directory-tree",
+  "expects": {
+    "tools_used": [
+      "memory_write",
+      "memory_tree"
+    ],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw_t1",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Alpha Project\n\nMain readme for the Alpha project.",
+              "target": "projects/alpha/readme.md"
+            }
+          },
+          {
+            "id": "call_mw_t2",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Alpha Config\n\nConfiguration details for Alpha.",
+              "target": "projects/alpha/config.md"
+            }
+          },
+          {
+            "id": "call_mw_t3",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Beta Project\n\nMain readme for the Beta project.",
+              "target": "projects/beta/readme.md"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 50
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mt_1",
+            "name": "memory_tree",
+            "arguments": {
+              "path": "projects"
+            }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The workspace tree under 'projects/' shows two subdirectories: alpha (with readme.md and config.md) and beta (with readme.md).",
+        "input_tokens": 300,
+        "output_tokens": 25
+      }
+    }
+  ]
+}

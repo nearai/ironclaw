@@ -1,0 +1,104 @@
+name: E2E Tests
+on:
+  workflow_call:
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly Monday 6 AM UTC
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/channels/web/**"
+      - "tests/e2e/**"
+
+jobs:
+  # ── Step 1: compile once ──────────────────────────────────────────────────
+  build:
+    name: Build ironclaw (libsql)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --no-default-features --features libsql
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironclaw-e2e-binary
+          path: target/debug/ironclaw
+          retention-days: 1
+
+  # ── Step 2: run test slices in parallel ───────────────────────────────────
+  test:
+    name: E2E (${{ matrix.group }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            files: "tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py tests/e2e/scenarios/test_csp.py"
+          - group: features
+            files: "tests/e2e/scenarios/test_skills.py tests/e2e/scenarios/test_tool_approval.py tests/e2e/scenarios/test_webhook.py"
+          - group: extensions
+            files: "tests/e2e/scenarios/test_extensions.py tests/e2e/scenarios/test_extension_oauth.py tests/e2e/scenarios/test_oauth_url_parameters.py tests/e2e/scenarios/test_telegram_token_validation.py tests/e2e/scenarios/test_telegram_hot_activation.py tests/e2e/scenarios/test_wasm_lifecycle.py tests/e2e/scenarios/test_tool_execution.py tests/e2e/scenarios/test_pairing.py tests/e2e/scenarios/test_mcp_auth_flow.py tests/e2e/scenarios/test_oauth_credential_fallback.py tests/e2e/scenarios/test_routine_oauth_credential_injection.py"
+          - group: routines
+            files: "tests/e2e/scenarios/test_owner_scope.py tests/e2e/scenarios/test_routine_event_batch.py"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ironclaw-e2e-binary
+          path: target/debug/
+
+      - name: Make binary executable
+        run: chmod +x target/debug/ironclaw
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install E2E dependencies
+        run: |
+          cd tests/e2e
+          pip install -e .
+          playwright install --with-deps chromium
+
+      - name: Run E2E tests (${{ matrix.group }})
+        run: pytest ${{ matrix.files }} -v --timeout=120
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-${{ matrix.group }}
+          path: tests/e2e/screenshots/
+          if-no-files-found: ignore
+
+  # ── Roll-up for branch protection ────────────────────────────────────────
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test]
+    steps:
+      - run: |
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "One or more E2E jobs failed"
+            exit 1
+          fi

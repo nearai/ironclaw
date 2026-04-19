@@ -1,0 +1,456 @@
+//! Interactive prompt utilities for the setup wizard.
+//!
+//! Provides terminal UI components for:
+//! - Single selection menus
+//! - Multi-select with toggles
+//! - Password/secret input (hidden)
+//! - Yes/no confirmations
+//! - Styled headers and step indicators
+
+use std::io::{self, Write};
+
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute,
+    style::{Color, Print, ResetColor, SetForegroundColor},
+    terminal::{self, ClearType},
+};
+use secrecy::SecretString;
+
+/// Drain any residual key events already queued in the terminal buffer.
+///
+/// On Windows, transitioning between raw mode and cooked mode (or between
+/// successive raw-mode prompts) can leave stale events (e.g. the Release
+/// half of an Enter keypress) in the queue. Consuming them with a
+/// non-blocking poll prevents the next prompt from mis-firing.
+fn drain_pending_events() {
+    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
+
+/// Display a numbered menu and get user selection.
+///
+/// Returns the index (0-based) of the selected option.
+/// Pressing Enter without input selects the first option (index 0).
+///
+/// # Example
+///
+/// ```ignore
+/// let choice = select_one("Choose an option:", &["Option A", "Option B"]);
+/// ```
+pub fn select_one(prompt: &str, options: &[&str]) -> io::Result<usize> {
+    let mut stdout = io::stdout();
+
+    // Print prompt
+    writeln!(stdout, "{}", prompt)?;
+    writeln!(stdout)?;
+
+    // Print options
+    for (i, option) in options.iter().enumerate() {
+        writeln!(stdout, "  [{}] {}", i + 1, option)?;
+    }
+    writeln!(stdout)?;
+
+    loop {
+        print!("> ");
+        stdout.flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        // Handle empty input as first option
+        if input.is_empty() {
+            return Ok(0);
+        }
+
+        // Parse number
+        if let Ok(num) = input.parse::<usize>()
+            && num >= 1
+            && num <= options.len()
+        {
+            return Ok(num - 1);
+        }
+
+        writeln!(
+            stdout,
+            "Invalid choice. Please enter a number 1-{}.",
+            options.len()
+        )?;
+    }
+}
+
+/// Multi-select with space to toggle, enter to confirm.
+///
+/// `options` is a slice of (label, initially_selected) tuples.
+/// Returns indices of selected options.
+///
+/// # Example
+///
+/// ```ignore
+/// let selected = select_many("Select channels:", &[
+///     ("CLI/TUI", true),
+///     ("HTTP webhook", false),
+///     ("Telegram", false),
+/// ])?;
+/// ```
+pub fn select_many(prompt: &str, options: &[(&str, bool)]) -> io::Result<Vec<usize>> {
+    if options.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut stdout = io::stdout();
+    let mut selected: Vec<bool> = options.iter().map(|(_, s)| *s).collect();
+    let mut cursor_pos = 0;
+
+    terminal::enable_raw_mode()?;
+    drain_pending_events();
+    execute!(stdout, cursor::Hide)?;
+
+    let result = (|| {
+        loop {
+            // Clear and redraw
+            execute!(stdout, cursor::MoveToColumn(0))?;
+
+            writeln!(stdout, "{}\r", prompt)?;
+            writeln!(stdout, "\r")?;
+            writeln!(
+                stdout,
+                "  (Use arrow keys to navigate, space to toggle, enter to confirm)\r"
+            )?;
+            writeln!(stdout, "\r")?;
+
+            for (i, (label, _)) in options.iter().enumerate() {
+                if i == cursor_pos {
+                    // Cursor line: cyan cursor, then colored checkbox
+                    execute!(stdout, SetForegroundColor(Color::Cyan))?;
+                    write!(stdout, "  \u{25b8} ")?;
+                    if selected[i] {
+                        execute!(stdout, SetForegroundColor(Color::Green))?;
+                        write!(stdout, "[\u{2713}]")?;
+                    } else {
+                        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                        write!(stdout, "[\u{00b7}]")?;
+                    }
+                    execute!(stdout, SetForegroundColor(Color::Cyan))?;
+                    writeln!(stdout, " {}\r", label)?;
+                    execute!(stdout, ResetColor)?;
+                } else {
+                    write!(stdout, "    ")?;
+                    if selected[i] {
+                        execute!(stdout, SetForegroundColor(Color::Green))?;
+                        write!(stdout, "[\u{2713}]")?;
+                        execute!(stdout, ResetColor)?;
+                    } else {
+                        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                        write!(stdout, "[\u{00b7}]")?;
+                        execute!(stdout, ResetColor)?;
+                    }
+                    writeln!(stdout, " {}\r", label)?;
+                }
+            }
+
+            stdout.flush()?;
+
+            // Read key — only act on Press events to avoid double-firing
+            // from Release/Repeat events on Windows.
+            if let Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) = event::read()?
+            {
+                match code {
+                    KeyCode::Up => {
+                        cursor_pos = cursor_pos.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        if cursor_pos < options.len() - 1 {
+                            cursor_pos += 1;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        selected[cursor_pos] = !selected[cursor_pos];
+                    }
+                    KeyCode::Enter => {
+                        break;
+                    }
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "Ctrl-C"));
+                    }
+                    _ => {}
+                }
+
+                // Move cursor up to redraw
+                execute!(
+                    stdout,
+                    cursor::MoveUp((options.len() + 4) as u16),
+                    terminal::Clear(ClearType::FromCursorDown)
+                )?;
+            }
+        }
+        Ok(())
+    })();
+
+    // Cleanup
+    execute!(stdout, cursor::Show)?;
+    terminal::disable_raw_mode()?;
+    writeln!(stdout)?;
+
+    result?;
+
+    Ok(selected
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &s)| if s { Some(i) } else { None })
+        .collect())
+}
+
+/// Password/secret input with hidden characters.
+///
+/// # Example
+///
+/// ```ignore
+/// let token = secret_input("Bot token")?;
+/// ```
+pub fn secret_input(prompt: &str) -> io::Result<SecretString> {
+    let mut stdout = io::stdout();
+
+    print!("{}: ", prompt);
+    stdout.flush()?;
+
+    terminal::enable_raw_mode()?;
+    let result = read_secret_line();
+    terminal::disable_raw_mode()?;
+
+    writeln!(stdout)?;
+    result
+}
+
+fn read_secret_line() -> io::Result<SecretString> {
+    let mut input = String::new();
+    let mut stdout = io::stdout();
+
+    drain_pending_events();
+
+    loop {
+        // Only act on Press events to avoid double-firing from
+        // Release/Repeat events on Windows.
+        if let Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        }) = event::read()?
+        {
+            match code {
+                KeyCode::Enter => {
+                    break;
+                }
+                KeyCode::Backspace => {
+                    if !input.is_empty() {
+                        input.pop();
+                        execute!(stdout, Print("\x08 \x08"))?;
+                        stdout.flush()?;
+                    }
+                }
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "Ctrl-C"));
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    execute!(stdout, Print('*'))?;
+                    stdout.flush()?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(SecretString::from(input))
+}
+
+/// Yes/no confirmation prompt.
+///
+/// # Example
+///
+/// ```ignore
+/// if confirm("Enable Telegram channel?", false)? {
+///     // ...
+/// }
+/// ```
+pub fn confirm(prompt: &str, default: bool) -> io::Result<bool> {
+    let mut stdout = io::stdout();
+
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{} {} ", prompt, hint);
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    Ok(match input.as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default,
+    })
+}
+
+/// Print a minimal wordmark banner.
+pub fn print_banner() {
+    use crate::cli::fmt;
+    println!();
+    println!("  {}ironclaw{}", fmt::bold_accent(), fmt::reset());
+    println!();
+}
+
+/// Print a styled header box.
+///
+/// # Example
+///
+/// ```ignore
+/// print_header("IronClaw Setup Wizard");
+/// ```
+pub fn print_header(text: &str) {
+    let width = text.len() + 4;
+    let border = "─".repeat(width);
+
+    println!();
+    println!("┌{}┐", border);
+    println!("│  {}  │", text);
+    println!("└{}┘", border);
+    println!();
+}
+
+/// Print a compact dot-based step indicator.
+///
+/// `●` = completed (green/success), `◉` = current (accent), `○` = remaining (dim).
+///
+/// # Example
+///
+/// ```ignore
+/// print_step(3, 5, "Model Selection");
+/// // Output:   ● ● ◉ ○ ○   Model Selection
+/// ```
+pub fn print_step(current: usize, total: usize, name: &str) {
+    use crate::cli::fmt;
+    let mut dots = String::new();
+    for i in 1..=total {
+        if i > 1 {
+            dots.push(' ');
+        }
+        if i < current {
+            dots.push_str(&format!("{}\u{25CF}{}", fmt::success(), fmt::reset())); // ● green
+        } else if i == current {
+            dots.push_str(&format!("{}\u{25C9}{}", fmt::accent(), fmt::reset())); // ◉ accent
+        } else {
+            dots.push_str(&format!("{}\u{25CB}{}", fmt::dim(), fmt::reset())); // ○ dim
+        }
+    }
+    println!("  {}   {}", dots, name);
+    println!();
+}
+
+/// Print a success message with green checkmark.
+pub fn print_success(message: &str) {
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, SetForegroundColor(Color::Green));
+    print!("✓");
+    let _ = execute!(stdout, ResetColor);
+    println!(" {}", message);
+}
+
+/// Print an error message with red X.
+pub fn print_error(message: &str) {
+    let mut stderr = io::stderr();
+    let _ = execute!(stderr, SetForegroundColor(Color::Red));
+    eprint!("✗");
+    let _ = execute!(stderr, ResetColor);
+    eprintln!(" {}", message);
+}
+
+/// Print a warning message with yellow exclamation.
+pub fn print_warning(message: &str) {
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, SetForegroundColor(Color::Yellow));
+    print!("!");
+    let _ = execute!(stdout, ResetColor);
+    println!(" {}", message);
+}
+
+/// Print an info message with blue info icon.
+pub fn print_info(message: &str) {
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, SetForegroundColor(Color::Blue));
+    print!("ℹ");
+    let _ = execute!(stdout, ResetColor);
+    println!(" {}", message);
+}
+
+/// Read a simple line of input with a prompt.
+pub fn input(prompt: &str) -> io::Result<String> {
+    let mut stdout = io::stdout();
+    print!("{}: ", prompt);
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+/// Read an optional line of input (empty returns None).
+pub fn optional_input(prompt: &str, hint: Option<&str>) -> io::Result<Option<String>> {
+    let mut stdout = io::stdout();
+
+    if let Some(h) = hint {
+        print!("{} ({}): ", prompt, h);
+    } else {
+        print!("{}: ", prompt);
+    }
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(input.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Interactive tests are difficult to unit test, but we can test the non-interactive parts.
+
+    #[test]
+    fn test_header_length_calculation() {
+        // Just verify it doesn't panic with various inputs
+        super::print_header("Test");
+        super::print_header("A longer header text");
+        super::print_header("");
+    }
+
+    #[test]
+    fn test_step_indicator() {
+        super::print_step(1, 3, "Test Step");
+        super::print_step(3, 3, "Final Step");
+    }
+
+    #[test]
+    fn test_print_functions_do_not_panic() {
+        super::print_success("operation completed");
+        super::print_error("something went wrong");
+        super::print_info("here is some information");
+        // Also test with empty strings
+        super::print_success("");
+        super::print_error("");
+        super::print_info("");
+    }
+}

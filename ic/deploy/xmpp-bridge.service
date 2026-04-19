@@ -1,0 +1,39 @@
+[Unit]
+Description=Ironclaw XMPP Bridge Service
+Documentation=https://github.com/IronclawCustomTools/ironclaw/tree/main/bridges/xmpp-bridge
+After=network.target
+Wants=network.target
+PartOf=ironclaw.service
+
+[Service]
+Type=simple
+User=starforce
+Group=starforce
+WorkingDirectory=/home/starforce/ironclaw/bridges/xmpp-bridge
+
+# Optional overrides:
+# Environment="XMPP_BRIDGE_BIND=127.0.0.1:8787"
+# Environment="XMPP_BRIDGE_TOKEN=change-me"
+
+ExecStart=/home/starforce/ironclaw/bridges/xmpp-bridge/target/release/xmpp-bridge
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+ReadWritePaths=/home/starforce/ironclaw
+ReadWritePaths=/tmp
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xmpp-bridge
+
+[Install]
+WantedBy=multi-user.target

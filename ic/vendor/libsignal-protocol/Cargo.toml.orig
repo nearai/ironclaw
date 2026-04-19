@@ -1,0 +1,41 @@
+[package]
+name = "libsignal-protocol"
+version = "0.1.0"
+authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+readme = "../README.md"
+description = "An idiomatic high-level interface to the libsignal-protocol-c crate."
+homepage = "https://github.com/Michael-F-Bryan/libsignal-protocol-rs"
+repository = "https://github.com/Michael-F-Bryan/libsignal-protocol-rs"
+keywords = ["signal", "libsignal", "whisper", "protocol"]
+categories = ["api-bindings", "cryptography"]
+
+[dependencies]
+#libsignal-protocol-sys = { path = "../libsignal-protocol-sys/" }
+libsignal-protocol-sys = "0.1.0"
+failure = "0.1.5"
+failure_derive = "0.1.5"
+rand = "0.6.5"
+parking_lot = "0.8.0"
+lock_api = "0.2.0"
+log = "0.4.6"
+
+# -- Optional Crates -- #
+openssl = { version = "0.10", optional = true }
+rental = { version = "0.5.3", optional = true }
+
+sha2 = { version = "0.8.0", optional = true }
+hmac = { version = "0.7.0", optional = true }
+aes = { version = "0.3.2", optional = true }
+block-modes = { version = "0.3.3", optional = true }
+aes-ctr = { version = "0.3.0", optional = true }
+
+[features]
+default = ["crypto-native"]
+crypto-native = ["sha2", "hmac", "aes", "block-modes", "aes-ctr"]
+crypto-openssl = ["openssl", "rental"]
+
+[dev-dependencies]
+cfg-if = "0.1.9"
+env_logger = "0.6.1"

@@ -1,0 +1,39 @@
+{
+  "name": "google-calendar",
+  "display_name": "Google Calendar",
+  "kind": "tool",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
+  "description": "Create, read, update, and delete Google Calendar events",
+  "keywords": [
+    "calendar",
+    "google",
+    "scheduling",
+    "events"
+  ],
+  "source": {
+    "dir": "tools-src/google-calendar",
+    "capabilities": "google-calendar-tool.capabilities.json",
+    "crate_name": "google-calendar-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/google-calendar-0.2.0-wasm32-wasip2.tar.gz",
+      "sha256": "2fa47150ea222e787c122182ad6f4dfa2ffaf5fe490d05e8de887a76445f8d2d"
+    }
+  },
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Google",
+    "secrets": [
+      "google_oauth_token"
+    ],
+    "shared_auth": "google_oauth_token",
+    "setup_url": "https://console.cloud.google.com/apis/credentials"
+  },
+  "tags": [
+    "default",
+    "google",
+    "productivity"
+  ]
+}

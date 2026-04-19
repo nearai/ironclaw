@@ -1,0 +1,1660 @@
+//! Request and response DTOs for the web gateway API.
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+// --- Chat ---
+
+/// Base64-encoded image data sent from the web frontend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageData {
+    /// MIME type (e.g., "image/png", "image/jpeg").
+    pub media_type: String,
+    /// Base64-encoded image data (without data: URL prefix).
+    pub data: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendMessageRequest {
+    pub content: String,
+    pub thread_id: Option<String>,
+    pub timezone: Option<String>,
+    /// Optional images attached to the message.
+    #[serde(default)]
+    pub images: Vec<ImageData>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SendMessageResponse {
+    pub message_id: Uuid,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadInfo {
+    pub id: Uuid,
+    pub state: String,
+    pub turn_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadListResponse {
+    /// The pinned assistant thread (always present after first load).
+    pub assistant_thread: Option<ThreadInfo>,
+    /// Regular conversation threads.
+    pub threads: Vec<ThreadInfo>,
+    pub active_thread: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TurnInfo {
+    pub turn_number: usize,
+    pub user_input: String,
+    pub response: Option<String>,
+    pub state: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub tool_calls: Vec<ToolCallInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolCallInfo {
+    pub name: String,
+    pub has_result: bool,
+    pub has_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryResponse {
+    pub thread_id: Uuid,
+    pub turns: Vec<TurnInfo>,
+    /// Whether there are older messages available.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_timestamp: Option<String>,
+    /// Pending tool approval that needs user action (re-rendered on thread switch).
+    ///
+    /// Only populated from in-memory state; not persisted to DB.
+    /// Server restart clears pending approvals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<PendingApprovalInfo>,
+}
+
+/// Lightweight DTO for a pending tool approval (excludes context_messages).
+#[derive(Debug, Serialize)]
+pub struct PendingApprovalInfo {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: String,
+}
+
+// --- Approval ---
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: String,
+    /// "approve", "always", or "deny"
+    pub action: String,
+    /// Thread that owns the pending approval (so the agent loop finds the right session).
+    pub thread_id: Option<String>,
+}
+
+// --- SSE Event Types ---
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDecisionDto {
+    pub tool_name: String,
+    pub rationale: String,
+}
+
+pub type AppEvent = SseEvent;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum SseEvent {
+    #[serde(rename = "response")]
+    Response { content: String, thread_id: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "tool_started")]
+    ToolStarted {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "tool_completed")]
+    ToolCompleted {
+        name: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parameters: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        name: String,
+        preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "stream_chunk")]
+    StreamChunk {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "status")]
+    Status {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "job_started")]
+    JobStarted {
+        job_id: String,
+        title: String,
+        browse_url: String,
+    },
+    #[serde(rename = "approval_needed")]
+    ApprovalNeeded {
+        request_id: String,
+        tool_name: String,
+        description: String,
+        parameters: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        /// Whether the "always" auto-approve option should be shown.
+        allow_always: bool,
+    },
+    #[serde(rename = "auth_required")]
+    AuthRequired {
+        extension_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        setup_url: Option<String>,
+    },
+    #[serde(rename = "auth_completed")]
+    AuthCompleted {
+        extension_name: String,
+        success: bool,
+        message: String,
+    },
+    #[serde(rename = "error")]
+    Error {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+
+    // Sandbox job streaming events (worker + Claude Code bridge)
+    #[serde(rename = "job_message")]
+    JobMessage {
+        job_id: String,
+        role: String,
+        content: String,
+    },
+    #[serde(rename = "job_tool_use")]
+    JobToolUse {
+        job_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "job_tool_result")]
+    JobToolResult {
+        job_id: String,
+        tool_name: String,
+        output: String,
+    },
+    #[serde(rename = "job_status")]
+    JobStatus { job_id: String, message: String },
+    #[serde(rename = "job_result")]
+    JobResult {
+        job_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fallback_deliverable: Option<serde_json::Value>,
+    },
+
+    /// An image was generated by a tool.
+    #[serde(rename = "image_generated")]
+    ImageGenerated {
+        data_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Suggested follow-up messages for the user.
+    #[serde(rename = "suggestions")]
+    Suggestions {
+        suggestions: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Per-turn token usage and cost summary.
+    #[serde(rename = "turn_cost")]
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Extension activation status change (WASM channels).
+    #[serde(rename = "extension_status")]
+    ExtensionStatus {
+        extension_name: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Agent reasoning update (why it chose specific tools).
+    #[serde(rename = "reasoning_update")]
+    ReasoningUpdate {
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Skills activated for this conversation turn.
+    #[serde(rename = "skill_activated")]
+    SkillActivated {
+        skill_names: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Engine v2 gate requires user input.
+    #[serde(rename = "gate_required")]
+    GateRequired {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        description: String,
+        parameters: String,
+        resume_kind: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Engine v2 gate was resolved.
+    #[serde(rename = "gate_resolved")]
+    GateResolved {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        resolution: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Engine thread changed state.
+    #[serde(rename = "thread_state_changed")]
+    ThreadStateChanged {
+        thread_id: String,
+        from_state: String,
+        to_state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// A child thread was spawned by a parent thread.
+    #[serde(rename = "child_thread_spawned")]
+    ChildThreadSpawned {
+        parent_thread_id: String,
+        child_thread_id: String,
+        goal: String,
+    },
+}
+
+impl From<ironclaw_common::AppEvent> for SseEvent {
+    fn from(ev: ironclaw_common::AppEvent) -> Self {
+        use ironclaw_common::AppEvent as AE;
+        match ev {
+            AE::Response { content, thread_id } => SseEvent::Response { content, thread_id },
+            AE::Thinking { message, thread_id } => SseEvent::Thinking { message, thread_id },
+            AE::ToolStarted { name, thread_id } => SseEvent::ToolStarted { name, thread_id },
+            AE::ToolCompleted {
+                name,
+                success,
+                error,
+                parameters,
+                thread_id,
+            } => SseEvent::ToolCompleted {
+                name,
+                success,
+                error,
+                parameters,
+                thread_id,
+            },
+            AE::ToolResult {
+                name,
+                preview,
+                thread_id,
+            } => SseEvent::ToolResult {
+                name,
+                preview,
+                thread_id,
+            },
+            AE::StreamChunk { content, thread_id } => SseEvent::StreamChunk { content, thread_id },
+            AE::Status { message, thread_id } => SseEvent::Status { message, thread_id },
+            AE::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => SseEvent::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            },
+            AE::ApprovalNeeded {
+                request_id,
+                tool_name,
+                description,
+                parameters,
+                thread_id,
+                allow_always,
+            } => SseEvent::ApprovalNeeded {
+                request_id,
+                tool_name,
+                description,
+                parameters,
+                thread_id,
+                allow_always,
+            },
+            AE::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+                ..
+            } => SseEvent::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+            },
+            AE::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => SseEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            },
+            AE::GateRequired {
+                request_id,
+                gate_name,
+                tool_name,
+                description,
+                parameters,
+                resume_kind,
+                thread_id,
+            } => SseEvent::GateRequired {
+                request_id,
+                gate_name,
+                tool_name,
+                description,
+                parameters,
+                resume_kind,
+                thread_id,
+            },
+            AE::GateResolved {
+                request_id,
+                gate_name,
+                tool_name,
+                resolution,
+                message,
+                thread_id,
+            } => SseEvent::GateResolved {
+                request_id,
+                gate_name,
+                tool_name,
+                resolution,
+                message,
+                thread_id,
+            },
+            AE::Error { message, thread_id } => SseEvent::Error { message, thread_id },
+            AE::Heartbeat => SseEvent::Heartbeat,
+            AE::JobMessage {
+                job_id,
+                role,
+                content,
+            } => SseEvent::JobMessage {
+                job_id,
+                role,
+                content,
+            },
+            AE::JobToolUse {
+                job_id,
+                tool_name,
+                input,
+            } => SseEvent::JobToolUse {
+                job_id,
+                tool_name,
+                input,
+            },
+            AE::JobToolResult {
+                job_id,
+                tool_name,
+                output,
+            } => SseEvent::JobToolResult {
+                job_id,
+                tool_name,
+                output,
+            },
+            AE::JobStatus { job_id, message } => SseEvent::JobStatus { job_id, message },
+            AE::JobResult {
+                job_id,
+                status,
+                session_id,
+                fallback_deliverable,
+            } => SseEvent::JobResult {
+                job_id,
+                status,
+                session_id,
+                fallback_deliverable,
+            },
+            AE::ImageGenerated {
+                data_url,
+                path,
+                thread_id,
+            } => SseEvent::ImageGenerated {
+                data_url,
+                path,
+                thread_id,
+            },
+            AE::Suggestions {
+                suggestions,
+                thread_id,
+            } => SseEvent::Suggestions {
+                suggestions,
+                thread_id,
+            },
+            AE::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                thread_id,
+            } => SseEvent::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                thread_id,
+            },
+            AE::SkillActivated {
+                skill_names,
+                thread_id,
+            } => SseEvent::SkillActivated {
+                skill_names,
+                thread_id,
+            },
+            AE::ExtensionStatus {
+                extension_name,
+                status,
+                message,
+            } => SseEvent::ExtensionStatus {
+                extension_name,
+                status,
+                message,
+            },
+            AE::ReasoningUpdate {
+                narrative,
+                decisions,
+                thread_id,
+            } => SseEvent::ReasoningUpdate {
+                narrative,
+                decisions: decisions
+                    .into_iter()
+                    .map(|d| ToolDecisionDto {
+                        tool_name: d.tool_name,
+                        rationale: d.rationale,
+                    })
+                    .collect(),
+                thread_id,
+            },
+            AE::ThreadStateChanged {
+                thread_id,
+                from_state,
+                to_state,
+                reason,
+            } => SseEvent::ThreadStateChanged {
+                thread_id,
+                from_state,
+                to_state,
+                reason,
+            },
+            AE::ChildThreadSpawned {
+                parent_thread_id,
+                child_thread_id,
+                goal,
+            } => SseEvent::ChildThreadSpawned {
+                parent_thread_id,
+                child_thread_id,
+                goal,
+            },
+            // Variants with no local equivalent are silently dropped
+            _ => SseEvent::Status {
+                message: String::new(),
+                thread_id: None,
+            },
+        }
+    }
+}
+
+// --- Memory ---
+
+#[derive(Debug, Serialize)]
+pub struct MemoryTreeResponse {
+    pub entries: Vec<TreeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryListResponse {
+    pub path: String,
+    pub entries: Vec<ListEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryReadResponse {
+    pub path: String,
+    pub content: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryWriteRequest {
+    pub path: String,
+    pub content: String,
+    /// Optional layer to write to. When present, uses `write_to_layer()`
+    /// which enables privacy classification and redirect.
+    pub layer: Option<String>,
+    /// When true and a layer is specified, appends to existing content
+    /// instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
+    /// Skip privacy classification and write directly to the specified layer.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryWriteResponse {
+    pub path: String,
+    pub status: &'static str,
+    /// Whether the write was redirected to a different layer (e.g., sensitive
+    /// content redirected from shared to private).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirected: Option<bool>,
+    /// The layer the content was actually written to (may differ from requested
+    /// layer if privacy redirect occurred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_layer: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemorySearchRequest {
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemorySearchResponse {
+    pub results: Vec<SearchHit>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchHit {
+    pub path: String,
+    pub content: String,
+    pub score: f64,
+}
+
+// --- Jobs ---
+
+#[derive(Debug, Serialize)]
+pub struct JobInfo {
+    pub id: Uuid,
+    pub title: String,
+    pub state: String,
+    pub user_id: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobListResponse {
+    pub jobs: Vec<JobInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobSummaryResponse {
+    pub total: usize,
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub stuck: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobDetailResponse {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+    pub state: String,
+    pub user_id: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub elapsed_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browse_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_mode: Option<String>,
+    pub transitions: Vec<TransitionInfo>,
+    /// Whether this job can be restarted from the UI.
+    #[serde(default)]
+    pub can_restart: bool,
+    /// Whether follow-up prompts can be sent to this job.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// The kind of job: "sandbox" or "agent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_kind: Option<String>,
+}
+
+// --- Project Files ---
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFilesResponse {
+    pub entries: Vec<ProjectFileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileReadResponse {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransitionInfo {
+    pub from: String,
+    pub to: String,
+    pub timestamp: String,
+    pub reason: Option<String>,
+}
+
+// --- Extensions ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActivationStatus {
+    Installed,
+    Configured,
+    Pairing,
+    Active,
+    Failed,
+}
+
+pub fn classify_wasm_channel_activation(
+    ext: &crate::extensions::InstalledExtension,
+    has_paired: bool,
+    has_owner_binding: bool,
+) -> Option<ExtensionActivationStatus> {
+    if ext.kind != crate::extensions::ExtensionKind::WasmChannel {
+        return None;
+    }
+
+    Some(if ext.activation_error.is_some() {
+        ExtensionActivationStatus::Failed
+    } else if !ext.authenticated {
+        ExtensionActivationStatus::Installed
+    } else if ext.active {
+        if has_paired || has_owner_binding {
+            ExtensionActivationStatus::Active
+        } else {
+            ExtensionActivationStatus::Pairing
+        }
+    } else {
+        ExtensionActivationStatus::Configured
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub kind: String,
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub authenticated: bool,
+    pub active: bool,
+    pub tools: Vec<String>,
+    /// Whether this extension has configurable secrets (setup schema).
+    #[serde(default)]
+    pub needs_setup: bool,
+    /// Whether this extension has an auth configuration (OAuth or manual token).
+    #[serde(default)]
+    pub has_auth: bool,
+    /// WASM channel activation status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_status: Option<ExtensionActivationStatus>,
+    /// Human-readable error when activation_status is "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
+    /// Extension version (semver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionListResponse {
+    pub extensions: Vec<ExtensionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolListResponse {
+    pub tools: Vec<ToolInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallExtensionRequest {
+    pub name: String,
+    pub url: Option<String>,
+    pub kind: Option<String>,
+}
+
+// --- Extension Setup ---
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionSetupResponse {
+    pub name: String,
+    pub kind: String,
+    pub secrets: Vec<SecretFieldInfo>,
+    pub fields: Vec<SetupFieldInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecretFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this secret is already stored.
+    pub provided: bool,
+    /// Whether the secret will be auto-generated if left empty.
+    pub auto_generate: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetupFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this field already has a stored value.
+    pub provided: bool,
+    /// Input type for web UI rendering.
+    pub input_type: crate::tools::wasm::ToolSetupFieldInputType,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionSetupRequest {
+    #[serde(default)]
+    pub secrets: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionResponse {
+    pub success: bool,
+    pub message: String,
+    /// Auth URL to open (when activation requires OAuth).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+    /// Whether the extension is waiting for a manual token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting_token: Option<bool>,
+    /// Instructions for manual token entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Whether the channel was successfully activated after setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+    /// Whether a restart is required for the new configuration to take effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_restart: Option<bool>,
+    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::extensions::VerificationChallenge>,
+}
+
+impl ActionResponse {
+    pub fn ok(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            auth_url: None,
+            awaiting_token: None,
+            instructions: None,
+            activated: None,
+            needs_restart: None,
+            verification: None,
+        }
+    }
+
+    pub fn fail(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            auth_url: None,
+            awaiting_token: None,
+            instructions: None,
+            activated: None,
+            needs_restart: None,
+            verification: None,
+        }
+    }
+}
+
+// --- Registry ---
+
+#[derive(Debug, Serialize)]
+pub struct RegistryEntryInfo {
+    pub name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub keywords: Vec<String>,
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegistrySearchResponse {
+    pub entries: Vec<RegistryEntryInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrySearchQuery {
+    pub query: Option<String>,
+}
+
+// --- Pairing ---
+
+#[derive(Debug, Serialize)]
+pub struct PairingListResponse {
+    pub channel: String,
+    pub requests: Vec<PairingRequestInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairingRequestInfo {
+    pub code: String,
+    pub sender_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PairingApproveRequest {
+    pub code: String,
+}
+
+// --- Skills ---
+
+#[derive(Debug, Serialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub trust: String,
+    pub source: String,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillListResponse {
+    pub skills: Vec<SkillInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillSearchRequest {
+    pub query: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillSearchResponse {
+    pub catalog: Vec<serde_json::Value>,
+    pub installed: Vec<SkillInfo>,
+    pub registry_url: String,
+    /// If the catalog registry was unreachable or errored, a human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillInstallRequest {
+    pub name: String,
+    /// Registry slug (e.g. "owner/skill-name"). Preferred over `name` for
+    /// constructing the download URL when fetching from ClawHub.
+    pub slug: Option<String>,
+    pub url: Option<String>,
+    pub content: Option<String>,
+}
+
+// --- Auth Token ---
+
+/// Request to submit an auth token for an extension (dedicated endpoint).
+#[derive(Debug, Deserialize)]
+pub struct AuthTokenRequest {
+    pub extension_name: String,
+    pub token: String,
+}
+
+/// Request to cancel an in-progress auth flow.
+#[derive(Debug, Deserialize)]
+pub struct AuthCancelRequest {
+    pub extension_name: String,
+}
+
+// --- WebSocket ---
+
+/// Message sent by a WebSocket client to the server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsClientMessage {
+    /// Send a chat message to the agent.
+    #[serde(rename = "message")]
+    Message {
+        content: String,
+        thread_id: Option<String>,
+        timezone: Option<String>,
+        /// Optional images attached to the message.
+        #[serde(default)]
+        images: Vec<ImageData>,
+    },
+    /// Approve or deny a pending tool execution.
+    #[serde(rename = "approval")]
+    Approval {
+        request_id: String,
+        /// "approve", "always", or "deny"
+        action: String,
+        /// Thread that owns the pending approval.
+        thread_id: Option<String>,
+    },
+    /// Submit an auth token for an extension (bypasses message pipeline).
+    #[serde(rename = "auth_token")]
+    AuthToken {
+        extension_name: String,
+        token: String,
+    },
+    /// Cancel an in-progress auth flow.
+    #[serde(rename = "auth_cancel")]
+    AuthCancel { extension_name: String },
+    /// Client heartbeat ping.
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+/// Message sent by the server to a WebSocket client.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum WsServerMessage {
+    /// An SSE-style event forwarded over WebSocket.
+    #[serde(rename = "event")]
+    Event {
+        /// The event sub-type (response, thinking, tool_started, etc.)
+        event_type: String,
+        /// The event payload as a JSON value.
+        data: serde_json::Value,
+    },
+    /// Server heartbeat pong.
+    #[serde(rename = "pong")]
+    Pong,
+    /// Error message.
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+impl WsServerMessage {
+    /// Create a WsServerMessage from an SseEvent.
+    pub fn from_sse_event(event: &SseEvent) -> Self {
+        let event_type = match event {
+            SseEvent::Response { .. } => "response",
+            SseEvent::Thinking { .. } => "thinking",
+            SseEvent::ToolStarted { .. } => "tool_started",
+            SseEvent::ToolCompleted { .. } => "tool_completed",
+            SseEvent::ToolResult { .. } => "tool_result",
+            SseEvent::StreamChunk { .. } => "stream_chunk",
+            SseEvent::Status { .. } => "status",
+            SseEvent::JobStarted { .. } => "job_started",
+            SseEvent::ApprovalNeeded { .. } => "approval_needed",
+            SseEvent::AuthRequired { .. } => "auth_required",
+            SseEvent::AuthCompleted { .. } => "auth_completed",
+            SseEvent::Error { .. } => "error",
+            SseEvent::Heartbeat => "heartbeat",
+            SseEvent::JobMessage { .. } => "job_message",
+            SseEvent::JobToolUse { .. } => "job_tool_use",
+            SseEvent::JobToolResult { .. } => "job_tool_result",
+            SseEvent::JobStatus { .. } => "job_status",
+            SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ImageGenerated { .. } => "image_generated",
+            SseEvent::Suggestions { .. } => "suggestions",
+            SseEvent::TurnCost { .. } => "turn_cost",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ReasoningUpdate { .. } => "reasoning_update",
+            SseEvent::SkillActivated { .. } => "skill_activated",
+            SseEvent::GateRequired { .. } => "gate_required",
+            SseEvent::GateResolved { .. } => "gate_resolved",
+            SseEvent::ThreadStateChanged { .. } => "thread_state_changed",
+            SseEvent::ChildThreadSpawned { .. } => "child_thread_spawned",
+        };
+        let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        WsServerMessage::Event {
+            event_type: event_type.to_string(),
+            data,
+        }
+    }
+}
+
+// --- Routines ---
+
+#[derive(Debug, Serialize)]
+pub struct RoutineInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub trigger_type: String,
+    pub trigger_raw: String,
+    pub trigger_summary: String,
+    pub action_type: String,
+    pub last_run_at: Option<String>,
+    pub next_fire_at: Option<String>,
+    pub run_count: u64,
+    pub consecutive_failures: u32,
+    pub status: String,
+}
+
+impl RoutineInfo {
+    /// Convert a `Routine` to the trimmed `RoutineInfo` for list display.
+    pub fn from_routine(r: &crate::agent::routine::Routine) -> Self {
+        let (trigger_type, trigger_raw, trigger_summary) = match &r.trigger {
+            crate::agent::routine::Trigger::Cron { schedule, timezone } => (
+                "cron".to_string(),
+                schedule.clone(),
+                crate::agent::routine::describe_cron(schedule, timezone.as_deref()),
+            ),
+            crate::agent::routine::Trigger::Event {
+                pattern, channel, ..
+            } => {
+                let ch = channel.as_deref().unwrap_or("any");
+                (
+                    "event".to_string(),
+                    String::new(),
+                    format!("on {} /{}/", ch, pattern),
+                )
+            }
+            crate::agent::routine::Trigger::SystemEvent {
+                source, event_type, ..
+            } => (
+                "system_event".to_string(),
+                String::new(),
+                format!("event: {}.{}", source, event_type),
+            ),
+            crate::agent::routine::Trigger::Webhook { path, .. } => {
+                let p = path.as_deref().unwrap_or("default");
+                (
+                    "webhook".to_string(),
+                    String::new(),
+                    format!("webhook: /api/webhooks/{}", p),
+                )
+            }
+            crate::agent::routine::Trigger::Manual => (
+                "manual".to_string(),
+                String::new(),
+                "manual only".to_string(),
+            ),
+        };
+
+        let action_type = match &r.action {
+            crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
+            crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
+        };
+
+        let status = if !r.enabled {
+            "disabled"
+        } else if r.consecutive_failures > 0 {
+            "failing"
+        } else {
+            "active"
+        };
+
+        RoutineInfo {
+            id: r.id,
+            name: r.name.clone(),
+            description: r.description.clone(),
+            enabled: r.enabled,
+            trigger_type,
+            trigger_raw,
+            trigger_summary,
+            action_type: action_type.to_string(),
+            last_run_at: r.last_run_at.map(|dt| dt.to_rfc3339()),
+            next_fire_at: r.next_fire_at.map(|dt| dt.to_rfc3339()),
+            run_count: r.run_count,
+            consecutive_failures: r.consecutive_failures,
+            status: status.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineListResponse {
+    pub routines: Vec<RoutineInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineSummaryResponse {
+    pub total: u64,
+    pub enabled: u64,
+    pub disabled: u64,
+    pub failing: u64,
+    pub runs_today: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineDetailResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub trigger_type: String,
+    pub trigger_raw: String,
+    pub trigger_summary: String,
+    pub trigger: serde_json::Value,
+    pub action: serde_json::Value,
+    pub guardrails: serde_json::Value,
+    pub notify: serde_json::Value,
+    pub last_run_at: Option<String>,
+    pub next_fire_at: Option<String>,
+    pub run_count: u64,
+    pub consecutive_failures: u32,
+    pub created_at: String,
+    pub recent_runs: Vec<RoutineRunInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineRunInfo {
+    pub id: Uuid,
+    pub trigger_type: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub result_summary: Option<String>,
+    pub tokens_used: Option<i32>,
+    pub job_id: Option<Uuid>,
+}
+
+// --- Settings ---
+
+#[derive(Debug, Serialize)]
+pub struct SettingResponse {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsListResponse {
+    pub settings: Vec<SettingResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingWriteRequest {
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsImportRequest {
+    pub settings: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsExportResponse {
+    pub settings: std::collections::HashMap<String, serde_json::Value>,
+}
+
+// --- Health ---
+
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    pub status: &'static str,
+    pub channel: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- WsClientMessage deserialization tests ----
+
+    #[test]
+    fn test_ws_client_message_parse() {
+        let json = r#"{"type":"message","content":"hello","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
+                assert_eq!(content, "hello");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_message_no_thread() {
+        let json = r#"{"type":"message","content":"hi"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
+                assert_eq!(content, "hi");
+                assert!(thread_id.is_none());
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_approval_parse() {
+        let json =
+            r#"{"type":"approval","request_id":"abc-123","action":"approve","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Approval {
+                request_id,
+                action,
+                thread_id,
+            } => {
+                assert_eq!(request_id, "abc-123");
+                assert_eq!(action, "approve");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected Approval variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_approval_parse_no_thread() {
+        let json = r#"{"type":"approval","request_id":"abc-123","action":"deny"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Approval {
+                request_id,
+                action,
+                thread_id,
+            } => {
+                assert_eq!(request_id, "abc-123");
+                assert_eq!(action, "deny");
+                assert!(thread_id.is_none());
+            }
+            _ => panic!("Expected Approval variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_ping_parse() {
+        let json = r#"{"type":"ping"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, WsClientMessage::Ping));
+    }
+
+    #[test]
+    fn test_ws_client_unknown_type_fails() {
+        let json = r#"{"type":"unknown"}"#;
+        let result: Result<WsClientMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ---- WsServerMessage serialization tests ----
+
+    #[test]
+    fn test_ws_server_pong_serialize() {
+        let msg = WsServerMessage::Pong;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"pong"}"#);
+    }
+
+    #[test]
+    fn test_ws_server_error_serialize() {
+        let msg = WsServerMessage::Error {
+            message: "bad request".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["message"], "bad request");
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_response() {
+        let sse = SseEvent::Response {
+            content: "hello".to_string(),
+            thread_id: "t1".to_string(),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "response");
+                assert_eq!(data["content"], "hello");
+                assert_eq!(data["thread_id"], "t1");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_thinking() {
+        let sse = SseEvent::Thinking {
+            message: "reasoning...".to_string(),
+            thread_id: None,
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "thinking");
+                assert_eq!(data["message"], "reasoning...");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_approval_needed() {
+        let sse = SseEvent::ApprovalNeeded {
+            request_id: "r1".to_string(),
+            tool_name: "shell".to_string(),
+            description: "Run ls".to_string(),
+            parameters: "{}".to_string(),
+            thread_id: Some("t1".to_string()),
+            allow_always: true,
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "approval_needed");
+                assert_eq!(data["tool_name"], "shell");
+                assert_eq!(data["thread_id"], "t1");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_heartbeat() {
+        let sse = SseEvent::Heartbeat;
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, .. } => {
+                assert_eq!(event_type, "heartbeat");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    // ---- Auth type tests ----
+
+    #[test]
+    fn test_ws_client_auth_token_parse() {
+        let json = r#"{"type":"auth_token","extension_name":"notion","token":"sk-123"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthToken {
+                extension_name,
+                token,
+            } => {
+                assert_eq!(extension_name, "notion");
+                assert_eq!(token, "sk-123");
+            }
+            _ => panic!("Expected AuthToken variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_auth_cancel_parse() {
+        let json = r#"{"type":"auth_cancel","extension_name":"notion"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthCancel { extension_name } => {
+                assert_eq!(extension_name, "notion");
+            }
+            _ => panic!("Expected AuthCancel variant"),
+        }
+    }
+
+    #[test]
+    fn test_sse_auth_required_serialize() {
+        let event = SseEvent::AuthRequired {
+            extension_name: "notion".to_string(),
+            instructions: Some("Get your token from...".to_string()),
+            auth_url: None,
+            setup_url: Some("https://notion.so/integrations".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "auth_required");
+        assert_eq!(parsed["extension_name"], "notion");
+        assert_eq!(parsed["instructions"], "Get your token from...");
+        assert!(parsed.get("auth_url").is_none());
+        assert_eq!(parsed["setup_url"], "https://notion.so/integrations");
+    }
+
+    #[test]
+    fn test_sse_auth_completed_serialize() {
+        let event = SseEvent::AuthCompleted {
+            extension_name: "notion".to_string(),
+            success: true,
+            message: "notion authenticated (3 tools loaded)".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "auth_completed");
+        assert_eq!(parsed["extension_name"], "notion");
+        assert_eq!(parsed["success"], true);
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_auth_required() {
+        let sse = SseEvent::AuthRequired {
+            extension_name: "openai".to_string(),
+            instructions: Some("Enter API key".to_string()),
+            auth_url: None,
+            setup_url: None,
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "auth_required");
+                assert_eq!(data["extension_name"], "openai");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_auth_completed() {
+        let sse = SseEvent::AuthCompleted {
+            extension_name: "slack".to_string(),
+            success: false,
+            message: "Invalid token".to_string(),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "auth_completed");
+                assert_eq!(data["success"], false);
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_auth_token_request_deserialize() {
+        let json = r#"{"extension_name":"telegram","token":"bot12345"}"#;
+        let req: AuthTokenRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extension_name, "telegram");
+        assert_eq!(req.token, "bot12345");
+    }
+
+    #[test]
+    fn test_auth_cancel_request_deserialize() {
+        let json = r#"{"extension_name":"telegram"}"#;
+        let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extension_name, "telegram");
+    }
+
+    #[test]
+    fn test_extension_setup_request_defaults() {
+        let json = r#"{}"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert!(req.secrets.is_empty());
+        assert!(req.fields.is_empty());
+    }
+
+    #[test]
+    fn test_extension_setup_request_deserialize_with_fields() {
+        let json = r#"{
+            "secrets": { "api_key": "sk-123" },
+            "fields": { "llm_backend": "openai", "selected_model": "gpt-4o" }
+        }"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.secrets.get("api_key").unwrap(), "sk-123");
+        assert_eq!(req.fields.get("llm_backend").unwrap(), "openai");
+        assert_eq!(req.fields.get("selected_model").unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_setup_field_info_serializes_input_type_as_enum_string() {
+        let field = SetupFieldInfo {
+            name: "selected_model".to_string(),
+            prompt: "Model".to_string(),
+            optional: false,
+            provided: true,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+        };
+
+        let json = serde_json::to_value(field).unwrap();
+        assert_eq!(json["input_type"], "password");
+    }
+
+    // ---- ThreadInfo channel field tests ----
+
+    #[test]
+    fn test_thread_info_channel_serialized() {
+        let info = ThreadInfo {
+            id: Uuid::nil(),
+            state: "Idle".to_string(),
+            turn_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            title: None,
+            thread_type: None,
+            channel: Some("telegram".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["channel"], "telegram");
+    }
+
+    #[test]
+    fn test_thread_info_channel_omitted_when_none() {
+        let info = ThreadInfo {
+            id: Uuid::nil(),
+            state: "Idle".to_string(),
+            turn_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            title: None,
+            thread_type: None,
+            channel: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("channel").is_none());
+    }
+}

@@ -1,0 +1,66 @@
+{
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
+  "type": "channel",
+  "name": "discord",
+  "description": "Discord webhook channel for slash commands, components, and optional mention polling",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "discord_bot_token",
+        "prompt": "Enter your Discord Bot Token. Find it under Bot > Token in your Discord Application settings.",
+        "optional": false
+      },
+      {
+        "name": "discord_public_key",
+        "prompt": "Enter your Discord Application Public Key (found under General Information in your Discord Application settings).",
+        "optional": false
+      }
+    ],
+    "setup_url": "https://discord.com/developers/applications"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "discord.com", "path_prefix": "/api/v10" }
+      ],
+      "credentials": {
+        "discord_bot_token": {
+          "secret_name": "discord_bot_token",
+          "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
+          "host_patterns": ["discord.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3600
+      }
+    },
+    "secrets": {
+      "allowed_names": ["discord_bot_token", "discord_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/discord"],
+      "allow_polling": true,
+      "callback_timeout_secs": 45,
+      "workspace_prefix": "channels/discord/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "signature_key_secret_name": "discord_public_key"
+      }
+    }
+  },
+  "config": {
+    "require_signature_verification": true,
+    "webhook_secret": null,
+    "polling_enabled": false,
+    "poll_interval_ms": 30000,
+    "mention_channel_ids": [],
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
+  }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Ironclaw service watchdog hourly
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+AccuracySec=1min
+Persistent=true
+Unit=ironclaw-watchdog.service
+
+[Install]
+WantedBy=timers.target
