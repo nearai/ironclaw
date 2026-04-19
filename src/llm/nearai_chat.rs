@@ -308,8 +308,12 @@ impl NearAiChatProvider {
                 return Err(LlmError::ContextLengthExceeded { used, limit });
             }
 
-            // Some providers return 400 with "context_length_exceeded" in the body
-            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
+            // Some providers return 400 with context-overflow text in the body
+            // (e.g., OpenAI-compatible endpoints behind NEAR AI). Some OpenAI-
+            // compatible backends also compute a negative remaining output budget
+            // when the prompt already exceeds the context window, surfacing that as
+            // "max_tokens must be at least 1, got -123" instead of the more common
+            // "context_length_exceeded" wording.
             if status_code == 400 {
                 let lower = response_text.to_ascii_lowercase();
                 const CONTEXT_PATTERNS: &[&str] = &[
@@ -317,6 +321,7 @@ impl NearAiChatProvider {
                     "maximum context length",
                     "too many tokens",
                     "payload too large",
+                    "max_tokens must be at least 1, got -",
                 ];
                 if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
                     let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
@@ -1167,6 +1172,11 @@ fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::llm::session::SessionConfig;
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use rust_decimal_macros::dec;
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
@@ -1190,6 +1200,37 @@ mod tests {
 
     fn test_session() -> Arc<SessionManager> {
         Arc::new(SessionManager::new(SessionConfig::default()))
+    }
+
+    async fn spawn_nearai_test_server(
+        chat_status: StatusCode,
+        chat_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post({
+                    let body = chat_body.to_string();
+                    move || {
+                        let body = body.clone();
+                        async move { (chat_status, body) }
+                    }
+                }),
+            )
+            .route(
+                "/v1/model/list",
+                get(|| async { (StatusCode::NOT_FOUND, "") }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        (format!("http://{}", addr), handle)
     }
 
     #[test]
@@ -1903,6 +1944,29 @@ mod tests {
         unsafe {
             std::env::remove_var("NEARAI_API_KEY");
         }
+    }
+
+    #[tokio::test]
+    async fn test_send_request_maps_negative_max_tokens_400_to_context_length_exceeded() {
+        let (base_url, server) = spawn_nearai_test_server(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"max_tokens must be at least 1, got -139081"}}"#,
+        )
+        .await;
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+
+        let err = provider
+            .send_request::<_, serde_json::Value>(&serde_json::json!({"ping": true}))
+            .await
+            .expect_err("negative max_tokens overflow should map to context-length error");
+
+        server.abort();
+
+        assert!(matches!(
+            err,
+            LlmError::ContextLengthExceeded { used: 0, limit: 0 }
+        ));
     }
 
     #[test]
