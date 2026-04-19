@@ -129,6 +129,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("ws.rs", "crate::channels::web::server::RateLimiter"),
     ("ws.rs", "crate::channels::web::server::ActiveConfigSnapshot"),
     ("ws.rs", "crate::channels::web::server::images_to_attachments"),
+    ("ws.rs", "crate::channels::web::server::inline_attachments_to_incoming"),
     ("ws.rs", "crate::channels::web::server::handle_legacy_auth_token_submission"),
     ("ws.rs", "crate::channels::web::server::handle_legacy_auth_cancel"),
 }
