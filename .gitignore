@@ -42,3 +42,5 @@ __pycache__/
 *.pyo
 *.pyd
 engine_trace_*.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.log

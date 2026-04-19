@@ -279,9 +279,9 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain + wasm target
-        run: |
-          rustup target add wasm32-wasip2
-          cargo install cargo-component --locked || true
+        run: rustup target add wasm32-wasip2
+      - name: Install cargo-component
+        uses: ./.github/actions/install-cargo-component
       - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
@@ -469,6 +469,17 @@ jobs:
 
           # shellcheck disable=SC2086  # PRERELEASE_FLAG is '--prerelease' or empty
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  # Build and push Docker Hub images (:version, :latest, :sha-*) after the GitHub Release exists.
+  docker-image:
+    needs: host
+    if: ${{ always() && needs.host.result == 'success' }}
+    permissions:
+      contents: read
+      packages: read
+      actions: write
+    uses: ./.github/workflows/docker.yml
+    secrets: inherit
 
   # Commit patched manifest SHA256 checksums back to main so the repo
   # stays in sync with the released artifacts.

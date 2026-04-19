@@ -18,6 +18,7 @@ from helpers import api_post, auth_headers
 BOT_TOKEN = "111222333:FAKE_E2E_TOKEN"
 # Owner user id used in subsequent Telegram messages.
 OWNER_USER_ID = 42
+PAIRED_USER_ID = 77
 # Fixed webhook secret supplied during setup so all tests can use it
 # without extracting it from the server.
 WEBHOOK_SECRET = "e2e-test-webhook-secret-for-telegram"
@@ -124,10 +125,11 @@ async def activate_telegram(
     r1.raise_for_status()
     body1 = r1.json()
     assert body1.get("success"), f"Setup call failed: {body1}"
-    assert body1.get("verification") is None, (
-        f"Telegram setup should not return a verification challenge: {body1}"
-    )
+    # Telegram verification challenge flow was removed — channels now go
+    # straight to activation and use the generic pairing flow for ownership.
     assert body1.get("activated"), f"Setup call did not activate Telegram: {body1}"
+
+    await reset_fake_tg(fake_tg_url)
 
     # Complete the pairing flow so OWNER_USER_ID can chat normally in the
     # subsequent round-trip assertions.
@@ -180,6 +182,135 @@ async def approve_pairing(base_url: str, code: str) -> None:
     response.raise_for_status()
     body = response.json()
     assert body.get("success"), f"Pairing approval failed: {body}"
+
+
+async def pair_telegram_user(
+    base_url: str,
+    http_url: str,
+    fake_tg_url: str,
+    *,
+    user_id: int,
+    first_name: str,
+) -> None:
+    """Pair an arbitrary Telegram user to the current IronClaw owner scope."""
+    pairing_resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": int(time.time() * 1000) % 2_147_483_647,
+            "message": {
+                "message_id": 1,
+                "from": {
+                    "id": user_id,
+                    "is_bot": False,
+                    "first_name": first_name,
+                },
+                "chat": {"id": user_id, "type": "private"},
+                "date": int(time.time()),
+                "text": "hello from paired user",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert pairing_resp.status_code == 200
+
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    code = extract_pairing_code(messages)
+    assert code, f"Expected pairing code in Telegram reply, got: {messages}"
+    await approve_pairing(base_url, code)
+    await reset_fake_tg(fake_tg_url)
+
+
+async def create_owner_routine_via_chat(base_url: str, routine_name: str) -> None:
+    """Create an owner-scoped routine through the gateway chat API."""
+    thread_r = await api_post(base_url, "/api/chat/thread/new", timeout=15)
+    assert thread_r.status_code == 200
+    thread_id = thread_r.json()["id"]
+
+    send_r = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={
+            "content": f"create lightweight owner routine {routine_name}",
+            "thread_id": thread_id,
+        },
+        timeout=30,
+    )
+    assert send_r.status_code in (200, 202), (
+        f"Routine create send failed ({send_r.status_code}): {send_r.text}"
+    )
+
+    deadline = time.monotonic() + 30
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            history = await client.get(
+                f"{base_url}/api/chat/history",
+                params={"thread_id": thread_id},
+                headers=auth_headers(),
+                timeout=15,
+            )
+            history.raise_for_status()
+            data = history.json()
+
+            pending = data.get("pending_gate") or data.get("pending_approval")
+            if pending:
+                approval = await client.post(
+                    f"{base_url}/api/chat/approval",
+                    json={
+                        "request_id": pending["request_id"],
+                        "action": "approve",
+                        "thread_id": thread_id,
+                    },
+                    headers=auth_headers(),
+                    timeout=15,
+                )
+                assert approval.status_code == 202, (
+                    f"Routine approval failed ({approval.status_code}): {approval.text}"
+                )
+
+            turns = data.get("turns", [])
+            if turns and turns[-1].get("response"):
+                response = turns[-1]["response"]
+                assert routine_name in response, (
+                    f"Routine create response missing routine name: {response}"
+                )
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise TimeoutError(
+        f"Routine '{routine_name}' did not complete via chat within 30 seconds"
+    )
+
+
+async def wait_for_routine(base_url: str, routine_name: str, *, timeout: float = 30) -> dict:
+    """Poll the routines API until the named routine appears."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            response = await client.get(
+                f"{base_url}/api/routines",
+                headers=auth_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+            for routine in response.json().get("routines", []):
+                if routine.get("name") == routine_name:
+                    return routine
+            await asyncio.sleep(0.5)
+    raise TimeoutError(
+        f"Routine '{routine_name}' did not appear within {timeout} seconds"
+    )
+
+
+async def queue_fake_telegram_update(fake_tg_url: str, update: dict) -> None:
+    """Queue an update for fake Telegram polling mode APIs like getUpdates."""
+    async with httpx.AsyncClient() as c:
+        response = await c.post(
+            f"{fake_tg_url}/__mock/queue_update",
+            json=update,
+            timeout=5,
+        )
+    response.raise_for_status()
 
 
 async def post_telegram_webhook(
@@ -322,6 +453,57 @@ async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
     reply_text = messages[-1].get("text", "")
     assert reply_text, f"Empty reply text. All sent messages: {messages}"
     assert messages[-1]["chat_id"] == OWNER_USER_ID
+
+
+async def test_paired_telegram_user_lists_owner_routines(
+    telegram_e2e_server_with_routines,
+):
+    """A paired Telegram guest should see routines created in owner scope."""
+    base_url = telegram_e2e_server_with_routines["base_url"]
+    http_url = telegram_e2e_server_with_routines["http_url"]
+    fake_tg_url = telegram_e2e_server_with_routines["fake_tg_url"]
+    channels_dir = telegram_e2e_server_with_routines["channels_dir"]
+    routine_name = f"telegram-owner-{int(time.time())}"
+
+    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    await create_owner_routine_via_chat(base_url, routine_name)
+    await wait_for_routine(base_url, routine_name)
+    await reset_fake_tg(fake_tg_url)
+
+    await pair_telegram_user(
+        base_url,
+        http_url,
+        fake_tg_url,
+        user_id=PAIRED_USER_ID,
+        first_name="Paired Tester",
+    )
+
+    resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": 10_001,
+            "message": {
+                "message_id": 99,
+                "from": {
+                    "id": PAIRED_USER_ID,
+                    "is_bot": False,
+                    "first_name": "Paired Tester",
+                },
+                "chat": {"id": PAIRED_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "list owner routines",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert resp.status_code == 200
+
+    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    reply_text = "\n".join(m.get("text", "") for m in messages if m.get("chat_id") == PAIRED_USER_ID)
+    assert routine_name in reply_text, (
+        f"Expected paired Telegram user to see owner routine '{routine_name}', "
+        f"got replies: {messages}"
+    )
 
 
 async def test_telegram_edited_message_roundtrip(telegram_e2e_server):

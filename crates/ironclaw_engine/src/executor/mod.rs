@@ -15,3 +15,4 @@ pub mod structured;
 pub mod trace;
 
 pub use loop_engine::ExecutionLoop;
+pub use scripting::validate_python_syntax;

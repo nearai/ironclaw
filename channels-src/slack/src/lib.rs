@@ -178,11 +178,10 @@ fn classify_slack_error(http_status: u16, error_field: Option<&str>) -> SlackApi
 
     // Application-level classification from Slack's `error` field
     match error_field {
-        Some("invalid_auth" | "token_revoked" | "token_expired" | "not_authed"
-        | "account_inactive") => SlackApiError::InvalidAuth,
-        Some(e) if e.starts_with("missing_scope") => {
-            SlackApiError::MissingScope(e.to_string())
-        }
+        Some(
+            "invalid_auth" | "token_revoked" | "token_expired" | "not_authed" | "account_inactive",
+        ) => SlackApiError::InvalidAuth,
+        Some(e) if e.starts_with("missing_scope") => SlackApiError::MissingScope(e.to_string()),
         Some("channel_not_found" | "not_in_channel" | "is_archived") => {
             SlackApiError::ChannelNotFound
         }
@@ -386,11 +385,7 @@ impl Guest for SlackChannel {
 
         let thread_ts = response.thread_id.or(metadata.thread_ts);
 
-        let ts = post_slack_message(
-            &metadata.channel,
-            &response.content,
-            thread_ts.as_deref(),
-        )?;
+        let ts = post_slack_message(&metadata.channel, &response.content, thread_ts.as_deref())?;
 
         if let Some(thread_ts) = thread_ts {
             if let Err(e) = track_active_thread(&metadata.channel, &thread_ts) {
@@ -484,9 +479,7 @@ fn validate_bot_token() {
 
     match result {
         Ok(http_response) => {
-            if let Ok(auth) =
-                serde_json::from_slice::<SlackAuthTestResponse>(&http_response.body)
-            {
+            if let Ok(auth) = serde_json::from_slice::<SlackAuthTestResponse>(&http_response.body) {
                 if auth.ok {
                     // Persist bot_id so we can filter our own messages
                     if let Some(ref bot_id) = auth.bot_id {
@@ -511,7 +504,10 @@ fn validate_bot_token() {
         Err(e) => {
             channel_host::log(
                 channel_host::LogLevel::Warn,
-                &format!("auth.test request failed (token may not be configured yet): {}", e),
+                &format!(
+                    "auth.test request failed (token may not be configured yet): {}",
+                    e
+                ),
             );
         }
     }
@@ -522,7 +518,7 @@ fn validate_bot_token() {
 // ============================================================================
 
 /// Post a chat.postMessage with retry for transient errors.
-fn post_message_with_retry(payload_bytes: &[u8], channel: &str) -> Result<(), String> {
+fn post_message_with_retry(payload_bytes: &[u8], channel: &str) -> Result<Option<String>, String> {
     let headers = serde_json::json!({
         "Content-Type": "application/json"
     });
@@ -556,40 +552,32 @@ fn post_message_with_retry(payload_bytes: &[u8], channel: &str) -> Result<(), St
 
         match result {
             Ok(http_response) => {
-                let slack_error_field = serde_json::from_slice::<SlackPostMessageResponse>(
-                    &http_response.body,
-                )
-                .ok();
+                let slack_error_field =
+                    serde_json::from_slice::<SlackPostMessageResponse>(&http_response.body).ok();
 
                 // Check for Slack-level success
                 if http_response.status == 200 {
                     if let Some(ref resp) = slack_error_field {
                         if resp.ok {
-                            return Ok(());
+                            return Ok(resp.ts.clone());
                         }
                     }
                 }
 
                 // Classify the error
-                let error_str = slack_error_field
-                    .as_ref()
-                    .and_then(|r| r.error.as_deref());
+                let error_str = slack_error_field.as_ref().and_then(|r| r.error.as_deref());
                 let classified = classify_slack_error(http_response.status, error_str);
 
                 // Auth failures: notify and fail immediately
                 if classified == SlackApiError::InvalidAuth {
-                    let msg =
-                        error_str.unwrap_or("invalid_auth");
+                    let msg = error_str.unwrap_or("invalid_auth");
                     notify_auth_failure(msg);
                     return Err(format!("invalid_auth: {}", msg));
                 }
 
                 // Non-retryable: fail immediately
                 if !is_retryable(&classified) {
-                    return Err(format!(
-                        "Slack API error: {:?}",
-                        classified
-                    ));
+                    return Err(format!("Slack API error: {:?}", classified));
                 }
 
                 last_error = format!("Slack API error: {:?}", classified);
@@ -631,6 +619,7 @@ fn notify_auth_failure(error: &str) {
         ),
         thread_id: None,
         metadata_json: "{}".to_string(),
+        attachments: vec![],
     });
 }
 
@@ -1103,47 +1092,10 @@ fn post_slack_message(
     thread_ts: Option<&str>,
 ) -> Result<Option<String>, String> {
     let payload = build_broadcast_payload(channel, text, thread_ts);
-    let payload_bytes = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
-    let headers = serde_json::json!({
-        "Content-Type": "application/json"
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://slack.com/api/chat.postMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
-        None,
-    );
-
-    match result {
-        Ok(http_response) => {
-            if http_response.status != 200 {
-                return Err(format!(
-                    "Slack API returned status {}",
-                    http_response.status
-                ));
-            }
-
-            let slack_response: SlackPostMessageResponse =
-                serde_json::from_slice(&http_response.body)
-                    .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
-
-            if !slack_response.ok {
-                return Err(format!(
-                    "Slack API error: {}",
-                    slack_response
-                        .error
-                        .unwrap_or_else(|| "unknown".to_string())
-                ));
-            }
-
-            Ok(slack_response.ts)
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
-    }
+    post_message_with_retry(&payload_bytes, channel)
 }
 
 /// Normalize a broadcast target by stripping a leading `#` if present.
@@ -1407,8 +1359,7 @@ mod tests {
             team_id: Some("T12345".to_string()),
         };
         let json = serde_json::to_string(&meta).expect("serialize");
-        let deserialized: SlackMessageMetadata =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: SlackMessageMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(meta, deserialized);
     }
 
@@ -1421,8 +1372,7 @@ mod tests {
             team_id: None,
         };
         let json = serde_json::to_string(&meta).expect("serialize");
-        let deserialized: SlackMessageMetadata =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: SlackMessageMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(meta, deserialized);
     }
 
@@ -1430,8 +1380,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let config: SlackConfig =
-            serde_json::from_str("{}").expect("should parse empty config");
+        let config: SlackConfig = serde_json::from_str("{}").expect("should parse empty config");
         assert_eq!(config.signing_secret_name, "slack_signing_secret");
         assert!(config.owner_id.is_none());
         assert!(config.dm_policy.is_none());

@@ -302,9 +302,35 @@ struct TelegramMessageMetadata {
     /// Whether this is a private (DM) chat.
     is_private: bool,
 
+    /// Telegram chat type for downstream group/private detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_type: Option<String>,
+
     /// Forum topic thread ID (for routing replies back to the correct topic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
+}
+
+/// Deserialize a value that may be a JSON string or number into `Option<String>`.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|id| id.to_string())),
+        Some(_) => Ok(None),
+    }
 }
 
 /// Channel configuration injected by host.
@@ -319,8 +345,10 @@ struct TelegramConfig {
 
     /// Telegram user ID of the bot owner. When set, only messages from this
     /// user are processed. All others are silently dropped.
-    #[serde(default)]
-    owner_id: Option<i64>,
+    /// Accepts both JSON string ("12345") and number (12345) for compatibility
+    /// with both boot-path and hot-activation config injection.
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
+    owner_id: Option<String>,
 
     /// DM policy: "pairing" (default), "allowlist", or "open".
     #[serde(default)]
@@ -376,6 +404,26 @@ const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
 const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 
+fn utf16_code_unit_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn prefix_within_utf16_limit(text: &str, max_units: usize) -> usize {
+    let mut units = 0;
+    let mut end = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        units += ch_units;
+        end = byte_idx + ch.len_utf8();
+    }
+
+    end
+}
+
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
     let truncated: String = iter.by_ref().take(max_chars).collect();
@@ -386,7 +434,7 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     }
 }
 
-/// Split a long message into chunks that fit within Telegram's 4096-char limit.
+/// Split a long message into chunks that fit within Telegram's 4096 UTF-16-unit limit.
 ///
 /// Tries to split at the most natural boundary available (in priority order):
 /// 1. Double newline (paragraph break)
@@ -395,7 +443,7 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
 /// 4. Word boundary (space)
 /// 5. Hard cut at the limit (last resort for pathological input)
 fn split_message(text: &str) -> Vec<String> {
-    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN {
+    if utf16_code_unit_len(text) <= TELEGRAM_MAX_MESSAGE_LEN {
         return vec![text.to_string()];
     }
 
@@ -403,18 +451,26 @@ fn split_message(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Count chars to find the byte offset for our window.
-        let window_bytes = remaining
-            .char_indices()
-            .take(TELEGRAM_MAX_MESSAGE_LEN)
-            .last()
-            .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
-            .unwrap_or(remaining.len());
+        // Find the longest UTF-8 prefix that fits within Telegram's UTF-16 limit.
+        let window_bytes = prefix_within_utf16_limit(remaining, TELEGRAM_MAX_MESSAGE_LEN);
 
         if window_bytes >= remaining.len() {
             // Remainder fits entirely.
             chunks.push(remaining.to_string());
             break;
+        }
+
+        if window_bytes == 0 {
+            // Defensive fallback: make progress even if a future caller uses a
+            // smaller limit than a single scalar value can fit within.
+            let first_char_len = remaining
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(remaining.len());
+            chunks.push(remaining[..first_char_len].to_string());
+            remaining = &remaining[first_char_len..];
+            continue;
         }
 
         let window = &remaining[..window_bytes];
@@ -516,8 +572,8 @@ impl Guest for TelegramChannel {
         }
 
         // Persist owner_id so subsequent callbacks (on_http_request, on_poll) can read it
-        if let Some(owner_id) = config.owner_id {
-            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, &owner_id.to_string()) {
+        if let Some(ref owner_id) = config.owner_id {
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, owner_id) {
                 channel_host::log(
                     channel_host::LogLevel::Error,
                     &format!("Failed to persist owner_id: {}", e),
@@ -2119,6 +2175,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        chat_type: Some(message.chat.chat_type.clone()),
         message_thread_id: message.message_thread_id,
     };
 
@@ -2257,6 +2314,10 @@ export!(TelegramChannel);
 mod tests {
     use super::*;
 
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
     #[test]
     fn test_split_message_short() {
         let text = "Hello, world!";
@@ -2284,7 +2345,7 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() > 1, "expected multiple chunks");
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined chunks must equal the original text exactly.
         let rejoined = chunks.join(" ");
@@ -2300,7 +2361,7 @@ mod tests {
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
         let chunks = split_message(&text);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
     }
 
@@ -2330,7 +2391,7 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined must preserve all characters
         let rejoined: String = chunks.concat();
@@ -2347,10 +2408,23 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
             // Every char should be a complete emoji
             assert!(chunk.chars().all(|c| c == '\u{1F600}'));
         }
+    }
+
+    #[test]
+    fn test_split_message_exact_utf16_limit_for_surrogate_pairs() {
+        let emoji = "\u{1F600}"; // 😀
+        let text = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
     }
 
     #[test]
@@ -2509,10 +2583,17 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_owner_id() {
+    fn test_config_with_numeric_owner_id() {
         let json = r#"{"owner_id": 123456789}"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.owner_id, Some(123456789));
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_string_owner_id() {
+        let json = r#"{"owner_id": "123456789"}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
     }
 
     #[test]
@@ -2538,7 +2619,7 @@ mod tests {
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
-        assert_eq!(config.owner_id, Some(42));
+        assert_eq!(config.owner_id, Some("42".to_string()));
         assert!(config.respond_to_all_group_messages);
     }
 
@@ -2731,6 +2812,26 @@ mod tests {
         .unwrap();
 
         assert!(webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_telegram_message_metadata_deserializes_without_chat_type() {
+        let metadata: TelegramMessageMetadata = serde_json::from_str(
+            r#"{
+                "chat_id": 999,
+                "message_id": 701,
+                "user_id": 999,
+                "is_private": true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.chat_id, 999);
+        assert_eq!(metadata.message_id, 701);
+        assert_eq!(metadata.user_id, 999);
+        assert!(metadata.is_private);
+        assert_eq!(metadata.chat_type, None);
+        assert_eq!(metadata.message_thread_id, None);
     }
 
     #[test]

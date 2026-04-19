@@ -116,11 +116,11 @@ jsonschema = { version = "0.45", default-features = false }
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.2.0" }
 
 # Safety/sanitization
-ironclaw_engine = { path = "crates/ironclaw_engine" }
-ironclaw_gateway = { path = "crates/ironclaw_gateway" }
+ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
+ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
-ironclaw_tui = { path = "crates/ironclaw_tui", optional = true }
+ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 
@@ -226,7 +226,7 @@ tracing-test = "0.2"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
-insta = "1.46.3"
+insta = { version = "1.46.3", features = ["yaml"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
@@ -246,6 +246,10 @@ libsql = ["dep:libsql"]
 # Opt-in feature for especially heavy integration-test targets that run in a
 # dedicated CI job instead of the default Rust test matrix.
 integration = []
+# Replay-gate snapshot tests promoted out of `--ignored` into a dedicated CI
+# job. Enabled by `.github/workflows/replay-gate.yml`; implies `libsql` so the
+# test rig can spin up its embedded database.
+replay = ["libsql"]
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 tui = ["dep:ironclaw_tui"]

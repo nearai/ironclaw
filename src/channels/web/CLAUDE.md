@@ -7,16 +7,46 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | File | Role |
 |------|------|
 | `mod.rs` | Gateway builder, startup, `WebChannel` implementation, `with_*` builder methods |
-| `server.rs` | `GatewayState`, `start_server()`, all Axum route registrations, inline handlers |
+| `server.rs` | Feature handlers that have not yet moved (OAuth callbacks, chat, extensions, pairing, logs, gateway status). Re-exports `GatewayState` / `start_server` / related types from `platform::*` for backward compatibility during the ironclaw#2599 migration. |
+| `platform/router.rs` | `start_server()` + Axum route composition (public / protected / statics / projects) and the cross-cutting layer stack (CORS, body limit, panic catch, static security headers, CSP). Single coupling point between platform and features. |
+| `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
+| `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
-| `sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients |
-| `ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker` |
-| `auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) |
+| `platform/sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients. Re-exported as `channels::web::sse` for backward compat. |
+| `platform/ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker`. Re-exported as `channels::web::ws`. |
+| `platform/auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) + DB-token + OIDC extractors. Re-exported as `channels::web::auth`. |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
-| `handlers/` | Handler functions split by domain: `chat`, `extensions`, `jobs`, `memory`, `routines`, `settings`, `skills`, `static_files` |
+| `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
+| `handlers/` | Feature handler functions split by domain: `auth`, `chat`, `engine`, `extensions`, `frontend`, `jobs`, `llm`, `memory`, `routines`, `secrets`, `settings`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration into `features/<slice>/` per ironclaw#2599. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`build_turns_from_db_messages`, `truncate_preview`) |
 | `static/` | Single-page app (HTML/CSS/JS) — embedded at compile time via `include_str!`/`include_bytes!` |
+
+## Platform vs. feature layering (ironclaw#2599)
+
+The target layout is a `platform/` subtree (router, state, auth, SSE,
+WS, static serving) that feature handlers depend on.
+
+**The "no back-edges" rule has one intentional exception: the router.**
+Route composition is inherently the coupling point where transport
+meets features — `platform/router.rs` imports every feature handler it
+registers. Every *other* platform submodule (state, static_files,
+auth, sse, ws) must stay handler-agnostic, and
+`scripts/check_gateway_boundaries.py` (wired into the `code_style`
+CI workflow as of ironclaw#2599 stage 5) enforces this: it fails the
+build on any added import from `platform/{state,static_files,auth,
+sse,ws}.rs` into `handlers/*` or `features/*`, while explicitly
+exempting `platform/router.rs`. The script also carries a minimal
+allowlist for pre-existing back-edges that are targeted for follow-up
+migration; the allowlist must not grow without reviewer sign-off.
+
+The flat `handlers/` folder is a transitional fallback — individual
+handlers will migrate into `features/<slice>/` directories once their
+platform dependencies are narrowed to a per-slice `Deps` view. When
+adding a new platform-level concern, put it under `platform/`; when
+adding a new feature handler, keep it under `handlers/` for now but
+design it so the surface it consumes from `GatewayState` is a narrow
+subset that can later be replaced by a typed `Deps` alias.
 
 ## API Routes
 
@@ -37,8 +67,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/chat/thread/new` | Create new thread |
 | POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
 | POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
-| POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |
-| POST | `/api/chat/auth-cancel` | Legacy auth-cancel shim |
+| POST | `/api/chat/auth-token` | Temporary legacy auth-mode shim for prompts without gate `request_id` |
+| POST | `/api/chat/auth-cancel` | Temporary legacy auth-mode cancel shim for prompts without gate `request_id` |
 
 ### Memory
 | Method | Path | Description |
@@ -85,6 +115,79 @@ Extension lifecycle note:
 - Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
 - Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
 
+## Unified Extension Onboarding
+
+The browser must have one canonical onboarding path for installable extensions and channels.
+
+Canonical states:
+
+- `setup_required`
+- `auth_required`
+- `pairing_required`
+- `ready`
+- `failed`
+
+Identity invariant:
+
+- `credential_name` is backend-only and may be a raw secret key like `telegram_bot_token`.
+- `extension_name` is the browser/setup identity and must be the installed extension/channel name like `telegram`.
+
+Do not mix them.
+
+Rules:
+
+- Chat and Settings must both route installable extension/channel auth into `/api/extensions/{name}/setup`.
+- `gate_required`, `HistoryResponse.pending_gate`, and `onboarding_state` must all carry enough normalized data for the frontend to render the same onboarding flow.
+- Frontend code must not infer setup routing from `resume_kind.Authentication.credential_name` when an `extension_name` is available or recoverable via the shared backend resolver.
+- Generic auth cards are only for non-extension credential prompts or OAuth-only flows that do not have extension setup UI.
+- If an auth-related change adds a new identity derivation path, stop and consolidate it into the shared backend resolver instead.
+
+Identity types at the web boundary:
+
+These rules are enforced by check #8 in `scripts/pre-commit-safety.sh`
+(`CREDNAME`). Suppress individual intentional uses with
+`// web-identity-exempt: <reason>`.
+
+- **Setup / configure / activate routes take `ExtensionName`, not `String`.**
+  Any handler on `/api/extensions/{name}/...` whose path segment is the
+  extension identity MUST parse it at entry via
+  `ExtensionName::new(&name).map_err(|e| (StatusCode::BAD_REQUEST, ...))?`
+  before the value reaches extension lookup, SSE broadcast, or any
+  `from_trusted` wrap. A path-traversal or malformed slug must return 400.
+
+- **Web request/response DTOs and web handlers must not reference
+  `CredentialName`.** Credential identity is a backend concern. The web
+  layer accepts and emits `ExtensionName`; the dispatcher / auth manager
+  resolves credential identity from it server-side. If you find yourself
+  importing `CredentialName` in `src/channels/web/**`, you're on the
+  wrong side of the boundary — push the resolution into
+  `bridge::auth_manager` and have the handler consume its output.
+
+- **Auth-flow extension resolution happens in one place.** The only
+  supported way to map an auth gate → extension name is
+  `AuthManager::resolve_extension_name_for_auth_flow`. Web handlers,
+  TUI channels, relay adapters, and SSE broadcasters must call through
+  it rather than re-deriving an extension name from `pending.action_name`,
+  a credential-name prefix, or a format-string. Four recent identity
+  bugs (#2561, #2473, #2512, #2574) were duplicate-resolution drift —
+  this rule exists to make a fifth impossible.
+
+Current consolidation points:
+
+- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
+- `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
+- `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
+- `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+
+All three of the backend wrappers above delegate to the canonical resolver
+or return `Option<ExtensionName>`; they must not duplicate its logic.
+
+Legacy cleanup note:
+
+- The only remaining browser compatibility path for engine v1 auth mode is `pending_auth` token submit/cancel through `/api/chat/auth-token` and `/api/chat/auth-cancel`.
+- That path exists solely for prompts that do not carry a gate `request_id`.
+- Do not expand it. When v1 auth mode is removed, delete these endpoints and the corresponding no-`request_id` branch in `static/app.js`.
+
 ### Routines
 | Method | Path | Description |
 |--------|------|-------------|
@@ -107,6 +210,7 @@ Extension lifecycle note:
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/usage/summary` | System-wide usage summary for the admin dashboard |
 | GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
 | PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
 | DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
@@ -149,6 +253,7 @@ Extension lifecycle note:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Single-page app HTML |
+| GET | `/theme.css` | Shared theme tokens for the web and admin SPAs |
 | GET | `/style.css` | App stylesheet |
 | GET | `/app.js` | App JavaScript |
 | GET | `/favicon.ico` | Favicon (cached 1 day) |
@@ -177,17 +282,18 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `gate_required` | Engine v2 gate requires user input (approval/auth/external) |
 | `gate_resolved` | Engine v2 gate was resolved |
 | `approval_needed` | Legacy approval event |
-| `auth_required` | Legacy extension/auth event |
-| `auth_completed` | Extension auth flow finished |
+| `onboarding_state` | Unified extension/channel onboarding state update (`setup_required`, `auth_required`, `pairing_required`, `ready`, `failed`) |
 | `extension_status` | WASM channel activation status changed |
 | `error` | Error from agent or gateway |
 | `heartbeat` | SSE keepalive (empty payload) |
 
 **SSE serialization:** Events use `#[serde(tag = "type")]` — the wire format is `{"type":"<variant>", ...fields}`. The SSE frame's `event:` field is set to the same string as `type` for easy `addEventListener` use in the browser.
 
+**Compatibility note:** `onboarding_state` intentionally replaces the older `auth_required`, `auth_completed`, `pairing_required`, and `pairing_completed` SSE event types. Non-bundled SSE consumers must migrate to `onboarding_state`; the gateway still accepts legacy WebSocket client messages `auth_token` and `auth_cancel` as temporary aliases during the browser v1-auth compatibility window.
+
 **SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
 
-**WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`, `auth_token`, `auth_cancel`) are defined in `WsClientMessage` in `types.rs`.
+**WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`) are defined in `WsClientMessage` in `types.rs`.
 
 **To add a new SSE event:** Use the `add-sse-event` skill (`/add-sse-event`). It scaffolds the Rust variant, serialization, broadcast call, and frontend handler. Also add a matching arm to `WsServerMessage::from_sse_event()` in `types.rs`.
 
@@ -221,7 +327,7 @@ Subsystems are wired via `with_*` builder methods on `GatewayChannel` (`mod.rs`)
 
 Both SSE and WebSocket share the same `SseManager` broadcast channel. Key characteristics:
 
-- **Broadcast buffer:** 256 events. A slow client that falls behind will miss events — the `BroadcastStream` silently drops lagged events. SSE clients are expected to reconnect and re-fetch history.
+- **Broadcast buffer:** `SSE_BROADCAST_BUFFER` env var (default `1024`, clamped to 65,536 max). A slow client that falls behind will miss events — the `BroadcastStream` silently drops lagged events. SSE clients are expected to reconnect and re-fetch history.
 - **Max connections:** `GATEWAY_MAX_CONNECTIONS` (default `100`) total across SSE + WebSocket. Connections beyond the limit receive a 503 / are immediately dropped.
 - **SSE keepalive:** Axum's `KeepAlive` sends an empty event every **30 seconds** to prevent proxy timeouts.
 - **WebSocket:** Two tasks per connection — a sender task (broadcast → WS frames) and a receiver loop (WS frames → agent). When the client disconnects, the sender is aborted and both the SSE connection counter and WS tracker counter are decremented.
@@ -239,6 +345,8 @@ All responses include:
 ## Pending Gates
 
 Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
+
+The chat history contract also carries a lightweight `HistoryResponse.in_progress` payload for durable in-flight turn state. Use it to rebuild the visible user message plus "Processing..." affordance after refresh or thread switches. Do not persist transient SSE-only thinking text as normal conversation messages.
 
 ## Adding a New API Endpoint
 
