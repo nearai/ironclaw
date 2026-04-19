@@ -665,6 +665,47 @@ async fn revert_always_allow(
     }
 }
 
+/// Validate that a `paused_lease` snapshot recorded when a gate paused
+/// still represents a usable lease at resume time.
+///
+/// A gate can sit in the pending-gate store for hours or across process
+/// restarts; during that window the original lease might have been
+/// revoked, expired, or the pending record could have drifted off its
+/// original thread. Callers that fail this check must NOT use the
+/// snapshot — fall through to `LeaseManager::find_lease_for_action`
+/// (which enforces its own scoping) or fail closed.
+fn snapshot_lease_still_valid(
+    lease: &ironclaw_engine::CapabilityLease,
+    pending: &PendingGate,
+) -> bool {
+    lease.thread_id == pending.thread_id
+        && lease.granted_actions.covers(&pending.action_name)
+        && !lease.revoked
+        && lease
+            .expires_at
+            .map(|exp| exp > chrono::Utc::now())
+            .unwrap_or(true)
+}
+
+/// Pick the lease to use for resuming a pending gate action. Prefers the
+/// `paused_lease` snapshot the gate recorded if it's still valid; falls
+/// back to a live lookup in the `LeaseManager`. Returns `None` if neither
+/// path yields a lease — the caller maps that to a "no active lease"
+/// error.
+async fn resume_lease_for_pending_gate(
+    pending: &PendingGate,
+    leases: &ironclaw_engine::LeaseManager,
+) -> Option<ironclaw_engine::CapabilityLease> {
+    if let Some(snapshot) = pending.paused_lease.clone()
+        && snapshot_lease_still_valid(&snapshot, pending)
+    {
+        return Some(snapshot);
+    }
+    leases
+        .find_lease_for_action(pending.thread_id, &pending.action_name)
+        .await
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -681,21 +722,14 @@ async fn execute_pending_gate_action(
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
-    let lease = if let Some(lease) = pending.paused_lease.clone() {
-        lease
-    } else {
-        state
-            .thread_manager
-            .leases
-            .find_lease_for_action(pending.thread_id, &pending.action_name)
-            .await
-            .ok_or_else(|| {
-                engine_err(
-                    "resume lease",
-                    format!("no active lease covers action '{}'", pending.action_name),
-                )
-            })?
-    };
+    let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
+        .await
+        .ok_or_else(|| {
+            engine_err(
+                "resume lease",
+                format!("no active lease covers action '{}'", pending.action_name),
+            )
+        })?;
 
     let exec_ctx = ironclaw_engine::ThreadExecutionContext {
         thread_id: pending.thread_id,
@@ -7725,6 +7759,204 @@ mod tests {
             completed_idx < call_idx && call_idx < gate_paused_idx,
             "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
              completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
+        );
+    }
+
+    // ── resume_lease_for_pending_gate tests ────────────────────
+    //
+    // Pins the PR #2631 review ask: when resuming a paused gate, we
+    // prefer the `paused_lease` snapshot the gate recorded. The snapshot
+    // MUST be validated (thread_id match, action coverage, not revoked,
+    // not expired) before use — a stale snapshot falling through silently
+    // would bypass revocation semantics that `find_lease_for_action`
+    // normally enforces. These tests drive the helper end-to-end to pin
+    // every branch of the decision.
+
+    fn sample_lease_for_pending(pending: &PendingGate) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: pending.thread_id,
+            capability_name: "tools".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(vec![
+                pending.action_name.clone(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_lease_prefers_snapshot_even_when_lease_manager_empty() {
+        // Reproduces the original bug: the LeaseManager has no active
+        // lease for the paused action (lease evicted or never persisted
+        // through restart), but the pending gate carries a snapshot. The
+        // resume must use the snapshot.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let snapshot = sample_lease_for_pending(&pending);
+        let snapshot_id = snapshot.id;
+        pending.paused_lease = Some(snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        // Intentionally empty — no lease for this thread/action.
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("snapshot must be used when LeaseManager has nothing");
+        assert_eq!(lease.id, snapshot_id, "should return the snapshot lease");
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_revoked_snapshot_and_falls_back() {
+        // A revoked snapshot must NOT resume the action. Fall back to
+        // the LeaseManager; if that has a valid lease, use it.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut revoked_snapshot = sample_lease_for_pending(&pending);
+        revoked_snapshot.revoked = true;
+        revoked_snapshot.revoked_reason = Some("user revoked mid-pause".into());
+        pending.paused_lease = Some(revoked_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let live_lease = leases
+            .grant(
+                thread_id,
+                "tools",
+                ironclaw_engine::GrantedActions::Specific(vec!["shell".into()]),
+                None,
+                None,
+            )
+            .await
+            .expect("grant live lease");
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("fallback lease must be found");
+        assert_eq!(
+            lease.id, live_lease.id,
+            "revoked snapshot must be skipped and LeaseManager fallback used"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_expired_snapshot_and_falls_back() {
+        // An expired snapshot must not be accepted even if all other
+        // fields check out.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut expired_snapshot = sample_lease_for_pending(&pending);
+        expired_snapshot.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        pending.paused_lease = Some(expired_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let live_lease = leases
+            .grant(
+                thread_id,
+                "tools",
+                ironclaw_engine::GrantedActions::Specific(vec!["shell".into()]),
+                None,
+                None,
+            )
+            .await
+            .expect("grant live lease");
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("fallback lease must be found");
+        assert_eq!(lease.id, live_lease.id, "expired snapshot must be skipped");
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_snapshot_with_wrong_thread_id() {
+        // Defensive: a snapshot whose thread_id doesn't match the pending
+        // gate's thread_id must never be trusted, even if other fields
+        // look valid. Guards against pending-gate-store drift or future
+        // refactors that reuse a snapshot across threads.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut mismatched_snapshot = sample_lease_for_pending(&pending);
+        mismatched_snapshot.thread_id = ironclaw_engine::ThreadId::new(); // different thread
+        pending.paused_lease = Some(mismatched_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        // Empty — no fallback.
+        let result = resume_lease_for_pending_gate(&pending, &leases).await;
+        assert!(
+            result.is_none(),
+            "mismatched-thread snapshot must be skipped and fallback must fail cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_snapshot_missing_action_coverage() {
+        // A snapshot whose granted_actions does not cover the pending
+        // action name must not be used, even when untargeted.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut mismatched_snapshot = sample_lease_for_pending(&pending);
+        mismatched_snapshot.granted_actions =
+            ironclaw_engine::GrantedActions::Specific(vec!["unrelated_tool".into()]);
+        pending.paused_lease = Some(mismatched_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let result = resume_lease_for_pending_gate(&pending, &leases).await;
+        assert!(
+            result.is_none(),
+            "snapshot must be skipped when it doesn't grant the pending action"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_returns_none_when_no_snapshot_and_no_active_lease() {
+        // Sanity: if there's nothing in either path, the helper returns
+        // None so the caller can map to a clean "no active lease" error.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let leases = ironclaw_engine::LeaseManager::new();
+        assert!(
+            resume_lease_for_pending_gate(&pending, &leases)
+                .await
+                .is_none()
         );
     }
 }
