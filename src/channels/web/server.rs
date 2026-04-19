@@ -839,7 +839,7 @@ pub(crate) fn web_attachments_to_incoming(
                 });
             Ok(crate::channels::IncomingAttachment {
                 id: format!("web-attachment-{i}"),
-                kind: crate::channels::AttachmentKind::Document,
+                kind: crate::channels::AttachmentKind::from_mime_type(&attachment.mime_type),
                 mime_type: attachment.mime_type.clone(),
                 filename: Some(filename),
                 size_bytes: Some(data.len() as u64),
@@ -7032,6 +7032,35 @@ mod tests {
             .expect("decode attachment");
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
+
+    #[test]
+    fn test_web_attachments_infer_kind_from_mime_type() {
+        let attachments = web_attachments_to_incoming(&[
+            crate::channels::web::types::AttachmentData {
+                mime_type: "image/png".to_string(),
+                filename: Some("screenshot.png".to_string()),
+                data_base64: "aGVsbG8=".to_string(),
+            },
+            crate::channels::web::types::AttachmentData {
+                mime_type: "audio/ogg; codecs=opus".to_string(),
+                filename: Some("voice.ogg".to_string()),
+                data_base64: "aGVsbG8=".to_string(),
+            },
+            crate::channels::web::types::AttachmentData {
+                mime_type: "application/pdf".to_string(),
+                filename: Some("report.pdf".to_string()),
+                data_base64: "aGVsbG8=".to_string(),
+            },
+        ])
+        .expect("decode attachments");
+
+        assert_eq!(attachments[0].kind, crate::channels::AttachmentKind::Image);
+        assert_eq!(attachments[1].kind, crate::channels::AttachmentKind::Audio);
+        assert_eq!(
+            attachments[2].kind,
+            crate::channels::AttachmentKind::Document
+        );
     }
 
     #[tokio::test]

@@ -1944,6 +1944,8 @@ async function sendMessage() {
         retryLink.addEventListener('click', (e) => {
           e.preventDefault();
           if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
+          stagedAttachments = pendingAttachments.map(att => ({ ...att }));
+          renderAttachmentPreviews();
           input.value = content;
           sendMessage();
         });
