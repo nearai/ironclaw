@@ -340,7 +340,7 @@ pub(crate) const MAX_WIDGET_CSS_BYTES: usize = 256 * 1024; // 256 KB
 ///   noise.
 /// * Malformed JSON → logs a `warn!` with the parse error and falls back to
 ///   the default. A broken file must never be allowed to crash a page load.
-pub async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
+pub(crate) async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
     match workspace.read(LAYOUT_PATH).await {
         Ok(doc) => match serde_json::from_str(&doc.content) {
             Ok(l) => l,

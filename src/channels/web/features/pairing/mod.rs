@@ -204,3 +204,87 @@ pub(crate) async fn pairing_approve_handler(
 
     Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
 }
+
+#[cfg(test)]
+mod tests {
+    //! `parse_channel` is the boundary that turns an untrusted URL-path
+    //! segment into a validated [`ExtensionName`]. Every pairing handler
+    //! calls it as the first line, so an error here is what triggers the
+    //! 400 that the PR #2665 review (Copilot) asked to lock in. These
+    //! tests pin both sides of the contract: accept the names pairing
+    //! actually uses, reject the shapes that can't correspond to a real
+    //! extension (path traversal, invalid charset, edge underscores,
+    //! oversize). If `ExtensionName`'s rules grow, this test module is
+    //! the first place the stricter behavior will surface.
+    use super::*;
+
+    #[test]
+    fn parse_channel_accepts_lowercase_snake_case() {
+        let parsed = parse_channel("telegram".to_string()).expect("lowercase name must validate");
+        assert_eq!(parsed.as_str(), "telegram");
+
+        let parsed =
+            parse_channel("slack_relay".to_string()).expect("snake_case name must validate");
+        assert_eq!(parsed.as_str(), "slack_relay");
+    }
+
+    #[test]
+    fn parse_channel_lowercases_mixed_case_input() {
+        // The handler's pre-validation `to_ascii_lowercase()` is what lets
+        // mixed-case URL paths resolve to the same pairing row as the
+        // corresponding webhook. `ExtensionName::new` would reject the raw
+        // uppercase input, so losing this step regresses to 400 on every
+        // dashboard-entered channel name — exactly the silent-drop regression
+        // this test guards against.
+        let parsed = parse_channel("Telegram".to_string()).expect("mixed case must lowercase");
+        assert_eq!(parsed.as_str(), "telegram");
+    }
+
+    #[test]
+    fn parse_channel_rejects_empty_with_bad_request() {
+        let (status, _msg) = parse_channel(String::new()).expect_err("empty must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_channel_rejects_path_traversal_with_bad_request() {
+        let (status, _msg) =
+            parse_channel("../bad".to_string()).expect_err("path traversal must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_channel_rejects_invalid_chars_with_bad_request() {
+        // Dot is the canonical injection-shaped separator the old
+        // `sanitize_extension_name` used to strip silently.
+        let (status, _msg) = parse_channel("bad.name".to_string()).expect_err("dot must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _msg) =
+            parse_channel("bad name".to_string()).expect_err("whitespace inside must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_channel_rejects_consecutive_underscores_with_bad_request() {
+        let (status, _msg) =
+            parse_channel("bad__name".to_string()).expect_err("consecutive _ must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_channel_rejects_edge_underscores_with_bad_request() {
+        let (status, _msg) = parse_channel("_leading".to_string()).expect_err("leading _");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _msg) = parse_channel("trailing_".to_string()).expect_err("trailing _");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_channel_rejects_too_long_with_bad_request() {
+        let long = "a".repeat(ironclaw_common::MAX_NAME_LEN + 1);
+        let (status, _msg) = parse_channel(long).expect_err("over length must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
