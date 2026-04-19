@@ -683,8 +683,12 @@ I18n.register('ko', {
   'message.system': '시스템',
   'message.copy': '복사',
   'message.copied': '복사됨!',
+  'message.thinking': 'Thinking',
 
   // 승인
+  'approval.tag': 'approval required',
+  'approval.approveOnce': 'Approve once',
+  'approval.alwaysAllow': 'Always allow',
   'approval.pressY': '승인하려면 Y, 거부하려면 N을 누르세요',
 
   // 디버그 인스펙터
@@ -745,6 +749,10 @@ I18n.register('ko', {
   'debug.infoCache': '캐시:',
   'debug.statsIn': '입력',
   'debug.statsOut': '출력',
+
+  // 서브 에이전트
+  'subagent.status.done': 'done',
+  'subagent.status.running': 'running',
 
   // === app.js 국제화 보충 ===
 

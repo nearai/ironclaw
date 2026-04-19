@@ -158,6 +158,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
+
     // Flush any remaining streaming buffer
     if (_streamDebounceTimer) {
       clearInterval(_streamDebounceTimer);
@@ -249,6 +250,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
+
     addToolCard(data);
   });
 
@@ -290,6 +292,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
+
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming

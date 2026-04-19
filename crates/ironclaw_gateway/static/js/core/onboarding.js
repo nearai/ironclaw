@@ -4,73 +4,94 @@ function showApproval(data) {
   if (existing) return;
 
   const container = document.getElementById('chat-messages');
-  const card = document.createElement('div');
-  card.className = 'approval-card';
-  card.setAttribute('data-request-id', data.request_id);
   const cardThreadId = data.thread_id || currentThreadId;
+
+  // Outer wrapper with avatar
+  const wrapper = document.createElement('div');
+  wrapper.className = 'gw-msg gw-msg--assistant';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'gw-msg__avatar gw-msg__avatar--warn';
+  avatar.textContent = '!';
+
+  const msgContent = document.createElement('div');
+  msgContent.className = 'gw-msg__content';
+
+  const card = document.createElement('div');
+  card.className = 'approval-card gw-approval';
+  card.setAttribute('data-request-id', data.request_id);
   if (cardThreadId) {
     card.setAttribute('data-thread-id', cardThreadId);
   }
 
+  // Header with title and tag
   const header = document.createElement('div');
-  header.className = 'approval-header';
-  header.textContent = I18n.t('approval.title');
+  header.className = 'gw-approval__header';
+  const title = document.createElement('span');
+  title.className = 'gw-approval__title';
+  title.textContent = humanizeToolName(data.tool_name);
+  header.appendChild(title);
+  const tag = document.createElement('span');
+  tag.className = 'gw-approval__tag';
+  tag.textContent = I18n.t('approval.tag');
+  header.appendChild(tag);
   card.appendChild(header);
-
-  const toolName = document.createElement('div');
-  toolName.className = 'approval-tool-name';
-  toolName.textContent = humanizeToolName(data.tool_name);
-  card.appendChild(toolName);
 
   if (data.description) {
     const desc = document.createElement('div');
-    desc.className = 'approval-description';
+    desc.className = 'gw-approval__summary';
     desc.textContent = data.description;
     card.appendChild(desc);
   }
 
+  // Detail grid for parameters
   if (data.parameters) {
-    const paramsToggle = document.createElement('button');
-    paramsToggle.className = 'approval-params-toggle';
-    paramsToggle.textContent = I18n.t('approval.showParams');
-    const paramsBlock = document.createElement('pre');
-    paramsBlock.className = 'approval-params';
-    paramsBlock.textContent = data.parameters;
-    paramsBlock.style.display = 'none';
-    paramsToggle.addEventListener('click', () => {
-      const visible = paramsBlock.style.display !== 'none';
-      paramsBlock.style.display = visible ? 'none' : 'block';
-      paramsToggle.textContent = visible ? I18n.t('approval.showParams') : I18n.t('approval.hideParams');
-    });
-    card.appendChild(paramsToggle);
-    card.appendChild(paramsBlock);
+    const details = document.createElement('dl');
+    details.className = 'gw-approval__details';
+    const dt = document.createElement('dt');
+    dt.textContent = 'params';
+    const dd = document.createElement('dd');
+    const code = document.createElement('code');
+    code.textContent = data.parameters.length > 200
+      ? data.parameters.substring(0, 200) + '...'
+      : data.parameters;
+    dd.appendChild(code);
+    details.appendChild(dt);
+    details.appendChild(dd);
+    card.appendChild(details);
   }
 
+  // Actions: Deny (ghost), Approve once (secondary), Always allow (primary)
   const actions = document.createElement('div');
-  actions.className = 'approval-actions';
-
-  const approveBtn = document.createElement('button');
-  approveBtn.className = 'approve';
-  approveBtn.textContent = I18n.t('approval.approve');
-  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', cardThreadId));
+  actions.className = 'approval-actions gw-approval__actions';
 
   const denyBtn = document.createElement('button');
-  denyBtn.className = 'deny';
+  denyBtn.className = 'gw-btn gw-btn--ghost gw-btn--sm deny';
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny', cardThreadId));
 
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'gw-btn gw-btn--secondary gw-btn--sm approve';
+  approveBtn.textContent = I18n.t('approval.approveOnce');
+  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', cardThreadId));
+
+  actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
+
   if (data.allow_always !== false) {
     const alwaysBtn = document.createElement('button');
-    alwaysBtn.className = 'always';
-    alwaysBtn.textContent = I18n.t('approval.always');
+    alwaysBtn.className = 'gw-btn gw-btn--primary gw-btn--sm always';
+    alwaysBtn.textContent = I18n.t('approval.alwaysAllow');
     alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always', cardThreadId));
     actions.appendChild(alwaysBtn);
   }
-  actions.appendChild(denyBtn);
-  card.appendChild(actions);
 
-  container.appendChild(card);
+  card.appendChild(actions);
+  msgContent.appendChild(card);
+  wrapper.appendChild(avatar);
+  wrapper.appendChild(msgContent);
+
+  container.appendChild(wrapper);
   container.scrollTop = container.scrollHeight;
 }
 

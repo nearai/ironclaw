@@ -683,8 +683,12 @@ I18n.register('zh-CN', {
   'message.system': '系统',
   'message.copy': '复制',
   'message.copied': '已复制！',
+  'message.thinking': 'Thinking',
 
   // Approval
+  'approval.tag': 'approval required',
+  'approval.approveOnce': 'Approve once',
+  'approval.alwaysAllow': 'Always allow',
   'approval.pressY': '按 Y 批准，N 拒绝',
 
   // 调试面板
@@ -745,6 +749,10 @@ I18n.register('zh-CN', {
   'debug.infoCache': '缓存:',
   'debug.statsIn': '输入',
   'debug.statsOut': '输出',
+
+  // Sub-agent
+  'subagent.status.done': 'done',
+  'subagent.status.running': 'running',
 
   // === 为 app.js 国际化补充 ===
 

@@ -256,6 +256,24 @@ function createMessageElement(role, content, options) {
     div.appendChild(copyBtn);
   }
 
+  // Wrap assistant messages in avatar layout
+  if (role === 'assistant') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'gw-msg gw-msg--assistant';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'gw-msg__avatar';
+    avatar.textContent = '\u25C6'; // ◆
+
+    const msgContent = document.createElement('div');
+    msgContent.className = 'gw-msg__content';
+    msgContent.appendChild(div);
+
+    wrapper.appendChild(avatar);
+    wrapper.appendChild(msgContent);
+    return wrapper;
+  }
+
   return div;
 }
 

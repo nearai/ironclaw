@@ -526,9 +526,9 @@ function sendApprovalAction(requestId, action, threadId) {
     });
     const actions = card.querySelector('.approval-actions');
     const label = document.createElement('span');
-    label.className = 'approval-resolved';
+    label.className = 'approval-resolved gw-approval__resolved' + (action === 'deny' ? '--deny' : '--ok');
     const labelText = action === 'approve' ? I18n.t('approval.approved') : action === 'always' ? I18n.t('approval.alwaysApproved') : I18n.t('approval.denied');
-    label.textContent = labelText;
+    label.textContent = (action === 'deny' ? '\u2717 ' : '\u2713 ') + labelText;
     actions.appendChild(label);
     // Remove the card after showing the confirmation briefly
     setTimeout(() => { card.remove(); }, 1500);

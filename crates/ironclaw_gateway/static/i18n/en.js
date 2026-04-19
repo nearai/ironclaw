@@ -684,8 +684,12 @@ I18n.register('en', {
   'message.system': 'System',
   'message.copy': 'Copy',
   'message.copied': 'Copied!',
+  'message.thinking': 'Thinking',
 
   // Approval
+  'approval.tag': 'approval required',
+  'approval.approveOnce': 'Approve once',
+  'approval.alwaysAllow': 'Always allow',
   'approval.pressY': 'Press Y to approve, N to deny',
 
   // Debug Inspector
@@ -746,6 +750,10 @@ I18n.register('en', {
   'debug.infoCache': 'Cache:',
   'debug.statsIn': 'in',
   'debug.statsOut': 'out',
+
+  // Sub-agent
+  'subagent.status.done': 'done',
+  'subagent.status.running': 'running',
 
   // === Added for app.js i18n coverage ===
 

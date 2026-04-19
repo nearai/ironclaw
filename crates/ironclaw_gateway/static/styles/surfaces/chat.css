@@ -41,10 +41,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .message {
-  max-width: 72%;
+  max-width: 100%;
   padding: 10px 14px;
   border-radius: var(--radius);
   font-size: var(--text-base);
@@ -77,33 +80,66 @@
 
 .message.user {
   align-self: flex-end;
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-bottom-right-radius: 2px;
+  background: var(--user-msg-bg);
+  border: 1px solid var(--user-msg-border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text);
+  max-width: 85%;
   white-space: pre-wrap;
-}
-
-.message.user::after {
-  content: '';
-  position: absolute;
-  right: -6px;
-  bottom: 10px;
-  width: 0;
-  height: 0;
-  border: 6px solid transparent;
-  border-left-color: var(--accent-soft);
-  border-right: 0;
 }
 
 .message.assistant {
   align-self: flex-start;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-bottom-left-radius: 2px;
   padding: 14px 18px;
   font-size: 15px;
   line-height: 1.6;
+}
+
+/* Assistant message avatar layout */
+.gw-msg {
+  display: flex;
+  gap: 12px;
+}
+
+.gw-msg--assistant {
+  align-items: flex-start;
+}
+
+.gw-msg__avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.gw-msg__avatar--think {
+  background: rgba(160, 140, 255, 0.12);
+  color: #b8a8ff;
+}
+
+.gw-msg__avatar--warn {
+  background: rgba(245, 166, 35, 0.15);
+  color: #f5a623;
+  font-weight: 700;
+}
+
+.gw-msg__avatar--sub {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.gw-msg__content {
+  flex: 1;
+  min-width: 0;
 }
 
 .message.has-copy {
@@ -275,19 +311,13 @@
 /* === Tool Activity Cards === */
 
 .activity-group {
-  align-self: flex-start;
-  max-width: 80%;
-  padding: 4px 0 4px 12px;
-  border-left: 2px solid var(--border);
+  align-self: stretch;
+  max-width: 100%;
+  padding: 4px 0 4px 40px;
   margin: 4px 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-.activity-group.collapsed {
-  border-left-color: transparent;
-  padding-left: 0;
 }
 
 /* Thinking indicator */
@@ -421,27 +451,27 @@
   flex-shrink: 0;
 }
 
-.activity-tool-icon .spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
+.activity-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  animation: spin 0.6s linear infinite;
+  background: var(--text-muted);
 }
 
-.activity-icon-success {
-  color: var(--success);
-  font-size: var(--text-base);
-  font-weight: 700;
-  line-height: 1;
+.activity-status-dot--ok {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
 }
 
-.activity-icon-fail {
-  color: var(--danger);
-  font-size: var(--text-base);
-  font-weight: 700;
-  line-height: 1;
+.activity-status-dot--fail {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+
+.activity-status-dot--run {
+  background: var(--accent);
+  animation: gw-pulse 1.2s ease-in-out infinite;
 }
 
 .activity-tool-name {
@@ -576,7 +606,7 @@
 
 @media (max-width: 768px) {
   .activity-group {
-    max-width: 95%;
+    max-width: 100%;
   }
 }
 
@@ -1052,9 +1082,11 @@
 .chat-input {
   display: flex;
   flex-wrap: wrap;
-  margin: 0 16px 12px;
+  margin: 0 auto 12px;
   padding: 12px 16px;
   gap: var(--space-2);
+  max-width: 780px;
+  width: calc(100% - 32px);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1123,6 +1155,9 @@
   gap: var(--space-2);
   padding: 8px 16px;
   border-top: 1px solid var(--border);
+  max-width: 780px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .suggestion-chip {
