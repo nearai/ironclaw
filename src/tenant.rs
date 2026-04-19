@@ -53,6 +53,9 @@ use crate::workspace::Workspace;
 pub struct TenantScope {
     identity: crate::ownership::Identity,
     inner: Arc<dyn Database>,
+    /// Optional cached settings store. When present, settings reads are
+    /// routed through this cache instead of hitting `inner` directly.
+    settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
 }
 
 impl TenantScope {
@@ -61,6 +64,7 @@ impl TenantScope {
         Self {
             identity,
             inner: db,
+            settings_store: None,
         }
     }
 
@@ -72,6 +76,15 @@ impl TenantScope {
             Identity::new(OwnerId::from(user_id.into()), UserRole::Member),
             db,
         )
+    }
+
+    /// Attach a cached settings store for settings reads.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_store = Some(store);
+        self
     }
 
     pub fn identity(&self) -> &crate::ownership::Identity {
@@ -250,9 +263,23 @@ impl TenantScope {
     }
 
     // === Settings ===
+    //
+    // Methods that delegate via `settings()` use the attached `settings_store`
+    // (e.g. `CachedSettingsStore`) when present, so those reads can hit the
+    // cache and writes can invalidate it. When no `settings_store` is attached,
+    // `settings()` falls back to `self.inner` (the raw `Database`).
+
+    /// Return the settings store to delegate to: the cached store if attached,
+    /// otherwise the raw `Database` (which also implements `SettingsStore`).
+    fn settings(&self) -> &(dyn crate::db::SettingsStore + Send + Sync) {
+        match &self.settings_store {
+            Some(store) => store.as_ref(),
+            None => self.inner.as_ref(),
+        }
+    }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting(self.identity.owner_id.as_str(), key)
             .await
     }
@@ -266,20 +293,20 @@ impl TenantScope {
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
         if let Some(value) = self
-            .inner
+            .settings()
             .get_setting(self.identity.owner_id.as_str(), key)
             .await?
         {
             return Ok(Some(value));
         }
         // Fall back to admin scope.
-        self.inner
+        self.settings()
             .get_setting(crate::tools::permissions::ADMIN_SETTINGS_USER_ID, key)
             .await
     }
 
     pub async fn get_setting_full(&self, key: &str) -> Result<Option<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting_full(self.identity.owner_id.as_str(), key)
             .await
     }
@@ -289,19 +316,19 @@ impl TenantScope {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_setting(self.identity.owner_id.as_str(), key, value)
             .await
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .delete_setting(self.identity.owner_id.as_str(), key)
             .await
     }
 
     pub async fn list_settings(&self) -> Result<Vec<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .list_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -309,7 +336,7 @@ impl TenantScope {
     pub async fn get_all_settings(
         &self,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_all_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -318,13 +345,13 @@ impl TenantScope {
         &self,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_all_settings(self.identity.owner_id.as_str(), settings)
             .await
     }
 
     pub async fn has_settings(&self) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .has_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -1262,5 +1289,40 @@ mod tests {
         let alice = registry.get_or_create("alice").await;
         let bob = registry.get_or_create("bob").await;
         assert!(!Arc::ptr_eq(&alice, &bob));
+    }
+
+    // --- CachedSettingsStore wiring through TenantScope ---
+
+    #[tokio::test]
+    async fn tenant_scope_routes_settings_through_cache() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Write a setting directly to the DB (bypassing cache).
+        db.set_setting("alice", "color", &serde_json::json!("blue"))
+            .await
+            .unwrap();
+
+        // Wrap in CachedSettingsStore.
+        let cached: Arc<dyn crate::db::SettingsStore + Send + Sync> =
+            Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                Arc::clone(&db) as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+            ));
+
+        // Build TenantScope with the cache attached.
+        let scope = TenantScope::with_identity(alice_identity(), db)
+            .with_settings_store(Arc::clone(&cached));
+
+        // Read through TenantScope — should populate the cache.
+        let val = scope.get_setting("color").await.unwrap();
+        assert_eq!(val, Some(serde_json::json!("blue")));
+
+        // Write through TenantScope — should invalidate the cache.
+        scope
+            .set_setting("color", &serde_json::json!("red"))
+            .await
+            .unwrap();
+
+        // Next read should see the updated value (cache was invalidated).
+        let val2 = scope.get_setting("color").await.unwrap();
+        assert_eq!(val2, Some(serde_json::json!("red")));
     }
 }

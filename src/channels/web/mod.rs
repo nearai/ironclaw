@@ -14,17 +14,26 @@
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
-pub mod auth;
+pub(crate) mod features;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
+pub(crate) mod onboarding;
 pub mod openai_compat;
+pub mod platform;
 pub mod responses_api;
 pub mod server;
-pub mod sse;
 pub mod types;
 pub(crate) mod util;
-pub mod ws;
+
+// Backward-compat re-exports for the ironclaw#2599 migration. The auth,
+// SSE, and WebSocket modules moved to `platform::*` in stage 3; every
+// existing `crate::channels::web::{auth,sse,ws}::...` call site
+// continues to resolve via these re-exports until a follow-up PR
+// updates them directly.
+pub use platform::auth;
+pub use platform::sse;
+pub use platform::ws;
 
 /// Test helpers for gateway integration tests.
 ///
@@ -134,7 +143,10 @@ impl GatewayChannel {
 
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::with_max_connections(config.max_connections)),
+            sse: Arc::new(SseManager::with_max_connections_and_buffer(
+                config.max_connections,
+                config.broadcast_buffer,
+            )),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -143,6 +155,7 @@ impl GatewayChannel {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -188,6 +201,8 @@ impl GatewayChannel {
         let mut new_state = GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             // Preserve the existing broadcast channel so sender handles remain valid.
+            // The broadcast channel capacity is already baked into `tx` at
+            // creation time; `from_sender` cannot resize it.
             sse: Arc::new(SseManager::from_sender(
                 self.state.sse.sender(),
                 self.state.sse.max_connections(),
@@ -200,6 +215,7 @@ impl GatewayChannel {
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
             store: self.state.store.clone(),
+            settings_cache: self.state.settings_cache.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
@@ -278,6 +294,14 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    pub fn with_settings_cache(
+        mut self,
+        cache: Arc<crate::db::cached_settings::CachedSettingsStore>,
+    ) -> Self {
+        self.rebuild_state(|s| s.settings_cache = Some(cache));
         self
     }
 
@@ -600,9 +624,14 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted {
                 name,
                 detail,
+                call_id,
+            } => AppEvent::ToolStarted {
+                name,
+                detail,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -610,17 +639,25 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
-                ..
+                call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
+                call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult {
                 name,
                 preview,
+                call_id,
+            } => AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::StreamChunk(content) => AppEvent::StreamChunk {
@@ -660,24 +697,43 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
-            } => AppEvent::AuthRequired {
+                request_id,
+            } => AppEvent::OnboardingState {
                 extension_name,
+                state: ironclaw_common::OnboardingStateDto::AuthRequired,
+                request_id,
+                message: None,
                 instructions,
                 auth_url,
                 setup_url,
-                thread_id: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::AuthCompleted {
                 extension_name,
                 success,
                 message,
-            } => AppEvent::AuthCompleted {
+            } => AppEvent::OnboardingState {
                 extension_name,
-                success,
-                message,
-                thread_id: None,
+                state: if success {
+                    ironclaw_common::OnboardingStateDto::Ready
+                } else {
+                    ironclaw_common::OnboardingStateDto::Failed
+                },
+                request_id: None,
+                message: Some(message),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
-            StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
+            StatusUpdate::ImageGenerated {
+                event_id,
+                data_url,
+                path,
+            } => AppEvent::ImageGenerated {
+                event_id,
                 data_url,
                 path,
                 thread_id: thread_id.clone(),
@@ -720,9 +776,13 @@ impl Channel for GatewayChannel {
                 session_id: None,
                 fallback_deliverable: None,
             },
-            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+            StatusUpdate::SkillActivated {
+                skill_names,
+                feedback,
+            } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
+                feedback,
             },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }
@@ -756,10 +816,28 @@ impl Channel for GatewayChannel {
         let thread_id = match response.thread_id {
             Some(tid) => tid,
             None => {
-                return Err(ChannelError::MissingRoutingTarget {
-                    name: "gateway".to_string(),
-                    reason: "broadcast() requires a thread_id on the response".to_string(),
-                });
+                // Proactive broadcasts (mission notifications, self-repair,
+                // extension activation) don't always have a thread context.
+                // Route to the user's assistant conversation so the message
+                // appears in a known location instead of being rejected.
+                match self.state.store.as_ref() {
+                    Some(store) => store
+                        .get_or_create_assistant_conversation(user_id, "gateway")
+                        .await
+                        .map(|id| id.to_string())
+                        .map_err(|e| ChannelError::SendFailed {
+                            name: "gateway".to_string(),
+                            reason: format!(
+                                "broadcast() has no thread_id and assistant thread lookup failed: {e}"
+                            ),
+                        })?,
+                    None => {
+                        return Err(ChannelError::MissingRoutingTarget {
+                            name: "gateway".to_string(),
+                            reason: "broadcast() has no thread_id and no DB to resolve assistant thread".to_string(),
+                        });
+                    }
+                }
             }
         };
         self.state.sse.broadcast_for_user(

@@ -15,10 +15,12 @@ use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use async_trait::async_trait;
+use ironclaw_common::ExtensionName;
 
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
@@ -64,11 +66,11 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
-    /// Auth flow initiated — config card already sent, suppress text response.
-    AuthPending {
-        instructions: String,
-        turn_usage: TurnUsageSummary,
-    },
+    /// Auth flow initiated — card already sent via `AuthRequired` status,
+    /// and `enter_auth_mode` was already called on the thread. The caller
+    /// concludes the turn with `TurnOutcome::CompletedSilently` (no text
+    /// response persisted — the auth card is the only user-facing signal).
+    AuthPending { turn_usage: TurnUsageSummary },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,7 +148,28 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+        let (active_skills, rewritten_content, skill_feedback) = self
+            .select_active_skills(&message.content, &message.user_id)
+            .await;
+
+        // Surface the selection decision to the channel so the web UI can
+        // render an activation card. We emit even when no skills activated
+        // if the selector produced notes (e.g. "budget exhausted") — those
+        // explain *why nothing loaded*, which is exactly the surface this
+        // feedback is meant to illuminate. Silent on the fully-empty case.
+        if !active_skills.is_empty() || !skill_feedback.is_empty() {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::SkillActivated {
+                        skill_names: active_skills.iter().map(|s| s.name().to_string()).collect(),
+                        feedback: skill_feedback,
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
@@ -260,7 +283,6 @@ impl Agent {
             force_text_at,
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
-            cached_tool_permissions: std::sync::Mutex::new(None),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
@@ -337,10 +359,9 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }),
+            Ok(LoopOutcome::AuthPending(_instructions)) => {
+                Ok(AgenticLoopResult::AuthPending { turn_usage })
+            }
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -376,8 +397,6 @@ struct ChatDelegate<'a> {
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
-    cached_tool_permissions:
-        std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
@@ -477,48 +496,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // AlwaysAllow tools are pre-approved in session so the approval
         // flow is skipped — unless the tool declares ApprovalRequirement::Always,
         // which is an unbypassable hard floor.
-        let tool_permissions = {
-            // Check the cache first (brief lock, no await while held).
-            let cached = {
-                let cache = self
-                    .cached_tool_permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.clone()
-            };
-            if let Some(perms) = cached {
-                perms
-            } else {
-                // Cache miss — load from DB (async).
-                let perms = if let Some(store) = self.tenant.store() {
-                    match store.get_all_settings().await {
-                        Ok(db_map) => {
-                            crate::settings::Settings::from_db_map(&db_map).tool_permissions
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to load tool permissions, keeping existing session state: {}",
-                                e
-                            );
-                            // Fail closed: preserve the previously filtered available_tools
-                            // rather than publishing the unfiltered tool list, which could
-                            // re-expose tools explicitly marked Disabled.
-                            return None;
-                        }
-                    }
-                } else {
-                    std::collections::HashMap::new()
-                };
-                // Store in cache for subsequent iterations.
-                {
-                    let mut cache = self
-                        .cached_tool_permissions
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *cache = Some(perms.clone());
+        //
+        // The SettingsStore is wrapped in CachedSettingsStore so repeated
+        // calls within the same session are cheap (in-memory lookup).
+        let tool_permissions = if let Some(store) = self.tenant.store() {
+            match store.get_all_settings().await {
+                Ok(db_map) => crate::settings::Settings::from_db_map(&db_map).tool_permissions,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load tool permissions, keeping existing session state: {}",
+                        e
+                    );
+                    // Fail closed: preserve the previously filtered available_tools
+                    // rather than publishing the unfiltered tool list, which could
+                    // re-expose tools explicitly marked Disabled.
+                    return None;
                 }
-                perms
             }
+        } else {
+            std::collections::HashMap::new()
         };
 
         // Filter tool definitions and collect AlwaysAllow names for session
@@ -994,10 +990,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     )
                     .await;
 
+                let started_at = std::time::Instant::now();
                 let result = self
                     .agent
                     .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
                     .await;
+                let duration_ms = started_at.elapsed().as_millis() as u64;
 
                 let disp_tool = self.agent.tools().get(&tc.name).await;
                 let _ = self
@@ -1011,6 +1009,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
+                            Some(duration_ms),
                         ),
                         &self.message.metadata,
                     )
@@ -1044,6 +1043,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         )
                         .await;
 
+                    let started_at = std::time::Instant::now();
                     let result = execute_chat_tool_standalone(
                         &tools,
                         &safety,
@@ -1052,6 +1052,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &job_ctx,
                     )
                     .await;
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
 
                     let par_tool = tools.get(&tc.name).await;
                     let _ = channels
@@ -1063,6 +1064,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
+                                Some(duration_ms),
                             ),
                             &metadata,
                         )
@@ -1104,7 +1106,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // === Phase 3: Post-flight (sequential, in original order) ===
-        let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
+        let mut selected_auth_prompt: Option<(ExtensionName, ParsedAuthData)> = None;
         let mut tool_failure_count: usize = 0;
         let total_tools = preflight.len();
 
@@ -1138,22 +1140,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     });
 
                     // Detect image generation sentinel
-                    let is_image_sentinel = if let Ok(ref output) = tool_result
+                    let image_sentinel = if let Ok(ref output) = tool_result
                         && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                     {
-                        if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
-                            && sentinel.get("type").and_then(|v| v.as_str())
-                                == Some("image_generated")
-                        {
-                            let data_url = sentinel
-                                .get("data")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let path = sentinel
-                                .get("path")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
+                        if let Some(sentinel) = GeneratedImageSentinel::from_output(output) {
+                            let data_url = sentinel.data_url().unwrap_or_default().to_string();
+                            let path = sentinel.path().map(String::from);
                             if data_url.is_empty() {
                                 tracing::warn!(
                                     "Image generation sentinel has empty data URL, skipping broadcast"
@@ -1164,21 +1156,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                     .channels
                                     .send_status(
                                         &self.message.channel,
-                                        StatusUpdate::ImageGenerated { data_url, path },
+                                        StatusUpdate::ImageGenerated {
+                                            event_id: tc.id.clone(),
+                                            data_url,
+                                            path,
+                                        },
                                         &self.message.metadata,
                                     )
                                     .await;
                             }
-                            true
+                            Some(sentinel)
                         } else {
-                            false
+                            None
                         }
                     } else {
-                        false
+                        None
                     };
 
                     // Send ToolResult preview
-                    if !is_image_sentinel
+                    if image_sentinel.is_none()
                         && let Ok(ref output) = tool_result
                         && !output.is_empty()
                     {
@@ -1214,12 +1210,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     if is_tool_error {
                         tool_failure_count += 1;
                     }
-                    let (result_content, tool_message) = crate::tools::execute::process_tool_result(
-                        self.agent.safety(),
-                        &tc.name,
-                        &tc.id,
-                        &tool_result,
-                    );
+                    let (record_content, tool_message) =
+                        if let (Ok(_), Some(sentinel)) = (&tool_result, image_sentinel.as_ref()) {
+                            (
+                                image_generation_record_content(sentinel),
+                                image_generation_summary_tool_message(
+                                    self.agent.safety(),
+                                    &tc.name,
+                                    &tc.id,
+                                    sentinel,
+                                ),
+                            )
+                        } else {
+                            crate::tools::execute::process_tool_result(
+                                self.agent.safety(),
+                                &tc.name,
+                                &tc.id,
+                                &tool_result,
+                            )
+                        };
 
                     // Record sanitized result in thread (identity-based matching).
                     {
@@ -1228,11 +1237,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             && let Some(turn) = thread.last_turn_mut()
                         {
                             if is_tool_error {
-                                turn.record_tool_error_for(&tc.id, result_content.clone());
+                                turn.record_tool_error_for(&tc.id, record_content.clone());
                             } else {
                                 turn.record_tool_result_for(
                                     &tc.id,
-                                    serde_json::json!(result_content),
+                                    serde_json::json!(record_content),
                                 );
                             }
                         }
@@ -1259,6 +1268,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.instructions.clone(),
                     auth_data.auth_url.clone(),
                     auth_data.setup_url.clone(),
+                    None,
                 )
                 .await;
             }
@@ -1297,6 +1307,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     Some(instructions.clone()),
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    Some(self.thread_id.to_string()),
                 )
                 .await;
                 return Ok(Some(LoopOutcome::AuthPending(instructions)));
@@ -1309,6 +1320,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 auth_data.instructions,
                 auth_data.auth_url,
                 auth_data.setup_url,
+                None,
             )
             .await;
         }
@@ -1342,7 +1354,7 @@ pub(super) async fn execute_chat_tool_standalone(
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedAuthData {
-    pub(super) extension_name: Option<String>,
+    pub(super) extension_name: Option<ExtensionName>,
     pub(super) instructions: Option<String>,
     pub(super) auth_url: Option<String>,
     pub(super) setup_url: Option<String>,
@@ -1351,11 +1363,8 @@ pub(super) struct ParsedAuthData {
 
 const DEFAULT_AUTH_TOKEN_INSTRUCTIONS: &str = "Please provide your API token/key.";
 
-fn normalize_extension_name(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+fn normalize_extension_name(value: Option<&str>) -> Option<ExtensionName> {
+    value.and_then(|raw| ExtensionName::new(raw).ok())
 }
 
 pub(super) use crate::auth::oauth::sanitize_auth_url;
@@ -1367,9 +1376,9 @@ pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String
 }
 
 pub(super) fn persist_selected_auth_prompt(
-    selected: Option<&(String, ParsedAuthData)>,
+    selected: Option<&(ExtensionName, ParsedAuthData)>,
 ) -> Option<PendingAuthPrompt> {
-    selected.and_then(|(extension_name, auth_data)| {
+    selected.map(|(extension_name, auth_data)| {
         PendingAuthPrompt::new(
             extension_name.clone(),
             auth_data.instructions.clone(),
@@ -1382,25 +1391,33 @@ pub(super) fn persist_selected_auth_prompt(
 
 pub(super) fn restore_selected_auth_prompt(
     pending: Option<PendingAuthPrompt>,
-) -> Option<(String, ParsedAuthData)> {
-    // Re-validate via the constructor so deserialized rows go through the
-    // same trim/non-empty invariant as freshly constructed prompts.
+) -> Option<(ExtensionName, ParsedAuthData)> {
     let pending = pending?;
-    let validated = PendingAuthPrompt::new(
-        pending.extension_name,
-        pending.instructions,
-        pending.auth_url,
-        pending.setup_url,
-        pending.awaiting_token,
-    )?;
+    // The deserialized `PendingAuthPrompt.extension_name` is `#[serde(transparent)]`,
+    // which does not re-validate the inner string. Re-validate on restore so a
+    // legacy-persisted invalid name (empty, uppercase, path separator, etc.)
+    // drops the prompt instead of propagating through the auth-card path.
+    // Pre-PR2 the equivalent `PendingAuthPrompt::new` rejected empty strings;
+    // this upgrade extends that rejection to the full identity invariant.
+    let extension_name = match ExtensionName::new(pending.extension_name.as_str()) {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::warn!(
+                raw = %pending.extension_name,
+                %error,
+                "Dropping restored PendingAuthPrompt whose extension_name no longer satisfies the identity rule"
+            );
+            return None;
+        }
+    };
     Some((
-        validated.extension_name.clone(),
+        extension_name.clone(),
         ParsedAuthData {
-            extension_name: Some(validated.extension_name),
-            instructions: validated.instructions,
-            auth_url: validated.auth_url,
-            setup_url: validated.setup_url,
-            awaiting_token: validated.awaiting_token,
+            extension_name: Some(extension_name),
+            instructions: pending.instructions,
+            auth_url: pending.auth_url,
+            setup_url: pending.setup_url,
+            awaiting_token: pending.awaiting_token,
         },
     ))
 }
@@ -1469,10 +1486,11 @@ pub(super) fn extract_auth_prompt(
 pub(super) async fn emit_auth_required_status(
     channels: &ChannelManager,
     message: &IncomingMessage,
-    extension_name: String,
+    extension_name: ExtensionName,
     instructions: Option<String>,
     auth_url: Option<String>,
     setup_url: Option<String>,
+    request_id: Option<String>,
 ) {
     let _ = channels
         .send_status(
@@ -1482,6 +1500,7 @@ pub(super) async fn emit_auth_required_status(
                 instructions,
                 auth_url,
                 setup_url,
+                request_id,
             },
             &message.metadata,
         )
@@ -1490,7 +1509,7 @@ pub(super) async fn emit_auth_required_status(
 
 /// Keep only the first actionable auth prompt seen in a turn.
 pub(super) fn capture_auth_prompt(
-    selected: &mut Option<(String, ParsedAuthData)>,
+    selected: &mut Option<(ExtensionName, ParsedAuthData)>,
     tool_name: &str,
     result: &Result<String, Error>,
 ) {
@@ -1514,7 +1533,7 @@ pub(super) fn capture_auth_prompt(
 pub(super) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
-) -> Option<(String, String)> {
+) -> Option<(ExtensionName, String)> {
     let auth_data = extract_auth_prompt(tool_name, result)?;
     if !auth_data.awaiting_token {
         return None;
@@ -1711,6 +1730,39 @@ pub(crate) fn strip_suggestions(text: &str) -> String {
     extract_suggestions(text).0
 }
 
+fn image_generation_summary_tool_message(
+    safety: &ironclaw_safety::SafetyLayer,
+    tool_name: &str,
+    tool_call_id: &str,
+    sentinel: &GeneratedImageSentinel,
+) -> ChatMessage {
+    let media_type = sentinel.media_type().unwrap_or("image");
+    let path = sentinel.path();
+    let summary = if let Some(path) = path {
+        serde_json::json!({
+            "type": "image_generated",
+            "status": "ok",
+            "media_type": media_type,
+            "path": path,
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "type": "image_generated",
+            "status": "ok",
+            "media_type": media_type,
+        })
+        .to_string()
+    };
+    let sanitized = safety.sanitize_tool_output(tool_name, &summary);
+    let content = safety.wrap_for_llm(tool_name, &sanitized.content);
+    ChatMessage::tool_result(tool_call_id, tool_name, content)
+}
+
+fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
+    sentinel.record_content_for_thread_state()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1740,6 +1792,8 @@ mod tests {
         selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
+    use crate::generated_images::GeneratedImageSentinel;
+    use ironclaw_common::ExtensionName;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1969,6 +2023,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -2236,13 +2291,13 @@ mod tests {
                     reasoning: None,
                 },
             ],
-            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt {
-                extension_name: "gmail".to_string(),
-                instructions: Some("Authorize Gmail".to_string()),
-                auth_url: Some("https://example.com/oauth".to_string()),
-                setup_url: None,
-                awaiting_token: false,
-            }),
+            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
+                ExtensionName::new("gmail").unwrap(),
+                Some("Authorize Gmail".to_string()),
+                Some("https://example.com/oauth".to_string()),
+                None,
+                false,
+            )),
             user_timezone: None,
             allow_always: true,
         };
@@ -2278,6 +2333,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(AuthThenApprovalProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -2383,17 +2439,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_restore_selected_auth_prompt_rejects_blank_extension_name() {
-        let pending = PendingAuthPrompt {
-            extension_name: "   ".to_string(),
-            instructions: Some("Connect Gmail".to_string()),
-            auth_url: Some("https://accounts.google.com/o/oauth2/auth".to_string()),
-            setup_url: None,
-            awaiting_token: false,
-        };
+    // Note: `PendingAuthPrompt` now carries an `ExtensionName` that carries the
+    // non-empty invariant itself. The "blank extension name" rejection case
+    // lives in `ironclaw_common::identity` tests; there is no intermediate
+    // stringly-typed rejection path in the prompt layer anymore.
 
-        assert!(restore_selected_auth_prompt(Some(pending)).is_none());
+    /// Regression for PR #2617 Copilot review: `PendingAuthPrompt` is
+    /// `#[serde(transparent)]`, so deserialization does not re-validate the
+    /// inner `ExtensionName` string. A legacy-persisted row holding an
+    /// invalid identity (empty, uppercase, path-separator, etc.) must be
+    /// rejected by `restore_selected_auth_prompt` rather than propagating
+    /// as a typed extension name. Mirrors the pre-PR2 behaviour where the
+    /// old string-trim constructor returned `None` on invalid input.
+    #[test]
+    fn test_restore_selected_auth_prompt_rejects_invalid_legacy_row() {
+        // Forge a legacy prompt by deserializing an invalid extension_name
+        // straight through serde — bypasses the normal `::new` entry point
+        // and simulates a bad row in `pending_gates.json`.
+        let bad_rows = [
+            r#"{"extension_name":"","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+            r#"{"extension_name":"Bad__Case","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+            r#"{"extension_name":"../traversal","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+        ];
+        for raw in bad_rows {
+            let legacy: PendingAuthPrompt =
+                serde_json::from_str(raw).expect("serde transparent accepts any string");
+            assert!(
+                restore_selected_auth_prompt(Some(legacy)).is_none(),
+                "legacy row {raw:?} should be dropped on restore"
+            );
+        }
     }
 
     #[test]
@@ -2438,7 +2513,10 @@ mod tests {
         .to_string());
 
         let auth_data = extract_auth_prompt("tool_activate", &result).expect("auth prompt");
-        assert_eq!(auth_data.extension_name.as_deref(), Some("gmail"));
+        assert_eq!(
+            auth_data.extension_name.as_ref().map(|e| e.as_str()),
+            Some("gmail")
+        );
         assert_eq!(
             auth_data.auth_url.as_deref(),
             Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=test")
@@ -2485,39 +2563,23 @@ mod tests {
 
     #[test]
     fn test_pending_auth_prompt_new_rejects_empty_name() {
-        assert!(
-            PendingAuthPrompt::new(
-                "".to_string(),
-                None,
-                Some("https://example.com".to_string()),
-                None,
-                false,
-            )
-            .is_none()
-        );
-        assert!(
-            PendingAuthPrompt::new(
-                "   ".to_string(),
-                None,
-                Some("https://example.com".to_string()),
-                None,
-                false,
-            )
-            .is_none()
-        );
+        // Empty / whitespace extension names are rejected by the identity
+        // validator; `PendingAuthPrompt::new` itself is now infallible and
+        // only accepts an already-validated `ExtensionName`.
+        assert!(ExtensionName::new("").is_err());
+        assert!(ExtensionName::new("   ").is_err());
     }
 
     #[test]
     fn test_pending_auth_prompt_new_accepts_valid_name() {
         let prompt = PendingAuthPrompt::new(
-            "gmail".to_string(),
+            ExtensionName::new("gmail").unwrap(),
             None,
             Some("https://example.com".to_string()),
             None,
             false,
         );
-        assert!(prompt.is_some());
-        assert_eq!(prompt.unwrap().extension_name, "gmail");
+        assert_eq!(prompt.extension_name.as_str(), "gmail");
     }
 
     #[test]
@@ -3258,6 +3320,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3406,6 +3469,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: Some(db),
+            settings_store: None,
             llm: llm as Arc<dyn LlmProvider>,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3536,6 +3600,7 @@ mod tests {
             let deps = AgentDeps {
                 owner_id: "default".to_string(),
                 store: None,
+                settings_store: None,
                 llm,
                 cheap_llm: None,
                 safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3867,6 +3932,91 @@ mod tests {
             !data_url.is_empty(),
             "Present 'data' field should produce non-empty string"
         );
+    }
+
+    #[test]
+    fn test_image_generation_summary_tool_message_omits_data_url() {
+        let safety = ironclaw_safety::SafetyLayer::new(&crate::config::SafetyConfig {
+            max_output_length: 4000,
+            injection_check_enabled: true,
+        });
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        }))
+        .expect("sentinel");
+
+        let message = super::image_generation_summary_tool_message(
+            &safety,
+            "image_generate",
+            "call_1",
+            &sentinel,
+        );
+
+        assert!(!message.content.contains("data:image"));
+        assert!(message.content.contains("\"type\":\"image_generated\""));
+        assert!(message.content.contains("\"media_type\":\"image/png\""));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_caps_large_payloads() {
+        let oversized = "a".repeat(crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        }))
+        .expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel);
+
+        assert!(!record.contains("data:image/png;base64"));
+        assert!(record.contains("\"type\":\"image_generated\""));
+        assert!(record.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_preserves_double_stringified_payload_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let filler_len = crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&normalized).unwrap();
+        let sentinel = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel);
+
+        assert_eq!(record, normalized);
+        assert!(record.contains("data:image/png;base64"));
+        assert!(!record.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_parse_image_generated_sentinel_accepts_stringified_json() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "path": "/tmp/image.png"
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&sentinel).unwrap();
+
+        let parsed = GeneratedImageSentinel::from_output(&wrapped).expect("should parse");
+        assert_eq!(parsed.data_url(), Some("data:image/png;base64,abc123"));
     }
 
     /// Test the relay channel auto-deny decision logic:
