@@ -222,7 +222,7 @@ mod persona_tests {
         let active_skills: Vec<Vec<String>> = new_events
             .iter()
             .filter_map(|event| match event {
-                ironclaw::channels::StatusUpdate::SkillActivated { skill_names } => {
+                ironclaw::channels::StatusUpdate::SkillActivated { skill_names, .. } => {
                     Some(skill_names.clone())
                 }
                 _ => None,
@@ -248,7 +248,7 @@ mod persona_tests {
             .captured_status_events()
             .iter()
             .filter_map(|event| match event {
-                ironclaw::channels::StatusUpdate::SkillActivated { skill_names } => {
+                ironclaw::channels::StatusUpdate::SkillActivated { skill_names, .. } => {
                     Some(skill_names.clone())
                 }
                 _ => None,

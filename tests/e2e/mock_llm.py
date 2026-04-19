@@ -68,8 +68,18 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 )
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
+MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
 
 TOOL_CALL_PATTERNS = [
+    # Parallel tool calls: return both echo and time in one response
+    (
+        re.compile(r"parallel echo and time", re.IGNORECASE),
+        "echo",
+        lambda _: [
+            {"tool_name": "echo", "arguments": {"message": "parallel-test"}},
+            {"tool_name": "time", "arguments": {"operation": "now"}},
+        ],
+    ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     (
         re.compile(r"loop until cap", re.IGNORECASE),
@@ -801,6 +811,27 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
     if EMPTY_REPLY_TRIGGER.search(last_user):
         return {"type": "empty_text"}
 
+    # Multi-step tool chain: echo first, then time, then text completion.
+    # Uses result count (not names) because v2 engine tool results don't
+    # always include the tool name in a parseable format.
+    if _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0 and has_tools:
+            return {
+                "type": "tool_call",
+                "tool_call": {"tool_name": "echo", "arguments": {"message": "step-one"}},
+            }
+        if n == 1 and has_tools:
+            return {
+                "type": "tool_call",
+                "tool_call": {"tool_name": "time", "arguments": {"operation": "now"}},
+            }
+        return {
+            "type": "text",
+            "text": "Multi-step complete: executed echo then time.",
+        }
+
     return None
 
 
@@ -859,6 +890,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     # tool-result summary path (for example, the looping case).
     special = match_special_response(messages, has_tools)
     if special and _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
+        return await _dispatch_special_response(request, cid, stream, special)
+    # Multi-step chain: must bypass tool-result-summary to issue second tool call
+    if special and _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
 
     # Tool result(s) in messages -> text summary covering every fresh result

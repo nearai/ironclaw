@@ -17,7 +17,7 @@
 FROM rust:1.92-bookworm AS chef
 
 RUN rustup target add wasm32-wasip2 \
-    && cargo install cargo-chef@0.1.77 wasm-tools@1.246.1
+    && cargo install --locked cargo-chef@0.1.77 wasm-tools@1.246.1
 
 WORKDIR /app
 

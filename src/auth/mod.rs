@@ -7,6 +7,7 @@ use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use ironclaw_common::ExtensionName;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{SettingsStore, UserStore};
@@ -104,7 +105,7 @@ pub struct PendingOAuthLaunch {
 }
 
 pub struct PendingOAuthLaunchParams {
-    pub extension_name: String,
+    pub extension_name: ExtensionName,
     pub display_name: String,
     pub authorization_url: String,
     pub token_url: String,

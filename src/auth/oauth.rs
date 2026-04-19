@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use ironclaw_common::ExtensionName;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -485,7 +486,7 @@ pub async fn validate_oauth_token(
 /// `/oauth/callback` handler when running in hosted mode.
 pub struct PendingOAuthFlow {
     /// Extension name (e.g., "google_calendar").
-    pub extension_name: String,
+    pub extension_name: ExtensionName,
     /// Human-readable display name (e.g., "Google Calendar").
     pub display_name: String,
     /// OAuth token exchange URL.

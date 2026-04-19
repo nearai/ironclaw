@@ -53,7 +53,9 @@ pub(crate) fn derive_onboarding(
 ) {
     match activation_status {
         Some(ExtensionActivationStatus::Pairing) => {
-            let safe_name = crate::channels::web::server::sanitize_extension_name(channel_name);
+            // `channel_name` is the registry-sourced `Extension.name`,
+            // which already passed validation at install time — no
+            // re-sanitization needed.
             let state = ChannelOnboardingState::PairingRequired;
             let info = ChannelOnboardingInfo {
                 state,
@@ -62,12 +64,12 @@ pub(crate) fn derive_onboarding(
                 credential_instructions: None,
                 credential_next_step: None,
                 setup_url: None,
-                pairing_title: Some(format!("Claim ownership for {safe_name}")),
+                pairing_title: Some(format!("Claim ownership for {channel_name}")),
                 pairing_instructions: Some(format!(
-                    "Send a message to your {safe_name} bot, then paste the pairing code here."
+                    "Send a message to your {channel_name} bot, then paste the pairing code here."
                 )),
                 restart_instructions: Some(format!(
-                    "To generate a new code, send another message to {safe_name}."
+                    "To generate a new code, send another message to {channel_name}."
                 )),
             };
             (Some(state), Some(info))

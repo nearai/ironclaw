@@ -1226,13 +1226,18 @@ impl SetupWizard {
             self.settings.secrets_master_key_hex = Some(master_key.expose_secret().to_string());
         }
 
+        // `SecretsConfig::resolve` either returns a key with source
+        // `Env`/`Keychain` or errors — `None` cannot be produced here,
+        // so only the two real sources are handled.
         let msg = match cfg.source {
             KeySource::Env => format!(
                 "Master key stored in {}",
                 crate::bootstrap::ironclaw_env_path().display()
             ),
             KeySource::Keychain => "Master key stored in OS keychain".to_string(),
-            KeySource::None => "Security not configured".to_string(),
+            KeySource::None => unreachable!(
+                "SecretsConfig::resolve returns a key or errors; None is never produced"
+            ),
         };
         print_success(&msg);
         Ok(())

@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::submission::Submission;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
 
 /// Tracks active WebSocket connections.
@@ -177,7 +177,7 @@ async fn handle_client_message(
 
             // Convert uploaded images to IncomingAttachments
             if !images.is_empty() {
-                let attachments = crate::channels::web::server::images_to_attachments(&images);
+                let attachments = crate::channels::web::util::images_to_attachments(&images);
                 incoming = incoming.with_attachments(attachments);
             }
 
@@ -280,7 +280,7 @@ async fn handle_client_message(
                 thread_id,
             };
             if let Err((_, message)) =
-                crate::channels::web::server::handle_legacy_auth_token_submission(
+                crate::channels::web::platform::legacy_auth::handle_legacy_auth_token_submission(
                     state, user_id, req,
                 )
                 .await
@@ -298,7 +298,10 @@ async fn handle_client_message(
                 thread_id,
             };
             if let Err((_, message)) =
-                crate::channels::web::server::handle_legacy_auth_cancel(state, user_id, req).await
+                crate::channels::web::platform::legacy_auth::handle_legacy_auth_cancel(
+                    state, user_id, req,
+                )
+                .await
             {
                 let _ = direct_tx.send(WsServerMessage::Error { message }).await;
             }
@@ -522,17 +525,26 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,

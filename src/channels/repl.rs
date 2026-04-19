@@ -811,7 +811,7 @@ impl Channel for ReplChannel {
             | StatusUpdate::ConversationHistory { .. } => {
                 // Infrastructure status events are only rendered by the TUI.
             }
-            StatusUpdate::SkillActivated { skill_names } => {
+            StatusUpdate::SkillActivated { skill_names, .. } => {
                 if !skill_names.is_empty() {
                     eprintln!(
                         "  \x1b[36m\u{25C8} skills: {}\x1b[0m",
@@ -905,7 +905,7 @@ mod tests {
 
         repl.send_status(
             StatusUpdate::AuthRequired {
-                extension_name: "google_oauth_token".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("google_oauth_token").unwrap(),
                 instructions: Some("Paste your token".to_string()),
                 auth_url: None,
                 setup_url: Some("http://127.0.0.1:8080/auth".to_string()),
