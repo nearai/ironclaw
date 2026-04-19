@@ -683,9 +683,17 @@ I18n.register('en', {
   'message.system': 'System',
   'message.copy': 'Copy',
   'message.copied': 'Copied!',
+  'message.thinking': 'Thinking',
 
   // Approval
+  'approval.tag': 'approval required',
+  'approval.approveOnce': 'Approve once',
+  'approval.alwaysAllow': 'Always allow',
   'approval.pressY': 'Press Y to approve, N to deny',
+
+  // Sub-agent
+  'subagent.status.done': 'done',
+  'subagent.status.running': 'running',
 
   // === Added for app.js i18n coverage ===
 

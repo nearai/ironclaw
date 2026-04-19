@@ -1,0 +1,66 @@
+/* Reasoning (thinking) collapsible card */
+
+.gw-reasoning {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(160, 140, 255, 0.04);
+}
+
+.gw-reasoning.is-open {
+  background: rgba(160, 140, 255, 0.06);
+}
+
+.gw-reasoning__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.gw-reasoning__header:hover {
+  color: var(--text);
+}
+
+.gw-reasoning__chev {
+  display: inline-block;
+  color: var(--text-dimmed);
+  transition: transform 150ms ease;
+  font-family: var(--font-mono);
+}
+
+.gw-reasoning__chev.is-open {
+  transform: rotate(90deg);
+}
+
+.gw-reasoning__label {
+  font-weight: 500;
+  color: #b8a8ff;
+  font-style: italic;
+}
+
+.gw-reasoning__meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.gw-reasoning__body {
+  padding: 4px 14px 12px 30px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  font-style: italic;
+  border-top: 1px dashed var(--border);
+}
+
+.gw-reasoning__body p {
+  margin: 6px 0;
+}

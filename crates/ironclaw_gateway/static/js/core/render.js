@@ -457,5 +457,57 @@ function appendToLastAssistant(chunk) {
   }
 }
 
+// --- Reasoning (thinking) collapsible card ---
+
+function createReasoningElement(content, meta) {
+  const card = document.createElement('div');
+  card.className = 'gw-reasoning';
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'gw-reasoning__header';
+
+  const chev = document.createElement('span');
+  chev.className = 'gw-reasoning__chev';
+  chev.textContent = '\u203A'; // ›
+  header.appendChild(chev);
+
+  const label = document.createElement('span');
+  label.className = 'gw-reasoning__label';
+  label.textContent = I18n.t('message.thinking');
+  header.appendChild(label);
+
+  if (meta) {
+    const metaEl = document.createElement('span');
+    metaEl.className = 'gw-reasoning__meta';
+    metaEl.textContent = meta;
+    header.appendChild(metaEl);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'gw-reasoning__body';
+  body.style.display = 'none';
+  body.textContent = content || '';
+
+  header.addEventListener('click', () => {
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    chev.classList.toggle('is-open', !isOpen);
+    card.classList.toggle('is-open', !isOpen);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
+}
+
+function addReasoningCard(content, meta) {
+  const container = document.getElementById('chat-messages');
+  const card = createReasoningElement(content, meta);
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  return card;
+}
+
 // --- Inline Tool Activity Cards ---
 

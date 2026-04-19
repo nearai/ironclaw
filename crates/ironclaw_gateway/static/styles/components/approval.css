@@ -1,0 +1,108 @@
+/* Approval card — design system restyling */
+
+.gw-approval {
+  border: 1px solid rgba(245, 166, 35, 0.35);
+  background: rgba(245, 166, 35, 0.04);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.gw-approval.is-denied {
+  border-color: var(--danger-border-subtle);
+  background: var(--danger-subtle);
+}
+
+.gw-approval.is-once,
+.gw-approval.is-always {
+  border-color: var(--accent-border-subtle);
+  background: var(--accent-soft);
+}
+
+.gw-approval__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.gw-approval__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.gw-approval__tag {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #f5a623;
+  background: rgba(245, 166, 35, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.gw-approval__summary {
+  margin: 4px 0 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.gw-approval__details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  margin: 0 0 10px;
+  font-size: 12.5px;
+}
+
+.gw-approval__details dt {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.gw-approval__details dd {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gw-approval__details code {
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.gw-approval__warn {
+  font-size: 12px;
+  color: #f5a623;
+  padding: 6px 10px;
+  background: rgba(245, 166, 35, 0.08);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.gw-approval__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.gw-approval__resolved {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.gw-approval__resolved--ok {
+  color: var(--accent);
+}
+
+.gw-approval__resolved--deny {
+  color: var(--danger);
+}

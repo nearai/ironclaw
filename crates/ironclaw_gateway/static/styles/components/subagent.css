@@ -1,0 +1,95 @@
+/* Sub-agent collapsible card */
+
+.gw-subagent {
+  border: 1px solid var(--border);
+  border-left: 3px solid #60a5fa;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.gw-subagent__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 10px 14px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  text-align: left;
+}
+
+.gw-subagent__chev {
+  color: var(--text-dimmed);
+  font-family: var(--font-mono);
+  transition: transform 150ms ease;
+  flex-shrink: 0;
+}
+
+.gw-subagent__chev.is-open {
+  transform: rotate(90deg);
+}
+
+.gw-subagent__title {
+  font-weight: 500;
+  color: var(--text);
+  flex: 1;
+}
+
+.gw-subagent__status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.gw-subagent__status.is-done {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.gw-subagent__status.is-running {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.gw-subagent__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gw-subagent__desc {
+  margin: 0;
+  padding: 0 14px 10px 32px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.gw-subagent__steps {
+  margin: 0 14px 12px 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.gw-subagent__steps .gw-toolline {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.gw-subagent__result {
+  padding: 0 14px 14px 32px;
+  font-size: 12.5px;
+  color: var(--text);
+  font-style: italic;
+}

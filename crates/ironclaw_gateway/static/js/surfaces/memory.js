@@ -5,6 +5,27 @@ let currentMemoryContent = null;
 // { name, path, is_dir, children: [] | null, expanded: bool, loaded: bool }
 let memoryTreeState = null;
 
+function _fileIcon(name) {
+  var ext = (name.lastIndexOf('.') !== -1) ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  switch (ext) {
+    case 'md': return '\uD83D\uDCDD';  // memo
+    case 'txt': return '\uD83D\uDCC4';  // page facing up
+    case 'json': return '\uD83D\uDD27'; // wrench
+    case 'toml': case 'yaml': case 'yml': case 'ini': case 'cfg': return '\u2699\uFE0F'; // gear
+    case 'rs': case 'py': case 'js': case 'ts': case 'go': case 'rb': case 'java': case 'c': case 'cpp': case 'h': return '\uD83D\uDCBB'; // laptop
+    case 'sh': case 'bash': case 'zsh': return '\uD83D\uDCDF'; // pager
+    case 'sql': return '\uD83D\uDDC3\uFE0F'; // card file box
+    case 'html': case 'css': case 'scss': return '\uD83C\uDF10'; // globe
+    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': case 'webp': return '\uD83D\uDDBC\uFE0F'; // framed picture
+    case 'pdf': return '\uD83D\uDCD5'; // closed book
+    case 'zip': case 'tar': case 'gz': case 'bz2': return '\uD83D\uDCE6'; // package
+    case 'log': return '\uD83D\uDCDC'; // scroll
+    case 'lock': return '\uD83D\uDD12'; // lock
+    case 'env': return '\uD83D\uDD11'; // key
+    default: return '\uD83D\uDCC4'; // page facing up
+  }
+}
+
 document.getElementById('memory-search').addEventListener('input', (e) => {
   clearTimeout(memorySearchTimeout);
   const query = e.target.value.trim();
@@ -55,6 +76,11 @@ function renderNodes(nodes, container, depth) {
       arrow.textContent = '\u25B6';
       row.appendChild(arrow);
 
+      const icon = document.createElement('span');
+      icon.className = 'tree-icon tree-icon--dir';
+      icon.textContent = node.expanded ? '\uD83D\uDCC2' : '\uD83D\uDCC1';
+      row.appendChild(icon);
+
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
@@ -68,6 +94,11 @@ function renderNodes(nodes, container, depth) {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
       row.appendChild(spacer);
+
+      const icon = document.createElement('span');
+      icon.className = 'tree-icon tree-icon--file';
+      icon.textContent = _fileIcon(node.name);
+      row.appendChild(icon);
 
       const label = document.createElement('span');
       label.className = 'tree-label file';

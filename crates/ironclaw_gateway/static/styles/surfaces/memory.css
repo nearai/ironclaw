@@ -80,6 +80,14 @@
   flex-shrink: 0;
 }
 
+.tree-icon {
+  font-size: 14px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
 .tree-label {
   white-space: nowrap;
   overflow: hidden;

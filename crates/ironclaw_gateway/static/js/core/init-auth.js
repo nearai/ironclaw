@@ -74,7 +74,7 @@ function initApp() {
 }
 
 function authenticate() {
-  token = document.getElementById('token-input').value.trim();
+  token = document.getElementById('token-input').value.replace(/\s/g, '');
   if (!token) {
     document.getElementById('auth-error').textContent = I18n.t('auth.errorRequired');
     return;

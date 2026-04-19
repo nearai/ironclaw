@@ -1,0 +1,103 @@
+/* Semantic type roles — pick the class closest to intent.
+   Never set font-family or size inline; these roles encode the whole style system. */
+
+.ic-display {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: var(--text-3xl);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.ic-h1 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-2xl);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.ic-h2 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-xl);
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.ic-h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-lg);
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.ic-body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: var(--text-base);
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.ic-body-sm {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.ic-meta {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  text-transform: none;
+}
+
+.ic-label {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.ic-code {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 0.9em;
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+.ic-mono-block {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  color: var(--text);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.ic-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--transition-fast);
+}
+.ic-link:hover { border-bottom-color: var(--accent); }

@@ -87,11 +87,11 @@ function applyToolActivityCardState(rendered, options) {
   }
 
   if (status === 'fail') {
-    rendered.icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+    rendered.icon.innerHTML = '<span class="activity-status-dot activity-status-dot--fail"></span>';
   } else if (status === 'success') {
-    rendered.icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+    rendered.icon.innerHTML = '<span class="activity-status-dot activity-status-dot--ok"></span>';
   } else {
-    rendered.icon.innerHTML = '<div class="spinner"></div>';
+    rendered.icon.innerHTML = '<span class="activity-status-dot activity-status-dot--run"></span>';
   }
 
   rendered.output.textContent = getToolActivityBodyText(entry);
@@ -509,6 +509,126 @@ function humanizeToolName(rawName) {
     .replace(/^tool([a-zA-Z])/, 'tool $1')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function syntaxHighlightArgs(argsStr) {
+  if (!argsStr) return '';
+  // Highlight keys, strings, and numbers in tool arguments
+  return argsStr
+    .replace(/"([^"]+)":/g, '<span class="k">"$1":</span>')
+    .replace(/:\s*"([^"]*)"/g, ': <span class="s">"$1"</span>')
+    .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="n">$1</span>');
+}
+
+function createToolLines(tools) {
+  if (!tools || tools.length === 0) return null;
+  const container = document.createElement('div');
+  container.className = 'gw-msg__tools';
+
+  for (const tool of tools) {
+    const line = document.createElement('div');
+    line.className = 'gw-toolline';
+
+    const dot = document.createElement('span');
+    dot.className = 'gw-toolline__dot';
+    if (tool.status === 'success') dot.classList.add('is-ok');
+    else if (tool.status === 'running') dot.classList.add('is-run');
+    else if (tool.status === 'fail') dot.classList.add('is-warn');
+
+    const name = document.createElement('span');
+    name.className = 'gw-toolline__name';
+    name.textContent = tool.name || '';
+
+    const args = document.createElement('span');
+    args.className = 'gw-toolline__args';
+    if (tool.args) {
+      args.innerHTML = syntaxHighlightArgs(escapeHtml(tool.args));
+    }
+
+    const meta = document.createElement('span');
+    meta.className = 'gw-toolline__meta';
+    if (tool.duration_ms !== null && tool.duration_ms !== undefined) {
+      meta.textContent = formatToolActivityDurationMs(tool.duration_ms);
+    }
+
+    line.appendChild(dot);
+    line.appendChild(name);
+    line.appendChild(args);
+    line.appendChild(meta);
+    container.appendChild(line);
+  }
+
+  return container;
+}
+
+function createSubAgentCard(data) {
+  const card = document.createElement('div');
+  card.className = 'gw-subagent';
+  if (data.id) card.setAttribute('data-subagent-id', data.id);
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'gw-subagent__header';
+
+  const chev = document.createElement('span');
+  chev.className = 'gw-subagent__chev';
+  chev.textContent = '\u203A'; // ›
+  header.appendChild(chev);
+
+  const title = document.createElement('span');
+  title.className = 'gw-subagent__title';
+  title.textContent = data.title || data.name || 'Sub-agent';
+  header.appendChild(title);
+
+  const status = document.createElement('span');
+  const isDone = data.status === 'done' || data.status === 'completed';
+  status.className = 'gw-subagent__status ' + (isDone ? 'is-done' : 'is-running');
+  status.textContent = isDone
+    ? I18n.t('subagent.status.done')
+    : I18n.t('subagent.status.running');
+  header.appendChild(status);
+
+  if (data.duration) {
+    const meta = document.createElement('span');
+    meta.className = 'gw-subagent__meta';
+    meta.textContent = data.duration;
+    header.appendChild(meta);
+  }
+
+  const body = document.createElement('div');
+  body.style.display = 'none';
+
+  if (data.description) {
+    const desc = document.createElement('div');
+    desc.className = 'gw-subagent__desc';
+    desc.textContent = data.description;
+    body.appendChild(desc);
+  }
+
+  if (data.tools && data.tools.length > 0) {
+    const steps = createToolLines(data.tools);
+    if (steps) {
+      steps.className = 'gw-subagent__steps';
+      body.appendChild(steps);
+    }
+  }
+
+  if (data.result) {
+    const result = document.createElement('div');
+    result.className = 'gw-subagent__result';
+    result.textContent = data.result;
+    body.appendChild(result);
+  }
+
+  header.addEventListener('click', () => {
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    chev.classList.toggle('is-open', !isOpen);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
 }
 
 function shouldShowChannelConnectedMessage(extensionName, success) {
