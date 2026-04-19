@@ -126,10 +126,15 @@ SEL = {
     "toast_success":            ".toast.toast-success",
     "toast_error":              ".toast.toast-error",
     "toast_info":               ".toast.toast-info",
-    # Jobs / routines
+    # Jobs / missions / routines
     "jobs_tbody":               "#jobs-tbody",
     "job_row":                  "#jobs-tbody .job-row",
     "jobs_empty":               "#jobs-empty",
+    "missions_summary":         "#missions-summary",
+    "missions_table":           "#missions-table",
+    "missions_tbody":           "#missions-tbody",
+    "missions_empty":           "#missions-empty",
+    "active_work_strip":        "#active-work-strip",
     "routines_tbody":           "#routines-tbody",
     "routine_row":              "#routines-tbody .routine-row",
     "routines_empty":           "#routines-empty",

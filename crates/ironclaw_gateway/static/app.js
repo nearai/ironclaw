@@ -115,11 +115,10 @@ let currentMissionList = [];
 const missionDetailCache = new Map();
 const missionDetailFetchInFlight = new Set();
 const ACTIVE_MISSION_MAPPING_REFRESH_MS = 5000;
-const MAX_ACTIVITY_BAR_ITEMS = 6;
 let missionProgressRefreshScheduled = false;
 let missionMappingRefreshTimer = null;
 let missionMappingsLastRefreshedAt = 0;
-let activityBarSnapshotInFlight = false;
+let activeWorkSnapshotInFlight = false;
 
 function shortDisplayId(id) {
   return typeof id === 'string' && id.length > 8 ? id.substring(0, 8) : (id || '');
@@ -206,16 +205,6 @@ class JobActivityEntry extends ActivityEntry {
     return this.state === 'running';
   }
 
-  toBarItem() {
-    return {
-      kind: 'job',
-      id: this.id,
-      title: this.title,
-      statusText: this.statusText || JobActivityEntry.formatStatus('running'),
-      updatedAt: this.updatedAt || 0,
-      state: this.state || 'done',
-    };
-  }
 }
 
 class MissionActivityEntry extends ActivityEntry {
@@ -285,25 +274,6 @@ class MissionActivityEntry extends ActivityEntry {
     return this.state === 'running';
   }
 
-  isVisibleInBar() {
-    return this.state !== 'idle';
-  }
-
-  toBarItem(liveSnapshot) {
-    const liveUpdatedAt = liveSnapshot?.updatedAt || 0;
-    const statusText = this.state === 'running'
-      ? (liveSnapshot?.progress || MissionActivityEntry.formatStatus(this.status))
-      : MissionActivityEntry.formatStatus(this.status, this.statusText);
-    return {
-      kind: 'mission',
-      id: this.id,
-      missionId: this.id,
-      title: this.title || ('Mission ' + shortDisplayId(this.id)),
-      statusText: statusText,
-      updatedAt: Math.max(this.updatedAt || 0, liveUpdatedAt),
-      state: this.state || 'done',
-    };
-  }
 }
 
 class ActiveWorkStore {
@@ -472,21 +442,6 @@ class ActiveWorkStore {
     });
   }
 
-  getMissionLiveSnapshot(missionId) {
-    let newestUpdatedAt = 0;
-    let progress = '';
-    for (const [threadId, meta] of this.threadMeta.entries()) {
-      if (meta.mission_id !== missionId) continue;
-      const thread = this.threads.get(threadId);
-      if (!thread || !thread.active) continue;
-      if ((thread.updatedAt || 0) >= newestUpdatedAt) {
-        newestUpdatedAt = thread.updatedAt || 0;
-        progress = thread.statusText || '';
-      }
-    }
-    return { updatedAt: newestUpdatedAt, progress: progress };
-  }
-
   getActiveMissionIds() {
     const ids = [];
     for (const [missionId, entry] of this.missions.entries()) {
@@ -495,52 +450,8 @@ class ActiveWorkStore {
     return ids;
   }
 
-  getActivityBarItems() {
-    const items = [];
-    for (const [missionId, entry] of this.missions.entries()) {
-      if (!entry || !entry.isVisibleInBar()) continue;
-      items.push(entry.toBarItem(this.getMissionLiveSnapshot(missionId)));
-    }
-    for (const [jobId, entry] of this.jobs.entries()) {
-      if (!entry) continue;
-      items.push(entry.toBarItem());
-    }
-    items.sort((a, b) => b.updatedAt - a.updatedAt);
-    return items.slice(0, MAX_ACTIVITY_BAR_ITEMS);
-  }
-
   render() {
     this.renderTabCounts();
-    const strip = document.getElementById('active-work-strip');
-    if (!strip) return;
-    if (!engineV2Enabled) {
-      strip.hidden = true;
-      strip.innerHTML = '';
-      scheduleMissionProgressViewsRefresh();
-      return;
-    }
-    const items = this.getActivityBarItems();
-    strip.hidden = false;
-    strip.innerHTML = items.length === 0
-      ? '<div class="active-work-empty">' + escapeHtml(ActivityEntry.t('activity.empty', 'No recent jobs or missions')) + '</div>'
-      : items.map((item) => {
-        const kindLabel = item.kind === 'job'
-          ? ActivityEntry.t('activity.kind.job', 'Job')
-          : ActivityEntry.t('activity.kind.mission', 'Mission');
-        return '<button class="active-work-item" type="button"'
-          + ' data-action="open-active-work"'
-          + ' data-kind="' + escapeHtml(item.kind) + '"'
-          + ' data-state="' + escapeHtml(item.state || 'done') + '"'
-          + ' data-id="' + escapeHtml(item.id) + '"'
-          + (item.missionId ? ' data-mission-id="' + escapeHtml(item.missionId) + '"' : '')
-          + (item.updatedAt ? ' title="' + escapeHtml(relativeTime(new Date(item.updatedAt).toISOString())) + '"' : '')
-          + '>'
-          + '<span class="active-work-kind">' + escapeHtml(kindLabel) + '</span>'
-          + '<span class="active-work-title">' + escapeHtml(item.title) + '</span>'
-          + '<span class="active-work-status">' + escapeHtml(item.statusText) + '</span>'
-          + '</button>';
-      }).join('');
-
     scheduleMissionProgressViewsRefresh();
   }
 }
@@ -4641,6 +4552,7 @@ function switchTab(tab) {
     if (!currentMemoryPath) readMemoryFile('README.md');
   }
   if (tab === 'jobs') loadJobs();
+  if (tab === 'missions') loadMissions();
   if (tab === 'projects') {
     loadProjectsOverview();
   } else if (crCurrentProjectId) {
@@ -7556,9 +7468,9 @@ function fetchMissionDetailForProgress(missionId, options = {}) {
     });
 }
 
-function refreshPersistentActivityBar() {
-  if (activityBarSnapshotInFlight) return;
-  activityBarSnapshotInFlight = true;
+function refreshPersistentActiveWorkState() {
+  if (activeWorkSnapshotInFlight) return;
+  activeWorkSnapshotInFlight = true;
   Promise.all([
     apiFetch('/api/jobs').catch(() => null),
     engineV2Enabled ? apiFetch('/api/engine/missions').catch(() => null) : Promise.resolve(null),
@@ -7575,7 +7487,7 @@ function refreshPersistentActivityBar() {
         });
     }
   }).finally(() => {
-    activityBarSnapshotInFlight = false;
+    activeWorkSnapshotInFlight = false;
   });
 }
 
@@ -8119,7 +8031,7 @@ function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
     activeWorkStore.setEngineV2Enabled(!!data.engine_v2);
     applyEngineModeUi();
-    refreshPersistentActivityBar();
+    refreshPersistentActiveWorkState();
 
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
@@ -9974,15 +9886,6 @@ document.addEventListener('click', function(e) {
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
       else document.getElementById('cr-detail').style.display = 'none';
-      break;
-    case 'open-active-work':
-      if (el.dataset.kind === 'job') {
-        switchTab('jobs');
-        openJobDetail(el.dataset.id);
-      } else {
-        switchTab('missions');
-        openMissionDetail(el.dataset.missionId || el.dataset.id);
-      }
       break;
     case 'view-run-job':
       e.preventDefault();
