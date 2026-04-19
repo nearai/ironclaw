@@ -339,11 +339,31 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Parse headers from WASM and scan for leaks before credential injection.
+        // Host-injected tokens (e.g., xoxb- Slack bot token) would otherwise
+        // trigger the leak detector. The URL has template substitution applied
+        // (`injected_url`) but not yet host credential injection.
+        let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
+            &headers_json,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Malformed headers JSON from WASM; scanning empty headers");
+            std::collections::HashMap::new()
+        });
 
+        let mut logical_url = injected_url;
+
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        leak_detector
+            .scan_http_request(&logical_url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Now inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -362,22 +382,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             headers_changed = headers_changed,
             "Parsed and injected request headers"
         );
-
-        let mut logical_url = injected_url;
-
-        // Leak scan runs on WASM-provided values BEFORE host credential injection.
-        // This prevents false positives where the host-injected Bearer token
-        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
-        // the real value, so scanning the pre-injection state is correct.
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&logical_url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
@@ -6834,18 +6838,87 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_http_url_for_testing_uses_host_map() {
-        use std::sync::{Mutex, OnceLock};
+    fn test_http_request_scans_headers_before_placeholder_substitution() {
+        use super::ChannelStoreData;
+        use std::collections::HashMap;
 
-        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
 
-        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://127.0.0.1:1"}"#,
+            );
+        }
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "slack.com",
+                )])),
+                ..Default::default()
+            });
+
+        // Placeholder whose substituted value matches the openai_api_key leak
+        // pattern (`sk-(?:proj-)?[a-zA-Z0-9]{20,}`). If the scan ran AFTER
+        // `inject_credentials` replaced `{FAKE_TOKEN}` in the Authorization
+        // header, the Bearer value would trip the detector.
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "FAKE_TOKEN".to_string(),
+            "sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+        );
+
+        let mut store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            credentials,
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "BREW".to_string(),
+            "https://slack.com/api/chat.postMessage".to_string(),
+            r#"{"Authorization":"Bearer {FAKE_TOKEN}"}"#.to_string(),
+            None,
+            Some(1_000),
+        );
+
+        // Reaching the unsupported-method branch proves the leak scan accepted
+        // the raw `Bearer {FAKE_TOKEN}` header value. A regression to
+        // post-injection scanning would surface as "Potential secret leak
+        // blocked" before method dispatch.
+        let error = result.expect_err("unsupported method should fail after leak scan");
+        assert!(
+            !error.contains("Potential secret leak blocked"),
+            "placeholder-substituted credential must not trigger request leak scan: {error}"
+        );
+        assert!(
+            error.contains("Unsupported HTTP method: BREW"),
+            "expected unsupported method after leak scan, got: {error}"
+        );
+
+        // SAFETY: Under ENV_MUTEX, restore original state.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
+            } else {
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var(
                 TEST_HTTP_REWRITE_MAP_ENV,

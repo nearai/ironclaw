@@ -18,8 +18,6 @@ pub mod users;
 // Modules not yet wired into server.rs router -- suppress dead_code until
 // they replace their inline counterparts.
 #[allow(dead_code)]
-pub mod chat;
-#[allow(dead_code)]
 pub mod extensions;
 pub mod frontend;
 #[allow(dead_code)]
