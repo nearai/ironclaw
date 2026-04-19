@@ -104,8 +104,17 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
+            // Pick the right prompt for the agent based on where the image
+            // actually lives. Engine v2 persists the file to disk and then
+            // clears `data` to keep the outbound prompt small, so an empty
+            // `data` with a set `local_path` is a saved-to-disk image, not
+            // a missing one.
             let body = if att.data.is_empty() {
-                "[Image attached — visual content not available in this conversation.]"
+                if att.local_path.is_some() {
+                    "[Image attached — the raw bytes have been persisted to the project file path above. Reference that path when you need the image; don't try to load it from memory.]"
+                } else {
+                    "[Image attached — visual content not available in this conversation.]"
+                }
             } else {
                 "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
             };

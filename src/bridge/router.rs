@@ -115,12 +115,44 @@ fn attachment_project_relative_path(
     )
 }
 
+/// Collapse anything that could break a markdown title/backtick span in a
+/// user-supplied filename before embedding it. User content in attachment
+/// filenames goes straight into `# Uploaded attachment: ...` and into the
+/// note's `title`, so raw newlines / backticks / odd ASCII control codes
+/// would corrupt the agent-visible transcript (and, for a title, the
+/// searchable memory-doc row).
+fn sanitize_filename_for_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\n' | '\r' | '\t' => out.push(' '),
+            '`' => out.push('\''),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return "attachment".to_string();
+    }
+    // Clamp so a pathological filename can't flood the agent prompt.
+    const MAX_DISPLAY_LEN: usize = 256;
+    if trimmed.len() <= MAX_DISPLAY_LEN {
+        trimmed.to_string()
+    } else {
+        let mut t = trimmed.to_string();
+        t.truncate(MAX_DISPLAY_LEN);
+        t
+    }
+}
+
 fn attachment_index_note(
     message: &IncomingMessage,
     attachment: &crate::channels::IncomingAttachment,
     relative_path: &str,
 ) -> AttachmentIndexNote {
-    let filename = attachment.filename.as_deref().unwrap_or("attachment");
+    let raw_filename = attachment.filename.as_deref().unwrap_or("attachment");
+    let filename = sanitize_filename_for_display(raw_filename);
     let attachment_type = match attachment.kind {
         crate::channels::AttachmentKind::Audio => "audio",
         crate::channels::AttachmentKind::Image => "image",
@@ -216,9 +248,14 @@ async fn persist_project_attachments(
         }
 
         attachment.local_path = Some(relative_path.clone());
+        // Build the index note while `data` is still populated so the
+        // fallback to `data.len()` in `attachment_index_note` reports the
+        // real payload size when `size_bytes` wasn't pre-filled. Clear the
+        // buffer afterwards so the outbound agent prompt doesn't re-embed
+        // the raw bytes it just persisted to disk.
+        notes.push(attachment_index_note(message, attachment, &relative_path));
         attachment.data.clear();
         attachment.data.shrink_to_fit();
-        notes.push(attachment_index_note(message, attachment, &relative_path));
     }
 
     notes
