@@ -252,7 +252,10 @@ impl ChannelsConfig {
                 if scope.len() > 128 {
                     return Err(ConfigError::InvalidValue {
                         key: "WORKSPACE_READ_SCOPES".to_string(),
-                        message: format!("scope '{}...' exceeds 128 characters", &scope[..32]),
+                        message: format!(
+                            "scope '{}...' exceeds 128 characters",
+                            &scope[..crate::util::floor_char_boundary(scope, 32)]
+                        ),
                     });
                 }
             }

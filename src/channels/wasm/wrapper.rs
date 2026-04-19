@@ -342,11 +342,29 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Parse headers from WASM and scan for leaks before header placeholder
+        // substitution. Placeholder-expanded secrets are trusted host-side values;
+        // they must not trip the request leak detector.
+        let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
+            &headers_json,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Malformed headers JSON from WASM; scanning empty headers");
+            std::collections::HashMap::new()
+        });
 
+        let mut logical_url = injected_url.clone();
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        leak_detector
+            .scan_http_request(&logical_url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Now inject credentials into header values.
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}".
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -357,40 +375,11 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             })
             .collect();
 
-        // ── Credential injection & leak-scan ordering ──────────────────
-        //
-        // Two-pass credential injection:
-        //   Pass 1 (above):  WASM-side placeholder substitution ({TOKEN} → value)
-        //   Pass 2a (below): Auto-inject from capability mappings (Bearer/Header)
-        //   Pass 2b (below): inject_host_credentials (pre-resolved host creds)
-        //
-        // Pass 2a skips headers that already exist (no-clobber); Pass 2b
-        // overwrites (host credentials take precedence). This means the two
-        // passes cannot double-inject the same header.
-        //
-        // Leak scan runs HERE, between Pass 1 and Pass 2, so it only sees
-        // WASM-provided content. Pass 2a/2b values are trusted host-side
-        // secrets that must not trigger the leak detector. URL modifications
-        // from inject_host_credentials (query params) are also trusted host
-        // values — they are NOT re-scanned intentionally.
-        // ──────────────────────────────────────────────────────────────────
-        {
-            let url_for_scan = &injected_url;
-            let header_vec: Vec<(String, String)> = headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            let leak_detector = LeakDetector::new();
-            leak_detector
-                .scan_http_request(url_for_scan, &header_vec, body.as_deref())
-                .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-        }
-
         // Auto-inject credentials based on capability mappings (Bearer, Header).
         // WASM channels don't include auth headers explicitly; the host injects
         // them based on the credential mappings in the capabilities file.
         if let Some(http_cap) = &self.host_state.capabilities().tool_capabilities.http
-            && let Ok(parsed) = reqwest::Url::parse(&injected_url)
+            && let Ok(parsed) = reqwest::Url::parse(&logical_url)
             && let Some(host) = parsed.host_str()
         {
             for mapping in http_cap.credentials.values() {
@@ -449,8 +438,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut logical_url = injected_url;
-
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
         // Host creds take precedence — they overwrite any same-named header
@@ -492,7 +479,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        // Test-only URL rewrites intentionally point at local fake servers.
+        // Test/dev URL rewrites intentionally point at local fake servers.
         if !allow_private_test_target {
             reject_private_ip(&transport_url)?;
         }
@@ -4682,7 +4669,19 @@ fn is_loopback_test_rewrite_base(base: &str) -> bool {
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .filter(|base| {
+            if is_loopback_test_rewrite_base(base) {
+                true
+            } else {
+                tracing::warn!(
+                    env_var = TELEGRAM_TEST_API_BASE_ENV,
+                    %base,
+                    "Ignoring non-loopback Telegram test API rewrite target"
+                );
+                false
+            }
+        })?;
 
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -6844,6 +6843,15 @@ mod tests {
                 .expect("Telegram URL should rewrite");
         assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
 
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "https://example.com");
+        }
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage");
+        assert!(rewritten.is_none());
+
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             if let Some(value) = original {
@@ -7450,18 +7458,87 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_http_url_for_testing_uses_host_map() {
-        use std::sync::{Mutex, OnceLock};
+    fn test_http_request_scans_headers_before_placeholder_substitution() {
+        use super::ChannelStoreData;
+        use std::collections::HashMap;
 
-        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
 
-        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://127.0.0.1:1"}"#,
+            );
+        }
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "slack.com",
+                )])),
+                ..Default::default()
+            });
+
+        // Placeholder whose substituted value matches the openai_api_key leak
+        // pattern (`sk-(?:proj-)?[a-zA-Z0-9]{20,}`). If the scan ran AFTER
+        // `inject_credentials` replaced `{FAKE_TOKEN}` in the Authorization
+        // header, the Bearer value would trip the detector.
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "FAKE_TOKEN".to_string(),
+            "sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+        );
+
+        let mut store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            credentials,
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "BREW".to_string(),
+            "https://slack.com/api/chat.postMessage".to_string(),
+            r#"{"Authorization":"Bearer {FAKE_TOKEN}"}"#.to_string(),
+            None,
+            Some(1_000),
+        );
+
+        // Reaching the unsupported-method branch proves the leak scan accepted
+        // the raw `Bearer {FAKE_TOKEN}` header value. A regression to
+        // post-injection scanning would surface as "Potential secret leak
+        // blocked" before method dispatch.
+        let error = result.expect_err("unsupported method should fail after leak scan");
+        assert!(
+            !error.contains("Potential secret leak blocked"),
+            "placeholder-substituted credential must not trigger request leak scan: {error}"
+        );
+        assert!(
+            error.contains("Unsupported HTTP method: BREW"),
+            "expected unsupported method after leak scan, got: {error}"
+        );
+
+        // SAFETY: Under ENV_MUTEX, restore original state.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
+            } else {
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var(
                 TEST_HTTP_REWRITE_MAP_ENV,
