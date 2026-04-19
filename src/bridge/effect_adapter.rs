@@ -15,6 +15,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use ironclaw_engine::CapabilityRegistry;
 use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, MountError,
     ThreadExecutionContext, WorkspaceMounts,
@@ -64,6 +65,12 @@ pub struct EffectBridgeAdapter {
     /// in Phase 5+) instead of the host tool. When unset, all tool calls run
     /// on the host as before.
     workspace_mounts: RwLock<Option<Arc<WorkspaceMounts>>>,
+    /// Engine capability registry. `available_actions()` reads this to surface
+    /// actions from non-v1 capabilities (e.g. `missions`) to the LLM. The v1
+    /// `ToolRegistry` only covers built-in + extension tools; engine-native
+    /// capabilities like `missions` are registered here in `router.rs` and
+    /// would otherwise be invisible to the LLM despite having active leases.
+    capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -84,6 +91,7 @@ impl EffectBridgeAdapter {
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
+            capability_registry: RwLock::new(None),
         }
     }
 
@@ -96,6 +104,14 @@ impl EffectBridgeAdapter {
     /// execution for all tools.
     pub async fn set_workspace_mounts(&self, mounts: Option<Arc<WorkspaceMounts>>) {
         *self.workspace_mounts.write().await = mounts;
+    }
+
+    /// Install the engine capability registry so `available_actions()` can
+    /// surface actions from engine-native capabilities (missions, etc.) to
+    /// the LLM. Called once at bridge setup after `router.rs` has finished
+    /// registering all capabilities.
+    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+        *self.capability_registry.write().await = Some(registry);
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -1242,7 +1258,7 @@ impl EffectExecutor for EffectBridgeAdapter {
 
     async fn available_actions(
         &self,
-        _leases: &[CapabilityLease],
+        leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
@@ -1290,6 +1306,35 @@ impl EffectExecutor for EffectBridgeAdapter {
                     effects: vec![],
                     requires_approval: false,
                 });
+            }
+        }
+
+        // Surface actions from engine-native capabilities (e.g. `missions`).
+        // The v1 `ToolRegistry` path above only covers built-in + extension
+        // tools; capabilities registered directly against the engine
+        // (`CapabilityRegistry`) would otherwise be invisible to the LLM
+        // even though the thread holds active leases for them. Iterate
+        // leases so we only advertise what the current thread actually has
+        // access to, and skip the `"tools"` capability — that lease is
+        // reconciled dynamically from the v1 path already covered above.
+        if let Some(registry) = self.capability_registry.read().await.as_ref() {
+            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            for lease in leases {
+                if lease.capability_name == "tools" {
+                    continue;
+                }
+                let Some(cap) = registry.get(&lease.capability_name) else {
+                    continue;
+                };
+                for action in &cap.actions {
+                    if !lease.granted_actions.covers(&action.name) {
+                        continue;
+                    }
+                    if !seen.insert(action.name.clone()) {
+                        continue;
+                    }
+                    actions.push(action.clone());
+                }
             }
         }
 
@@ -4121,6 +4166,141 @@ mod tests {
             assert!(
                 listed_names.contains(&expected),
                 "expected mission {expected:?} in list, got: {listed_names:?}"
+            );
+        }
+    }
+
+    // ── available_actions surfaces engine-registered capability actions ──
+    //
+    // Regression: without the capability registry, `available_actions`
+    // returned only v1 `ToolRegistry` tools + latent OAuth actions, so
+    // the LLM never saw mission tools in its tools list even though the
+    // thread held an active `missions` lease. This test pins that a
+    // thread with a mission lease gets `mission_*` advertised.
+
+    fn mission_capability() -> ironclaw_engine::Capability {
+        ironclaw_engine::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![
+                ActionDef {
+                    name: "mission_create".into(),
+                    description: "Create a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_list".into(),
+                    description: "List missions".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_complete".into(),
+                    description: "Complete a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    fn mission_lease(granted: &[&str]) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "missions".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(
+                granted.iter().map(|s| s.to_string()).collect(),
+            ),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_surfaces_leased_mission_capability() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in advertised actions, got: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_respects_partial_lease_grant() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // Lease only grants mission_list; mission_create / mission_complete
+        // must NOT be advertised to the LLM even though they exist in the
+        // capability registry.
+        let actions = adapter
+            .available_actions(&[mission_lease(&["mission_list"])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"mission_list"),
+            "mission_list should be advertised: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_create"),
+            "mission_create must not leak when lease did not grant it: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_complete"),
+            "mission_complete must not leak when lease did not grant it: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_actions_omits_capability_without_lease() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // No leases passed — no capability actions should surface even
+        // though the registry has them.
+        let actions = adapter
+            .available_actions(&[])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for name in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not appear without a lease: {names:?}"
             );
         }
     }

@@ -1190,11 +1190,20 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     let store_dyn: Arc<dyn Store> = store.clone();
 
+    // Share the registry with the effect adapter so its `available_actions`
+    // can advertise engine-native capability actions (missions) to the LLM.
+    // Without this, mission tools have active leases but never appear in
+    // the tools list sent with each LLM call.
+    let capabilities = Arc::new(capabilities);
+    effect_adapter
+        .set_capability_registry(Arc::clone(&capabilities))
+        .await;
+
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
         effect_adapter.clone(),
         store_dyn.clone(),
-        Arc::new(capabilities),
+        capabilities,
         leases,
         policy,
     ));
