@@ -1,7 +1,8 @@
 # LunarWing
 
-<img width="1920" height="1920" alt="can you make transparent bg" src="https://github.com/user-attachments/assets/df542eab-ffc2-4873-8982-2070e1c0c0b1" />
+## Secure, Privacy focused AI Agent
 
+<img width="2048" height="2048" alt="darklogo" src="https://github.com/user-attachments/assets/28e6abcb-16fe-43e5-8c44-6d2d734c64f3" />
 
 The LunarWing project is a hard fork of the Ironclaw project originally developed by NearAI. The fork was initially started in Febuary 2026 and continues to expand far beyond what NearAI's project is currently capable of.
 
