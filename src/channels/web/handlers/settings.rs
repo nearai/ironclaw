@@ -180,7 +180,7 @@ pub async fn settings_set_handler(
         })?;
 
     if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
-        reload_llm_after_settings_change(&state, &effective_user_id).await?;
+        reload_llm_after_settings_change(&state, &effective_user_id).await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -229,21 +229,20 @@ fn scope_feeds_global_chain(state: &GatewayState, effective_user_id: &str) -> bo
 /// caller is responsible for gating this with [`scope_feeds_global_chain`]
 /// so per-user writes don't trigger a no-op rebuild.
 ///
-/// Returns `Ok(())` when the reload completes *or* when hot-reload is not
-/// wired into this gateway instance (test harnesses, CLI-only runs). A
-/// missing subsystem is logged at `warn!` so operators can distinguish
-/// "setting landed, provider still stale because hot-reload is disabled"
-/// from "setting landed and new provider is live".
-async fn reload_llm_after_settings_change(
-    state: &GatewayState,
-    effective_user_id: &str,
-) -> Result<(), StatusCode> {
+/// Reload failures are logged at `error!` but do not propagate: the
+/// `set_setting` write has already committed, so surfacing a reload failure
+/// as HTTP 500 would misrepresent the actual outcome (setting persisted,
+/// provider chain stale). Operators find stale-chain cases via log search or
+/// the `/api/gateway/status` endpoint (whose `llm_model` only updates on a
+/// successful reload). A future iteration should publish a gateway-wide
+/// "provider stale" event so clients can surface it in the Settings UI.
+async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_id: &str) {
     let Some(reloader) = state.llm_reload.as_ref() else {
         tracing::warn!(
             "LLM setting changed but llm_reload is not wired into the gateway; \
              provider chain will keep using the pre-change config until restart"
         );
-        return Ok(());
+        return;
     };
     let store_opt = state.store.as_ref(); // dispatch-exempt: read-only re-resolve of LlmConfig for chain rebuild
     let Some(store) = store_opt else {
@@ -251,14 +250,14 @@ async fn reload_llm_after_settings_change(
             "LLM setting changed but no database store is configured; \
              cannot reload provider chain"
         );
-        return Ok(());
+        return;
     };
     let Some(session_manager) = state.llm_session_manager.as_ref() else {
         tracing::warn!(
             "LLM setting changed but llm_session_manager is not wired into the gateway; \
              cannot reload provider chain"
         );
-        return Ok(());
+        return;
     };
 
     // Load the base config from DB at the write's scope so the
@@ -267,20 +266,26 @@ async fn reload_llm_after_settings_change(
     // hydrate API keys from secrets, so a plain fetch here would rebuild
     // the chain without the `OPENAI_API_KEY` / `NEARAI_SESSION_TOKEN` the
     // user may have added alongside the backend switch.
-    let mut config = crate::config::Config::from_db_with_toml(
+    let mut config = match crate::config::Config::from_db_with_toml(
         store.as_ref(),
         effective_user_id,
         state.config_toml_path.as_deref(),
         true,
     )
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to reload config for LLM hot reload: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                "Setting was saved but LLM config reload failed at from_db_with_toml: {}",
+                e
+            );
+            return;
+        }
+    };
 
-    if let Some(secrets) = state.secrets_store.as_ref() {
-        config
+    if let Some(secrets) = state.secrets_store.as_ref()
+        && let Err(e) = config
             .re_resolve_llm_with_secrets(
                 Some(store.as_ref()),
                 effective_user_id,
@@ -289,19 +294,24 @@ async fn reload_llm_after_settings_change(
                 true,
             )
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to re-hydrate LLM secrets for hot reload: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+    {
+        tracing::error!(
+            "Setting was saved but LLM secret re-hydration failed: {}",
+            e
+        );
+        return;
     }
 
-    reloader
+    if let Err(e) = reloader
         .reload(&config.llm, Arc::clone(session_manager))
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to hot-reload LLM provider: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    {
+        tracing::error!(
+            "Setting was saved but LLM provider chain reload failed: {}",
+            e
+        );
+        return;
+    }
 
     // Refresh the active-config snapshot the status handler reads. Only
     // llm_backend / llm_model are touched — `enabled_channels` is
@@ -322,8 +332,6 @@ async fn reload_llm_after_settings_change(
         backend = %config.llm.backend,
         "LLM provider chain hot-reloaded from updated settings"
     );
-
-    Ok(())
 }
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
@@ -450,7 +458,7 @@ pub async fn settings_delete_handler(
         })?;
 
     if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
-        reload_llm_after_settings_change(&state, &effective_user_id).await?;
+        reload_llm_after_settings_change(&state, &effective_user_id).await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -509,7 +517,7 @@ pub async fn settings_import_handler(
     if body.settings.keys().any(|k| llm_setting_requires_reload(k))
         && scope_feeds_global_chain(&state, &user.user_id)
     {
-        reload_llm_after_settings_change(&state, &user.user_id).await?;
+        reload_llm_after_settings_change(&state, &user.user_id).await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -1789,6 +1797,61 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         assert_eq!(primary.active_model_name(), "owner-pick");
+    }
+
+    /// When the settings write succeeds but the provider chain rebuild
+    /// fails (e.g. admin switches `llm_backend` to a value that has no
+    /// credentials yet), the handler must still return 204 — the write
+    /// did commit, it would be misleading to tell the client otherwise,
+    /// and a 500 would trigger retries that re-run the same failing
+    /// reload. The stale provider chain is discoverable via `warn!` logs
+    /// and the `/api/gateway/status` `llm_model` field, which is only
+    /// refreshed on successful reload.
+    #[tokio::test]
+    async fn settings_set_handler_returns_success_when_reload_fails() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+        let before_model = primary.active_model_name();
+
+        // Admin switches `llm_backend` to "openai" via the admin scope.
+        // `create_llm_provider` will return `AuthFailed` because no
+        // registry provider config / API key is present in this test DB,
+        // so the reload path surfaces an error.
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_backend".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("openai"),
+            }),
+        )
+        .await
+        .expect("handler must return Ok even when reload fails");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // DB is updated (the setting's commit is decoupled from reload).
+        let stored = state
+            .store
+            .as_ref()
+            .expect("store")
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_backend",
+            )
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored, serde_json::json!("openai"));
+
+        // Provider chain stayed on the old (working) chain — reload failure
+        // must not leave the wrapper pointing at a half-built provider.
+        assert_eq!(primary.active_model_name(), before_model);
     }
 
     #[tokio::test]
