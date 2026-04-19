@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use ironclaw_common::JobResultStatus;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -399,7 +400,10 @@ pub enum StatusUpdate {
     /// A sandbox job's status changed.
     JobStatus { job_id: String, status: String },
     /// A sandbox job completed with final result.
-    JobResult { job_id: String, status: String },
+    JobResult {
+        job_id: String,
+        status: JobResultStatus,
+    },
     /// A routine was created, updated, or deleted.
     RoutineUpdate {
         id: String,
