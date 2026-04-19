@@ -88,17 +88,19 @@ FORBIDDEN_PATTERNS = [
     re.compile(r"\bsuper::super::server::"),
 ]
 
-# Grouped-import pattern: `use crate::channels::web::{ ... handlers:: ... }`
-# or the same via `super::{ ... }` / `super::super::{ ... }`. The per-line
-# scan above misses these because the forbidden segment lands on a
-# continuation line. We match across newlines (sanitized text already has
-# comments and string literals blanked) and report the line where the
-# offending segment actually appears.
-GROUPED_FORBIDDEN_PATTERN = re.compile(
+# Header for a grouped import we care about:
+# `crate::channels::web::{`, `super::{`, or `super::super::{`. The full
+# span of the import is found by depth-tracking the matching `}` in
+# `_find_grouped_violations`, which lets us scan imports that contain
+# *nested* brace groups (e.g. `web::{ platform::{state}, handlers::... }`)
+# — a case a simple `[^{}]*?` regex cannot handle.
+GROUPED_IMPORT_HEADER = re.compile(
     r"\b(?:crate::channels::web|super(?:::super)?)::\{"
-    r"[^{}]*?\b(?P<forbidden>handlers|features|server)::",
-    re.DOTALL,
 )
+
+# Segments that are back-edges from non-router platform modules when they
+# appear *anywhere inside* a matched grouped-import body.
+GROUPED_FORBIDDEN_SEGMENT = re.compile(r"\b(handlers|features|server)::")
 
 # Narrow allowlist of pre-existing back-edges, each tied to a specific
 # migration target. Entries are `(platform_file, forbidden_path_prefix)`;
@@ -116,15 +118,19 @@ ALLOWLIST: set[tuple[str, str]] = {
     # frontend_widgets_handler) that share the same helpers. Tracked as a
     # follow-up under ironclaw#2599; see the stage 5 commit message.
     ("static_files.rs", "crate::channels::web::handlers::frontend"),
-    # platform/ws.rs reaches through the `server.rs` compatibility shim for
-    # a handful of types and helpers that have not yet moved into
-    # `platform/*` (GatewayState re-export, PerUserRateLimiter / RateLimiter
-    # constructors, ActiveConfigSnapshot, images_to_attachments, and the
-    # legacy v1 auth-token handlers). Each is tracked for relocation under
-    # ironclaw#2599; this allowlist entry shrinks as individual items move.
-    # Added in stage 5 when `crate::channels::web::server::` was promoted to
-    # a forbidden pattern.
-    ("ws.rs", "crate::channels::web::server::"),
+    # platform/ws.rs reaches through the `server.rs` compatibility shim
+    # for a specific set of types and helpers that have not yet moved into
+    # `platform/*`. Each entry below names the exact symbol so any *new*
+    # accidental `server::` import in ws.rs still fails the boundary check
+    # (the Copilot review on PR #2647 flagged a broad-prefix entry as too
+    # permissive). Individual entries are removed as each symbol migrates.
+    ("ws.rs", "crate::channels::web::server::GatewayState"),
+    ("ws.rs", "crate::channels::web::server::PerUserRateLimiter"),
+    ("ws.rs", "crate::channels::web::server::RateLimiter"),
+    ("ws.rs", "crate::channels::web::server::ActiveConfigSnapshot"),
+    ("ws.rs", "crate::channels::web::server::images_to_attachments"),
+    ("ws.rs", "crate::channels::web::server::handle_legacy_auth_token_submission"),
+    ("ws.rs", "crate::channels::web::server::handle_legacy_auth_cancel"),
 }
 
 
@@ -373,24 +379,42 @@ def _find_violations(path: pathlib.Path) -> list[Violation]:
                 break  # one violation per line is enough
 
     # Grouped-import scan for forbidden paths split across a
-    # multi-line `use crate::channels::web::{ ... }` statement.
-    for m in GROUPED_FORBIDDEN_PATTERN.finditer(sanitized):
-        forbidden_start = m.start("forbidden")
-        line_number = sanitized.count("\n", 0, forbidden_start) + 1
-        if line_number in flagged_lines:
-            continue
-        original = _original_at(line_number)
-        if _is_allowlisted(path, original):
-            continue
-        violations.append(
-            Violation(
-                path=path,
-                line_number=line_number,
-                line=original.rstrip(),
-                pattern=GROUPED_FORBIDDEN_PATTERN.pattern,
+    # multi-line `use crate::channels::web::{ ... }` statement. Uses a
+    # depth-tracking walk over the brace body so nested groups
+    # (`web::{ platform::{state}, handlers::... }`) cannot hide a
+    # back-edge by sitting after an inner `{` — see the Copilot review
+    # on PR #2647.
+    n = len(sanitized)
+    for header in GROUPED_IMPORT_HEADER.finditer(sanitized):
+        open_pos = header.end() - 1  # position of the header's `{`
+        depth = 1
+        j = open_pos + 1
+        while j < n and depth > 0:
+            ch = sanitized[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            j += 1
+        body_end = j - 1 if depth == 0 else n  # exclude the closing `}`
+        body = sanitized[open_pos + 1 : body_end]
+        for seg in GROUPED_FORBIDDEN_SEGMENT.finditer(body):
+            abs_pos = open_pos + 1 + seg.start()
+            line_number = sanitized.count("\n", 0, abs_pos) + 1
+            if line_number in flagged_lines:
+                continue
+            original = _original_at(line_number)
+            if _is_allowlisted(path, original):
+                continue
+            violations.append(
+                Violation(
+                    path=path,
+                    line_number=line_number,
+                    line=original.rstrip(),
+                    pattern=f"grouped-use::{seg.group(1)}",
+                )
             )
-        )
-        flagged_lines.add(line_number)
+            flagged_lines.add(line_number)
 
     return violations
 
@@ -544,6 +568,29 @@ class _Tests(unittest.TestCase):
         try:
             violations = _find_violations(p)
             self.assertEqual(len(violations), 1)
+        finally:
+            p.unlink()
+
+    def test_detects_nested_brace_grouped_import(self) -> None:
+        # Regression for the Copilot review on PR #2647: the original
+        # `[^{}]*?` regex stopped at the inner `{` and missed the
+        # forbidden segment that follows it.
+        src = (
+            "use crate::channels::web::{\n"
+            "    platform::{state::GatewayState, auth::middleware},\n"
+            "    handlers::auth::login_handler,\n"
+            "};\n"
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+            f.write(src)
+            p = pathlib.Path(f.name)
+        try:
+            violations = _find_violations(p)
+            self.assertEqual(len(violations), 1)
+            # Reported at the line where `handlers::` appears, not at the
+            # line with the inner `{`.
+            self.assertEqual(violations[0].line_number, 3)
         finally:
             p.unlink()
 
