@@ -592,9 +592,7 @@ impl RoutineEngine {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled | JobState::Stuck => {
-                    Some(RunStatus::Failed)
-                }
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
                 // Pending / InProgress — job is still running or waiting for a
                 // worker. Apply a wall-clock escape hatch: if the run is older
                 // than DISPATCH_RUN_TIMEOUT_HOURS force-fail it so that a
@@ -2806,9 +2804,7 @@ mod tests {
                     Some(RunStatus::Ok)
                 }
                 // Stuck is now treated as terminal failure (#2655).
-                JobState::Failed | JobState::Cancelled | JobState::Stuck => {
-                    Some(RunStatus::Failed)
-                }
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
                 _ => None,
             }
         };
@@ -2860,9 +2856,7 @@ mod tests {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled | JobState::Stuck => {
-                    Some(RunStatus::Failed)
-                }
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
                 _ => {
                     let age = Utc::now().signed_duration_since(started_at);
                     if age > chrono::Duration::hours(super::DISPATCH_RUN_TIMEOUT_HOURS) {
