@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use ironclaw_common::ExtensionName;
 use uuid::Uuid;
 
 use crate::channels::web::platform::state::GatewayState;
@@ -55,11 +56,11 @@ pub(crate) async fn clear_auth_mode_for_thread(
 async fn restore_pending_auth_mode(
     session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
     thread_id: Uuid,
-    extension_name: &str,
+    extension_name: &ExtensionName,
 ) {
     let mut sess = session.lock().await;
     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-        thread.enter_auth_mode(extension_name.to_string());
+        thread.enter_auth_mode(extension_name.clone());
     }
 }
 
@@ -140,11 +141,11 @@ pub(crate) async fn handle_legacy_auth_token_submission(
 
     let result = if let Some(auth_manager) = state.auth_manager.as_ref() {
         auth_manager
-            .submit_auth_token(&pending_auth.extension_name, token, user_id)
+            .submit_auth_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else if let Some(ext_mgr) = state.extension_manager.as_ref() {
         ext_mgr
-            .configure_token(&pending_auth.extension_name, token, user_id)
+            .configure_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else {
         restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;

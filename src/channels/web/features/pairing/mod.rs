@@ -164,7 +164,7 @@ pub(crate) async fn pairing_approve_handler(
         state.sse.broadcast_for_user(
             &user.user_id,
             AppEvent::OnboardingState {
-                extension_name: channel.as_str().to_string(),
+                extension_name: channel.clone(),
                 state: OnboardingStateDto::Failed,
                 request_id: None,
                 message: Some(message.clone()),
@@ -182,7 +182,7 @@ pub(crate) async fn pairing_approve_handler(
     state.sse.broadcast_for_user(
         &user.user_id,
         AppEvent::OnboardingState {
-            extension_name: channel.as_str().to_string(),
+            extension_name: channel.clone(),
             state: OnboardingStateDto::Ready,
             request_id: None,
             message: Some("Pairing approved.".to_string()),

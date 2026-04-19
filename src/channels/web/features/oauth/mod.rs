@@ -61,7 +61,7 @@ fn oauth_error_page(label: &str) -> axum::response::Response {
 fn redact_oauth_state_for_logs(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     let mut short_hash = String::with_capacity(12);
-    for byte in &digest[..6] {
+    for byte in digest.iter().take(6) {
         use std::fmt::Write as _;
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
@@ -322,7 +322,7 @@ pub(crate) async fn oauth_callback_handler(
     let final_message = if success && flow.auto_activate_extension {
         match ext_mgr
             .ensure_extension_ready(
-                &flow.extension_name,
+                flow.extension_name.as_str(),
                 &flow.user_id,
                 crate::extensions::EnsureReadyIntent::ExplicitActivate,
             )
@@ -737,7 +737,7 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
 
     // Broadcast event to notify the web UI.
     state.sse.broadcast(AppEvent::OnboardingState {
-        extension_name: relay_extension_name.clone(),
+        extension_name: ironclaw_common::ExtensionName::from_trusted(relay_extension_name.clone()),
         state: if success {
             crate::channels::web::types::OnboardingStateDto::Ready
         } else {

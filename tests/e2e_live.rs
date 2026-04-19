@@ -382,7 +382,7 @@ mod live_tests {
             .collect();
         let drive_gate = auth_required_events
             .iter()
-            .find(|(ext, _, _)| ext.contains("google") || ext.contains("drive"));
+            .find(|(ext, _, _)| ext.as_str().contains("google") || ext.as_str().contains("drive"));
         assert!(
             drive_gate.is_some(),
             "Phase A: expected an AuthRequired event for the Google Drive extension, \
@@ -710,7 +710,8 @@ mod live_tests {
             matches!(
                 s,
                 StatusUpdate::AuthRequired { extension_name, .. }
-                    if extension_name.contains("google") || extension_name.contains("drive")
+                    if extension_name.as_str().contains("google")
+                        || extension_name.as_str().contains("drive")
             )
         });
         assert!(

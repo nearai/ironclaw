@@ -87,8 +87,10 @@ async fn resolve_extension_for_action(
     parameters: &serde_json::Value,
     credential_fallback: &str,
     user_id: &str,
-) -> String {
+) -> ironclaw_common::ExtensionName {
     if let Some(auth_manager) = auth_manager {
+        // Resolver enforces identity validation on user-influenced branches
+        // and returns a typed `ExtensionName` directly — no wrap needed.
         return auth_manager
             .resolve_extension_name_for_auth_flow(
                 action_name,
@@ -98,25 +100,35 @@ async fn resolve_extension_for_action(
             )
             .await;
     }
-    tools
+    // No auth manager (bare test harness): try the tool registry's
+    // provider-extension hint, else fall back to the credential-name
+    // string the caller already typed upstream.
+    let fallback = tools
         .provider_extension_for_tool(action_name)
         .await
-        .unwrap_or_else(|| credential_fallback.to_string())
+        .unwrap_or_else(|| credential_fallback.to_string());
+    ironclaw_common::ExtensionName::from_trusted(fallback)
 }
 
-/// Resolve the user-facing name to use when surfacing an authentication
-/// gate to a channel. Thin wrapper around `resolve_extension_for_action`
-/// that handles the non-Authentication ResumeKind variants by falling back
-/// to the action name (since they don't have a credential name to use).
-async fn resolve_auth_gate_display_name(
+/// Resolve the installed extension identifier that owns an authentication
+/// gate, for surfacing that gate on a channel.
+///
+/// Returns `Some(ExtensionName)` only for `Authentication` gates — the
+/// resolver delegates to [`resolve_extension_for_action`]. Non-auth
+/// gate variants (`Approval`, `External`) don't have an extension
+/// identity and return `None`.
+async fn resolve_auth_gate_extension_name(
     auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
-) -> String {
-    if let ironclaw_engine::ResumeKind::Authentication {
+) -> Option<ironclaw_common::ExtensionName> {
+    let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = &pending.resume_kind
-    {
+    else {
+        return None;
+    };
+    Some(
         resolve_extension_for_action(
             auth_manager,
             tools,
@@ -125,19 +137,15 @@ async fn resolve_auth_gate_display_name(
             credential_name.as_str(),
             &pending.user_id,
         )
-        .await
-    } else {
-        // Non-authentication gates don't use this string; return
-        // something innocuous.
-        pending.action_name.clone()
-    }
+        .await,
+    )
 }
 
 async fn send_pending_gate_status(
     agent: &Agent,
     message: &IncomingMessage,
     pending: &PendingGate,
-    auth_display_name: &str,
+    extension_name: Option<&ironclaw_common::ExtensionName>,
 ) {
     let display_parameters = gate_display_parameters(pending);
 
@@ -163,12 +171,23 @@ async fn send_pending_gate_status(
             auth_url,
             ..
         } => {
+            // `resolve_auth_gate_extension_name` always returns `Some` for
+            // Authentication gates; a `None` here would be an upstream
+            // plumbing bug (wrong variant reached this arm).
+            let Some(extension_name) = extension_name else {
+                tracing::warn!(
+                    gate = %pending.gate_name,
+                    request_id = %pending.request_id,
+                    "Authentication gate reached send_pending_gate_status without a resolved extension name"
+                );
+                return;
+            };
             let _ = agent
                 .channels
                 .send_status(
                     &message.channel,
                     StatusUpdate::AuthRequired {
-                        extension_name: auth_display_name.to_string(),
+                        extension_name: extension_name.clone(),
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
@@ -358,7 +377,7 @@ async fn notify_pending_gate(
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<BridgeOutcome, Error> {
-    let auth_display_name = resolve_auth_gate_display_name(auth_manager, tools, pending).await;
+    let extension_name = resolve_auth_gate_extension_name(auth_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -383,11 +402,7 @@ async fn notify_pending_gate(
                 description: pending.description.clone(),
                 parameters: serde_json::to_string_pretty(&display_parameters)
                     .unwrap_or_else(|_| display_parameters.to_string()),
-                extension_name: matches!(
-                    &pending.resume_kind,
-                    ironclaw_engine::ResumeKind::Authentication { .. }
-                )
-                .then(|| auth_display_name.clone()),
+                extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
                 thread_id: pending
                     .scope_thread_id
@@ -396,7 +411,7 @@ async fn notify_pending_gate(
             },
         );
     }
-    send_pending_gate_status(agent, message, pending, &auth_display_name).await;
+    send_pending_gate_status(agent, message, pending, extension_name.as_ref()).await;
     Ok(BridgeOutcome::Pending)
 }
 
@@ -1175,11 +1190,20 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     let store_dyn: Arc<dyn Store> = store.clone();
 
+    // Share the registry with the effect adapter so its `available_actions`
+    // can advertise engine-native capability actions (missions) to the LLM.
+    // Without this, mission tools have active leases but never appear in
+    // the tools list sent with each LLM call.
+    let capabilities = Arc::new(capabilities);
+    effect_adapter
+        .set_capability_registry(Arc::clone(&capabilities))
+        .await;
+
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
         effect_adapter.clone(),
         store_dyn.clone(),
-        Arc::new(capabilities),
+        capabilities,
         leases,
         policy,
     ));
@@ -1321,6 +1345,69 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 _ => {}
             }
         }
+    }
+
+    // Install the per-project workspace mount table on the effect adapter.
+    //
+    // Two factories share the same `ProjectPathResolver`: a default
+    // [`FilesystemMountFactory`] that points `/project/` at the host
+    // workspace directory, and a [`ContainerizedMountFactory`] (gated on
+    // `SANDBOX_ENABLED=true`) that routes the same prefix into a
+    // per-project sandbox container via `ProjectSandboxManager`. The
+    // bridge interceptor does not care which factory is in play — Phase 1
+    // already routes any `/project/...` tool call through whichever
+    // backend the mount table returns.
+    {
+        use crate::bridge::sandbox::{
+            ContainerizedMountFactory, FilesystemMountFactory, ProjectPathResolver,
+            ProjectSandboxManager, ensure_project_workspace_dir,
+        };
+        use ironclaw_engine::{MountError, ProjectMountFactory, WorkspaceMounts};
+
+        let store_for_resolver = store_dyn.clone();
+        let resolver: ProjectPathResolver = Arc::new(move |pid| {
+            let store_for_resolver = store_for_resolver.clone();
+            Box::pin(async move {
+                match store_for_resolver.load_project(pid).await {
+                    Ok(Some(project)) => {
+                        ensure_project_workspace_dir(&project).map_err(|e| MountError::Backend {
+                            reason: format!("ensure_project_workspace_dir({pid}): {e}"),
+                        })
+                    }
+                    Ok(None) => Err(MountError::Backend {
+                        reason: format!("project {pid} not found"),
+                    }),
+                    Err(e) => Err(MountError::Backend {
+                        reason: format!("store load_project({pid}): {e}"),
+                    }),
+                }
+            })
+        });
+
+        let factory: Arc<dyn ProjectMountFactory> =
+            if crate::bridge::sandbox::engine_v2_sandbox_enabled() {
+                match crate::sandbox::container::connect_docker().await {
+                    Ok(docker) => {
+                        debug!(
+                            "engine v2: SANDBOX_ENABLED=true — using containerized mount factory"
+                        );
+                        let manager = Arc::new(ProjectSandboxManager::new(docker));
+                        Arc::new(ContainerizedMountFactory::new(manager, resolver))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "engine v2: SANDBOX_ENABLED=true but Docker is not reachable; \
+                             falling back to host filesystem mount factory"
+                        );
+                        Arc::new(FilesystemMountFactory::new(resolver))
+                    }
+                }
+            } else {
+                Arc::new(FilesystemMountFactory::new(resolver))
+            };
+        let mounts = Arc::new(WorkspaceMounts::new(factory));
+        effect_adapter.set_workspace_mounts(Some(mounts)).await;
     }
 
     // Wire mission manager into effect adapter for mission_* function calls
@@ -2042,7 +2129,7 @@ pub async fn resolve_gate(
                 }
                 if let Some(ref auth_manager) = state.auth_manager {
                     match auth_manager
-                        .submit_auth_token(&submit_target, &token, &message.user_id)
+                        .submit_auth_token(submit_target.as_str(), &token, &message.user_id)
                         .await
                     {
                         Ok(result)
@@ -2072,7 +2159,7 @@ pub async fn resolve_gate(
                                 onboarding,
                             } => {
                             let next_pending =
-                                requeue_pairing_pending_gate(state, &pending, &display_name)
+                                requeue_pairing_pending_gate(state, &pending, display_name.as_str())
                                     .await?;
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(
@@ -3238,7 +3325,9 @@ async fn await_thread_outcome(
                     .send_status(
                         &message.channel,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name.clone(),
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
@@ -3319,13 +3408,13 @@ async fn await_thread_outcome(
             // (agent_loop) detects the pending gate and maps to
             // HandleOutcome::Pending.
             {
-                let auth_display_name = resolve_auth_gate_display_name(
+                let extension_name = resolve_auth_gate_extension_name(
                     state.auth_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending,
                 )
                 .await;
-                send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
+                send_pending_gate_status(agent, message, &pending, extension_name.as_ref()).await;
             }
             Ok(BridgeOutcome::Pending)
         }
@@ -3596,7 +3685,7 @@ async fn forward_event_to_channel(
                     .send_status(
                         channel_name,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name,
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(cred_name),
                             instructions: Some(
                                 "Store the credential with: ironclaw secret set <name> <value>"
                                     .into(),
@@ -5318,7 +5407,7 @@ mod tests {
                     ..
                 } if tool_name == "shell"
                     && *event_thread_id == thread_id.to_string()
-                    && *extension_name == expected_extension_name
+                    && extension_name.as_str() == expected_extension_name.as_str()
             ),
             "expected GateRequired auth event, got: {event:?}"
         );

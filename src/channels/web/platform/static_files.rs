@@ -100,8 +100,8 @@ pub(crate) fn build_csp(nonce: Option<&str>) -> String {
 /// nonce. Falls back to a minimally-permissive `default-src 'self'` if the
 /// assembled value somehow fails to parse as a `HeaderValue` — in practice
 /// the assembled string is pure ASCII and this branch is unreachable, but
-/// production code in this repo doesn't use `.expect()` on request-path
-/// values.
+/// production code in this repo avoids panics on request-path values, so
+/// we fall back instead of calling `expect`.
 pub(crate) static BASE_CSP_HEADER: std::sync::LazyLock<header::HeaderValue> =
     std::sync::LazyLock::new(|| {
         header::HeaderValue::from_str(&build_csp(None))
@@ -593,7 +593,7 @@ pub(crate) fn css_etag(body: &str) -> String {
     let digest = Sha256::digest(body.as_bytes());
     let hex = hex::encode(digest);
     // 16 hex chars = 64 bits, plenty for content addressing.
-    format!("\"sha256-{}\"", &hex[..16])
+    format!("\"sha256-{}\"", &hex[..16]) // safety: hex::encode is pure ASCII, char-boundary safe
 }
 
 pub(crate) async fn css_handler(
