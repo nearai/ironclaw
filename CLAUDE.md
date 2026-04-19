@@ -7,9 +7,10 @@
 ```bash
 cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
-cargo test                                                   # unit tests
-cargo test --features integration                            # + PostgreSQL tests
-RUST_LOG=ironclaw=debug cargo run                            # run with logging
+cargo test                                                   # default libsql-backed test suite
+cargo test --features postgres,integration                   # PostgreSQL-backed integration tests
+RUST_LOG=ironclaw=debug cargo run                            # run with logging (default local profile)
+RUST_LOG=ironclaw=debug cargo run --features local-tui       # local profile + TUI
 ```
 
 E2E tests: see `tests/e2e/CLAUDE.md`.

@@ -8,9 +8,10 @@
 #   ./scripts/dev-setup.sh
 #
 # After running, you can:
-#   cargo check           # default features (postgres + libsql)
-#   cargo test            # default test suite (uses libsql temp DB)
-#   cargo test --all-features         # full test suite
+#   cargo check                              # default local profile (libsql)
+#   cargo test                               # default test suite (uses libsql temp DB)
+#   cargo test --all-features                # full test suite
+#   cargo run --features local-tui           # local profile + TUI
 
 set -euo pipefail
 
@@ -67,7 +68,8 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Quick start:"
-echo "  cargo run                            # Run with default features"
+echo "  cargo run                            # Run with the default local profile (libsql)"
+echo "  cargo run --features local-tui       # Add the optional TUI"
 echo "  cargo test                           # Test suite (libsql temp DB)"
 echo "  cargo test --all-features            # Full test suite"
 echo "  cargo clippy --all-features          # Lint all code"

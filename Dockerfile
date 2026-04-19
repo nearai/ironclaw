@@ -65,7 +65,7 @@ COPY wit/ wit/
 COPY providers.json providers.json
 COPY profiles/ profiles/
 
-RUN cargo build --profile dist --bin ironclaw
+RUN cargo build --profile dist --bin ironclaw --no-default-features --features full
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
 #

@@ -229,7 +229,14 @@ tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui"]
+# Minimal local-dev profile: channels + web UI + Monty + libSQL.
+local = ["libsql"]
+# `cargo build` / `cargo run` default to the local-dev profile.
+default = ["local"]
+# Local-dev profile with the optional terminal UI enabled.
+local-tui = ["local", "tui"]
+# Full feature set used for release-style builds and broad manual testing.
+full = ["local-tui", "postgres", "html-to-markdown"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -305,6 +312,10 @@ install-path = "CARGO_HOME"
 install-updater = true
 # Cache intermediate build artifacts to speed up the release pipelines
 cache-builds = true
+# Release/distribution artifacts should continue to include the full feature set
+# even though local development defaults are intentionally slimmed down.
+default-features = false
+features = ["full"]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
