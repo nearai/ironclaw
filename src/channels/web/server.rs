@@ -336,13 +336,11 @@ pub(crate) async fn chat_auth_token_handler(
 async fn restore_pending_auth_mode(
     session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
     thread_id: Uuid,
-    extension_name: &str,
+    extension_name: &ironclaw_common::ExtensionName,
 ) {
     let mut sess = session.lock().await;
     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-        thread.enter_auth_mode(ironclaw_common::ExtensionName::from_trusted(
-            extension_name.to_string(),
-        ));
+        thread.enter_auth_mode(extension_name.clone());
     }
 }
 
@@ -430,7 +428,7 @@ pub(crate) async fn handle_legacy_auth_token_submission(
             .configure_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else {
-        restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str()).await;
+        restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Extension manager not available".to_string(),
@@ -456,8 +454,7 @@ pub(crate) async fn handle_legacy_auth_token_submission(
             Ok(ActionResponse::ok(result.message))
         }
         Ok(result) => {
-            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
-                .await;
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
             state.sse.broadcast_for_user(
                 user_id,
                 AppEvent::OnboardingState {
@@ -476,8 +473,7 @@ pub(crate) async fn handle_legacy_auth_token_submission(
         }
         Err(crate::extensions::ExtensionError::ValidationFailed(_)) => {
             let message = "Invalid token. Please try again.".to_string();
-            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
-                .await;
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
             state.sse.broadcast_for_user(
                 user_id,
                 AppEvent::OnboardingState {
@@ -495,8 +491,7 @@ pub(crate) async fn handle_legacy_auth_token_submission(
             Ok(ActionResponse::fail(message))
         }
         Err(error) => {
-            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
-                .await;
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
             let message = error.to_string();
             state.sse.broadcast_for_user(
                 user_id,
@@ -1656,8 +1651,17 @@ pub(crate) async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // The URL path segment is user input — validate at the boundary via
+    // `ExtensionName::new` and use the canonical form for all downstream
+    // extension-manager calls and response formatting.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     tracing::trace!(
-        extension = %name,
+        extension = %name.as_str(),
         user_id = %user.user_id,
         "extensions_activate_handler: received activate request"
     );
@@ -1668,14 +1672,14 @@ pub(crate) async fn extensions_activate_handler(
 
     match ext_mgr
         .ensure_extension_ready(
-            &name,
+            name.as_str(),
             &user.user_id,
             crate::extensions::EnsureReadyIntent::ExplicitActivate,
         )
         .await
     {
         Ok(readiness) => {
-            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name));
+            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name.as_str()));
             apply_extension_readiness_to_response(&mut resp, readiness, false);
             Ok(Json(resp))
         }
@@ -1688,12 +1692,21 @@ pub(crate) async fn extensions_remove_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Validate user-controlled path segment before it reaches the extension
+    // manager — rejects path-traversal, invalid characters, and malformed
+    // slugs with a 400.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.remove(&name, &user.user_id).await {
+    match ext_mgr.remove(name.as_str(), &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
@@ -1768,13 +1781,21 @@ pub(crate) async fn extensions_setup_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
+    // Validate user-controlled path segment at entry. Downstream lookups
+    // (`get_setup_schema`, `list().find(...)`) consume the canonical form.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
     let setup = ext_mgr
-        .get_setup_schema(&name, &user.user_id)
+        .get_setup_schema(name.as_str(), &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1782,12 +1803,12 @@ pub(crate) async fn extensions_setup_handler(
         .list(None, false, &user.user_id)
         .await
         .ok()
-        .and_then(|list| list.into_iter().find(|e| e.name == name))
+        .and_then(|list| list.into_iter().find(|e| e.name == name.as_str()))
         .map(|e| e.kind.to_string())
         .unwrap_or_default();
 
     Ok(Json(ExtensionSetupResponse {
-        name,
+        name: name.as_str().to_string(),
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
@@ -4167,6 +4188,79 @@ mod tests {
                 "expected 400 for malformed extension name {bad:?}, got {:?}",
                 resp.status()
             );
+        }
+    }
+
+    /// Regression for the PR #2617 Copilot review: the sibling
+    /// `/api/extensions/{name}/...` handlers (`activate`, `remove`, setup GET)
+    /// used to accept `Path<String>` and hand it straight to the extension
+    /// manager, leaving path-traversal / malformed slugs unvalidated at the
+    /// web boundary. All three must now reject at 400 before any downstream
+    /// lookup — same guarantee as `extensions_setup_submit_handler`.
+    #[tokio::test]
+    async fn test_extensions_sibling_handlers_reject_path_traversal_name() {
+        use axum::body::Body;
+        use axum::routing::{get, post};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/activate",
+                post(extensions_activate_handler),
+            )
+            .route(
+                "/api/extensions/{name}/remove",
+                post(extensions_remove_handler),
+            )
+            .route(
+                "/api/extensions/{name}/setup",
+                get(extensions_setup_handler),
+            )
+            .with_state(state);
+
+        let bad_names = [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ];
+        let routes = [("POST", "activate"), ("POST", "remove"), ("GET", "setup")];
+
+        for bad in bad_names {
+            for (method, suffix) in routes {
+                let mut builder = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/api/extensions/{bad}/{suffix}"));
+                if method == "POST" {
+                    builder = builder.header("content-type", "application/json");
+                }
+                let body = if method == "POST" {
+                    Body::from("{}")
+                } else {
+                    Body::empty()
+                };
+                let mut req = builder.body(body).expect("request");
+                req.extensions_mut().insert(UserIdentity {
+                    user_id: "test".to_string(),
+                    role: "admin".to_string(),
+                    workspace_read_scopes: Vec::new(),
+                });
+
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "expected 400 for {method} {suffix} with malformed name {bad:?}, got {:?}",
+                    resp.status()
+                );
+            }
         }
     }
 
