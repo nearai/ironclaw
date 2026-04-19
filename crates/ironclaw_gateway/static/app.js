@@ -1402,6 +1402,15 @@ function connectSSE(lastEventIdOverride) {
     }
   });
 
+  addTrackedEventListener('skill_activated', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    const names = Array.isArray(data.skill_names) ? data.skill_names : [];
+    const feedback = Array.isArray(data.feedback) ? data.feedback : [];
+    if (names.length === 0 && feedback.length === 0) return;
+    addSkillActivationCard(names, feedback);
+  });
+
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
@@ -2777,6 +2786,46 @@ function applyToolActivityCardState(rendered, options) {
   rendered.output.textContent = getToolActivityBodyText(entry);
   const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
   setToolActivityCardExpanded(rendered, shouldAutoExpand);
+}
+
+function addSkillActivationCard(names, feedback) {
+  // The activation card is the first concrete signal that a turn is
+  // underway, so the "thinking" dots have done their job — drop them.
+  // `startTool` / `completeTool` will re-show them later if nothing
+  // else has reported progress by then.
+  removeActivityThinking();
+  const group = getOrCreateActivityGroup();
+  if (!group) return;
+
+  const card = document.createElement('div');
+  card.className = 'activity-skill-card';
+
+  const header = document.createElement('div');
+  header.className = 'activity-skill-header';
+  const icon = document.createElement('span');
+  icon.className = 'activity-skill-icon';
+  icon.textContent = '\u25C6'; // ◆
+  header.appendChild(icon);
+  const label = document.createElement('span');
+  label.className = 'activity-skill-label';
+  if (names.length > 0) {
+    label.textContent = 'Skills: ' + names.join(', ');
+  } else {
+    label.textContent = 'Skill activation';
+  }
+  header.appendChild(label);
+  card.appendChild(header);
+
+  for (const note of feedback) {
+    const row = document.createElement('div');
+    row.className = 'activity-skill-note';
+    row.textContent = note;
+    card.appendChild(row);
+  }
+
+  group.appendChild(card);
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
 }
 
 function createToolActivityCard(entry, options) {

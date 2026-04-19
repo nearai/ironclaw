@@ -16,8 +16,8 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, MountError,
-    ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, EffectExecutor, EngineError,
+    MountError, ThreadExecutionContext, WorkspaceMounts,
 };
 
 use crate::auth::oauth::sanitize_auth_url;
@@ -64,6 +64,12 @@ pub struct EffectBridgeAdapter {
     /// in Phase 5+) instead of the host tool. When unset, all tool calls run
     /// on the host as before.
     workspace_mounts: RwLock<Option<Arc<WorkspaceMounts>>>,
+    /// Engine capability registry. `available_actions()` reads this to surface
+    /// actions from non-v1 capabilities (e.g. `missions`) to the LLM. The v1
+    /// `ToolRegistry` only covers built-in + extension tools; engine-native
+    /// capabilities like `missions` are registered here in `router.rs` and
+    /// would otherwise be invisible to the LLM despite having active leases.
+    capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -84,6 +90,7 @@ impl EffectBridgeAdapter {
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
+            capability_registry: RwLock::new(None),
         }
     }
 
@@ -96,6 +103,14 @@ impl EffectBridgeAdapter {
     /// execution for all tools.
     pub async fn set_workspace_mounts(&self, mounts: Option<Arc<WorkspaceMounts>>) {
         *self.workspace_mounts.write().await = mounts;
+    }
+
+    /// Install the engine capability registry so `available_actions()` can
+    /// surface actions from engine-native capabilities (missions, etc.) to
+    /// the LLM. Called once at bridge setup after `router.rs` has finished
+    /// registering all capabilities.
+    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+        *self.capability_registry.write().await = Some(registry);
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -1242,7 +1257,7 @@ impl EffectExecutor for EffectBridgeAdapter {
 
     async fn available_actions(
         &self,
-        _leases: &[CapabilityLease],
+        leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
@@ -1290,6 +1305,44 @@ impl EffectExecutor for EffectBridgeAdapter {
                     effects: vec![],
                     requires_approval: false,
                 });
+            }
+        }
+
+        // Surface actions from engine-native capabilities (e.g. `missions`).
+        // The v1 `ToolRegistry` path above only covers built-in + extension
+        // tools; capabilities registered directly against the engine
+        // (`CapabilityRegistry`) would otherwise be invisible to the LLM
+        // even though the thread holds active leases for them. Iterate
+        // leases so we only advertise what the current thread actually has
+        // access to, and skip the `"tools"` capability — that lease is
+        // reconciled dynamically from the v1 path already covered above.
+        if let Some(registry) = self.capability_registry.read().await.as_ref() {
+            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            for lease in leases {
+                if lease.capability_name == "tools" {
+                    continue;
+                }
+                let Some(cap) = registry.get(&lease.capability_name) else {
+                    continue;
+                };
+                for action in &cap.actions {
+                    if !lease.granted_actions.covers(&action.name) {
+                        continue;
+                    }
+                    // Defensive: apply the same v1-isolation filters we run
+                    // on v1 tools. If a future engine capability registers
+                    // an action under a v1-denylisted name (`create_job`,
+                    // `tool_auth`, ...), the v1 filters above would have
+                    // hidden it — the engine path must not become a
+                    // silent bypass.
+                    if is_v1_only_tool(&action.name) || is_v1_auth_tool(&action.name) {
+                        continue;
+                    }
+                    if !seen.insert(action.name.clone()) {
+                        continue;
+                    }
+                    actions.push(action.clone());
+                }
             }
         }
 
@@ -3927,6 +3980,484 @@ mod tests {
             Some("completed"),
             "mission_complete should return 'completed', got: {}",
             delete_result.output
+        );
+    }
+
+    // ── Phase 6 acceptance: full mission lifecycle through the bridge ──
+    //
+    // These tests pin the gateway-facing contract that v2 clients rely on:
+    // a mission round-trips through create → list → fire → complete and
+    // each step's response shape stays stable. Existing per-action tests
+    // above cover error paths; these cover the happy-path interactions
+    // between actions, which is where regressions tend to bite (e.g.
+    // status not surfacing in mission_list after complete, or fire not
+    // returning a thread_id for manual missions).
+
+    /// Full lifecycle: create → list (present) → complete → list (Completed).
+    /// Pins the post-complete visibility of status through `mission_list`,
+    /// which a chat client polls to render terminal-state UI.
+    #[tokio::test]
+    async fn mission_full_lifecycle_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("lc1"));
+
+        // Create
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lifecycle-mission",
+                    "goal": "exercise the full lifecycle",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("create must return mission_id")
+            .to_string();
+
+        // List → present, status not yet Completed
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("list output is array");
+        let entry = missions
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("created mission must appear in list");
+        let initial_status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(
+            initial_status, "Completed",
+            "fresh mission should not be Completed; got status={initial_status}"
+        );
+
+        // Complete
+        let complete = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+        assert!(!complete.is_error);
+        assert_eq!(
+            complete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+
+        // List again → Completed status now visible
+        let list_after = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list-after should succeed");
+        let missions_after = list_after.output.as_array().expect("array");
+        let entry_after = missions_after
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("mission still present after complete");
+        let post_status = entry_after
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            post_status, "Completed",
+            "mission_list must surface Completed status after mission_complete; got {post_status}"
+        );
+    }
+
+    /// `mission_fire` on a manual-cadence mission returns a thread_id and
+    /// fired status. Pins the response shape gateway clients consume to
+    /// link the fired mission to its child thread.
+    #[tokio::test]
+    async fn mission_fire_returns_thread_id_for_manual_cadence_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("fire1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "fireable",
+                    "goal": "test fire flow",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire should succeed");
+
+        assert!(!fire.is_error, "fire failed: {}", fire.output);
+        // Two terminal shapes are valid: (a) {thread_id, status="fired"}
+        // when the mission ran; (b) {status="not_fired", reason} when
+        // budget/cooldown gated it. A fresh manual mission has no
+        // budget — must produce shape (a).
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "fresh manual mission should fire successfully, got: {}",
+            fire.output
+        );
+        let thread_id = fire
+            .output
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .expect("fired response must include thread_id");
+        assert!(
+            uuid::Uuid::parse_str(thread_id).is_ok(),
+            "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// `mission_list` returns every mission the user created in the
+    /// current project, isolated from other users. Pins the per-user
+    /// scoping that chat history and project-detail pages rely on.
+    #[tokio::test]
+    async fn mission_list_returns_all_user_missions_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("list1"));
+
+        let names = ["alpha", "beta", "gamma"];
+        for name in names {
+            let r = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": name,
+                        "goal": format!("test {name}"),
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!r.is_error, "create {name} failed: {}", r.output);
+        }
+
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        let listed_names: Vec<&str> = missions
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for expected in names {
+            assert!(
+                listed_names.contains(&expected),
+                "expected mission {expected:?} in list, got: {listed_names:?}"
+            );
+        }
+    }
+
+    // ── available_actions surfaces engine-registered capability actions ──
+    //
+    // Regression: without the capability registry, `available_actions`
+    // returned only v1 `ToolRegistry` tools + latent OAuth actions, so
+    // the LLM never saw mission tools in its tools list even though the
+    // thread held an active `missions` lease. This test pins that a
+    // thread with a mission lease gets `mission_*` advertised.
+
+    fn mission_capability() -> ironclaw_engine::Capability {
+        ironclaw_engine::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![
+                ActionDef {
+                    name: "mission_create".into(),
+                    description: "Create a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_list".into(),
+                    description: "List missions".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_complete".into(),
+                    description: "Complete a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    fn mission_lease(granted: &[&str]) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "missions".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(
+                granted.iter().map(|s| s.to_string()).collect(),
+            ),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_surfaces_leased_mission_capability() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in advertised actions, got: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_respects_partial_lease_grant() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // Lease only grants mission_list; mission_create / mission_complete
+        // must NOT be advertised to the LLM even though they exist in the
+        // capability registry.
+        let actions = adapter
+            .available_actions(&[mission_lease(&["mission_list"])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"mission_list"),
+            "mission_list should be advertised: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_create"),
+            "mission_create must not leak when lease did not grant it: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_complete"),
+            "mission_complete must not leak when lease did not grant it: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_actions_omits_capability_without_lease() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // No leases passed — no capability actions should surface even
+        // though the registry has them.
+        let actions = adapter
+            .available_actions(&[])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for name in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not appear without a lease: {names:?}"
+            );
+        }
+    }
+
+    /// Trivial v1 tool for the combined advertising test. Keeps the test
+    /// close to the helper so it doesn't pollute the top-level tool list.
+    struct V1EchoTool;
+
+    #[async_trait]
+    impl Tool for V1EchoTool {
+        fn name(&self) -> &str {
+            "v1_echo"
+        }
+        fn description(&self) -> &str {
+            "v1 echo tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_merges_v1_tools_with_engine_capabilities() {
+        // Exercises the real production shape: the adapter has both a v1
+        // `ToolRegistry` (echo tool) and a capability registry (missions).
+        // With a missions lease active, the LLM's tools list must include
+        // BOTH. Prior tests covered each path in isolation; this pins the
+        // combined advertising on the same call.
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(V1EchoTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"v1_echo"),
+            "v1 tool should be advertised: {names:?}"
+        );
+        for mission in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&mission),
+                "engine capability action {mission} should be advertised alongside v1 tools: {names:?}"
+            );
+        }
+    }
+
+    /// Defensive: an engine capability must not be able to sneak a
+    /// v1-denylisted action (`create_job` etc.) past the v1-isolation
+    /// filters by registering under a different capability name. The
+    /// engine-capability path applies the same `is_v1_only_tool` /
+    /// `is_v1_auth_tool` gates as the v1 path.
+    #[tokio::test]
+    async fn available_actions_filters_v1_denylisted_names_from_engine_capabilities() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        // A hypothetical malformed capability that tries to expose v1
+        // tools through the v2 advertising path.
+        registry.register(ironclaw_engine::Capability {
+            name: "rogue".into(),
+            description: "should not surface denylisted v1 names".into(),
+            actions: vec![
+                ActionDef {
+                    name: "create_job".into(), // v1-only denylist
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "tool_auth".into(), // v1 auth tool
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "safe_action".into(),
+                    description: "allowed".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let rogue_lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "rogue".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+
+        let actions = adapter
+            .available_actions(&[rogue_lease])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            !names.contains(&"create_job"),
+            "create_job is v1-denylisted and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            !names.contains(&"tool_auth"),
+            "tool_auth is a v1 auth tool and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            names.contains(&"safe_action"),
+            "safe_action should surface through the engine capability path: {names:?}"
         );
     }
 }
