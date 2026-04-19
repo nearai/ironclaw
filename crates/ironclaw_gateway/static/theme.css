@@ -170,7 +170,13 @@
    * the 20 split surface stylesheets under `styles/`. Each one is
    * now an alias onto a scale step or role token above, so touching
    * the palette here instantly reskins the whole app without
-   * changing a single line in `styles/**/*.css`.
+   * changing a single line in any surface stylesheet.
+   *
+   * NOTE: do not write "<>/<star><star>/<star>.css" inside a CSS
+   * comment — the embedded `<star>/` sequence closes the comment
+   * early and the following declarations get dropped. (This file
+   * was bitten by exactly that once — keep glob patterns out of
+   * comment bodies.)
    * =========================================================== */
   --bg:                    var(--color-bg);
   --bg-secondary:          var(--color-surface);
