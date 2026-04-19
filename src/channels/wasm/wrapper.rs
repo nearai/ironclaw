@@ -693,12 +693,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
             return Err("pairing host callback requires a multi-thread Tokio runtime".to_string());
         }
-        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+        let result: Result<Option<crate::ownership::UserId>, crate::error::DatabaseError> =
             tokio::task::block_in_place(move || {
                 handle.block_on(async move { store.resolve_identity(&channel, &external_id).await })
             });
         match result {
-            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(Some(identity)) => Ok(Some(identity.as_str().to_string())),
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
@@ -862,7 +862,7 @@ async fn resolve_message_scope_with_pairing(
         .resolve_identity(channel_name, sender_id)
         .await
     {
-        Ok(Some(identity)) => (identity.owner_id.to_string(), false),
+        Ok(Some(identity)) => (identity.as_str().to_string(), false),
         Ok(None) => (sender_id.to_string(), false),
         Err(error) => {
             tracing::warn!(
@@ -6443,7 +6443,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_emitted_messages_paired_sender_sets_owner_scope() {
         use crate::channels::wasm::host::EmittedMessage;
-        use crate::ownership::OwnerId;
+        use crate::ownership::{UserId, UserRole};
 
         let (pairing_store, _dir) = make_db_backed_pairing_store("owner-scope").await;
         let pairing_request = pairing_store
@@ -6458,7 +6458,7 @@ mod tests {
             .approve(
                 "telegram",
                 &pairing_request.code,
-                &OwnerId::from("owner-scope"),
+                &UserId::from_trusted("owner-scope".into(), UserRole::Regular),
             )
             .await
             .expect("pairing approval");

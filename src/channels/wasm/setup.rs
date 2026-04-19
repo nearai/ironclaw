@@ -442,7 +442,10 @@ async fn resolve_owner_actor_id_for_channel(
     pairing_store
         .external_id_for_owner(
             channel_name,
-            &crate::ownership::OwnerId::from(config.owner_id.clone()),
+            &crate::ownership::UserId::from_trusted(
+                config.owner_id.clone(),
+                crate::ownership::UserRole::Owner,
+            ),
         )
         .await
         .ok()

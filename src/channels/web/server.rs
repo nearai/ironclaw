@@ -4114,7 +4114,13 @@ async fn pairing_approve_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Pairing store not available".to_string(),
     ))?;
-    let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
+    // Bind to the authenticated user. `from_trusted` is appropriate: user.user_id
+    // came from the auth layer (DB-sourced). Role is irrelevant for approval —
+    // only the id is recorded on the pairing row.
+    let owner_id = crate::ownership::UserId::from_trusted(
+        user.user_id.clone(),
+        crate::ownership::UserRole::from_db_role(&user.role),
+    );
     let approval = match store.approve(&channel, &code, &owner_id).await {
         Ok(approval) => approval,
         Err(crate::error::DatabaseError::NotFound { .. }) => {
@@ -5215,7 +5221,7 @@ mod tests {
             .await
             .expect("resolve identity")
             .expect("claimed identity");
-        assert_eq!(identity.owner_id.as_str(), "member-1");
+        assert_eq!(identity.as_str(), "member-1");
         assert!(
             pairing_store
                 .list_pending("telegram")
@@ -5476,7 +5482,10 @@ mod tests {
             .approve(
                 "telegram",
                 &request.code,
-                &crate::ownership::OwnerId::from("member-1"),
+                &crate::ownership::UserId::from_trusted(
+                    "member-1".into(),
+                    crate::ownership::UserRole::Regular,
+                ),
             )
             .await
             .expect("approve pairing");

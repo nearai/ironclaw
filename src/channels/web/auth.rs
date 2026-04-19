@@ -67,10 +67,23 @@ pub const SESSION_COOKIE_NAME: &str = "ironclaw_session";
 #[derive(Debug, Clone)]
 pub struct UserIdentity {
     pub user_id: String,
-    /// `admin` or `member`.
+    /// Raw DB role string — one of `owner`, `admin`, `regular` (or legacy `member`).
+    /// Use [`UserIdentity::is_admin`] for role checks rather than comparing this
+    /// string literally.
     pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
+}
+
+impl UserIdentity {
+    /// Returns `true` if the user has administrative privileges.
+    ///
+    /// Admins AND owners both satisfy this check — owners are a super-admin tier.
+    /// Delegates to [`crate::ownership::UserRole::is_admin`] so the rule stays
+    /// centralized.
+    pub fn is_admin(&self) -> bool {
+        crate::ownership::UserRole::from_db_role(&self.role).is_admin()
+    }
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.
@@ -344,7 +357,7 @@ where
             .get::<UserIdentity>()
             .cloned()
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))?;
-        if identity.role != "admin" {
+        if !identity.is_admin() {
             return Err((StatusCode::FORBIDDEN, "Admin role required"));
         }
         Ok(AdminUser(identity))
