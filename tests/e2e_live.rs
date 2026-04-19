@@ -75,8 +75,14 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v1 (default agentic loop).
+    ///
+    /// Marked `#[ignore]` by default because the `IRONCLAW_LIVE_TEST=1`
+    /// recording path needs real LLM credentials. The `replay` feature flag
+    /// promotes this test out of `--ignored` so CI can run the committed
+    /// fixture without extra `-- --ignored` gymnastics; see
+    /// `.github/workflows/replay-gate.yml`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
@@ -96,7 +102,7 @@ mod live_tests {
     /// mentions zizmor in its response (even if it can't execute shell).
     /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)

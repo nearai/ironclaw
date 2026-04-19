@@ -2434,8 +2434,25 @@ pub async fn handle_expected(
         "thread_state": thread.state,
     });
 
-    // Fire the expected-behavior learning mission
+    // Ensure learning missions exist for this user before firing.
+    // They may be missing if the user wasn't the owner at init_engine time
+    // or if their missions failed to initialize.
     let mgr = state.effect_adapter.mission_manager().await;
+    if let Some(ref mgr) = mgr {
+        let user_project_id =
+            resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+        if let Err(e) = mgr
+            .ensure_learning_missions(user_project_id, &message.user_id)
+            .await
+        {
+            debug!(
+                "failed to ensure learning missions for user {}: {e}",
+                message.user_id
+            );
+        }
+    }
+
+    // Fire the expected-behavior learning mission
     let fired = if let Some(mgr) = mgr {
         match mgr
             .fire_on_system_event(
@@ -4629,6 +4646,50 @@ pub async fn reset_engine_state() {
     if let Some(lock) = ENGINE_STATE.get() {
         *lock.write().await = None;
     }
+}
+
+/// Build retrospective `ExecutionTrace`s for every currently-known engine
+/// thread. Returns an empty vector when engine v2 is not initialized.
+///
+/// Test-only helper: snapshot-based replay tests fold each trace into
+/// per-thread entries under `ReplayOutcome.engine_threads`. Not part of any
+/// public API; exposed under `#[doc(hidden)]` because integration tests live
+/// in a separate crate and cannot see `#[cfg(test)]`-only items.
+///
+/// **Caller must serialize access** when more than one engine v2 replay can
+/// run concurrently — `ENGINE_STATE` is a process-global singleton and this
+/// function iterates every thread across every project. Snapshot tests in
+/// `tests/e2e_engine_v2.rs` take `engine_v2_test_lock()` for this reason;
+/// new test suites that spawn engine threads must do the same or clear state
+/// via `reset_engine_state()` before calling.
+#[cfg(feature = "libsql")]
+pub async fn engine_retrospectives_for_test()
+-> Vec<ironclaw_engine::executor::trace::ExecutionTrace> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Vec::new();
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let projects = match state.store.list_all_projects().await {
+        Ok(projects) => projects,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for project in projects {
+        let threads = match state.store.list_all_threads(project.id).await {
+            Ok(threads) => threads,
+            Err(_) => continue,
+        };
+        for mut thread in threads {
+            if let Ok(events) = state.store.load_events(thread.id).await {
+                thread.events = events;
+            }
+            out.push(ironclaw_engine::executor::trace::build_trace(&thread));
+        }
+    }
+    out
 }
 
 /// Resolve the effective user_id for mission management operations.

@@ -23,6 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
+      # `has_boundary_check` fires when the gateway-boundaries guardrail
+      # itself changes (either the checker script or this workflow). Keeps
+      # the check from being silently skipped by a PR that only edits
+      # scripts/.github — see serrrfirat's review on PR #2647.
+      has_boundary_check: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_boundary_check }}
     steps:
       - id: non_pr
         if: github.event_name != 'pull_request'
@@ -46,6 +51,16 @@ jobs:
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
+          fi
+
+          BOUNDARY_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'scripts/check_gateway_boundaries.py' \
+            '.github/workflows/code_style.yml' \
+            | head -1)
+          if [ -n "$BOUNDARY_CHANGES" ]; then
+            echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Dynamic matrix: SLIM (1 leg) for non-main PRs; FULL (3 legs) for PRs
@@ -207,6 +222,29 @@ jobs:
         BASE="${{ github.event.pull_request.base.sha }}"
         python3 scripts/check_no_panics.py --base "$BASE" --head HEAD
 
+  gateway-boundaries:
+    name: Gateway platform/feature boundaries
+    needs: changes
+    # Also run when the checker script or this workflow itself is edited —
+    # otherwise a PR touching only `scripts/check_gateway_boundaries.py`
+    # or `.github/workflows/code_style.yml` would skip this job and still
+    # satisfy the roll-up, weakening the guardrail. See serrrfirat's
+    # review on PR #2647.
+    if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+    - name: Check that platform/ has no back-edges into handlers/ or features/
+      run: python3 scripts/check_gateway_boundaries.py
+    - name: Self-test the boundary script
+      run: python3 scripts/check_gateway_boundaries.py test
+
   # Roll-up job for branch protection
   code-style:
     name: Code Style (fmt + gateway-js-syntax + clippy + deny)
@@ -221,6 +259,7 @@ jobs:
       - clippy-windows
       - deny-check
       - no-panics
+      - gateway-boundaries
     steps:
       - run: |
           # Docs-only PRs intentionally skip every gated job — that's a pass.
@@ -234,7 +273,8 @@ jobs:
             "format=${{ needs.format.result }}" \
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
-            "deny-check=${{ needs.deny-check.result }}"; do
+            "deny-check=${{ needs.deny-check.result }}" \
+            "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
             if [[ "$result" != "success" ]]; then
