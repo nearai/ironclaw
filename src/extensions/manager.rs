@@ -7091,38 +7091,60 @@ impl ExtensionManager {
 
         self.cleanup_expired_auths().await;
 
-        let mut sessions = self.pending_wechat_logins.write().await;
-        let Some(session) = sessions.get_mut(session_id) else {
-            return Err(ExtensionError::Other(
-                "This WeChat login session no longer exists. Start again.".to_string(),
-            ));
+        let mut session = {
+            let mut sessions = self.pending_wechat_logins.write().await;
+            let Some(existing) = sessions.get(session_id) else {
+                return Err(ExtensionError::Other(
+                    "This WeChat login session no longer exists. Start again.".to_string(),
+                ));
+            };
+            if existing.user_id != user_id {
+                return Err(ExtensionError::AuthFailed(
+                    "This WeChat login session belongs to another user".to_string(),
+                ));
+            }
+            sessions.remove(session_id).ok_or_else(|| {
+                ExtensionError::Other(
+                    "This WeChat login session no longer exists. Start again.".to_string(),
+                )
+            })?
         };
-        if session.user_id != user_id {
-            return Err(ExtensionError::AuthFailed(
-                "This WeChat login session belongs to another user".to_string(),
-            ));
-        }
 
         #[cfg(test)]
-        let outcome = if let Some(poller) = self.test_wechat_login_poller.read().await.as_ref() {
-            poller(session)
+        let outcome = if let Some(poller) = self.test_wechat_login_poller.read().await.clone() {
+            poller(&mut session)
         } else {
-            poll_wechat_login(session).await
-        }?;
+            poll_wechat_login(&mut session).await
+        };
         #[cfg(not(test))]
-        let outcome = poll_wechat_login(session).await?;
+        let outcome = poll_wechat_login(&mut session).await;
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if session.is_fresh() {
+                    self.pending_wechat_logins
+                        .write()
+                        .await
+                        .entry(session.session_id.clone())
+                        .or_insert(session);
+                }
+                return Err(error);
+            }
+        };
 
         match outcome {
             WechatLoginPollOutcome::Pending(result) => {
-                if matches!(result.status.as_str(), "failed") {
-                    sessions.remove(session_id);
+                if !matches!(result.status.as_str(), "failed") && session.is_fresh() {
+                    self.pending_wechat_logins
+                        .write()
+                        .await
+                        .entry(session.session_id.clone())
+                        .or_insert(session);
                 }
                 Ok(result)
             }
             WechatLoginPollOutcome::Confirmed(confirmed) => {
-                sessions.remove(session_id);
-                drop(sessions);
-
                 if let Some(base_url) = confirmed.base_url.as_deref()
                     && let Some(store) = &self.store
                 {
@@ -8059,7 +8081,7 @@ mod tests {
     };
     use crate::extensions::{
         AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
-        InteractiveLoginStartResult, RegistryEntry, ToolAuthState,
+        InteractiveLoginPollResult, InteractiveLoginStartResult, RegistryEntry, ToolAuthState,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
@@ -10355,6 +10377,76 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_wechat_interactive_login_poll_releases_session_map_lock() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("wechat.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+
+        let manager = Arc::new(make_manager_custom_dirs(
+            dir.path().join("tools"),
+            channels_dir.clone(),
+        ));
+        let session_id = "wechat-session-lock";
+        manager.pending_wechat_logins.write().await.insert(
+            session_id.to_string(),
+            PendingWechatLogin {
+                user_id: "test".to_string(),
+                session_id: session_id.to_string(),
+                qrcode: "qr-123".to_string(),
+                qr_code_url: "https://qr.example/one".to_string(),
+                started_at: std::time::Instant::now(),
+                base_url: "https://ilinkai.weixin.qq.com".to_string(),
+                bot_type: "3".to_string(),
+                refresh_count: 0,
+            },
+        );
+
+        let map_was_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager
+            .set_test_wechat_login_poller(Arc::new({
+                let manager = Arc::clone(&manager);
+                let map_was_unlocked = Arc::clone(&map_was_unlocked);
+                move |session| {
+                    map_was_unlocked.store(
+                        manager.pending_wechat_logins.try_write().is_ok(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(WechatLoginPollOutcome::Pending(
+                        InteractiveLoginPollResult {
+                            session_id: session.session_id.clone(),
+                            status: "pending".to_string(),
+                            message: "Waiting for the QR code to be scanned.".to_string(),
+                            qr_code_url: None,
+                            activated: None,
+                        },
+                    ))
+                }
+            }))
+            .await;
+
+        let poll = manager
+            .poll_interactive_login("wechat", session_id, "test")
+            .await
+            .map_err(|err| format!("poll interactive login: {err}"))?;
+
+        require_eq(poll.status, "pending".to_string(), "poll status")?;
+        require(
+            map_was_unlocked.load(std::sync::atomic::Ordering::SeqCst),
+            "pending_wechat_logins should not be locked while polling WeChat",
+        )?;
+        require(
+            manager
+                .pending_wechat_logins
+                .read()
+                .await
+                .contains_key(session_id),
+            "pending WeChat session should be written back after a pending poll",
+        )
     }
 
     /// Regression for nearai/ironclaw#1921 — caller-level coverage.

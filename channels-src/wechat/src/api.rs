@@ -67,7 +67,7 @@ pub fn get_updates_with_timeout(
         &format!(
             "WeChat getUpdates request: cursor_len={} timeout_ms={}",
             get_updates_buf.len(),
-            config.long_poll_timeout_ms
+            timeout_ms
         ),
     );
     let response =
