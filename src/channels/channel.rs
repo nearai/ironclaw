@@ -6,7 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
-use ironclaw_common::ExtensionName;
+use ironclaw_common::{ExtensionName, ExternalThreadId};
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -85,7 +85,12 @@ pub struct IncomingMessage {
     /// routing semantics without serializing control payloads into `content`.
     pub structured_submission: Option<crate::agent::submission::Submission>,
     /// Thread/conversation ID for threaded conversations.
-    pub thread_id: Option<String>,
+    ///
+    /// This is the *external* channel-supplied thread identifier (e.g. a
+    /// Telegram chat id, Slack `thread_ts`, or web-UI UUID string) — **not**
+    /// the internal engine [`ironclaw_engine::ThreadId`] UUID. Conversion to
+    /// the internal id happens in `SessionManager::resolve_thread`.
+    pub thread_id: Option<ExternalThreadId>,
     /// Stable channel/chat/thread scope for this conversation.
     pub conversation_scope_id: Option<String>,
     /// When the message was received.
@@ -165,9 +170,21 @@ impl IncomingMessage {
     }
 
     /// Set the thread ID.
+    ///
+    /// Accepts raw strings — the value is wrapped with
+    /// [`ExternalThreadId::from_trusted`] because callers are typically
+    /// channel adapters forwarding a value already emitted by their external
+    /// platform. The `conversation_scope_id` shadow mirrors the raw string.
     pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
         let thread_id = thread_id.into();
         self.conversation_scope_id = Some(thread_id.clone());
+        self.thread_id = Some(ExternalThreadId::from_trusted(thread_id));
+        self
+    }
+
+    /// Set the thread ID from an already-typed [`ExternalThreadId`].
+    pub fn with_external_thread(mut self, thread_id: ExternalThreadId) -> Self {
+        self.conversation_scope_id = Some(thread_id.as_str().to_string());
         self.thread_id = Some(thread_id);
         self
     }
@@ -227,7 +244,7 @@ impl IncomingMessage {
     pub fn conversation_scope(&self) -> Option<&str> {
         self.conversation_scope_id
             .as_deref()
-            .or(self.thread_id.as_deref())
+            .or_else(|| self.thread_id.as_ref().map(|t| t.as_str()))
     }
 
     /// Best-effort routing target for proactive replies on the current channel.
@@ -274,7 +291,10 @@ pub struct OutgoingResponse {
     /// The content to send.
     pub content: String,
     /// Optional thread ID to reply in.
-    pub thread_id: Option<String>,
+    ///
+    /// External/channel-supplied thread identifier (see
+    /// [`IncomingMessage::thread_id`]).
+    pub thread_id: Option<ExternalThreadId>,
     /// Optional file paths to attach.
     pub attachments: Vec<String>,
     /// Channel-specific metadata for the response.
@@ -293,8 +313,18 @@ impl OutgoingResponse {
     }
 
     /// Set the thread ID for the response.
+    ///
+    /// Accepts raw strings — the value is wrapped with
+    /// [`ExternalThreadId::from_trusted`] because callers typically forward
+    /// an identifier that a channel adapter already accepted.
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
-        self.thread_id = Some(thread_id.into());
+        self.thread_id = Some(ExternalThreadId::from_trusted(thread_id.into()));
+        self
+    }
+
+    /// Set the thread ID from an already-typed [`ExternalThreadId`].
+    pub fn in_external_thread(mut self, thread_id: ExternalThreadId) -> Self {
+        self.thread_id = Some(thread_id);
         self
     }
 

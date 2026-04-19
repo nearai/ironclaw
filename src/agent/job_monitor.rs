@@ -255,7 +255,12 @@ mod tests {
 
         assert_eq!(msg.channel, "cli");
         assert_eq!(msg.user_id, "user-1");
-        assert_eq!(msg.thread_id, Some("thread-1".to_string()));
+        assert_eq!(
+            msg.thread_id,
+            Some(ironclaw_common::ExternalThreadId::from_trusted(
+                "thread-1".to_string()
+            ))
+        );
         assert!(msg.content.contains("I found a bug"));
         assert!(msg.is_internal, "monitor messages must be marked internal");
     }

@@ -163,7 +163,7 @@ async fn test_ws_message_reaches_agent() {
         .expect("Agent channel closed");
 
     assert_eq!(incoming.content, "hello from ws");
-    assert_eq!(incoming.thread_id.as_deref(), Some("t42"));
+    assert_eq!(incoming.thread_id.as_ref().map(|t| t.as_str()), Some("t42"));
     assert_eq!(incoming.channel, "gateway");
     assert_eq!(incoming.user_id, "test-user");
 

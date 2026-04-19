@@ -375,7 +375,7 @@ mod tests {
 
         let incoming = agent_rx.recv().await.unwrap();
         assert_eq!(incoming.content, "hello agent");
-        assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
+        assert_eq!(incoming.thread_id.as_ref().map(|t| t.as_str()), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
         assert_eq!(
@@ -439,7 +439,10 @@ mod tests {
         // The content should be a serialized ExecApproval
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
-        assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+        assert_eq!(
+            incoming.thread_id.as_ref().map(|t| t.as_str()),
+            Some("thread-42")
+        );
         assert_eq!(
             incoming.metadata.get("user_id").and_then(|v| v.as_str()),
             Some("user1")

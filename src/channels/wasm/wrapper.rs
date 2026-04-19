@@ -3174,7 +3174,7 @@ impl Channel for WasmChannel {
         self.call_on_respond(
             msg.id,
             &response.content,
-            response.thread_id.as_deref(),
+            response.thread_id.as_ref().map(|t| t.as_str()),
             &metadata_json,
             &response.attachments,
         )
@@ -3212,7 +3212,7 @@ impl Channel for WasmChannel {
         self.call_on_broadcast(
             &resolved_target,
             &response.content,
-            response.thread_id.as_deref(),
+            response.thread_id.as_ref().map(|t| t.as_str()),
             &response.attachments,
         )
         .await

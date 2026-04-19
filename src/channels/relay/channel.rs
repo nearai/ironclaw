@@ -299,7 +299,8 @@ impl Channel for RelayChannel {
         // Determine thread_id from response or metadata
         let thread_id = response
             .thread_id
-            .as_deref()
+            .as_ref()
+            .map(|t| t.as_str())
             .or_else(|| metadata.get("thread_id").and_then(|v| v.as_str()));
 
         let (method, body) = self.build_send_body(channel_id, &response.content, thread_id);
@@ -384,7 +385,8 @@ impl Channel for RelayChannel {
         // Determine thread_id from response or metadata
         let thread_id = response
             .thread_id
-            .as_deref()
+            .as_ref()
+            .map(|t| t.as_str())
             .or_else(|| response.metadata.get("thread_ts").and_then(|v| v.as_str()));
 
         let (method, body) = self.build_send_body(target, &response.content, thread_id);
@@ -592,7 +594,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(msg.content, "approve");
-        assert_eq!(msg.thread_id.as_deref(), Some("1712345678.123"));
+        assert_eq!(
+            msg.thread_id.as_ref().map(|t| t.as_str()),
+            Some("1712345678.123")
+        );
         assert_eq!(msg.conversation_scope(), Some("1712345678.123"));
     }
 
@@ -751,7 +756,7 @@ mod tests {
 
         // thread_id should be the message timestamp, NOT the channel_id
         assert_eq!(
-            msg.thread_id.as_deref(),
+            msg.thread_id.as_ref().map(|t| t.as_str()),
             Some("1609459200.000100"),
             "thread_id should be the message ts for threading, not the channel_id"
         );

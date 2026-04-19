@@ -421,7 +421,7 @@ impl Channel for TuiChannel {
             let _ = tx
                 .send(TuiEvent::Response {
                     content: response.content,
-                    thread_id: response.thread_id,
+                    thread_id: response.thread_id.map(String::from),
                 })
                 .await;
         }
@@ -643,7 +643,7 @@ impl Channel for TuiChannel {
             let _ = tx
                 .send(TuiEvent::Response {
                     content: response.content,
-                    thread_id: response.thread_id,
+                    thread_id: response.thread_id.map(String::from),
                 })
                 .await;
         }
@@ -695,7 +695,10 @@ mod tests {
             "Europe/Istanbul",
         );
 
-        assert_eq!(msg.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(
+            msg.thread_id.as_ref().map(|t| t.as_str()),
+            Some("thread-123")
+        );
         assert_eq!(msg.channel, "tui");
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.content, "hello");

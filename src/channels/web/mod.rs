@@ -590,7 +590,7 @@ impl Channel for GatewayChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let thread_id = match &msg.thread_id {
-            Some(tid) => tid.clone(),
+            Some(tid) => tid.as_str().to_string(),
             None => {
                 return Err(ChannelError::MissingRoutingTarget {
                     name: "gateway".to_string(),
@@ -813,8 +813,8 @@ impl Channel for GatewayChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let thread_id = match response.thread_id {
-            Some(tid) => tid,
+        let thread_id: String = match response.thread_id {
+            Some(tid) => tid.into(),
             None => {
                 // Proactive broadcasts (mission notifications, self-repair,
                 // extension activation) don't always have a thread context.

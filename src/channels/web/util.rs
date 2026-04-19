@@ -84,7 +84,7 @@ pub fn web_incoming_message_with_metadata(
     };
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("user_id".to_string(), serde_json::json!(user_id));
-        if let Some(thread_id) = message.thread_id.as_deref() {
+        if let Some(thread_id) = message.thread_id.as_ref().map(|t| t.as_str()) {
             obj.insert("thread_id".to_string(), serde_json::json!(thread_id));
         }
     }

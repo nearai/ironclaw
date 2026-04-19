@@ -2062,7 +2062,12 @@ mod tests {
         assert_eq!(target, "group:testgroup");
         // Groups now use deterministic UUID derived from group ID
         let expected_thread_id = SignalChannel::thread_id_from_identifier("group:testgroup");
-        assert_eq!(msg.thread_id, Some(expected_thread_id));
+        assert_eq!(
+            msg.thread_id,
+            Some(ironclaw_common::ExternalThreadId::from_trusted(
+                expected_thread_id
+            ))
+        );
 
         // Verify reply routing: group message should still route as Group.
         let parsed = SignalChannel::parse_recipient_target(&target);
@@ -2523,7 +2528,9 @@ mod tests {
         let expected_thread_id = SignalChannel::thread_id_from_identifier("+1111111111");
         assert_eq!(
             msg.thread_id,
-            Some(expected_thread_id),
+            Some(ironclaw_common::ExternalThreadId::from_trusted(
+                expected_thread_id
+            )),
             "DMs should set thread_id to UUID"
         );
         Ok(())
@@ -2562,7 +2569,9 @@ mod tests {
         let expected_thread_id = SignalChannel::thread_id_from_identifier("group:grp999");
         assert_eq!(
             msg.thread_id,
-            Some(expected_thread_id),
+            Some(ironclaw_common::ExternalThreadId::from_trusted(
+                expected_thread_id
+            )),
             "Groups should set thread_id to UUID"
         );
         Ok(())
