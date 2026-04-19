@@ -14,6 +14,21 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
+/// Error shape for the write-path settings handlers (`set`, `delete`,
+/// `import`). Carries a status code plus an optional body string — the
+/// body is surfaced to the client through axum's `IntoResponse` for
+/// `(StatusCode, String)`, so the web UI's `apiFetch` can display
+/// actionable reasons for 422 rollbacks alongside an empty body for
+/// authorization failures.
+type WriteErr = (StatusCode, String);
+
+/// Convert a bare `StatusCode` (from helpers that don't carry a reason)
+/// into the handlers' [`WriteErr`] shape. Used at `?` propagation sites
+/// where the inner helper returns `Result<_, StatusCode>`.
+fn no_body(code: StatusCode) -> WriteErr {
+    (code, String::new())
+}
+
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
 const API_KEY_UNCHANGED: &str = "••••••••";
 
@@ -147,41 +162,56 @@ pub async fn settings_set_handler(
     Path(key): Path<String>,
     Query(query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
+) -> Result<StatusCode, WriteErr> {
+    let effective_user_id = resolve_settings_scope(&user, &query).map_err(no_body)?;
+    ensure_setting_write_allowed(&user, &key).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &effective_user_id, &body.value).await?;
-        validate_custom_providers(&body.value)?;
+        guard_active_provider_not_removed(store, &effective_user_id, &body.value)
+            .await
+            .map_err(no_body)?;
+        validate_custom_providers(&body.value).map_err(no_body)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            extract_builtin_override_keys(&state, &effective_user_id, &body.value).await?
+            extract_builtin_override_keys(&state, &effective_user_id, &body.value)
+                .await
+                .map_err(no_body)?
         }
         "llm_custom_providers" => {
-            extract_custom_provider_keys(&state, &effective_user_id, &body.value).await?
+            extract_custom_provider_keys(&state, &effective_user_id, &body.value)
+                .await
+                .map_err(no_body)?
         }
         _ => body.value.clone(),
     };
 
     // Snapshot the current value BEFORE the write so a post-reload failure
-    // can roll the DB back to its pre-request state. Without this, a bad
-    // `llm_backend=openai` write would leave DB + runtime out of sync
-    // until the admin manually corrects it.
+    // can roll the DB back to its pre-request state. Treating a DB read
+    // error as `None` would be unsafe — we might later `delete_setting`
+    // a key whose prior value we simply failed to read. Abort with 500
+    // instead.
     let reload_triggered =
         llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
     let prev_value = if reload_triggered {
         store
             .get_setting(&effective_user_id, &key)
             .await
-            .unwrap_or(None)
+            .map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %effective_user_id,
+                    "Failed to snapshot setting for rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?
     } else {
         None
     };
@@ -191,7 +221,7 @@ pub async fn settings_set_handler(
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
 
     if reload_triggered {
@@ -205,7 +235,7 @@ pub async fn settings_set_handler(
                     "Rejected LLM settings write because the resulting config \
                      would not produce a buildable provider chain; rolled back to prior value"
                 );
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
             }
         }
     }
@@ -494,11 +524,11 @@ pub async fn settings_delete_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
     Query(query): Query<SettingScopeQuery>,
-) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
+) -> Result<StatusCode, WriteErr> {
+    let effective_user_id = resolve_settings_scope(&user, &query).map_err(no_body)?;
+    ensure_setting_write_allowed(&user, &key).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -508,17 +538,28 @@ pub async fn settings_delete_handler(
             &effective_user_id,
             &serde_json::Value::Array(vec![]),
         )
-        .await?;
+        .await
+        .map_err(no_body)?;
     }
 
-    // Snapshot for rollback — see `settings_set_handler` for rationale.
+    // Snapshot for rollback — see `settings_set_handler` for rationale,
+    // including why a DB read error must not be collapsed to "no prior
+    // value" (doing so could turn rollback into silent data loss).
     let reload_triggered =
         llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
     let prev_value = if reload_triggered {
         store
             .get_setting(&effective_user_id, &key)
             .await
-            .unwrap_or(None)
+            .map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %effective_user_id,
+                    "Failed to snapshot setting for rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?
     } else {
         None
     };
@@ -528,7 +569,7 @@ pub async fn settings_delete_handler(
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
 
     if reload_triggered {
@@ -542,7 +583,7 @@ pub async fn settings_delete_handler(
                     "Rejected LLM settings delete because the resulting config \
                      would not produce a buildable provider chain; rolled back",
                 );
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
             }
         }
     }
@@ -572,20 +613,24 @@ pub async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    ensure_settings_import_allowed(&user, &body.settings)?;
+) -> Result<StatusCode, WriteErr> {
+    ensure_settings_import_allowed(&user, &body.settings).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
     let mut sanitized = body.settings.clone();
     if let Some(v) = sanitized.get("llm_builtin_overrides").cloned() {
-        let clean = extract_builtin_override_keys(&state, &user.user_id, &v).await?;
+        let clean = extract_builtin_override_keys(&state, &user.user_id, &v)
+            .await
+            .map_err(no_body)?;
         sanitized.insert("llm_builtin_overrides".to_string(), clean);
     }
     if let Some(v) = sanitized.get("llm_custom_providers").cloned() {
-        let clean = extract_custom_provider_keys(&state, &user.user_id, &v).await?;
+        let clean = extract_custom_provider_keys(&state, &user.user_id, &v)
+            .await
+            .map_err(no_body)?;
         sanitized.insert("llm_custom_providers".to_string(), clean);
     }
 
@@ -600,6 +645,10 @@ pub async fn settings_import_handler(
     // the new config unbuildable. We deliberately don't snapshot keys
     // that aren't in the reload allowlist — those don't participate in
     // the build that can fail.
+    //
+    // Snapshot-read failures must abort the import with 500, not be
+    // collapsed to "no prior value" — a later rollback would otherwise
+    // delete a key whose prior value we simply couldn't read.
     let mut prev_values: Vec<(String, Option<serde_json::Value>)> = Vec::new();
     if reload_triggered {
         for key in body
@@ -607,7 +656,15 @@ pub async fn settings_import_handler(
             .keys()
             .filter(|k| llm_setting_requires_reload(k))
         {
-            let prev = store.get_setting(&user.user_id, key).await.unwrap_or(None);
+            let prev = store.get_setting(&user.user_id, key).await.map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %user.user_id,
+                    "Failed to snapshot setting for import rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?;
             prev_values.push((key.clone(), prev));
         }
     }
@@ -617,7 +674,7 @@ pub async fn settings_import_handler(
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
 
     if reload_triggered {
@@ -634,7 +691,7 @@ pub async fn settings_import_handler(
                      {} LLM key(s)",
                     prev_values.len(),
                 );
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
             }
         }
     }
@@ -1550,7 +1607,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1571,7 +1628,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     /// Drive through `settings_set_handler` and verify that writing an
@@ -1828,7 +1885,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     /// Members writing their own `selected_model` must succeed (the model
@@ -1983,7 +2040,13 @@ mod tests {
         )
         .await
         .expect_err("handler must reject unbuildable LLM config");
-        assert_eq!(err, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        // The error body must carry the underlying reason so the web UI
+        // can surface it in the Settings UI rather than a generic 422.
+        assert!(
+            !err.1.is_empty(),
+            "422 response body must include the reload failure reason; got empty body",
+        );
 
         // DB rolled back to the pre-request state for the caller's key
         // (was never set → delete-on-rollback → still not set).
@@ -2090,7 +2153,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     // --- Tool permissions helpers ---
