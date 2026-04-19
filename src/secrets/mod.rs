@@ -207,6 +207,68 @@ pub async fn verify_generated_key_safe(
     }
 }
 
+/// Undo the persistence side-effect of `auto_generate_and_persist`
+/// when the safety gate rejects the freshly-generated key.
+///
+/// Without this step, `auto_generate_and_persist` has already written
+/// the key to either the OS keychain or `~/.ironclaw/.env` by the
+/// time the gate runs — and a subsequent restart would pick it up
+/// via the env-first/keychain probe as `generated = false`, skip the
+/// gate, and silently accept the wrong key against data it cannot
+/// decrypt. Rolling back keeps the system in the "please fix me"
+/// state so the gate re-fires on every start until the user either
+/// restores the real key or clears the stale rows.
+///
+/// Best-effort: failures are logged at `warn` and swallowed. The
+/// primary user signal is the gate's abort error; a failed rollback
+/// only leaves a stray entry the user can delete manually, not data
+/// loss.
+pub async fn rollback_generated_key_persistence(
+    source: crate::settings::KeySource,
+    env_path: &std::path::Path,
+) {
+    use crate::settings::KeySource;
+
+    match source {
+        KeySource::Keychain => {
+            if let Err(e) = keychain::delete_master_key().await {
+                tracing::warn!(
+                    "Safety-gate rollback: failed to delete the freshly-generated \
+                     master key from the OS keychain: {e}. The stray entry may \
+                     need manual cleanup before the next start."
+                );
+            } else {
+                tracing::debug!(
+                    "Safety-gate rollback: removed the freshly-generated master \
+                     key from the OS keychain."
+                );
+            }
+        }
+        KeySource::Env => {
+            if let Err(e) =
+                crate::bootstrap::remove_bootstrap_var_to(env_path, "SECRETS_MASTER_KEY")
+            {
+                tracing::warn!(
+                    "Safety-gate rollback: failed to strip SECRETS_MASTER_KEY from \
+                     {}: {e}. Manual cleanup may be required before the next start.",
+                    env_path.display()
+                );
+            } else {
+                tracing::debug!(
+                    "Safety-gate rollback: removed the freshly-generated \
+                     SECRETS_MASTER_KEY entry from {}.",
+                    env_path.display()
+                );
+            }
+        }
+        KeySource::None => {
+            // `generated = true` never pairs with `source = None` —
+            // `auto_generate_and_persist` always reports Env or
+            // Keychain — but be defensive.
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +343,65 @@ mod tests {
         assert!(
             msg.contains("secrets"),
             "error must reference the store / table the user can clear; got: {msg}"
+        );
+    }
+
+    /// Rollback for the `.env` persistence path: when the safety gate
+    /// fails, we must strip the `SECRETS_MASTER_KEY` line we just
+    /// wrote so the next start re-triggers the gate instead of
+    /// picking up the stray key as an env-var match.
+    #[tokio::test]
+    async fn rollback_removes_generated_env_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(
+            &env_path,
+            "DATABASE_URL=\"postgres://x\"\nSECRETS_MASTER_KEY=\"deadbeef\"\nOTHER=\"y\"\n",
+        )
+        .unwrap();
+
+        rollback_generated_key_persistence(crate::settings::KeySource::Env, &env_path).await;
+
+        let after = std::fs::read_to_string(&env_path).unwrap();
+        assert!(
+            !after.contains("SECRETS_MASTER_KEY"),
+            "rollback must strip the SECRETS_MASTER_KEY line; got: {after}"
+        );
+        assert!(
+            after.contains("DATABASE_URL") && after.contains("OTHER"),
+            "rollback must preserve unrelated lines; got: {after}"
+        );
+    }
+
+    /// Rollback is idempotent on a missing `.env`: the gate fires on
+    /// every subsequent start until the user acts, so rollback must
+    /// not error when there is nothing to remove.
+    #[tokio::test]
+    async fn rollback_tolerates_missing_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("does-not-exist.env");
+
+        // Does not panic / error.
+        rollback_generated_key_persistence(crate::settings::KeySource::Env, &env_path).await;
+
+        assert!(!env_path.exists(), "rollback must not create the file");
+    }
+
+    /// `KeySource::None` is defensive — `auto_generate_and_persist`
+    /// never pairs `generated = true` with `None` — but rollback
+    /// must be a no-op rather than panic if it ever does.
+    #[tokio::test]
+    async fn rollback_with_source_none_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "SECRETS_MASTER_KEY=\"keepme\"\n").unwrap();
+
+        rollback_generated_key_persistence(crate::settings::KeySource::None, &env_path).await;
+
+        let after = std::fs::read_to_string(&env_path).unwrap();
+        assert!(
+            after.contains("SECRETS_MASTER_KEY"),
+            "rollback with source=None must not touch .env; got: {after}"
         );
     }
 

@@ -280,12 +280,28 @@ impl AppBuilder {
         // shadow unrecoverable data. Fail loudly (and fail-closed on
         // probe error) so the user can restore the original key before
         // any new writes pile on top.
-        if let Some(ref secrets) = store {
-            crate::secrets::verify_generated_key_safe(
+        //
+        // Roll back the persistence `auto_generate_and_persist` already
+        // committed: otherwise a subsequent restart would read the
+        // newly-written key as `source = Env/Keychain, generated =
+        // false`, skip this gate, and silently accept the wrong key.
+        // Rollback keeps the gate re-firing on every start until the
+        // user restores the real key or clears the stale rows.
+        if let Some(ref secrets) = store
+            && let Err(gate_err) = crate::secrets::verify_generated_key_safe(
                 self.config.secrets.generated,
                 secrets.as_ref(),
             )
-            .await?;
+            .await
+        {
+            if self.config.secrets.generated {
+                crate::secrets::rollback_generated_key_persistence(
+                    self.config.secrets.source,
+                    &crate::bootstrap::ironclaw_env_path(),
+                )
+                .await;
+            }
+            return Err(gate_err.into());
         }
 
         if let Some(ref secrets) = store {
