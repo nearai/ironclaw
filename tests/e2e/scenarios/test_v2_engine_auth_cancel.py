@@ -330,12 +330,26 @@ class TestV2EngineAuthCancel:
             timeout=30,
         )
 
-        history = await _wait_for_response(cancel_server, thread_id, timeout=30)
-        all_responses = " ".join(
-            (t.get("response") or "") for t in history.get("turns", [])
-        ).lower()
-        assert "cancel" in all_responses, (
-            f"Expected 'cancelled' in response. Got: {all_responses[:300]}"
+        # Cancel is delivered via the `GateResolved` SSE event + a direct
+        # "Cancelled." text response to the channel; neither writes a new
+        # assistant row to the chat history DB (the engine thread was
+        # stop_thread'd rather than resumed). Verify the user-visible
+        # signal the gateway actually emits: the pending_gate is gone.
+        async def _pending_gate_cleared() -> bool:
+            r = await api_get(
+                cancel_server,
+                f"/api/chat/history?thread_id={thread_id}",
+                timeout=15,
+            )
+            r.raise_for_status()
+            return r.json().get("pending_gate") is None
+
+        for _ in range(60):
+            if await _pending_gate_cleared():
+                break
+            await asyncio.sleep(0.5)
+        assert await _pending_gate_cleared(), (
+            "Expected pending_gate to clear after 'cancel'"
         )
 
     async def test_cancel_then_empty_same_thread(self, cancel_server, cancel_mock_api):
