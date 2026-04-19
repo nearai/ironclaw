@@ -1870,6 +1870,10 @@ mod tests {
             self.inner.exists(user_id, name).await
         }
 
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            self.inner.any_exist().await
+        }
+
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
             self.inner.list(user_id).await
         }
