@@ -27,7 +27,6 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::channels::web::auth::{CombinedAuthState, auth_middleware};
-use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -71,20 +70,29 @@ use crate::channels::web::platform::static_files::{
     project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
-// Feature handlers still inline in `server.rs` pending migration into
-// `features/<slice>/`. Kept `pub(crate)` so the router can reference them
+// Feature handlers live in a split during the ironclaw#2599 migration:
+// already-migrated slices (chat, logs, oauth, pairing, status) under
+// `features/<slice>/`, everything else still in `server.rs`. Each slice
+// keeps its handlers `pub(crate)` so the router can reference them
 // without exposing them outside the crate.
+use crate::channels::web::features::chat::{
+    chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler, chat_events_handler,
+    chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
+    chat_threads_handler, chat_ws_handler,
+};
+use crate::channels::web::features::logs::{
+    logs_events_handler, logs_level_get_handler, logs_level_set_handler,
+};
 use crate::channels::web::features::oauth::{
     oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
 };
+use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
+use crate::channels::web::features::status::gateway_status_handler;
 use crate::channels::web::server::{
-    chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler,
-    chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
-    chat_threads_handler, chat_ws_handler, extensions_activate_handler, extensions_install_handler,
-    extensions_list_handler, extensions_readiness_handler, extensions_registry_handler,
-    extensions_remove_handler, extensions_setup_handler, extensions_setup_submit_handler,
-    extensions_tools_handler, gateway_status_handler, logs_events_handler, logs_level_get_handler,
-    logs_level_set_handler, pairing_approve_handler, pairing_list_handler, routines_runs_handler,
+    extensions_activate_handler, extensions_install_handler, extensions_list_handler,
+    extensions_readiness_handler, extensions_registry_handler, extensions_remove_handler,
+    extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
+    routines_runs_handler,
 };
 
 /// Start the gateway HTTP server.

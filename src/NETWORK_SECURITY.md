@@ -138,6 +138,10 @@ Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `808
 
 By default the webhook server binds to loopback only. For external webhook providers, expose it intentionally via a tunnel or set `HTTP_HOST` explicitly.
 
+**`--cli-only` mode:** When the `--cli-only` flag is set, non-CLI network services and channel activations are suppressed — no webhook server, WASM channel endpoints, HTTP channel, Signal channel, relay channel restoration, gateway channel, managed tunnel, or sandbox orchestrator API will start.
+
+This mode suppresses network-facing services; it does not disable the job tool surface. Scheduler-backed job tools remain available, while sandbox/container-backed job dependencies are only injected when the orchestrator is running.
+
 **Reference:** `src/config/channels.rs` — `http_host` default (`"127.0.0.1"`), `http_port` default (`8080`)
 
 ### Authentication

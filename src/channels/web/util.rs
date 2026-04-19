@@ -1,10 +1,59 @@
 //! Shared utility functions for the web gateway.
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::{GeneratedImageInfo, ToolCallInfo, TurnInfo};
+use crate::channels::web::types::{GeneratedImageInfo, ImageData, ToolCallInfo, TurnInfo};
 use crate::generated_images::GeneratedImageSentinel;
 
 pub use ironclaw_common::truncate_preview;
+
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
 
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
