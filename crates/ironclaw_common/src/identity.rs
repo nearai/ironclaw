@@ -248,6 +248,153 @@ impl ExtensionName {
     }
 }
 
+/// Maximum length for an [`McpServerName`].
+///
+/// MCP server names are used as tool-name prefixes in LLM providers (which
+/// typically require `^[a-zA-Z0-9_-]+$`), as components of secret-store keys
+/// (e.g. `mcp_<name>_access_token`), and as filesystem-adjacent identifiers.
+/// 64 bytes matches the shared `MAX_NAME_LEN` used for other identity names.
+pub const MAX_MCP_SERVER_NAME_LEN: usize = 64;
+
+/// Why a candidate string is not a valid MCP server name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum McpServerNameError {
+    #[error("MCP server name must not be empty")]
+    Empty,
+    #[error("MCP server name exceeds {MAX_MCP_SERVER_NAME_LEN} characters")]
+    TooLong,
+    #[error(
+        "MCP server name '{0}' contains invalid characters \
+         (only alphanumeric, dash, underscore are allowed)"
+    )]
+    InvalidChar(String),
+}
+
+/// MCP server identifier — e.g. `notion`, `github`, `my-server`.
+///
+/// The allowlist rules mirror the pre-newtype check that landed in #2400:
+/// alphanumeric, dash, and underscore only. These rules are intentionally
+/// more permissive than [`CredentialName`] / [`ExtensionName`] because MCP
+/// server names were historically free-form — we reject shell metacharacters
+/// and path separators but still accept uppercase letters and dashes. The
+/// character set is a superset of what LLM providers accept for tool-name
+/// prefixes (`^[a-zA-Z0-9_-]+$`).
+///
+/// Callers must go through [`Self::new`] (validating) or
+/// [`Self::from_trusted`] (documented opt-out, e.g. for values already
+/// validated at load time). Deliberately no `From<String>` / `From<&str>`.
+///
+/// `#[serde(transparent)]` preserves on-wire compatibility — legacy config
+/// rows continue to deserialize cleanly, and invalid values are only
+/// surfaced when re-validated through [`Self::new`]. See
+/// `.claude/rules/types.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpServerName(String);
+
+impl McpServerName {
+    /// Construct from any string-like value, validating the allowlist.
+    ///
+    /// Rejects empty strings, strings longer than
+    /// [`MAX_MCP_SERVER_NAME_LEN`], and strings containing any character
+    /// outside the allowlist (alphanumeric, `-`, `_`). Path separators,
+    /// shell metacharacters, NUL bytes, and whitespace all fall into the
+    /// invalid-character bucket.
+    pub fn new(raw: impl AsRef<str>) -> Result<Self, McpServerNameError> {
+        let s = raw.as_ref();
+        if s.is_empty() {
+            return Err(McpServerNameError::Empty);
+        }
+        if s.len() > MAX_MCP_SERVER_NAME_LEN {
+            return Err(McpServerNameError::TooLong);
+        }
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(McpServerNameError::InvalidChar(s.to_string()));
+        }
+        Ok(Self(s.to_string()))
+    }
+
+    /// Construct without validation.
+    ///
+    /// Use for values sourced from a typed upstream that the caller already
+    /// trusts — an already-validated config row, a canonicalised name after
+    /// hyphen-to-underscore folding in the factory, or a
+    /// `#[serde(transparent)]` deserialization whose wire contract predates
+    /// the newtype. Prefer [`Self::new`] for anything touching external
+    /// input.
+    pub fn from_trusted(raw: String) -> Self {
+        Self(raw)
+    }
+
+    /// Borrow the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for McpServerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// Intentionally no `Deref<Target = str>`, no `From<String>`, no
+// `From<&str>`: the whole point of this newtype is to force callers to
+// make the boundary crossing explicit via `new` (validating) or
+// `from_trusted` (documented opt-out).
+impl AsRef<str> for McpServerName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for McpServerName {
+    type Error = McpServerNameError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for McpServerName {
+    type Error = McpServerNameError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl FromStr for McpServerName {
+    type Err = McpServerNameError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl From<McpServerName> for String {
+    fn from(value: McpServerName) -> String {
+        value.0
+    }
+}
+
+impl PartialEq<str> for McpServerName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for McpServerName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +587,108 @@ mod tests {
         ] {
             assert!(CredentialName::new(ok).is_ok(), "expected {ok} to validate",);
         }
+    }
+
+    // ---- McpServerName tests ----
+
+    #[test]
+    fn mcp_server_name_accepts_allowlist_characters() {
+        // Alphanumeric, dashes, underscores, mixed case are all accepted —
+        // this mirrors the pre-newtype `McpServerConfig::validate` coverage
+        // (`test_server_name_valid_characters_accepted`).
+        for ok in ["notion", "my-server", "my_server", "MCP-1", "server123"] {
+            let name = McpServerName::new(ok).expect("should accept allowlist chars");
+            assert_eq!(name.as_str(), ok);
+        }
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_shell_metacharacters() {
+        // Regression: the allowlist originated in #2400 as defence against
+        // shell-metacharacter injection when the name is interpolated into
+        // secret keys or tool-name prefixes.
+        for bad in [
+            "server; rm -rf /",
+            "server$(whoami)",
+            "server`id`",
+            "server|cat /etc/passwd",
+            "server&bg",
+            "server>out",
+            "server<in",
+            "name with spaces",
+        ] {
+            assert!(
+                matches!(McpServerName::new(bad), Err(McpServerNameError::InvalidChar(_))),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_path_separators() {
+        for bad in ["../etc/passwd", "server/name", "server\\name"] {
+            assert!(
+                matches!(McpServerName::new(bad), Err(McpServerNameError::InvalidChar(_))),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_dots() {
+        // Dots are rejected because server names are used as tool-name
+        // prefixes and LLM providers require `^[a-zA-Z0-9_-]+$`.
+        assert!(matches!(
+            McpServerName::new("my.server"),
+            Err(McpServerNameError::InvalidChar(_))
+        ));
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_null_byte() {
+        assert!(matches!(
+            McpServerName::new("server\0name"),
+            Err(McpServerNameError::InvalidChar(_))
+        ));
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_empty() {
+        assert_eq!(McpServerName::new(""), Err(McpServerNameError::Empty));
+    }
+
+    #[test]
+    fn mcp_server_name_rejects_too_long() {
+        let long = "a".repeat(MAX_MCP_SERVER_NAME_LEN + 1);
+        assert_eq!(McpServerName::new(&long), Err(McpServerNameError::TooLong));
+    }
+
+    #[test]
+    fn mcp_server_name_serde_is_transparent() {
+        let name = McpServerName::new("notion").unwrap();
+        let json = serde_json::to_string(&name).unwrap();
+        assert_eq!(json, "\"notion\"");
+
+        let round: McpServerName = serde_json::from_str("\"notion\"").unwrap();
+        assert_eq!(round.as_str(), "notion");
+    }
+
+    /// Like the other identity newtypes, `#[serde(transparent)]` means we
+    /// do not re-validate at deserialize time — legacy persisted
+    /// `mcp-servers.json` rows must keep loading. Validation happens at
+    /// construction sites (e.g. `McpServerConfig::validate`), not on the
+    /// wire.
+    #[test]
+    fn mcp_server_name_serde_does_not_revalidate() {
+        let legacy: McpServerName = serde_json::from_str("\"bad;server\"").unwrap();
+        assert_eq!(legacy.as_str(), "bad;server");
+    }
+
+    #[test]
+    fn mcp_server_name_from_trusted_preserves_raw() {
+        // `from_trusted` is the documented escape hatch for canonicalised
+        // post-validation values (e.g. after the factory folds hyphens).
+        let name = McpServerName::from_trusted("my_server".to_string());
+        assert_eq!(name.as_str(), "my_server");
     }
 }

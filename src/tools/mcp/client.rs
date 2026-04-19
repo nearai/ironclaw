@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use ironclaw_common::McpServerName;
 use tokio::sync::RwLock;
 
 use crate::auth::resolve_access_token_string_with_refresh;
@@ -60,7 +61,11 @@ pub struct McpClient {
     server_url: String,
 
     /// Server name (for logging and session management).
-    server_name: String,
+    ///
+    /// Typed via `McpServerName` so session-manager lookups and logging
+    /// are both compile-time-gated behind the allowlist validation that
+    /// lives in `ironclaw_common::identity`.
+    server_name: McpServerName,
 
     /// Request ID counter.
     next_id: AtomicU64,
@@ -100,8 +105,14 @@ impl McpClient {
     /// Use this for local development servers or servers that don't require auth.
     pub fn new(server_url: impl Into<String>) -> Self {
         let url: String = server_url.into();
-        let name = extract_server_name(&url);
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let name_str = extract_server_name(&url);
+        // `extract_server_name` is a heuristic URL parser that may emit
+        // names outside the strict allowlist (e.g. "unknown" when the URL
+        // cannot be parsed). `from_trusted` accepts whatever it produced;
+        // validation ran upstream in `McpServerConfig::validate` for the
+        // production path.
+        let name = McpServerName::from_trusted(name_str);
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
         Self {
             transport,
@@ -126,9 +137,12 @@ impl McpClient {
     ///
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        let name: String = server_name.into().replace('-', "_");
+        // Preserve historical hyphen-to-underscore folding so session
+        // keys match `create_client_from_config`'s canonicalization.
+        let raw: String = server_name.into().replace('-', "_");
+        let name = McpServerName::from_trusted(raw);
         let url: String = server_url.into();
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
         Self {
             transport,
@@ -178,7 +192,10 @@ impl McpClient {
         Ok(Self {
             transport,
             server_url: config.url.clone(),
-            server_name: config.name.clone(),
+            // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name`
+            // to `McpServerName` so we can move this through without
+            // `from_trusted`. See PR description for deferred sites.
+            server_name: McpServerName::from_trusted(config.name.clone()),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
@@ -213,7 +230,10 @@ impl McpClient {
         Self {
             transport,
             server_url: config.url.clone(),
-            server_name: config.name.clone(),
+            // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name`
+            // to `McpServerName` so we can move this through without
+            // `from_trusted`.
+            server_name: McpServerName::from_trusted(config.name.clone()),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
@@ -238,7 +258,11 @@ impl McpClient {
         user_id: impl Into<String>,
         server_config: Option<McpServerConfig>,
     ) -> Self {
-        let name: String = server_name.into();
+        // Caller (factory) already canonicalized and validated the name
+        // via `McpServerConfig::validate`; `from_trusted` preserves the
+        // hyphen-folded form. TODO(type-safety PR 4 of 4): accept
+        // `McpServerName` here directly.
+        let name = McpServerName::from_trusted(server_name.into());
         let url = server_config
             .as_ref()
             .map(|c| c.url.clone())
@@ -278,8 +302,16 @@ impl McpClient {
         self
     }
 
-    /// Get the server name.
+    /// Get the server name as a string slice.
+    ///
+    /// For typed access — when feeding the name into a session-manager
+    /// call or another typed API — use [`Self::server_name_typed`].
     pub fn server_name(&self) -> &str {
+        self.server_name.as_str()
+    }
+
+    /// Get the typed server name.
+    pub fn server_name_typed(&self) -> &McpServerName {
         &self.server_name
     }
 
@@ -337,7 +369,7 @@ impl McpClient {
             secrets.as_ref(),
             &self.user_id,
             &config.token_secret_name(),
-            &self.server_name,
+            self.server_name.as_str(),
             || async {
                 refresh_access_token(config, secrets, &self.user_id)
                     .await
@@ -641,7 +673,7 @@ impl McpClient {
         // a few dozen tools).
         let mut seen_ids: HashMap<String, String> = HashMap::new();
         for t in &mcp_tools {
-            let id = mcp_tool_id(&self.server_name, &t.name);
+            let id = mcp_tool_id(self.server_name.as_str(), &t.name);
             match seen_ids.get(&id) {
                 Some(prev) if prev != &t.name => {
                     tracing::warn!(
@@ -664,11 +696,11 @@ impl McpClient {
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
-                let prefixed_name = mcp_tool_id(&self.server_name, &t.name);
+                let prefixed_name = mcp_tool_id(self.server_name.as_str(), &t.name);
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
-                    provider_extension: self.server_name.clone(),
+                    provider_extension: self.server_name.as_str().to_string(),
                     client: client.clone(),
                 }) as Arc<dyn Tool>
             })

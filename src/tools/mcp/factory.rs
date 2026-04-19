@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use ironclaw_common::McpServerName;
+
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::config::{EffectiveTransport, McpServerConfig};
 use crate::tools::mcp::http_transport::HttpMcpTransport;
@@ -39,6 +41,18 @@ pub async fn create_client_from_config(
     // receives the normalised name.
     server.name = server.name.replace('-', "_");
     let server_name = server.name.clone();
+
+    // Re-validate through `McpServerName::new` so a malformed name (e.g.
+    // a config row persisted before the #2400 allowlist tightened) fails
+    // fast at factory time instead of silently producing an MCP session
+    // keyed by an un-checked string. The typed value is discarded for
+    // now — client / transport still carry `String` — but the validation
+    // still fires as a gate. The follow-up that threads `McpServerName`
+    // through `McpServerConfig.name` itself will remove this drop.
+    McpServerName::new(&server_name).map_err(|e| McpFactoryError::InvalidConfig {
+        name: server_name.clone(),
+        reason: e.to_string(),
+    })?;
 
     match server.effective_transport() {
         EffectiveTransport::Stdio { command, args, env } => {
@@ -378,8 +392,8 @@ mod tests {
         // Pre-create a session entry so that update_session_id has something to update.
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
         // Use the normalised server name (hyphens → underscores) that the factory applies.
-        let normalised_name = "session_test";
-        session_manager.get_or_create(normalised_name, &url).await;
+        let normalised_name = McpServerName::new("session_test").expect("valid");
+        session_manager.get_or_create(&normalised_name, &url).await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;
@@ -397,7 +411,7 @@ mod tests {
             .expect("request should succeed");
 
         // Verify the session manager captured the session ID from the response.
-        let captured = session_manager.get_session_id(normalised_name).await;
+        let captured = session_manager.get_session_id(&normalised_name).await;
         assert_eq!(
             captured.as_deref(),
             Some(SESSION_ID),

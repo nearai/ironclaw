@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ironclaw_common::McpServerName;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -159,32 +160,17 @@ impl McpServerConfig {
 
     /// Validate the server configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.name.is_empty() {
-            return Err(ConfigError::InvalidConfig {
-                reason: "Server name cannot be empty".to_string(),
-            });
-        }
-
-        // Allowlist: alphanumeric, dash, underscore.
-        // Rejects shell metacharacters (;|&`$), path separators (/\),
-        // dots (LLM providers require tool names match ^[a-zA-Z0-9_-]+$
-        // and server names are used as tool name prefixes), null bytes,
-        // spaces, and other dangerous characters that could cause injection
-        // when names are interpolated into secret keys, tool name prefixes,
-        // or provider tags.
-        if !self
-            .name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(ConfigError::InvalidConfig {
-                reason: format!(
-                    "Server name '{}' contains invalid characters \
-                     (only alphanumeric, dash, underscore are allowed)",
-                    self.name
-                ),
-            });
-        }
+        // The server-name allowlist (non-empty, length cap, alphanumeric /
+        // dash / underscore only) now lives in `McpServerName::new` — see
+        // `ironclaw_common::identity`. Delegating here keeps the on-disk
+        // wire format a plain string (via `McpServerConfig.name: String`)
+        // while gating every construction path through the newtype's
+        // validation. The allowlist itself originated in #2400 as
+        // defence against shell-metacharacter injection when the name is
+        // interpolated into secret keys or tool-name prefixes.
+        McpServerName::new(&self.name).map_err(|e| ConfigError::InvalidConfig {
+            reason: e.to_string(),
+        })?;
 
         match self.effective_transport() {
             EffectiveTransport::Http => {

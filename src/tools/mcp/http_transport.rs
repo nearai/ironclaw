@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_common::McpServerName;
 
 use crate::tools::mcp::protocol::{McpRequest, McpResponse};
 use crate::tools::mcp::session::McpSessionManager;
@@ -20,7 +21,9 @@ use crate::tools::tool::ToolError;
 /// manages session IDs via [`McpSessionManager`] and supports custom headers.
 pub struct HttpMcpTransport {
     server_url: String,
-    server_name: String,
+    /// Typed name so session-manager lookups cannot accidentally be keyed
+    /// by a free-form string. See `ironclaw_common::identity`.
+    server_name: McpServerName,
     http_client: reqwest::Client,
     session_manager: Option<Arc<McpSessionManager>>,
     custom_headers: HashMap<String, String>,
@@ -28,10 +31,17 @@ pub struct HttpMcpTransport {
 
 impl HttpMcpTransport {
     /// Create a new HTTP transport for the given server URL.
+    ///
+    /// TODO(type-safety PR 4 of 4): accept `McpServerName` directly once
+    /// all callers migrate. For now the raw string is wrapped via
+    /// `from_trusted` — the factory and `McpServerConfig::validate`
+    /// already ran the allowlist check, and hyphen-folded names are
+    /// legal `from_trusted` inputs even though some shapes they produce
+    /// would re-reject via `new`.
     pub fn new(server_url: impl Into<String>, server_name: impl Into<String>) -> Self {
         Self {
             server_url: server_url.into(),
-            server_name: server_name.into(),
+            server_name: McpServerName::from_trusted(server_name.into()),
             // reqwest::Client::builder().build() only fails if the TLS backend
             // cannot initialize, which does not happen with the default rustls
             // feature set. Panic is acceptable here (same as reqwest's own
