@@ -14,6 +14,16 @@ pub struct SecretsConfig {
     pub enabled: bool,
     /// Source of the master key.
     pub source: crate::settings::KeySource,
+    /// `true` when this process had to fall through to
+    /// `auto_generate_and_persist` — i.e. no pre-existing
+    /// `SECRETS_MASTER_KEY`, no keychain entry, and no on-disk `.env`
+    /// key was available when we resolved.
+    ///
+    /// Consumed by `AppBuilder::init_secrets` as a safety gate: if the
+    /// secrets table already has rows, a freshly-generated key can't
+    /// decrypt them and startup must fail loudly rather than silently
+    /// shadow unrecoverable data.
+    pub generated: bool,
 }
 
 impl std::fmt::Debug for SecretsConfig {
@@ -22,6 +32,7 @@ impl std::fmt::Debug for SecretsConfig {
             .field("master_key", &self.master_key.is_some())
             .field("enabled", &self.enabled)
             .field("source", &self.source)
+            .field("generated", &self.generated)
             .finish()
     }
 }
@@ -30,11 +41,17 @@ impl SecretsConfig {
     /// Resolve the secrets master key.
     ///
     /// Order:
-    /// 1. OS keychain entry — preferred when reachable. Keychain storage
-    ///    is OS-encrypted and rotates on device policy, so it's the
-    ///    stronger persistence substrate.
-    /// 2. `SECRETS_MASTER_KEY` env var — the escape hatch for
-    ///    CI/Docker/headless environments where no keychain exists.
+    /// 1. `SECRETS_MASTER_KEY` env var — explicit user intent and the
+    ///    canonical escape hatch for CI/Docker/headless environments.
+    ///    Matches the probe order used by `SetupWizard::step_security`,
+    ///    `SetupWizard::init_secrets_context`,
+    ///    `crate::secrets::resolve_master_key`, and `cli import`, so the
+    ///    key a newly-written row is encrypted with always matches the
+    ///    key a subsequent startup decrypts with.
+    /// 2. OS keychain entry — the managed-storage path for local
+    ///    installs that ran the onboarding wizard. Only probed when the
+    ///    env var is unset, so setting `SECRETS_MASTER_KEY` explicitly
+    ///    does not trigger a macOS Keychain Access dialog.
     /// 3. Auto-generate and persist: try keychain first, fall back to
     ///    `~/.ironclaw/.env` as `SECRETS_MASTER_KEY=…`.
     ///
@@ -57,14 +74,22 @@ impl SecretsConfig {
     /// fallback to an explicit path. Production code calls
     /// [`Self::resolve`], which targets `~/.ironclaw/.env`.
     pub(crate) async fn resolve_with_env_path(env_path: &Path) -> Result<Self, ConfigError> {
-        let keychain_probe = crate::secrets::keychain::get_master_key().await.ok();
+        // Lazy keychain probe: only touch the OS keychain when the env
+        // var is unset. Eager probing would trigger macOS Keychain
+        // Access dialogs on every startup even when the user has
+        // explicitly set SECRETS_MASTER_KEY.
+        let keychain_probe = if optional_env("SECRETS_MASTER_KEY")?.is_some() {
+            None
+        } else {
+            crate::secrets::keychain::get_master_key().await.ok()
+        };
         Self::resolve_inner(keychain_probe, env_path, true).await
     }
 
-    /// Resolution core. Takes the keychain probe result and a
+    /// Resolution core. Takes the keychain probe result and an
     /// `allow_keychain_persist` flag as inputs so tests can exercise
-    /// the keychain-wins-over-env and env-fallback branches
-    /// deterministically without touching the real OS keychain.
+    /// the env-wins and keychain-fallback branches deterministically
+    /// without touching the real OS keychain.
     ///
     /// `allow_keychain_persist = false` skips the keychain write in
     /// the auto-generate path, forcing `.env` persistence. Tests use
@@ -77,18 +102,22 @@ impl SecretsConfig {
     ) -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
 
-        if let Some(key_bytes) = keychain_key {
-            let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            return Self::build(Some(SecretString::from(key_hex)), KeySource::Keychain);
+        if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
+            return Self::build(Some(SecretString::from(env_key)), KeySource::Env, false);
         }
 
-        if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
-            return Self::build(Some(SecretString::from(env_key)), KeySource::Env);
+        if let Some(key_bytes) = keychain_key {
+            let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            return Self::build(
+                Some(SecretString::from(key_hex)),
+                KeySource::Keychain,
+                false,
+            );
         }
 
         let (key_hex, source) =
             Self::auto_generate_and_persist(env_path, allow_keychain_persist).await?;
-        Self::build(Some(SecretString::from(key_hex)), source)
+        Self::build(Some(SecretString::from(key_hex)), source, true)
     }
 
     /// Generate a new master key and persist it.
@@ -156,6 +185,7 @@ impl SecretsConfig {
     fn build(
         master_key: Option<SecretString>,
         source: crate::settings::KeySource,
+        generated: bool,
     ) -> Result<Self, ConfigError> {
         if let Some(ref key) = master_key
             && key.expose_secret().len() < 32
@@ -170,6 +200,7 @@ impl SecretsConfig {
             master_key,
             enabled,
             source,
+            generated,
         })
     }
 
@@ -186,7 +217,13 @@ impl SecretsConfig {
 fn read_secrets_master_key(env_path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(env_path).ok()?;
     for line in contents.lines() {
-        let (key, value) = line.split_once('=')?;
+        // Skip blank lines and comments rather than bailing out of the
+        // whole scan — a normal `.env` often has a leading comment or
+        // blank line, and `?` on `split_once` would abort before we
+        // ever reach `SECRETS_MASTER_KEY` further down the file.
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if key.trim() != "SECRETS_MASTER_KEY" {
             continue;
         }
@@ -204,14 +241,17 @@ mod tests {
     use crate::config::helpers::lock_env;
     use crate::settings::KeySource;
 
-    /// Probe order: when the keychain yields a key AND
-    /// `SECRETS_MASTER_KEY` is set in the env, the keychain wins.
-    /// Keychain storage is OS-encrypted and stronger than a plaintext
-    /// `.env` entry, so we prefer it as the source of truth when both
-    /// are present.
+    /// Probe order: when `SECRETS_MASTER_KEY` is set AND the keychain
+    /// also yields a key, the env var wins. The env var is the explicit
+    /// user-intent / CI escape hatch, and matches the order used by
+    /// every other master-key reader (`SetupWizard::step_security`,
+    /// `SetupWizard::init_secrets_context`,
+    /// `crate::secrets::resolve_master_key`, `cli import`). If the
+    /// startup path disagreed, onboarding could encrypt new secrets
+    /// with one key and a subsequent boot could read them with another.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // env guard must span the entire test
-    async fn keychain_wins_over_env_when_both_present() {
+    async fn env_wins_over_keychain_when_both_present() {
         let _guard = lock_env();
         let prior = std::env::var("SECRETS_MASTER_KEY").ok();
         let env_hex = "a".repeat(64);
@@ -224,24 +264,131 @@ mod tests {
         let env_path = dir.path().join(".env");
 
         let keychain_bytes = vec![0xbbu8; 32];
-        let expected_keychain_hex: String = keychain_bytes
+
+        let cfg = SecretsConfig::resolve_inner(Some(keychain_bytes), &env_path, false)
+            .await
+            .expect("resolve must succeed with env var present");
+
+        assert_eq!(cfg.source, KeySource::Env);
+        assert_eq!(
+            cfg.master_key
+                .as_ref()
+                .map(|k| k.expose_secret().to_string()),
+            Some(env_hex),
+            "env-var key must be returned, not the keychain key"
+        );
+        assert!(!env_path.exists(), "env-wins path must not touch .env");
+
+        // SAFETY: serialized via ENV_MUTEX (lock_env).
+        unsafe {
+            if let Some(ref v) = prior {
+                std::env::set_var("SECRETS_MASTER_KEY", v);
+            } else {
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+        }
+    }
+
+    /// `generated` must be false when the key came from env or
+    /// keychain, and true only when we fell through to
+    /// `auto_generate_and_persist`. The flag is read in
+    /// `AppBuilder::init_secrets` to gate the "DB already populated"
+    /// safety check — a false positive (marking an env-supplied key as
+    /// generated) would spuriously abort a correctly-configured
+    /// startup; a false negative would silently shadow undecryptable
+    /// data.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
+    async fn generated_flag_tracks_auto_generate_path() {
+        let _guard = lock_env();
+        let prior = std::env::var("SECRETS_MASTER_KEY").ok();
+        let dir = tempfile::tempdir().unwrap();
+
+        // env-first branch: generated = false.
+        // SAFETY: serialized via ENV_MUTEX (lock_env).
+        unsafe {
+            std::env::set_var("SECRETS_MASTER_KEY", "b".repeat(64));
+        }
+        let cfg = SecretsConfig::resolve_inner(None, &dir.path().join(".env-env"), false)
+            .await
+            .expect("env branch");
+        assert!(
+            !cfg.generated,
+            "env-supplied key must not be marked generated"
+        );
+
+        // keychain branch: generated = false.
+        // SAFETY: serialized via ENV_MUTEX (lock_env).
+        unsafe {
+            std::env::remove_var("SECRETS_MASTER_KEY");
+        }
+        let cfg = SecretsConfig::resolve_inner(
+            Some(vec![0xaau8; 32]),
+            &dir.path().join(".env-kc"),
+            false,
+        )
+        .await
+        .expect("keychain branch");
+        assert!(
+            !cfg.generated,
+            "keychain-supplied key must not be marked generated"
+        );
+
+        // auto-generate branch: generated = true.
+        let cfg = SecretsConfig::resolve_inner(None, &dir.path().join(".env-gen"), false)
+            .await
+            .expect("auto-generate branch");
+        assert!(
+            cfg.generated,
+            "auto-generated key must be marked generated so init_secrets can \
+             run the store-already-populated safety check"
+        );
+        crate::config::clear_injected_var("SECRETS_MASTER_KEY");
+
+        // SAFETY: serialized via ENV_MUTEX (lock_env).
+        unsafe {
+            if let Some(ref v) = prior {
+                std::env::set_var("SECRETS_MASTER_KEY", v);
+            } else {
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+        }
+    }
+
+    /// When `SECRETS_MASTER_KEY` is unset but the keychain has a key,
+    /// the keychain fallback path must succeed. This is the typical
+    /// macOS flow after the onboarding wizard stores a generated key.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
+    async fn keychain_wins_when_env_unset() {
+        let _guard = lock_env();
+        let prior = std::env::var("SECRETS_MASTER_KEY").ok();
+        // SAFETY: serialized via ENV_MUTEX (lock_env).
+        unsafe {
+            std::env::remove_var("SECRETS_MASTER_KEY");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        let keychain_bytes = vec![0xbbu8; 32];
+        let expected_hex: String = keychain_bytes
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
 
         let cfg = SecretsConfig::resolve_inner(Some(keychain_bytes), &env_path, false)
             .await
-            .expect("resolve must succeed with keychain present");
+            .expect("keychain path must succeed when env var unset");
 
         assert_eq!(cfg.source, KeySource::Keychain);
         assert_eq!(
             cfg.master_key
                 .as_ref()
                 .map(|k| k.expose_secret().to_string()),
-            Some(expected_keychain_hex),
-            "keychain key must be returned, not the env-var key"
+            Some(expected_hex)
         );
-        assert!(!env_path.exists(), "keychain-wins path must not touch .env");
+        assert!(!env_path.exists(), "keychain-hit path must not create .env");
 
         // SAFETY: serialized via ENV_MUTEX (lock_env).
         unsafe {
@@ -480,6 +627,25 @@ mod tests {
         std::fs::write(&path, format!("SECRETS_MASTER_KEY=\"{bad}\"\n")).unwrap();
 
         assert_eq!(read_secrets_master_key(&path), None);
+    }
+
+    /// Regression: a `.env` whose `SECRETS_MASTER_KEY` line is preceded
+    /// by blank lines or comments must still be parsed. An earlier
+    /// version used `split_once('=')?`, which bailed out of the entire
+    /// scan on the first non-`KEY=value` line and silently defeated the
+    /// TOCTOU re-check.
+    #[test]
+    fn read_secrets_master_key_skips_blank_and_comment_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let key = "d".repeat(64);
+        std::fs::write(
+            &path,
+            format!("\n# a comment line\n\n# another comment\nSECRETS_MASTER_KEY=\"{key}\"\n"),
+        )
+        .unwrap();
+
+        assert_eq!(read_secrets_master_key(&path), Some(key));
     }
 
     #[test]

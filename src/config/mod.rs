@@ -215,6 +215,7 @@ impl Config {
                 master_key: Some(generate_test_master_key()),
                 enabled: true,
                 source: crate::settings::KeySource::Env,
+                generated: false,
             },
             builder: BuilderModeConfig {
                 enabled: false,
