@@ -92,7 +92,11 @@ impl OrchestratorState {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         if cache.len() >= MAX_JOB_OWNER_CACHE_SIZE {
-            let to_remove: Vec<Uuid> = cache.keys().take(MAX_JOB_OWNER_CACHE_SIZE / 10).copied().collect();
+            let to_remove: Vec<Uuid> = cache
+                .keys()
+                .take(MAX_JOB_OWNER_CACHE_SIZE / 10)
+                .copied()
+                .collect();
             for k in to_remove {
                 cache.remove(&k);
             }
