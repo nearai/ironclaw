@@ -2419,8 +2419,25 @@ pub async fn handle_expected(
         "thread_state": thread.state,
     });
 
-    // Fire the expected-behavior learning mission
+    // Ensure learning missions exist for this user before firing.
+    // They may be missing if the user wasn't the owner at init_engine time
+    // or if their missions failed to initialize.
     let mgr = state.effect_adapter.mission_manager().await;
+    if let Some(ref mgr) = mgr {
+        let user_project_id =
+            resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+        if let Err(e) = mgr
+            .ensure_learning_missions(user_project_id, &message.user_id)
+            .await
+        {
+            debug!(
+                "failed to ensure learning missions for user {}: {e}",
+                message.user_id
+            );
+        }
+    }
+
+    // Fire the expected-behavior learning mission
     let fired = if let Some(mgr) = mgr {
         match mgr
             .fire_on_system_event(
