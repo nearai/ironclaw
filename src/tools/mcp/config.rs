@@ -165,6 +165,27 @@ impl McpServerConfig {
             });
         }
 
+        // Allowlist: alphanumeric, dash, underscore.
+        // Rejects shell metacharacters (;|&`$), path separators (/\),
+        // dots (LLM providers require tool names match ^[a-zA-Z0-9_-]+$
+        // and server names are used as tool name prefixes), null bytes,
+        // spaces, and other dangerous characters that could cause injection
+        // when names are interpolated into secret keys, tool name prefixes,
+        // or provider tags.
+        if !self
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "Server name '{}' contains invalid characters \
+                     (only alphanumeric, dash, underscore are allowed)",
+                    self.name
+                ),
+            });
+        }
+
         match self.effective_transport() {
             EffectiveTransport::Http => {
                 if self.url.is_empty() {
@@ -543,14 +564,23 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     }
 
     let content = fs::read_to_string(path).await?;
-    let config: McpServersFile = serde_json::from_str(&content)?;
+    let mut config: McpServersFile = serde_json::from_str(&content)?;
 
-    // Validate every server on load so corrupted configs are caught early
-    for server in &config.servers {
-        server.validate().map_err(|e| ConfigError::InvalidConfig {
-            reason: format!("Server '{}': {}", server.name, e),
-        })?;
-    }
+    // Validate every server on load. Invalid entries are skipped with a
+    // warning instead of failing the entire config — this prevents legacy
+    // names (e.g. "My Server") from disabling all MCP integrations after
+    // an upgrade that tightened validation.
+    config.servers.retain(|server| {
+        if let Err(e) = server.validate() {
+            tracing::warn!(
+                server_name = %server.name,
+                "Skipping MCP server with invalid config: {e}"
+            );
+            false
+        } else {
+            true
+        }
+    });
 
     Ok(config)
 }
@@ -632,13 +662,21 @@ pub async fn load_mcp_servers_from_db(
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
-            let config: McpServersFile = serde_json::from_value(value)?;
-            // Validate every server on load so corrupted DB configs are caught early
-            for server in &config.servers {
-                server.validate().map_err(|e| ConfigError::InvalidConfig {
-                    reason: format!("Server '{}': {}", server.name, e),
-                })?;
-            }
+            let mut config: McpServersFile = serde_json::from_value(value)?;
+            // Validate every server on load. Invalid entries are skipped
+            // with a warning to avoid breaking all MCP integrations when
+            // legacy names don't pass tightened validation.
+            config.servers.retain(|server| {
+                if let Err(e) = server.validate() {
+                    tracing::warn!(
+                        server_name = %server.name,
+                        "Skipping MCP server with invalid DB config: {e}"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
             Ok(config)
         }
         Ok(None) => {
@@ -891,31 +929,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_rejects_corrupted_headers() {
+    async fn test_load_skips_corrupted_headers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp-servers.json");
 
         // Write a config with an invalid header name directly to disk,
         // bypassing the add_mcp_server() validation path.
         let corrupted = serde_json::json!({
-            "servers": [{
-                "name": "bad-server",
-                "url": "https://mcp.example.com",
-                "enabled": true,
-                "headers": { "X Bad": "value" }
-            }]
+            "servers": [
+                {
+                    "name": "bad-server",
+                    "url": "https://mcp.example.com",
+                    "enabled": true,
+                    "headers": { "X Bad": "value" }
+                },
+                {
+                    "name": "good-server",
+                    "url": "https://mcp.good.com",
+                    "enabled": true,
+                    "headers": {}
+                }
+            ]
         });
         tokio::fs::write(&path, corrupted.to_string())
             .await
             .unwrap();
 
-        let result = load_mcp_servers_from(&path).await;
-        assert!(result.is_err(), "Load should reject corrupted headers");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("bad-server"),
-            "Error should name the offending server, got: {err}"
-        );
+        // Invalid entries are skipped, valid ones are kept
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "good-server");
     }
 
     #[test]
@@ -1450,6 +1493,134 @@ mod tests {
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
         }
+    }
+
+    #[test]
+    fn test_server_name_valid_characters_accepted() {
+        // Alphanumeric, dashes, and underscores are all valid
+        for name in ["notion", "my-server", "my_server", "MCP-1"] {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_ok(),
+                "Name '{}' should be accepted",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_shell_metacharacters_rejected() {
+        let dangerous_names = [
+            "server; rm -rf /",
+            "server$(whoami)",
+            "server`id`",
+            "server|cat /etc/passwd",
+            "server&bg",
+            "server>out",
+            "server<in",
+            "name with spaces",
+        ];
+        for name in dangerous_names {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_err(),
+                "Name '{}' should be rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_path_separators_rejected() {
+        for name in ["../etc/passwd", "server/name", "server\\name"] {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_err(),
+                "Name '{}' should be rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_name_null_byte_rejected() {
+        let config = McpServerConfig::new("server\0name", "https://mcp.example.com");
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_name_dot_rejected() {
+        // Dots are rejected because server names are used as tool name
+        // prefixes and LLM providers require ^[a-zA-Z0-9_-]+$
+        let config = McpServerConfig::new("my.server", "https://mcp.example.com");
+        assert!(
+            config.validate().is_err(),
+            "Dot in server name should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_skips_invalid_server_names() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Write a config with one invalid name and one valid name
+        let mixed = serde_json::json!({
+            "servers": [
+                {
+                    "name": "bad;server",
+                    "url": "https://mcp.evil.com",
+                    "enabled": true,
+                    "headers": {}
+                },
+                {
+                    "name": "good-server",
+                    "url": "https://mcp.good.com",
+                    "enabled": true,
+                    "headers": {}
+                }
+            ]
+        });
+        tokio::fs::write(&path, mixed.to_string()).await.unwrap();
+
+        // Invalid entry is skipped, valid one is kept
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "good-server");
+    }
+
+    #[tokio::test]
+    async fn test_load_preserves_schema_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Write a config with schema_version explicitly set
+        let config = serde_json::json!({
+            "servers": [
+                {
+                    "name": "good-server",
+                    "url": "https://mcp.good.com",
+                    "enabled": true,
+                    "headers": {}
+                },
+                {
+                    "name": "bad;server",
+                    "url": "https://mcp.evil.com",
+                    "enabled": true,
+                    "headers": {}
+                }
+            ],
+            "schema_version": 1
+        });
+        tokio::fs::write(&path, config.to_string()).await.unwrap();
+
+        // Filtering invalid servers must preserve the original schema_version
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(
+            result.schema_version, 1,
+            "schema_version must be preserved when filtering invalid servers"
+        );
     }
 
     #[test]

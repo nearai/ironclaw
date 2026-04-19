@@ -7,16 +7,43 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | File | Role |
 |------|------|
 | `mod.rs` | Gateway builder, startup, `WebChannel` implementation, `with_*` builder methods |
-| `server.rs` | `GatewayState`, `start_server()`, all Axum route registrations, inline handlers |
+| `server.rs` | Feature handlers that have not yet moved (OAuth callbacks, chat, extensions, pairing, logs, gateway status). Re-exports `GatewayState` / `start_server` / related types from `platform::*` for backward compatibility during the ironclaw#2599 migration. |
+| `platform/router.rs` | `start_server()` + Axum route composition (public / protected / statics / projects) and the cross-cutting layer stack (CORS, body limit, panic catch, static security headers, CSP). Single coupling point between platform and features. |
+| `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
+| `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
-| `sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients |
-| `ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker` |
-| `auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) |
+| `platform/sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients. Re-exported as `channels::web::sse` for backward compat. |
+| `platform/ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker`. Re-exported as `channels::web::ws`. |
+| `platform/auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) + DB-token + OIDC extractors. Re-exported as `channels::web::auth`. |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
-| `handlers/` | Handler functions split by domain: `chat`, `extensions`, `jobs`, `memory`, `routines`, `settings`, `skills`, `static_files` |
+| `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
+| `handlers/` | Feature handler functions split by domain: `auth`, `chat`, `engine`, `extensions`, `frontend`, `jobs`, `llm`, `memory`, `routines`, `secrets`, `settings`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration into `features/<slice>/` per ironclaw#2599. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`build_turns_from_db_messages`, `truncate_preview`) |
 | `static/` | Single-page app (HTML/CSS/JS) — embedded at compile time via `include_str!`/`include_bytes!` |
+
+## Platform vs. feature layering (ironclaw#2599)
+
+The target layout is a `platform/` subtree (router, state, auth, SSE,
+WS, static serving) that feature handlers depend on.
+
+**The "no back-edges" rule has one intentional exception: the router.**
+Route composition is inherently the coupling point where transport
+meets features — `platform/router.rs` imports every feature handler it
+registers. Every *other* platform submodule (state, static_files, and
+the auth/SSE/WS modules once they move) must stay handler-agnostic,
+and that's what the future CI check (ironclaw#2599 stage 5) will
+enforce: forbid cross-imports between `platform/{state,static_files,
+auth,sse,ws}.rs` and `handlers/*` / `features/*`, but allow
+`platform/router.rs` to reference both sides.
+
+The flat `handlers/` folder is a transitional fallback — individual
+handlers will migrate into `features/<slice>/` directories once their
+platform dependencies are narrowed to a per-slice `Deps` view. When
+adding a new platform-level concern, put it under `platform/`; when
+adding a new feature handler, keep it under `handlers/` for now but
+design it so the surface it consumes from `GatewayState` is a narrow
+subset that can later be replaced by a typed `Deps` alias.
 
 ## API Routes
 
@@ -282,6 +309,8 @@ All responses include:
 ## Pending Gates
 
 Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
+
+The chat history contract also carries a lightweight `HistoryResponse.in_progress` payload for durable in-flight turn state. Use it to rebuild the visible user message plus "Processing..." affordance after refresh or thread switches. Do not persist transient SSE-only thinking text as normal conversation messages.
 
 ## Adding a New API Endpoint
 
