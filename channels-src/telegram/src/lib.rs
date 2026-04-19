@@ -302,9 +302,35 @@ struct TelegramMessageMetadata {
     /// Whether this is a private (DM) chat.
     is_private: bool,
 
+    /// Telegram chat type for downstream group/private detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_type: Option<String>,
+
     /// Forum topic thread ID (for routing replies back to the correct topic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
+}
+
+/// Deserialize a value that may be a JSON string or number into `Option<String>`.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|id| id.to_string())),
+        Some(_) => Ok(None),
+    }
 }
 
 /// Channel configuration injected by host.
@@ -319,8 +345,10 @@ struct TelegramConfig {
 
     /// Telegram user ID of the bot owner. When set, only messages from this
     /// user are processed. All others are silently dropped.
-    #[serde(default)]
-    owner_id: Option<i64>,
+    /// Accepts both JSON string ("12345") and number (12345) for compatibility
+    /// with both boot-path and hot-activation config injection.
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
+    owner_id: Option<String>,
 
     /// DM policy: "pairing" (default), "allowlist", or "open".
     #[serde(default)]
@@ -448,8 +476,7 @@ fn split_message(text: &str) -> Vec<String> {
         let window = &remaining[..window_bytes];
 
         // 1. Double newline — best paragraph boundary
-        let split_at = window
-            .rfind("\n\n")
+        let split_at = window.rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
             // 3. Sentence-ending punctuation followed by space.
@@ -459,9 +486,9 @@ fn split_message(text: &str) -> Vec<String> {
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
-                (1..bytes.len())
-                    .rev()
-                    .find(|&i| matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' ')
+                (1..bytes.len()).rev().find(|&i| {
+                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
+                })
             })
             // 4. Word boundary (last space)
             .or_else(|| window.rfind(' '))
@@ -469,11 +496,7 @@ fn split_message(text: &str) -> Vec<String> {
             .unwrap_or(window_bytes);
 
         // Avoid empty chunks (e.g. text starting with \n\n).
-        let split_at = if split_at == 0 {
-            window_bytes
-        } else {
-            split_at
-        };
+        let split_at = if split_at == 0 { window_bytes } else { split_at };
 
         // Trim whitespace at chunk boundaries for clean Telegram display.
         // Note: this drops leading/trailing spaces at split points, which is
@@ -549,8 +572,8 @@ impl Guest for TelegramChannel {
         }
 
         // Persist owner_id so subsequent callbacks (on_http_request, on_poll) can read it
-        if let Some(owner_id) = config.owner_id {
-            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, &owner_id.to_string()) {
+        if let Some(ref owner_id) = config.owner_id {
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, owner_id) {
                 channel_host::log(
                     channel_host::LogLevel::Error,
                     &format!("Failed to persist owner_id: {}", e),
@@ -1429,13 +1452,7 @@ fn send_response(
 
     for (i, chunk) in chunks.into_iter().enumerate() {
         // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(
-            chat_id,
-            &chunk,
-            reply_to,
-            Some("Markdown"),
-            message_thread_id,
-        );
+        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
 
         let msg_id = match result {
             Ok(id) => {
@@ -2158,6 +2175,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        chat_type: Some(message.chat.chat_type.clone()),
         message_thread_id: message.message_thread_id,
     };
 
@@ -2565,10 +2583,17 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_owner_id() {
+    fn test_config_with_numeric_owner_id() {
         let json = r#"{"owner_id": 123456789}"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.owner_id, Some(123456789));
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_string_owner_id() {
+        let json = r#"{"owner_id": "123456789"}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
     }
 
     #[test]
@@ -2594,7 +2619,7 @@ mod tests {
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
-        assert_eq!(config.owner_id, Some(42));
+        assert_eq!(config.owner_id, Some("42".to_string()));
         assert!(config.respond_to_all_group_messages);
     }
 
@@ -2787,6 +2812,26 @@ mod tests {
         .unwrap();
 
         assert!(webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_telegram_message_metadata_deserializes_without_chat_type() {
+        let metadata: TelegramMessageMetadata = serde_json::from_str(
+            r#"{
+                "chat_id": 999,
+                "message_id": 701,
+                "user_id": 999,
+                "is_private": true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.chat_id, 999);
+        assert_eq!(metadata.message_id, 701);
+        assert_eq!(metadata.user_id, 999);
+        assert!(metadata.is_private);
+        assert_eq!(metadata.chat_type, None);
+        assert_eq!(metadata.message_thread_id, None);
     }
 
     #[test]

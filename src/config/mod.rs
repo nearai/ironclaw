@@ -189,6 +189,7 @@ impl Config {
                 tui: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
+                configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
             },
             agent: AgentConfig::for_testing(),
@@ -217,6 +218,7 @@ impl Config {
                 master_key: Some(generate_test_master_key()),
                 enabled: true,
                 source: crate::settings::KeySource::Env,
+                generated: false,
             },
             builder: BuilderModeConfig {
                 enabled: false,
@@ -641,6 +643,24 @@ pub fn inject_single_var(key: &str, value: &str) {
             poisoned
                 .into_inner()
                 .insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
         }
     }
 }
@@ -1155,11 +1175,16 @@ mod tests {
             )
             .await;
 
+        // Use an empty TOML file to isolate from the host's config.toml
+        // (which may contain a selected_model that overrides the DB value).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"").unwrap();
+
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "another-operator",
-            None,
+            Some(tmp.path()),
             None,
             true,
         )

@@ -95,6 +95,186 @@ async def test_sse_reconnect_preserves_chat_history(page):
     assert user_msgs >= 1, "User message should be preserved after reconnect"
 
 
+async def test_tab_switch_does_not_reload_chat_history(page):
+    """Regression for #2404: brief tab hide/show must not re-render the chat DOM.
+
+    Before the fix, every ``visibilitychange`` round-trip triggered
+    ``loadHistory()`` in ``onopen`` unconditionally, wiping ``#chat-messages``
+    and losing scroll position. The fix time-gates the reload on
+    ``_sseDisconnectedAt``.  This test drives the real ``visibilitychange``
+    handler (rather than the helper it consults) so that a future refactor
+    of ``onopen`` cannot silently reintroduce the regression.
+    """
+    await send_chat_and_wait_for_terminal_message(page, "Hello")
+
+    # Tag the rendered user message with a sentinel. ``loadHistory()`` clears
+    # ``#chat-messages`` and re-renders from scratch, which would strip this
+    # attribute — its presence after the tab switch proves the DOM survived.
+    await page.evaluate(
+        """
+        () => {
+          const msg = document.querySelector('#chat-messages .message.user');
+          if (msg) msg.setAttribute('data-e2e-preserved', 'yes');
+        }
+        """
+    )
+    tagged = await page.locator('[data-e2e-preserved="yes"]').count()
+    assert tagged == 1, "precondition: exactly one tagged user message"
+
+    history_requests: list[str] = []
+
+    def on_request(request) -> None:
+        if "/api/chat/history" in request.url:
+            history_requests.append(request.url)
+
+    page.on("request", on_request)
+    try:
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'hidden', {
+                configurable: true, get: () => true,
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+        await page.wait_for_function("() => eventSource === null", timeout=5000)
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'hidden', {
+                configurable: true, get: () => false,
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+        await page.wait_for_function(
+            "() => eventSource && eventSource.readyState === 1",
+            timeout=10000,
+        )
+        # Give any deferred history reload time to fire before asserting none did.
+        await page.wait_for_timeout(1500)
+    finally:
+        page.remove_listener("request", on_request)
+
+    assert not history_requests, (
+        f"expected no /api/chat/history calls on brief tab switch, got: {history_requests}"
+    )
+    preserved = await page.locator('[data-e2e-preserved="yes"]').count()
+    assert preserved == 1, "chat DOM was re-rendered (sentinel attribute lost)"
+
+
+async def _create_new_user_thread(page) -> str:
+    """Click the "new thread" button and return the newly created thread's id.
+
+    The wait condition must check that ``currentThreadId`` changed to a *new*
+    non-assistant value. Just checking ``currentThreadId !== assistantThreadId``
+    is not enough: prior tests in the session may have left the server's
+    ``active_thread`` pointing at a user-created thread, in which case the
+    initial page load sets ``currentThreadId`` to that stale thread and the
+    wait would pass immediately — before ``createNewThread()`` resolves.
+    """
+    prev_thread_id = await page.evaluate("() => currentThreadId")
+    await page.locator("#thread-new-btn").click()
+    await page.wait_for_function(
+        """(prev) => !!currentThreadId
+            && currentThreadId !== assistantThreadId
+            && currentThreadId !== prev""",
+        arg=prev_thread_id,
+        timeout=15000,
+    )
+    return await page.evaluate("() => currentThreadId")
+
+
+async def test_refresh_without_hash_reopens_active_thread_history(page):
+    """Refreshing should reopen the server active thread when the URL has no thread hash."""
+    thread_id = await _create_new_user_thread(page)
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Refresh should keep this thread",
+    )
+    assert result["role"] == "assistant"
+
+    await page.evaluate(
+        "() => history.replaceState(null, '', location.pathname + location.search)"
+    )
+    await page.reload()
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _wait_for_connected(page, timeout=15000)
+    await page.wait_for_function(
+        "(threadId) => currentThreadId === threadId",
+        arg=thread_id,
+        timeout=15000,
+    )
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="Refresh should keep this thread"
+    ).wait_for(state="visible", timeout=15000)
+
+
+async def test_refresh_skips_readonly_external_active_thread(page):
+    """When the server active_thread is an external-channel (HTTP/Telegram) thread,
+    a refresh without a hash should fall through to the assistant thread with
+    the chat input enabled, not land on the read-only thread."""
+
+    # 1. Create a secondary thread and send a message so it becomes active_thread
+    ext_thread_id = await _create_new_user_thread(page)
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Readonly channel test message",
+    )
+    assert result["role"] == "assistant"
+
+    # 2. Strip the URL hash so reload relies on active_thread
+    await page.evaluate(
+        "() => history.replaceState(null, '', location.pathname + location.search)"
+    )
+
+    # 3. Intercept /api/chat/threads to mark the active thread as "http" channel.
+    # The frontend polls this endpoint (loadThreads runs on page load and on
+    # every SSE reconnect via debouncedLoadThreads), so the handler can be
+    # mid-`route.fetch()` when the page context tears down — always pair this
+    # with `page.unroute_all(behavior="ignoreErrors")` at test end to drain
+    # in-flight callbacks, otherwise the cancelled fetch surfaces as a
+    # TargetClosedError on the next test's Browser.new_context() call.
+    async def patch_threads_response(route):
+        response = await route.fetch()
+        body = await response.json()
+        for t in body.get("threads", []):
+            if t["id"] == ext_thread_id:
+                t["channel"] = "http"
+        await route.fulfill(response=response, json=body)
+
+    await page.route("**/api/chat/threads", patch_threads_response)
+
+    # 4. Reload — loadThreads() should skip the "http" active thread
+    await page.reload()
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _wait_for_connected(page, timeout=15000)
+
+    # 5. Assert we landed on the assistant thread, not the external one
+    await page.wait_for_function(
+        "() => currentThreadId === assistantThreadId",
+        timeout=15000,
+    )
+
+    # 6. Chat input should be enabled (not disabled by read-only state)
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+    is_disabled = await chat_input.is_disabled()
+    assert not is_disabled, "Chat input should be enabled on the assistant thread"
+
+    # Drain in-flight route callbacks before the `page` fixture closes the
+    # context (see the setup comment at step 3 for the root cause). The
+    # `ignoreErrors` behavior swallows the cancellation of any mid-flight
+    # `route.fetch()` so it cannot surface on an unrelated later test.
+    await page.unroute_all(behavior="ignoreErrors")
+
+
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):
     """Idle SSE connections should receive keepalive comments within 30 seconds."""
     async with sse_stream(managed_gateway_server.base_url, timeout=50) as response:
@@ -150,6 +330,11 @@ async def test_reconnect_after_server_restart_rebuilds_history(browser, managed_
             ),
             timeout=30000,
         ):
+            # Simulate a long disconnect so the reconnect exercises the
+            # history-reload path. Real restart cycles on fast hardware can
+            # complete inside the SSE_RELOAD_THRESHOLD_MS window; the ||=
+            # pattern in onerror preserves this pre-seeded timestamp.
+            await page.evaluate("_sseDisconnectedAt = Date.now() - 15000")
             await managed_gateway_server.restart()
             await _wait_for_connected(page, timeout=30000)
 
@@ -200,6 +385,7 @@ async def test_reconnect_with_stale_last_event_id_does_not_duplicate_messages(
             ),
             timeout=20000,
         ):
+            await page.evaluate("_sseDisconnectedAt = Date.now() - 15000")
             await page.evaluate("(eventId) => connectSSE(eventId)", old_event_id)
             await _wait_for_connected(page, timeout=20000)
 

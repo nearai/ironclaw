@@ -4,15 +4,17 @@
 //! or for specific users. The policy is stored in the settings table under the
 //! well-known `__admin__` scope.
 //!
-//! dispatch-exempt: These endpoints access `state.store` directly (not through
-//! the agentic tool pipeline) because they are admin-only infrastructure
-//! operations gated behind `AdminUser` auth, consistent with the other admin
-//! handlers in this module (users, secrets, tokens).
+//! dispatch-exempt: These endpoints are not routed through `ToolDispatcher`
+//! because they are admin-only infrastructure operations gated behind
+//! `AdminUser` auth. Settings reads/writes go through `resolve_settings_store`
+//! so the `CachedSettingsStore` is invalidated on writes (keeping the agent
+//! loop's view of admin tool policies coherent).
 
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 
+use super::settings::resolve_settings_store;
 use crate::channels::web::auth::AdminUser;
 use crate::channels::web::server::GatewayState;
 use crate::tools::permissions::{
@@ -35,11 +37,8 @@ pub async fn tool_policy_get_handler(
         ));
     }
 
-    let store = state.store.as_ref(); // dispatch-exempt: admin-only read of cross-tenant policy scope
-    let store = store.ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let store = resolve_settings_store(&state)
+        .map_err(|status| (status, "Settings store unavailable".to_string()))?;
 
     let policy = match store
         .get_setting(ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY)
@@ -84,11 +83,8 @@ pub async fn tool_policy_put_handler(
 
     validate_admin_tool_policy(&policy).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
 
-    let store = state.store.as_ref(); // dispatch-exempt: admin-only write to cross-tenant policy scope
-    let store = store.ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let store = resolve_settings_store(&state)
+        .map_err(|status| (status, "Settings store unavailable".to_string()))?;
 
     let value = serde_json::to_value(&policy).map_err(|e| {
         (

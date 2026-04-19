@@ -88,13 +88,464 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
+let processingThreads = new Set(); // thread IDs with active agent work
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
+const JOB_EVENTS_MAX_JOBS = 50;
+const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
+// Tracks user messages sent but not yet persisted to DB (#2409).
+// When loadHistory() clears the DOM, pending messages are re-injected
+// so they don't vanish during the safety-pipeline processing window.
+const _pendingUserMessages = new Map(); // threadId -> [{id, content, images, timestamp}]
+const PENDING_MSG_TTL_MS = 60000; // discard after 60s
+let _nextPendingId = 0;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
+let generatedImagesByThread = new Map();
+const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
+const GENERATED_IMAGES_PER_THREAD_CAP = 8;
+let engineV2Enabled = false;
+let engineModeApplied = false;
+let currentMissionData = null;
+let currentEngineThreadDetail = null;
+let currentMissionList = [];
+const missionDetailCache = new Map();
+const missionDetailFetchInFlight = new Set();
+const ACTIVE_MISSION_MAPPING_REFRESH_MS = 5000;
+const MAX_ACTIVITY_BAR_ITEMS = 6;
+let missionProgressRefreshScheduled = false;
+let missionMappingRefreshTimer = null;
+let missionMappingsLastRefreshedAt = 0;
+let activityBarSnapshotInFlight = false;
+
+function shortDisplayId(id) {
+  return typeof id === 'string' && id.length > 8 ? id.substring(0, 8) : (id || '');
+}
+
+class ActivityEntry {
+  static parseTimestampMs(value) {
+    if (!value) return 0;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  static t(key, fallback, params) {
+    if (typeof I18n === 'undefined') return fallback;
+    const translated = I18n.t(key, params);
+    return translated && translated !== key ? translated : fallback;
+  }
+}
+
+class JobActivityEntry extends ActivityEntry {
+  constructor({ id, title, state, statusText, updatedAt }) {
+    super();
+    this.id = id;
+    this.title = title;
+    this.state = state;
+    this.statusText = statusText;
+    this.updatedAt = updatedAt;
+  }
+
+  static isActiveState(state) {
+    return state === 'pending' || state === 'in_progress' || state === 'running';
+  }
+
+  static normalizeState(state) {
+    if (state === 'failed' || state === 'error' || state === 'stuck') return 'failed';
+    if (state === 'completed' || state === 'done' || state === 'succeeded') return 'done';
+    if (JobActivityEntry.isActiveState(state)) return 'running';
+    return state || 'done';
+  }
+
+  static formatStatus(state, fallback) {
+    if (fallback) return fallback;
+    if (state === 'pending') return ActivityEntry.t('jobs.statusPending', 'Pending');
+    if (state === 'in_progress' || state === 'running') return ActivityEntry.t('jobs.statusRunning', 'Running');
+    if (state === 'completed' || state === 'done' || state === 'succeeded') return ActivityEntry.t('jobs.statusCompleted', 'Completed');
+    if (state === 'failed' || state === 'error') return ActivityEntry.t('jobs.statusFailed', 'Failed');
+    if (state === 'stuck') return ActivityEntry.t('jobs.summary.stuck', 'Stuck');
+    return state ? state.replace(/_/g, ' ') : ActivityEntry.t('jobs.statusCompleted', 'Completed');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStates = ['pending', 'in_progress', 'running'];
+    return !genericStates.some((candidate) => existing.statusText === JobActivityEntry.formatStatus(candidate));
+  }
+
+  static fromApi(job, existing) {
+    const normalizedState = JobActivityEntry.normalizeState(job.state);
+    const nextUpdatedAt = JobActivityEntry.parseTimestampMs(job.started_at || job.created_at)
+      || existing?.updatedAt
+      || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && JobActivityEntry.shouldPreserveActiveStatus(existing);
+    return new JobActivityEntry({
+      id: job.id,
+      title: job.title || existing?.title || ('Job ' + shortDisplayId(job.id)),
+      state: normalizedState,
+      statusText: normalizedState === 'running'
+        ? JobActivityEntry.formatStatus(job.state, shouldPreserveStatus ? existing.statusText : '')
+        : JobActivityEntry.formatStatus(job.state),
+      updatedAt: nextUpdatedAt,
+    });
+  }
+
+  applyPatch(patch) {
+    if (patch.title) this.title = patch.title;
+    if (patch.state) this.state = patch.state;
+    if (patch.statusText) this.statusText = patch.statusText;
+    if (patch.active === false && !patch.state) this.state = 'done';
+    this.updatedAt = Date.now();
+  }
+
+  isActive() {
+    return this.state === 'running';
+  }
+
+  toBarItem() {
+    return {
+      kind: 'job',
+      id: this.id,
+      title: this.title,
+      statusText: this.statusText || JobActivityEntry.formatStatus('running'),
+      updatedAt: this.updatedAt || 0,
+      state: this.state || 'done',
+    };
+  }
+}
+
+class MissionActivityEntry extends ActivityEntry {
+  constructor({ id, title, status, state, statusText, updatedAt }) {
+    super();
+    this.id = id;
+    this.title = title;
+    this.status = status;
+    this.state = state;
+    this.statusText = statusText;
+    this.updatedAt = updatedAt;
+  }
+
+  static normalizeState(status) {
+    if (status === 'Active') return 'running';
+    if (status === 'Completed') return 'done';
+    if (status === 'Failed') return 'failed';
+    return 'idle';
+  }
+
+  static formatStatus(status, fallback) {
+    if (fallback) return fallback;
+    if (status === 'Active') return ActivityEntry.t('status.active', 'Active');
+    if (status === 'Completed') return ActivityEntry.t('missions.summary.completed', 'Completed');
+    if (status === 'Failed') return ActivityEntry.t('missions.summary.failed', 'Failed');
+    if (status === 'Paused') return ActivityEntry.t('missions.summary.paused', 'Paused');
+    return status || ActivityEntry.t('status.idle', 'Idle');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStatuses = ['Active', 'Completed', 'Failed', 'Paused'];
+    return !genericStatuses.some((candidate) => existing.statusText === MissionActivityEntry.formatStatus(candidate));
+  }
+
+  static fromApi(mission, existing) {
+    const normalizedState = MissionActivityEntry.normalizeState(mission.status);
+    const nextUpdatedAt = MissionActivityEntry.parseTimestampMs(mission.updated_at || mission.created_at)
+      || existing?.updatedAt
+      || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && MissionActivityEntry.shouldPreserveActiveStatus(existing);
+    return new MissionActivityEntry({
+      id: mission.id,
+      title: mission.name || existing?.title || ('Mission ' + shortDisplayId(mission.id)),
+      status: mission.status || existing?.status || '',
+      state: normalizedState,
+      statusText: normalizedState === 'running'
+        ? MissionActivityEntry.formatStatus(
+          mission.status,
+          shouldPreserveStatus ? existing.statusText : '',
+        )
+        : MissionActivityEntry.formatStatus(mission.status),
+      updatedAt: nextUpdatedAt,
+    });
+  }
+
+  applyThreadPatch(meta, patch) {
+    this.title = meta.mission_name || this.title || ('Mission ' + shortDisplayId(meta.mission_id));
+    this.status = this.status || 'Active';
+    this.state = 'running';
+    this.statusText = patch.statusText || this.statusText || MissionActivityEntry.formatStatus('Active');
+    this.updatedAt = Date.now();
+  }
+
+  isActive() {
+    return this.state === 'running';
+  }
+
+  isVisibleInBar() {
+    return this.state !== 'idle';
+  }
+
+  toBarItem(liveSnapshot) {
+    const liveUpdatedAt = liveSnapshot?.updatedAt || 0;
+    const statusText = this.state === 'running'
+      ? (liveSnapshot?.progress || MissionActivityEntry.formatStatus(this.status))
+      : MissionActivityEntry.formatStatus(this.status, this.statusText);
+    return {
+      kind: 'mission',
+      id: this.id,
+      missionId: this.id,
+      title: this.title || ('Mission ' + shortDisplayId(this.id)),
+      statusText: statusText,
+      updatedAt: Math.max(this.updatedAt || 0, liveUpdatedAt),
+      state: this.state || 'done',
+    };
+  }
+}
+
+class ActiveWorkStore {
+  constructor() {
+    this.threads = new Map();
+    this.jobs = new Map();
+    this.missions = new Map();
+    this.threadMeta = new Map();
+  }
+
+  setEngineV2Enabled(enabled) {
+    engineV2Enabled = !!enabled;
+    this.render();
+  }
+
+  rememberThreads(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    let changed = false;
+    entries.forEach(({ threadId, meta }) => {
+      if (!threadId) return;
+      const prev = this.threadMeta.get(threadId) || {};
+      const next = { ...prev, ...meta };
+      const nextKeys = Object.keys(next);
+      const isSame = nextKeys.length === Object.keys(prev).length
+        && nextKeys.every((key) => prev[key] === next[key]);
+      if (isSame) return;
+      this.threadMeta.set(threadId, next);
+      changed = true;
+    });
+    if (changed) this.render();
+  }
+
+  rememberMissionThreads(mission) {
+    if (!mission || !Array.isArray(mission.threads)) return;
+    this.rememberThreads(mission.threads.map((thread) => ({
+      threadId: thread.id,
+      meta: {
+        label: thread.goal || ('Thread ' + shortDisplayId(thread.id)),
+        mission_id: mission.id,
+        mission_name: mission.name,
+      },
+    })));
+  }
+
+  rememberJobs(jobs) {
+    if (!Array.isArray(jobs)) return;
+    jobs.forEach((job) => {
+      if (!job || !job.id) return;
+      this.jobs.set(job.id, JobActivityEntry.fromApi(job, this.jobs.get(job.id)));
+    });
+    this.render();
+  }
+
+  rememberMissions(missions) {
+    if (!Array.isArray(missions)) return;
+    missions.forEach((mission) => {
+      if (!mission || !mission.id) return;
+      this.missions.set(mission.id, MissionActivityEntry.fromApi(mission, this.missions.get(mission.id)));
+    });
+    this.render();
+  }
+
+  updateThread(threadId, patch) {
+    if (!threadId) return;
+    const prev = this.threads.get(threadId) || {};
+    this.threads.set(threadId, {
+      ...prev,
+      ...patch,
+      active: patch.active !== undefined ? patch.active : true,
+      updatedAt: Date.now(),
+    });
+    const meta = this.threadMeta.get(threadId) || {};
+    if (meta.mission_id) {
+      const missionEntry = this.missions.get(meta.mission_id)
+        || new MissionActivityEntry({
+          id: meta.mission_id,
+          title: meta.mission_name || ('Mission ' + shortDisplayId(meta.mission_id)),
+          status: 'Active',
+          state: 'running',
+          statusText: MissionActivityEntry.formatStatus('Active'),
+          updatedAt: Date.now(),
+        });
+      missionEntry.applyThreadPatch(meta, patch);
+      this.missions.set(meta.mission_id, missionEntry);
+    }
+    this.render();
+  }
+
+  clearThread(threadId) {
+    if (!threadId) return;
+    this.threads.delete(threadId);
+    this.render();
+  }
+
+  updateJob(jobId, patch) {
+    if (!jobId) return;
+    const prev = this.jobs.get(jobId)
+      || new JobActivityEntry({
+        id: jobId,
+        title: patch.title || ('Job ' + shortDisplayId(jobId)),
+        state: 'running',
+        statusText: JobActivityEntry.formatStatus('running'),
+        updatedAt: Date.now(),
+      });
+    prev.applyPatch(patch);
+    this.jobs.set(jobId, prev);
+    this.render();
+  }
+
+  getThreadProgress(threadId) {
+    const entry = threadId ? this.threads.get(threadId) : null;
+    return entry && entry.active ? entry.statusText : '';
+  }
+
+  isThreadBlocked(threadId) {
+    const entry = threadId ? this.threads.get(threadId) : null;
+    return !!(entry && entry.blockedReason);
+  }
+
+  getMissionProgress(missionId) {
+    let newest = null;
+    for (const [threadId, meta] of this.threadMeta.entries()) {
+      if (meta.mission_id !== missionId) continue;
+      const thread = this.threads.get(threadId);
+      if (!thread || !thread.active) continue;
+      if (!newest || thread.updatedAt > newest.updatedAt) {
+        newest = thread;
+      }
+    }
+    return newest ? newest.statusText : '';
+  }
+
+  getTabCounts() {
+    let jobs = 0;
+
+    for (const entry of this.jobs.values()) {
+      if (entry && entry.isActive()) jobs += 1;
+    }
+
+    let missions = 0;
+    for (const entry of this.missions.values()) {
+      if (entry && entry.isActive()) missions += 1;
+    }
+
+    return {
+      jobs: jobs,
+      missions: missions,
+    };
+  }
+
+  renderTabCounts() {
+    const counts = this.getTabCounts();
+    const chatButton = document.querySelector('.tab-bar button[data-tab="chat"]');
+    if (chatButton) {
+      chatButton.removeAttribute('data-active-count');
+    }
+    ['jobs', 'missions'].forEach((tabName) => {
+      const button = document.querySelector('.tab-bar button[data-tab="' + tabName + '"]');
+      if (!button) return;
+      const count = counts[tabName] || 0;
+      if (count > 0) {
+        button.setAttribute('data-active-count', String(count));
+      } else {
+        button.removeAttribute('data-active-count');
+      }
+    });
+  }
+
+  getMissionLiveSnapshot(missionId) {
+    let newestUpdatedAt = 0;
+    let progress = '';
+    for (const [threadId, meta] of this.threadMeta.entries()) {
+      if (meta.mission_id !== missionId) continue;
+      const thread = this.threads.get(threadId);
+      if (!thread || !thread.active) continue;
+      if ((thread.updatedAt || 0) >= newestUpdatedAt) {
+        newestUpdatedAt = thread.updatedAt || 0;
+        progress = thread.statusText || '';
+      }
+    }
+    return { updatedAt: newestUpdatedAt, progress: progress };
+  }
+
+  getActiveMissionIds() {
+    const ids = [];
+    for (const [missionId, entry] of this.missions.entries()) {
+      if (entry && entry.isActive()) ids.push(missionId);
+    }
+    return ids;
+  }
+
+  getActivityBarItems() {
+    const items = [];
+    for (const [missionId, entry] of this.missions.entries()) {
+      if (!entry || !entry.isVisibleInBar()) continue;
+      items.push(entry.toBarItem(this.getMissionLiveSnapshot(missionId)));
+    }
+    for (const [jobId, entry] of this.jobs.entries()) {
+      if (!entry) continue;
+      items.push(entry.toBarItem());
+    }
+    items.sort((a, b) => b.updatedAt - a.updatedAt);
+    return items.slice(0, MAX_ACTIVITY_BAR_ITEMS);
+  }
+
+  render() {
+    this.renderTabCounts();
+    const strip = document.getElementById('active-work-strip');
+    if (!strip) return;
+    if (!engineV2Enabled) {
+      strip.hidden = true;
+      strip.innerHTML = '';
+      scheduleMissionProgressViewsRefresh();
+      return;
+    }
+    const items = this.getActivityBarItems();
+    strip.hidden = false;
+    strip.innerHTML = items.length === 0
+      ? '<div class="active-work-empty">' + escapeHtml(ActivityEntry.t('activity.empty', 'No recent jobs or missions')) + '</div>'
+      : items.map((item) => {
+        const kindLabel = item.kind === 'job'
+          ? ActivityEntry.t('activity.kind.job', 'Job')
+          : ActivityEntry.t('activity.kind.mission', 'Mission');
+        return '<button class="active-work-item" type="button"'
+          + ' data-action="open-active-work"'
+          + ' data-kind="' + escapeHtml(item.kind) + '"'
+          + ' data-state="' + escapeHtml(item.state || 'done') + '"'
+          + ' data-id="' + escapeHtml(item.id) + '"'
+          + (item.missionId ? ' data-mission-id="' + escapeHtml(item.missionId) + '"' : '')
+          + (item.updatedAt ? ' title="' + escapeHtml(relativeTime(new Date(item.updatedAt).toISOString())) + '"' : '')
+          + '>'
+          + '<span class="active-work-kind">' + escapeHtml(kindLabel) + '</span>'
+          + '<span class="active-work-title">' + escapeHtml(item.title) + '</span>'
+          + '<span class="active-work-status">' + escapeHtml(item.statusText) + '</span>'
+          + '</button>';
+      }).join('');
+
+    scheduleMissionProgressViewsRefresh();
+  }
+}
+
+const activeWorkStore = new ActiveWorkStore();
 
 // --- Hash-based URL Navigation ---
 //
@@ -166,6 +617,27 @@ function parseHash() {
   };
 }
 
+function normalizeTabForEngineMode(tab) {
+  if (engineV2Enabled && tab === 'routines') {
+    return 'missions';
+  }
+  return tab;
+}
+
+function applyEngineModeUi() {
+  var routinesTab = document.querySelector('.tab-bar [data-tab-role="routines"]');
+  var routinesPanel = document.getElementById('tab-routines');
+  if (routinesTab) {
+    routinesTab.style.display = engineV2Enabled ? 'none' : '';
+  }
+  if (routinesPanel && engineV2Enabled && currentTab !== 'routines') {
+    routinesPanel.classList.remove('active');
+  }
+  if (engineV2Enabled && currentTab === 'routines') {
+    switchTab('missions');
+  }
+}
+
 /**
  * Restore navigation state from the URL hash.
  * Called once after authentication and on hashchange events.
@@ -181,7 +653,7 @@ function restoreFromHash() {
 
   // Switch tab
   if (state.tab && state.tab !== currentTab) {
-    switchTab(state.tab);
+    switchTab(normalizeTabForEngineMode(state.tab));
   }
 
   // Restore detail state within the tab
@@ -198,7 +670,11 @@ function restoreFromHash() {
         openJobDetail(state.detail);
         break;
       case 'routines':
-        openRoutineDetail(state.detail);
+        if (engineV2Enabled) {
+          switchTab('missions');
+        } else {
+          openRoutineDetail(state.detail);
+        }
         break;
       case 'settings':
         switchSettingsSubtab(state.detail);
@@ -221,9 +697,15 @@ const STREAM_DEBOUNCE_MS = 50;
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
-let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+// Timestamp of the most recent SSE disconnect (tab hide or onerror). Cleared
+// on successful reconnect. Used to decide whether to reload chat history on
+// reconnect — brief disconnects (<SSE_RELOAD_THRESHOLD_MS) preserve DOM and
+// rely on SSE catch-up + the "Done without response" safety net (#2079);
+// longer ones reload to catch missed events.
+let _sseDisconnectedAt = null;
+const SSE_RELOAD_THRESHOLD_MS = 10000;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -235,6 +717,22 @@ const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
 // matters here. Per-thread state is unnecessary.
 let _turnResponseReceived = false;
 let _doneWithoutResponseTimer = null;
+
+// Clean up connection-level timers and buffers.
+// Called before creating a new connection, on tab hide, and on page unload
+// to prevent leaked intervals/timeouts from accumulating across reconnects.
+// Note: _doneWithoutResponseTimer is intentionally NOT cleared here — it is a
+// turn-level concern managed by the onopen and response handlers (#2079).
+function cleanupConnectionState() {
+  if (_streamDebounceTimer) { clearInterval(_streamDebounceTimer); _streamDebounceTimer = null; }
+  _streamBuffer = '';
+  if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
+  if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
+  if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
+  if (missionMappingRefreshTimer) { clearTimeout(missionMappingRefreshTimer); missionMappingRefreshTimer = null; }
+  missionProgressRefreshScheduled = false;
+  if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
+}
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
@@ -266,9 +764,9 @@ let _slashSelected = -1;
 let _slashMatches = [];
 
 // --- Tool Activity State ---
-let _activeGroup = null;
-let _activeToolCards = {};
-let _activityThinking = null;
+// Chat uses a reusable controller so the same entry and rendering helpers can
+// be shared with history, jobs, and future activity surfaces.
+let _chatToolActivity = createToolActivityController({ containerId: 'chat-messages' });
 
 // --- Auth ---
 
@@ -390,6 +888,7 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 // Without this, stale SSE connections from prior page loads linger and exhaust
 // the HTTP/1.1 per-origin connection limit (6), blocking API fetch calls.
 window.addEventListener('beforeunload', () => {
+  cleanupConnectionState();
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
 });
@@ -400,10 +899,13 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
+    cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
   } else if (token) {
     connectSSE();
+    startGatewayStatusPolling();
     if (currentTab === 'logs') connectLogSSE();
   }
 });
@@ -693,6 +1195,7 @@ function rememberSseEventId(event) {
 
 function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
+  cleanupConnectionState();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
   let chatSseUrl = (token && !oidcProxyAuth)
@@ -731,15 +1234,9 @@ function connectSSE(lastEventIdOverride) {
     }
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
-      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
-      _connectionLostAt = null;
-      // If disconnected >10s, reload chat history to catch missed messages
-      if (wasDisconnectedLong && currentThreadId) {
-        loadHistory();
-      }
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -755,12 +1252,25 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      loadHistory();
+      // Only reload full history if disconnected beyond the threshold. Brief
+      // reconnects (tab visibility change, transient network blip) rely on
+      // SSE catch-up and the "Done without response" safety net (#2079).
+      // Full re-render loses scroll position and disrupts the user.
+      const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
+      if (disconnectMs > SSE_RELOAD_THRESHOLD_MS) {
+        loadHistory();
+      }
     }
+    _sseDisconnectedAt = null;
+    // Clear stale processing state — agents may have finished during disconnect.
+    // Refresh sidebar so stale spinners are removed immediately.
+    processingThreads.clear();
+    debouncedLoadThreads();
     sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     var statusEl2 = document.getElementById('sse-status');
@@ -774,7 +1284,6 @@ function connectSSE(lastEventIdOverride) {
 
     // Start connection-lost banner timer (3s delay)
     if (!_connectionLostTimer && !existingBanner) {
-      _connectionLostAt = _connectionLostAt || Date.now();
       _connectionLostTimer = setTimeout(() => {
         _connectionLostTimer = null;
         // Only show if still disconnected
@@ -819,6 +1328,7 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) activeWorkStore.clearThread(data.thread_id);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
@@ -846,9 +1356,19 @@ function connectSSE(lastEventIdOverride) {
     }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
+    pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
+
+    // Turn complete — remove oldest pending entry for this thread (#2409).
+    // FIFO is safe here because the agent loop processes one turn at a time
+    // per thread, so the oldest pending entry is the one that just completed.
+    const pending = _pendingUserMessages.get(data.thread_id);
+    if (pending) {
+      pending.shift();
+      if (pending.length === 0) _pendingUserMessages.delete(data.thread_id);
+    }
 
     // Show restart modal if the response indicates restart was initiated
     if (data.content && data.content.toLowerCase().includes('restart initiated')) {
@@ -858,8 +1378,16 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: data.message || ActivityEntry.t('activity.thinking', 'Thinking'),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
       return;
     }
     clearSuggestionChips();
@@ -874,16 +1402,45 @@ function connectSSE(lastEventIdOverride) {
     }
   });
 
-  addTrackedEventListener('tool_started', (e) => {
+  addTrackedEventListener('skill_activated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    addToolCard(data.name);
+    const names = Array.isArray(data.skill_names) ? data.skill_names : [];
+    const feedback = Array.isArray(data.feedback) ? data.feedback : [];
+    if (names.length === 0 && feedback.length === 0) return;
+    addSkillActivationCard(names, feedback);
+  });
+
+  addTrackedEventListener('tool_started', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.usingTool', 'Using {name}', {
+          name: data.name,
+        }),
+      });
+    }
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
+    addToolCard(data);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: data.success
+          ? ActivityEntry.t('activity.finishedTool', 'Finished {name}', { name: data.name })
+          : ActivityEntry.t('activity.failedTool', 'Failed {name}', { name: data.name }),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success, data.error, data.parameters);
+    completeToolCard(data);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -894,12 +1451,23 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    setToolCardOutput(data);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.streamingResponse', 'Streaming response'),
+      });
+    }
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming
@@ -934,8 +1502,35 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      const isBlockedStatus = activeWorkStore.isThreadBlocked(data.thread_id);
+      if (data.message === 'Done' || data.message === 'Interrupted'
+          || data.message === 'Rejected' || data.message === 'Tool call denied.') {
+        activeWorkStore.clearThread(data.thread_id);
+      } else if (data.message === 'Awaiting approval') {
+        activeWorkStore.updateThread(data.thread_id, {
+          statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+          blockedReason: 'approval',
+        });
+      } else if (isBlockedStatus) {
+        // Keep the user-visible blocked state until the gate resolves. Generic
+        // step/status updates from the runner are less informative here.
+      } else if (data.message) {
+        activeWorkStore.updateThread(data.thread_id, {
+          statusText: data.message,
+          blockedReason: null,
+        });
+      }
+    }
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        if (data.message === 'Done' || data.message === 'Awaiting approval'
+            || data.message === 'Interrupted' || data.message === 'Rejected'
+            || data.message === 'Tool call denied.') {
+          processingThreads.delete(data.thread_id);
+        }
+        debouncedLoadThreads();
+      }
       return;
     }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
@@ -963,6 +1558,11 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
+    activeWorkStore.updateJob(data.job_id, {
+      title: data.title,
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
+      state: 'running',
+    });
     showJobCard(data);
   });
 
@@ -970,6 +1570,12 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     const hasThread = !!data.thread_id;
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: 'approval',
+      });
+    }
 
     if (forCurrentThread) {
       showApproval(data);
@@ -983,32 +1589,33 @@ function connectSSE(lastEventIdOverride) {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  addTrackedEventListener('auth_required', (e) => {
-    handleAuthRequired(JSON.parse(e.data));
-  });
-
-  addTrackedEventListener('auth_completed', (e) => {
+  addTrackedEventListener('onboarding_state', (e) => {
     const data = JSON.parse(e.data);
-    handleAuthCompleted(data);
-  });
-
-  addTrackedEventListener('pairing_required', (e) => {
-    const data = JSON.parse(e.data);
-    handlePairingRequired(data);
-  });
-
-  addTrackedEventListener('pairing_completed', (e) => {
-    const data = JSON.parse(e.data);
-    handlePairingCompleted(data);
+    handleOnboardingState(data);
   });
 
   addTrackedEventListener('gate_required', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      const isCredentialGate = data.gate_name === 'credential' || data.gate_name === 'auth';
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: isCredentialGate
+          ? ActivityEntry.t('activity.waitingAuth', 'Waiting for auth')
+          : ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: isCredentialGate ? 'auth' : 'approval',
+      });
+    }
     handleGateRequired(data);
   });
 
   addTrackedEventListener('gate_resolved', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.resuming', 'Resuming'),
+        blockedReason: null,
+      });
+    }
     handleGateResolved(data);
   });
 
@@ -1019,12 +1626,14 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    addGeneratedImage(data.data_url, data.path);
+    rememberGeneratedImage(data.thread_id, data.event_id, data.data_url, data.path);
+    addGeneratedImage(data.data_url, data.path, data.event_id);
   });
 
   addTrackedEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
+      if (data.thread_id) activeWorkStore.clearThread(data.thread_id);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
       addMessage('system', 'Error: ' + data.message);
@@ -1042,11 +1651,61 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
-      if (!jobEvents.has(jobId)) jobEvents.set(jobId, []);
-      const events = jobEvents.get(jobId);
+      if (evtType === 'job_message') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: (data.role ? data.role + ': ' : '') + (data.content || ActivityEntry.t('activity.working', 'Working')),
+        });
+      } else if (evtType === 'job_tool_use') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: ActivityEntry.t('activity.runningTool', 'Running {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
+        });
+      } else if (evtType === 'job_tool_result') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: ActivityEntry.t('activity.finishedTool', 'Finished {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
+        });
+      } else if (evtType === 'job_status') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: data.message || JobActivityEntry.formatStatus('running'),
+        });
+      } else if (evtType === 'job_result') {
+        activeWorkStore.updateJob(jobId, {
+          active: false,
+          state: JobActivityEntry.normalizeState(data.status),
+          statusText: JobActivityEntry.formatStatus(data.status),
+        });
+      }
+      // Move jobId to end of Map insertion order (LRU: most-recent last).
+      // delete+set keeps the Map ordered by last-access time so that
+      // keys().next() always yields the least-recently-used entry in O(1).
+      const existing = jobEvents.get(jobId);
+      if (existing) jobEvents.delete(jobId);
+      const events = existing || [];
+      jobEvents.set(jobId, events);
       events.push({ type: evtType, data: data, ts: Date.now() });
       // Cap per-job events to prevent memory leak
       while (events.length > JOB_EVENTS_CAP) events.shift();
+      // Cap total tracked jobs — evict the least-recently-used entry (O(1)).
+      // Skip currentJobId so the user's actively-viewed job detail panel
+      // doesn't go empty when many other jobs fire events.
+      if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
+        let evicted = false;
+        for (const k of jobEvents.keys()) {
+          if (k !== currentJobId) {
+            jobEvents.delete(k);
+            evicted = true;
+            break;
+          }
+        }
+        // Fallback: if every entry is currentJobId (impossible in practice),
+        // evict the first key to maintain the cap.
+        if (!evicted) {
+          jobEvents.delete(jobEvents.keys().next().value);
+        }
+      }
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
       // Auto-refresh job list when on jobs tab (debounced)
@@ -1183,10 +1842,39 @@ function sendMessage() {
     }
   }
 
+  // Snapshot attached images before the body block clears stagedImages, so the
+  // optimistic display and the pending entry both keep them.
+  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
   const userMsg = addMessage('user', content || '(images attached)');
+  if (attachedImageDataUrls.length > 0) {
+    appendImagesToMessage(userMsg, attachedImageDataUrls);
+  }
+  pruneOldMessages();
+  if (currentThreadId) {
+    activeWorkStore.updateThread(currentThreadId, {
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
+    });
+  }
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
+
+  // Track as pending so loadHistory() can re-inject if DB hasn't persisted yet (#2409)
+  let pendingId = null;
+  const pendingThreadId = currentThreadId;
+  if (currentThreadId) {
+    const displayContent = content || '(images attached)';
+    if (!_pendingUserMessages.has(currentThreadId)) {
+      _pendingUserMessages.set(currentThreadId, []);
+    }
+    pendingId = _nextPendingId++;
+    _pendingUserMessages.get(currentThreadId).push({
+      id: pendingId,
+      content: displayContent,
+      images: attachedImageDataUrls,
+      timestamp: Date.now(),
+    });
+  }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
   if (stagedImages.length > 0) {
@@ -1199,6 +1887,18 @@ function sendMessage() {
     method: 'POST',
     body: body,
   }).catch((err) => {
+    // Remove the pending entry so it won't be re-injected on thread switch (#2498)
+    if (pendingId !== null && pendingThreadId) {
+      const arr = _pendingUserMessages.get(pendingThreadId);
+      if (arr) {
+        const filtered = arr.filter(p => p.id !== pendingId);
+        if (filtered.length > 0) {
+          _pendingUserMessages.set(pendingThreadId, filtered);
+        } else {
+          _pendingUserMessages.delete(pendingThreadId);
+        }
+      }
+    }
     // Handle rate limiting (429)
     if (err.status === 429) {
       showToast(I18n.t('chat.rateLimited'), 'error');
@@ -1235,6 +1935,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -1330,17 +2031,25 @@ chatMessagesEl.addEventListener('copy', (e) => {
   e.clipboardData.setData('text/plain', text);
 });
 
-function addGeneratedImage(dataUrl, path) {
-  const container = document.getElementById('chat-messages');
+function createGeneratedImageElement(dataUrl, path, eventId) {
   const card = document.createElement('div');
   card.className = 'generated-image-card';
+  if (eventId) {
+    card.dataset.imageEventId = eventId;
+  }
 
-  const img = document.createElement('img');
-  img.className = 'generated-image';
-  img.src = dataUrl;
-  img.alt = 'Generated image';
-
-  card.appendChild(img);
+  if (isSafeGeneratedImageDataUrl(dataUrl)) {
+    const img = document.createElement('img');
+    img.className = 'generated-image';
+    img.src = dataUrl;
+    img.alt = 'Generated image';
+    card.appendChild(img);
+  } else {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'generated-image-placeholder';
+    placeholder.textContent = 'Generated image unavailable in history payload';
+    card.appendChild(placeholder);
+  }
 
   if (path) {
     const pathLabel = document.createElement('div');
@@ -1349,8 +2058,76 @@ function addGeneratedImage(dataUrl, path) {
     card.appendChild(pathLabel);
   }
 
+  return card;
+}
+
+function isSafeGeneratedImageDataUrl(dataUrl) {
+  return typeof dataUrl === 'string' && /^data:image\//i.test(dataUrl);
+}
+
+function hasRenderedGeneratedImage(container, eventId) {
+  if (!eventId) return false;
+  return Array.from(container.querySelectorAll('.generated-image-card')).some((card) => {
+    return card.dataset.imageEventId === eventId;
+  });
+}
+
+function addGeneratedImage(dataUrl, path, eventId, shouldScroll = true) {
+  const container = document.getElementById('chat-messages');
+  if (hasRenderedGeneratedImage(container, eventId)) {
+    return;
+  }
+  const card = createGeneratedImageElement(dataUrl, path, eventId);
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  if (shouldScroll) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function rememberGeneratedImage(threadId, eventId, dataUrl, path) {
+  if (!threadId || !eventId || !isSafeGeneratedImageDataUrl(dataUrl)) return;
+  const normalizedPath = path || null;
+  let images = generatedImagesByThread.get(threadId);
+  if (!images) {
+    if (generatedImagesByThread.size >= GENERATED_IMAGE_THREAD_CACHE_CAP) {
+      const oldestThreadId = generatedImagesByThread.keys().next().value;
+      if (oldestThreadId) {
+        generatedImagesByThread.delete(oldestThreadId);
+      }
+    }
+    images = [];
+    generatedImagesByThread.set(threadId, images);
+  } else {
+    // Refresh insertion order so recently viewed/updated threads stay cached.
+    generatedImagesByThread.delete(threadId);
+    generatedImagesByThread.set(threadId, images);
+  }
+  if (images.some(img => img.eventId === eventId)) {
+    return;
+  }
+  images.push({ eventId, dataUrl, path: normalizedPath });
+  while (images.length > GENERATED_IMAGES_PER_THREAD_CAP) {
+    images.shift();
+  }
+}
+
+function getRememberedGeneratedImage(threadId, eventId) {
+  if (!threadId || !eventId) return null;
+  const images = generatedImagesByThread.get(threadId);
+  if (!images) return null;
+  return images.find(img => img.eventId === eventId) || null;
+}
+
+function resolveGeneratedImageForRender(threadId, image) {
+  const normalizedPath = image.path || null;
+  if (image.data_url) {
+    return { dataUrl: image.data_url, path: normalizedPath };
+  }
+  const remembered = getRememberedGeneratedImage(threadId, image.event_id);
+  if (remembered) {
+    return { dataUrl: remembered.dataUrl, path: remembered.path };
+  }
+  return { dataUrl: null, path: normalizedPath };
 }
 
 // --- Slash Autocomplete ---
@@ -1826,6 +2603,53 @@ function maybeInsertTimeSeparator(container, timestamp) {
   container.appendChild(sep);
 }
 
+// Remove oldest messages/activity groups from the DOM when the chat container
+// exceeds MAX_DOM_MESSAGES elements. Users can scroll up to trigger
+// loadHistory() for older content. This prevents unbounded DOM growth during
+// long sessions. Elements with data-streaming="true" are preserved to avoid
+// breaking mid-stream responses.
+// Note: if every element has data-streaming="true", this function will
+// under-prune and the DOM may temporarily exceed the cap. This is acceptable
+// because streaming completes quickly and the next call will clean up.
+function pruneOldMessages() {
+  const container = document.getElementById('chat-messages');
+  const items = container.querySelectorAll('.message, .activity-group, .time-separator');
+  if (items.length <= MAX_DOM_MESSAGES) return;
+  let removed = 0;
+  const target = items.length - MAX_DOM_MESSAGES;
+  for (let i = 0; i < items.length && removed < target; i++) {
+    if (items[i].getAttribute('data-streaming') === 'true') continue;
+    items[i].remove();
+    removed++;
+  }
+  // Clean up orphaned leading time-separators left after pruning.
+  // A separator is orphaned if no .message or .activity-group follows it
+  // before the next separator (or end of container).
+  const remaining = container.querySelectorAll('.message, .activity-group, .time-separator');
+  for (let i = 0; i < remaining.length; i++) {
+    if (!remaining[i].classList.contains('time-separator')) break;
+    remaining[i].remove();
+  }
+}
+
+// Append image thumbnails to an existing user message bubble. Used by the
+// optimistic display in sendMessage() and by the pending re-inject path in
+// loadHistory() so attached images stay visible until DB persistence catches
+// up. Reuses the .image-preview class for thumbnail styling.
+function appendImagesToMessage(messageDiv, dataUrls) {
+  if (!messageDiv || !dataUrls || dataUrls.length === 0) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'message-images';
+  for (const dataUrl of dataUrls) {
+    const img = document.createElement('img');
+    img.className = 'image-preview';
+    img.src = dataUrl;
+    img.alt = 'Attached image';
+    wrap.appendChild(img);
+  }
+  messageDiv.appendChild(wrap);
+}
+
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
   maybeInsertTimeSeparator(container);
@@ -1863,76 +2687,168 @@ function appendToLastAssistant(chunk) {
 
 // --- Inline Tool Activity Cards ---
 
-function getOrCreateActivityGroup() {
-  if (_activeGroup) return _activeGroup;
-  const container = document.getElementById('chat-messages');
-  const group = document.createElement('div');
-  group.className = 'activity-group';
-  container.appendChild(group);
-  container.scrollTop = container.scrollHeight;
-  _activeGroup = group;
-  _activeToolCards = {};
-  return group;
+const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+
+function formatToolActivityDurationMs(durationMs) {
+  if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
+  if (durationMs === 0) return '<1ms';
+  if (durationMs < 1000) return Math.round(durationMs) + 'ms';
+  const elapsedSecs = durationMs / 1000;
+  return elapsedSecs < 10 ? elapsedSecs.toFixed(1) + 's' : Math.floor(elapsedSecs) + 's';
 }
 
-function showActivityThinking(message) {
-  const group = getOrCreateActivityGroup();
-  if (_activityThinking) {
-    // Already exists — just update text and un-hide
-    _activityThinking.style.display = '';
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+function truncateToolActivityResult(text) {
+  if (!text) return '';
+  if (text.length <= MAX_TOOL_ACTIVITY_RESULT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_ACTIVITY_RESULT_CHARS) + '...';
+}
+
+function buildToolFailureText(parameters, error) {
+  let detail = '';
+  if (parameters) {
+    detail += 'Input:\n' + parameters + '\n\n';
+  }
+  if (error) {
+    detail += 'Error:\n' + error;
+  }
+  return detail;
+}
+
+function getToolActivityBodyText(entry) {
+  if (!entry) return '';
+  return entry.error || entry.result || entry.result_preview || '';
+}
+
+function normalizeHistoryToolCall(toolCall) {
+  return {
+    call_id: toolCall.call_id || null,
+    name: toolCall.name || 'tool',
+    status: toolCall.has_error ? 'fail' : (toolCall.has_result ? 'success' : 'running'),
+    result_preview: toolCall.result_preview || '',
+    result: toolCall.result || '',
+    error: toolCall.error || '',
+    duration_ms: null,
+  };
+}
+
+function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) {
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+  if (includeDuration) {
+    const durationStr = formatToolActivityDurationMs(totalDurationMs);
+    if (durationStr) {
+      const duration = document.createElement('span');
+      duration.className = 'activity-summary-duration';
+      duration.textContent = '(' + durationStr + ')';
+      summary.appendChild(duration);
+    }
+  }
+  return summary;
+}
+
+function setToolActivityCardExpanded(rendered, expanded) {
+  rendered.body.classList.toggle('expanded', !!expanded);
+  rendered.chevron.classList.toggle('expanded', !!expanded);
+  rendered.header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function applyToolActivityCardState(rendered, options) {
+  const entry = rendered.entry;
+  const status = entry.status || 'running';
+  rendered.card.setAttribute('data-tool-name', entry.name);
+  if (entry.call_id) {
+    rendered.card.setAttribute('data-call-id', entry.call_id);
   } else {
-    _activityThinking = document.createElement('div');
-    _activityThinking.className = 'activity-thinking';
-    _activityThinking.innerHTML =
-      '<span class="activity-thinking-dots">'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '</span>'
-      + '<span class="activity-thinking-text"></span>';
-    group.appendChild(_activityThinking);
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    rendered.card.removeAttribute('data-call-id');
   }
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  rendered.card.setAttribute('data-status', status);
+  rendered.toolName.textContent = entry.name;
+
+  if (options.showDuration && entry.duration_ms !== null) {
+    rendered.duration.textContent = formatToolActivityDurationMs(entry.duration_ms);
+  } else {
+    rendered.duration.textContent = '';
+  }
+
+  if (status === 'fail') {
+    rendered.icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+  } else if (status === 'success') {
+    rendered.icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+  } else {
+    rendered.icon.innerHTML = '<div class="spinner"></div>';
+  }
+
+  rendered.output.textContent = getToolActivityBodyText(entry);
+  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
+  setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
-function removeActivityThinking() {
-  if (_activityThinking) {
-    _activityThinking.remove();
-    _activityThinking = null;
-  }
-}
-
-function addToolCard(name) {
-  // Hide thinking instead of destroying — it may reappear between tool rounds
-  if (_activityThinking) _activityThinking.style.display = 'none';
+function addSkillActivationCard(names, feedback) {
+  // The activation card is the first concrete signal that a turn is
+  // underway, so the "thinking" dots have done their job — drop them.
+  // `startTool` / `completeTool` will re-show them later if nothing
+  // else has reported progress by then.
+  removeActivityThinking();
   const group = getOrCreateActivityGroup();
+  if (!group) return;
 
   const card = document.createElement('div');
-  card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', name);
-  card.setAttribute('data-status', 'running');
+  card.className = 'activity-skill-card';
 
   const header = document.createElement('div');
+  header.className = 'activity-skill-header';
+  const icon = document.createElement('span');
+  icon.className = 'activity-skill-icon';
+  icon.textContent = '\u25C6'; // ◆
+  header.appendChild(icon);
+  const label = document.createElement('span');
+  label.className = 'activity-skill-label';
+  if (names.length > 0) {
+    label.textContent = 'Skills: ' + names.join(', ');
+  } else {
+    label.textContent = 'Skill activation';
+  }
+  header.appendChild(label);
+  card.appendChild(header);
+
+  for (const note of feedback) {
+    const row = document.createElement('div');
+    row.className = 'activity-skill-note';
+    row.textContent = note;
+    card.appendChild(row);
+  }
+
+  group.appendChild(card);
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function createToolActivityCard(entry, options) {
+  const card = document.createElement('div');
+  card.className = 'activity-tool-card';
+
+  const header = document.createElement('button');
+  header.type = 'button';
   header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
-  icon.innerHTML = '<div class="spinner"></div>';
 
   const toolName = document.createElement('span');
   toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
 
   const duration = document.createElement('span');
   duration.className = 'activity-tool-duration';
-  duration.textContent = '';
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
 
   header.appendChild(icon);
   header.appendChild(toolName);
@@ -1946,164 +2862,332 @@ function addToolCard(name) {
   output.className = 'activity-tool-output';
   body.appendChild(output);
 
+  const rendered = { entry, card, header, icon, toolName, duration, chevron, body, output, timer: null };
   header.addEventListener('click', () => {
-    body.classList.toggle('expanded');
-    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    const willExpand = !body.classList.contains('expanded');
+    setToolActivityCardExpanded(rendered, willExpand);
   });
 
   card.appendChild(header);
   card.appendChild(body);
-  group.appendChild(card);
-
-  const startTime = Date.now();
-  const timerInterval = setInterval(() => {
-    const elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 300) { clearInterval(timerInterval); return; }
-    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  }, 100);
-
-  if (!_activeToolCards[name]) _activeToolCards[name] = [];
-  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
-
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  applyToolActivityCardState(rendered, options);
+  return rendered;
 }
 
-function completeToolCard(name, success, error, parameters) {
-  const entries = _activeToolCards[name];
-  if (!entries || entries.length === 0) return;
-  // Find first running card
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i].card.getAttribute('data-status') === 'running') {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
+function createActivityGroupFromEntries(entries, options) {
+  const hasError = entries.some(entry => entry.status === 'fail');
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
 
-  clearInterval(entry.timer);
-  const elapsed = (Date.now() - entry.startTime) / 1000;
-  entry.finalDuration = elapsed;
-  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  entry.icon.innerHTML = success
-    ? '<span class="activity-icon-success">&#10003;</span>'
-    : '<span class="activity-icon-fail">&#10007;</span>';
-  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
-
-  // For failed tools, populate the body with error details and auto-expand
-  if (!success && (error || parameters)) {
-    const output = entry.card.querySelector('.activity-tool-output');
-    if (output) {
-      let detail = '';
-      if (parameters) {
-        detail += 'Input:\n' + parameters + '\n\n';
-      }
-      if (error) {
-        detail += 'Error:\n' + error;
-      }
-      output.textContent = detail;
-
-      // Auto-expand so the error is immediately visible
-      const body = entry.card.querySelector('.activity-tool-body');
-      const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.classList.add('expanded');
-      if (chevron) chevron.classList.add('expanded');
-    }
-  }
-}
-
-function setToolCardOutput(name, preview) {
-  const entries = _activeToolCards[name];
-  if (!entries || entries.length === 0) return;
-  // Find first card with empty output
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    const out = entries[i].card.querySelector('.activity-tool-output');
-    if (out && !out.textContent) {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
-
-  const output = entry.card.querySelector('.activity-tool-output');
-  if (output) {
-    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
-    output.textContent = truncated;
-  }
-}
-
-function finalizeActivityGroup() {
-  removeActivityThinking();
-  if (!_activeGroup) return;
-
-  // Stop all timers
-  for (const name in _activeToolCards) {
-    const entries = _activeToolCards[name];
-    for (let i = 0; i < entries.length; i++) {
-      clearInterval(entries[i].timer);
+  let totalDurationMs = 0;
+  let hasDuration = false;
+  for (const entry of entries) {
+    if (typeof entry.duration_ms === 'number' && isFinite(entry.duration_ms)) {
+      totalDurationMs += entry.duration_ms;
+      hasDuration = true;
     }
   }
 
-  // Count tools and total duration
-  let toolCount = 0;
-  let totalDuration = 0;
-  for (const tname in _activeToolCards) {
-    const tentries = _activeToolCards[tname];
-    for (let j = 0; j < tentries.length; j++) {
-      const entry = tentries[j];
-      toolCount++;
-      if (entry.finalDuration !== null) {
-        totalDuration += entry.finalDuration;
-      } else {
-        // Tool was still running when finalized
-        totalDuration += (Date.now() - entry.startTime) / 1000;
-      }
-    }
+  const summary = createToolActivitySummary(entries.length, totalDurationMs, options.includeSummaryDuration && hasDuration);
+  if (hasError) {
+    summary.querySelector('.activity-summary-chevron').classList.add('expanded');
+    summary.setAttribute('aria-expanded', 'true');
   }
 
-  if (toolCount === 0) {
-    // No tools were used — remove the empty group
-    _activeGroup.remove();
-    _activeGroup = null;
-    _activeToolCards = {};
-    return;
-  }
-
-  // Wrap existing cards into a hidden container
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
+  cardsContainer.style.display = hasError ? 'flex' : 'none';
 
-  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
-  for (let k = 0; k < cards.length; k++) {
-    cardsContainer.appendChild(cards[k]);
+  for (const entry of entries) {
+    const rendered = createToolActivityCard(entry, {
+      showDuration: !!options.showCardDurations,
+      expandErrors: options.expandErrors !== false,
+    });
+    cardsContainer.appendChild(rendered.card);
   }
-
-  // Build summary line
-  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('div');
-  summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
-    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
-  // Clear group and add summary + hidden cards
-  _activeGroup.innerHTML = '';
-  _activeGroup.classList.add('collapsed');
-  _activeGroup.appendChild(summary);
-  _activeGroup.appendChild(cardsContainer);
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
 
-  _activeGroup = null;
-  _activeToolCards = {};
+function createToolActivityController(options) {
+  let activeGroup = null;
+  let activeEntries = [];
+  let entriesByCallId = new Map();
+  let entriesByName = new Map();
+  let thinkingEl = null;
+
+  function getContainer() {
+    return document.getElementById(options.containerId);
+  }
+
+  function scrollToBottom() {
+    const container = getContainer();
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  function clearTimer(rendered) {
+    if (rendered && rendered.timer) {
+      clearInterval(rendered.timer);
+      rendered.timer = null;
+    }
+  }
+
+  function rememberRendered(rendered) {
+    activeEntries.push(rendered);
+    if (rendered.entry.call_id) {
+      entriesByCallId.set(rendered.entry.call_id, rendered);
+    }
+    const byName = entriesByName.get(rendered.entry.name) || [];
+    byName.push(rendered);
+    entriesByName.set(rendered.entry.name, byName);
+  }
+
+  function findRendered(callId, name, predicate) {
+    if (callId) {
+      const rendered = entriesByCallId.get(callId);
+      if (rendered && (!predicate || predicate(rendered))) return rendered;
+      return null;
+    }
+
+    const byName = entriesByName.get(name) || [];
+    for (const rendered of byName) {
+      if (!predicate || predicate(rendered)) return rendered;
+    }
+    return null;
+  }
+
+  function reset(removeDom) {
+    if (removeDom && activeGroup) {
+      activeGroup.remove();
+    }
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+    }
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  function getOrCreateGroup() {
+    if (activeGroup) return activeGroup;
+    const container = getContainer();
+    if (!container) return null;
+    activeGroup = document.createElement('div');
+    activeGroup.className = 'activity-group';
+    container.appendChild(activeGroup);
+    scrollToBottom();
+    return activeGroup;
+  }
+
+  function showThinking(message) {
+    const group = getOrCreateGroup();
+    if (!group) return;
+    if (thinkingEl) {
+      thinkingEl.style.display = '';
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    } else {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'activity-thinking';
+      thinkingEl.innerHTML =
+        '<span class="activity-thinking-dots">'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '</span>'
+        + '<span class="activity-thinking-text"></span>';
+      group.appendChild(thinkingEl);
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    }
+    scrollToBottom();
+  }
+
+  function removeThinking() {
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+  }
+
+  function startTool(event) {
+    if (thinkingEl) thinkingEl.style.display = 'none';
+    const group = getOrCreateGroup();
+    if (!group) return;
+
+    const entry = {
+      call_id: event.call_id || null,
+      name: event.name || 'tool',
+      status: 'running',
+      result_preview: '',
+      result: '',
+      error: '',
+      duration_ms: null,
+      started_at_ms: Date.now(),
+    };
+    const rendered = createToolActivityCard(entry, {
+      showDuration: true,
+      expandErrors: true,
+    });
+
+    rendered.timer = setInterval(() => {
+      const elapsedMs = Date.now() - rendered.entry.started_at_ms;
+      if (elapsedMs > 300000) {
+        clearTimer(rendered);
+        return;
+      }
+      rendered.duration.textContent = formatToolActivityDurationMs(elapsedMs);
+    }, 100);
+
+    group.appendChild(rendered.card);
+    rememberRendered(rendered);
+    scrollToBottom();
+  }
+
+  function completeTool(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => candidate.entry.status === 'running'
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    clearTimer(rendered);
+    rendered.entry.status = event.success ? 'success' : 'fail';
+    rendered.entry.duration_ms = typeof event.duration_ms === 'number'
+      ? event.duration_ms
+      : (Date.now() - rendered.entry.started_at_ms);
+
+    if (!event.success && (event.error || event.parameters)) {
+      rendered.entry.error = buildToolFailureText(event.parameters, event.error);
+    }
+
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function setResult(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => !candidate.entry.result
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    const preview = truncateToolActivityResult(event.preview || '');
+    rendered.entry.result = preview;
+    if (!rendered.entry.result_preview) {
+      rendered.entry.result_preview = preview;
+    }
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function finalizeGroup() {
+    removeThinking();
+    if (!activeGroup) return;
+
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+      applyToolActivityCardState(rendered, {
+        showDuration: true,
+        expandErrors: true,
+      });
+    }
+
+    if (activeEntries.length === 0) {
+      activeGroup.remove();
+      reset(false);
+      return;
+    }
+
+    const totalDurationMs = activeEntries.reduce((sum, rendered) => {
+      return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
+    }, 0);
+
+    const cardsContainer = document.createElement('div');
+    cardsContainer.className = 'activity-cards-container';
+    cardsContainer.style.display = 'none';
+    for (const rendered of activeEntries) {
+      cardsContainer.appendChild(rendered.card);
+    }
+
+    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true);
+    summary.addEventListener('click', () => {
+      const isOpen = cardsContainer.style.display !== 'none';
+      cardsContainer.style.display = isOpen ? 'none' : 'flex';
+      summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+      summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+    });
+
+    activeGroup.innerHTML = '';
+    activeGroup.classList.add('collapsed');
+    activeGroup.appendChild(summary);
+    activeGroup.appendChild(cardsContainer);
+
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  return {
+    getOrCreateGroup,
+    showThinking,
+    removeThinking,
+    startTool,
+    completeTool,
+    setResult,
+    finalizeGroup,
+    reset,
+  };
+}
+
+function getOrCreateActivityGroup() {
+  return _chatToolActivity.getOrCreateGroup();
+}
+
+function showActivityThinking(message) {
+  _chatToolActivity.showThinking(message);
+}
+
+function removeActivityThinking() {
+  _chatToolActivity.removeThinking();
+}
+
+function addToolCard(toolEvent) {
+  _chatToolActivity.startTool(toolEvent);
+}
+
+function completeToolCard(toolEvent) {
+  _chatToolActivity.completeTool(toolEvent);
+}
+
+function setToolCardOutput(toolEvent) {
+  _chatToolActivity.setResult(toolEvent);
+}
+
+function finalizeActivityGroup() {
+  _chatToolActivity.finalizeGroup();
 }
 
 function humanizeToolName(rawName) {
@@ -2334,55 +3418,96 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-async function handleAuthRequired(data) {
+function handleAuthRequired(data) {
+  const shouldBlockChat = data.block_chat !== false;
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
-    setAuthFlowPending(true, data.instructions);
+    if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
     return;
   }
-  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
-  if (existingCard && !data.request_id) {
-    const existingRequestId = existingCard.getAttribute('data-request-id');
-    const existingThreadId = existingCard.getAttribute('data-thread-id');
-    const incomingThreadId = data.thread_id || currentThreadId || null;
-    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
-      return;
-    }
-  }
-  if (!data.request_id) {
-    const threadId = data.thread_id || currentThreadId || null;
-    if (threadId) {
-      try {
-        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
-        const pendingGate = history && history.pending_gate;
-        if (pendingGate && pendingGate.request_id) {
-          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
-          if (resumeKind && resumeKind.type === 'authentication') {
-            handleGateRequired({
-              ...pendingGate,
-              thread_id: pendingGate.thread_id || threadId,
-            });
-            return;
-          }
-        }
-      } catch (_) {
-        // Fall through to the legacy card when pending-gate hydration fails.
-      }
-    }
-  }
-  setAuthFlowPending(true, data.instructions);
-  if (data.auth_url) {
-    // Token paste flow (with optional OAuth button): show the global auth
-    // prompt card. This handles both OAuth credentials (auth_url present)
-    // and skill-based credentials (instructions present, no auth_url).
+  if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
+  if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
     if (getConfigureOverlay(data.extension_name)) return;
     showSetupCardForExtension(data);
+  }
+}
+
+function handleOnboardingState(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    if (data.state === 'auth_required' || data.state === 'setup_required' || data.state === 'pairing_required') {
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    }
+    debouncedLoadThreads();
+    return;
+  }
+
+  if (data.state === 'auth_required') {
+    handleAuthRequired({
+      extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
+      request_id: data.request_id || null,
+      instructions: data.instructions,
+      auth_url: data.auth_url || null,
+      setup_url: data.setup_url || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+
+  if (data.state === 'setup_required') {
+    setAuthFlowPending(true, data.instructions || null);
+    showSetupCardForExtension({
+      extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
+      instructions: data.instructions,
+      auth_url: data.auth_url || null,
+      setup_url: data.setup_url || null,
+      onboarding: data.onboarding || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+
+  if (data.state === 'pairing_required') {
+    removeAuthCard(data.extension_name);
+    removeSetupCard(data.extension_name);
+    closeConfigureModal(data.extension_name);
+    showPairingCard({
+      channel: data.extension_name,
+      request_id: data.request_id || null,
+      instructions: data.instructions,
+      onboarding: data.onboarding || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
+    return;
+  }
+
+  if (data.state === 'ready' || data.state === 'failed') {
+    const recentPairingApprovalAt = _recentLocalPairingApprovals.get(data.extension_name);
+    const skipToast = !!recentPairingApprovalAt
+      && data.state === 'ready'
+      && Date.now() - recentPairingApprovalAt <= 5000;
+    if (data.message && !skipToast) {
+      showToast(data.message, data.state === 'ready' ? 'success' : 'error');
+    }
+    _recentLocalPairingApprovals.delete(data.extension_name);
+    removePairingCard(data.extension_name);
+    removeAuthCard(data.extension_name);
+    removeSetupCard(data.extension_name);
+    closeConfigureModal(data.extension_name);
+    setAuthFlowPending(false);
+    if (data.state === 'ready' && shouldShowChannelConnectedMessage(data.extension_name, true)) {
+      addMessage('system', `${data.display_name || data.extension_name} is now connected.`);
+    }
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
+    enableChatInput();
   }
 }
 
@@ -2404,11 +3529,13 @@ function handleGateRequired(data) {
     return;
   }
   if (resume && resume.type === 'authentication') {
-    handleAuthRequired({
-      extension_name: resume.credential_name,
+    handleOnboardingState({
+      state: 'auth_required',
+      extension_name: data.extension_name || null,
+      display_name: data.display_name || data.extension_name || resume.credential_name,
+      request_id: data.request_id,
       instructions: resume.instructions,
       auth_url: resume.auth_url || null,
-      request_id: data.request_id,
       thread_id: data.thread_id || currentThreadId,
     });
     return;
@@ -2438,53 +3565,6 @@ function handleGateResolved(data) {
     removeAuthCard();
     enableChatInput();
   }
-}
-
-function handleAuthCompleted(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    debouncedLoadThreads();
-    return;
-  }
-  showToast(data.message, data.success ? 'success' : 'error');
-  // Dismiss only the matching extension's UI so stale prompts are cleared.
-  removeAuthCard(data.extension_name);
-  removeSetupCard(data.extension_name);
-  closeConfigureModal(data.extension_name);
-  if (!data.success) {
-    setAuthFlowPending(false);
-    if (currentTab === 'extensions') loadExtensions();
-    enableChatInput();
-    return;
-  }
-  setAuthFlowPending(false);
-  if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
-    addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
-  }
-  if (currentTab === 'settings') refreshCurrentSettingsTab();
-  enableChatInput();
-}
-
-function handlePairingRequired(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
-    debouncedLoadThreads();
-    return;
-  }
-  showPairingCard(data);
-}
-
-function handlePairingCompleted(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    debouncedLoadThreads();
-    return;
-  }
-  removePairingCard(data.channel);
-  const recentApprovalAt = _recentLocalPairingApprovals.get(data.channel);
-  if (!recentApprovalAt || Date.now() - recentApprovalAt > 5000) {
-    showToast(data.message, data.success ? 'success' : 'error');
-  }
-  _recentLocalPairingApprovals.delete(data.channel);
-  if (currentTab === 'settings') refreshCurrentSettingsTab();
 }
 
 function queryByDataAttribute(selector, attributeName, attributeValue) {
@@ -2564,17 +3644,27 @@ function showAuthCard(data) {
   // Keep a single global auth prompt so the experience is consistent across tabs.
   const existing = getAuthOverlay();
   if (existing) existing.remove();
+  // Temporary compatibility boundary: legacy web auth prompts (engine v1
+  // `pending_auth`) do not carry a gate `request_id`, but they still need
+  // manual token entry until that path is retired. Real v2 gates keep using
+  // `/api/chat/gate/resolve`.
+  const allowTokenSubmit = !data.auth_url;
+  const displayName = data.display_name || data.extension_name || 'this integration';
 
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
-  overlay.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    overlay.setAttribute('data-extension-name', data.extension_name);
+  }
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) cancelAuth(data.extension_name);
   });
 
   const card = document.createElement('div');
   card.className = 'auth-card auth-modal';
-  card.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    card.setAttribute('data-extension-name', data.extension_name);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -2584,7 +3674,7 @@ function showAuthCard(data) {
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
+  header.textContent = I18n.t('authRequired.title', {name: displayName});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -2607,7 +3697,9 @@ function showAuthCard(data) {
       // Match the other external links: include `noreferrer` so the
       // OAuth provider does not see the in-app Referer header.
       oauthLink.rel = 'noopener noreferrer';
-      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: displayName});
+      oauthLink.setAttribute('aria-label', 'Authenticate with ' + displayName + ' in a new tab');
+      oauthLink.title = 'Opens authentication in a new tab';
       links.appendChild(oauthLink);
     }
   }
@@ -2616,10 +3708,13 @@ function showAuthCard(data) {
     const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
     if (parsedSetupUrl) {
       const setupLink = document.createElement('a');
+      setupLink.className = 'auth-setup-link';
       setupLink.href = parsedSetupUrl.href;
       setupLink.target = '_blank';
       setupLink.rel = 'noopener noreferrer';
       setupLink.textContent = I18n.t('authRequired.getToken');
+      setupLink.setAttribute('aria-label', 'Open token setup instructions for ' + displayName + ' in a new tab');
+      setupLink.title = 'Opens setup instructions in a new tab';
       links.appendChild(setupLink);
     }
   }
@@ -2628,19 +3723,21 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  // Token input
-  const tokenRow = document.createElement('div');
-  tokenRow.className = 'auth-token-input';
+  let tokenInput = null;
+  if (allowTokenSubmit) {
+    const tokenRow = document.createElement('div');
+    tokenRow.className = 'auth-token-input';
 
-  const tokenInput = document.createElement('input');
-  tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions
-    || I18n.t('auth.tokenPlaceholder');
-  tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-  });
-  tokenRow.appendChild(tokenInput);
-  card.appendChild(tokenRow);
+    tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.placeholder = data.instructions
+      || I18n.t('auth.tokenPlaceholder');
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
+    });
+    tokenRow.appendChild(tokenInput);
+    card.appendChild(tokenRow);
+  }
 
   // Error display (hidden initially)
   const errorEl = document.createElement('div');
@@ -2652,23 +3749,24 @@ function showAuthCard(data) {
   const actions = document.createElement('div');
   actions.className = 'auth-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'auth-submit';
-  submitBtn.textContent = I18n.t('btn.submit');
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+  if (allowTokenSubmit) {
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'auth-submit';
+    submitBtn.textContent = I18n.t('btn.submit');
+    submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+    actions.appendChild(submitBtn);
+  }
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = I18n.t('btn.cancel');
+  cancelBtn.textContent = allowTokenSubmit ? I18n.t('btn.cancel') : I18n.t('common.close');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
-
-  actions.appendChild(submitBtn);
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   overlay.appendChild(card);
   document.body.appendChild(overlay);
-  tokenInput.focus();
+  if (tokenInput) tokenInput.focus();
 }
 
 function removeAuthCard(extensionName) {
@@ -2693,6 +3791,9 @@ function showPairingCard(data) {
   const card = document.createElement('div');
   card.className = 'auth-card pairing-card';
   card.setAttribute('data-channel', data.channel);
+  if (data.request_id) {
+    card.setAttribute('data-request-id', data.request_id);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -2813,30 +3914,33 @@ function submitAuthToken(extensionName, tokenValue) {
     btns.forEach((b) => { b.disabled = true; });
   }
 
-  const isGateResolution = !!(card && card.getAttribute('data-request-id'));
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
-    method: 'POST',
-    body: {
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-      resolution: 'credential_provided',
-      token: tokenValue.trim(),
-    },
-  }) : apiFetch('/api/chat/auth-token', {
-    method: 'POST',
-    body: {
-      extension_name: extensionName,
-      token: tokenValue.trim(),
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-    },
-  });
+  const targetThreadId = threadId || currentThreadId || undefined;
+  // Keep the v1 fallback scoped to prompts without a gate request id. This is
+  // the only browser-side compatibility shim we want left once v1 auth mode is
+  // removed.
+  const request = requestId
+    ? apiFetch('/api/chat/gate/resolve', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        thread_id: targetThreadId,
+        resolution: 'credential_provided',
+        token: tokenValue.trim(),
+      },
+    })
+    : apiFetch('/api/chat/auth-token', {
+      method: 'POST',
+      body: {
+        token: tokenValue.trim(),
+        thread_id: targetThreadId,
+      },
+    });
 
   request.then((result) => {
     if (result.success) {
       // Close immediately for responsiveness; the authoritative success UX
-      // (toast + extensions refresh) still comes from auth_completed SSE.
+      // (toast + settings refresh) still comes from the onboarding_state SSE.
       removeAuthCard(extensionName);
       enableChatInput();
     } else {
@@ -2851,22 +3955,7 @@ function cancelAuth(extensionName) {
   const card = getAuthCard(extensionName);
   const threadId = card ? card.getAttribute('data-thread-id') : null;
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
-    method: 'POST',
-    body: {
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-      resolution: 'cancelled',
-    },
-  }) : apiFetch('/api/chat/auth-cancel', {
-    method: 'POST',
-    body: {
-      extension_name: extensionName,
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-    },
-  });
-  request.catch(() => {});
+  requestAuthCancellation(requestId, threadId).catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -2902,6 +3991,24 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+function isSameInProgressTurn(lastTurn, inProgress) {
+  if (!lastTurn || !inProgress) return false;
+
+  if (lastTurn.user_message_id && inProgress.user_message_id) {
+    return lastTurn.user_message_id === inProgress.user_message_id;
+  }
+
+  if (!lastTurn.user_message_id && !inProgress.user_message_id) {
+    return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  }
+
+  if (!inProgress.user_message_id && lastTurn.user_input && inProgress.user_input) {
+    return !lastTurn.response && lastTurn.user_input === inProgress.user_input;
+  }
+
+  return false;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -2917,6 +4024,7 @@ function loadHistory(before) {
 
   // Show skeleton while loading (only for fresh loads)
   if (!isPaginating) {
+    _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
     chatContainer.innerHTML = '';
     chatContainer.appendChild(renderSkeleton('message', 3));
@@ -2935,18 +4043,72 @@ function loadHistory(before) {
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            addGeneratedImage(
+              resolvedImage.dataUrl,
+              resolvedImage.path,
+              image.event_id,
+              false
+            );
+          }
+        }
         if (turn.response) {
           addMessage('assistant', turn.response);
         }
       }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const pending = _pendingUserMessages.get(currentThreadId);
+      let freshPending = [];
+      if (pending && pending.length > 0) {
+        const now = Date.now();
+        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+        if (freshPending.length > 0) {
+          const dbContentsCounts = new Map();
+          data.turns
+            .map(t => t.user_input)
+            .filter(Boolean)
+            .forEach(content => {
+              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
+            });
+          for (const p of freshPending) {
+            const count = dbContentsCounts.get(p.content) || 0;
+            if (count > 0) {
+              dbContentsCounts.set(p.content, count - 1);
+            } else {
+              const div = addMessage('user', p.content);
+              if (p.images && p.images.length > 0) {
+                appendImagesToMessage(div, p.images);
+              }
+            }
+          }
+          _pendingUserMessages.set(currentThreadId, freshPending);
+        } else {
+          _pendingUserMessages.delete(currentThreadId);
+        }
+      }
+      container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0) {
+      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking('Processing...');
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          addMessage('user', data.in_progress.user_input);
+        }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
         handleGateRequired({
@@ -2978,6 +4140,24 @@ function loadHistory(before) {
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
+        }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            fragment.appendChild(
+              createGeneratedImageElement(
+                resolvedImage.dataUrl,
+                resolvedImage.path,
+                image.event_id
+              )
+            );
+          }
         }
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
@@ -3055,52 +4235,18 @@ function addToolCallsSummary(toolCalls) {
 }
 
 function createToolCallsSummaryElement(toolCalls) {
-  const div = document.createElement('div');
-  div.className = 'tool-calls-summary';
+  return createActivityGroupFromHistory(toolCalls);
+}
 
-  const header = document.createElement('div');
-  header.className = 'tool-calls-header';
-  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
-  div.appendChild(header);
-
-  const list = document.createElement('div');
-  list.className = 'tool-calls-list';
-
-  for (const tc of toolCalls) {
-    const item = document.createElement('div');
-    item.className = 'tool-call-item' + (tc.has_error ? ' tool-error' : '');
-
-    const icon = tc.has_error ? '\u2717' : '\u2713';
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'tool-call-name';
-    nameSpan.textContent = icon + ' ' + tc.name;
-    item.appendChild(nameSpan);
-
-    if (tc.result_preview) {
-      const preview = document.createElement('div');
-      preview.className = 'tool-call-preview';
-      preview.textContent = tc.result_preview;
-      item.appendChild(preview);
+function createActivityGroupFromHistory(toolCalls) {
+  return createActivityGroupFromEntries(
+    toolCalls.map(normalizeHistoryToolCall),
+    {
+      includeSummaryDuration: false,
+      showCardDurations: false,
+      expandErrors: true,
     }
-    if (tc.error) {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'tool-call-error-text';
-      errDiv.textContent = tc.error;
-      item.appendChild(errDiv);
-    }
-
-    list.appendChild(item);
-  }
-
-  div.appendChild(list);
-
-  header.style.cursor = 'pointer';
-  header.addEventListener('click', () => {
-    list.classList.toggle('expanded');
-    header.classList.toggle('expanded');
-  });
-
-  return div;
+  );
 }
 
 function removeScrollSpinner() {
@@ -3150,19 +4296,33 @@ function loadThreads() {
   }
 
   apiFetch('/api/chat/threads').then((data) => {
+    const rememberedThreads = [];
     // Pinned assistant thread
     if (data.assistant_thread) {
       assistantThreadId = data.assistant_thread.id;
+      rememberedThreads.push({
+        threadId: data.assistant_thread.id,
+        meta: {
+          label: I18n.t('thread.assistant'),
+          source: 'chat',
+        },
+      });
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
-        const at = data.assistant_thread;
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
+      if (data.assistant_thread.state === 'Processing' && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        el.appendChild(spinner);
+      }
     }
 
     // Regular threads
@@ -3170,9 +4330,17 @@ function loadThreads() {
     list.innerHTML = '';
     const threads = data.threads || [];
     for (const thread of threads) {
+      rememberedThreads.push({
+        threadId: thread.id,
+        meta: {
+          label: threadTitle(thread),
+          source: 'chat',
+        },
+      });
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
+      item.setAttribute('data-thread-id', thread.id);
 
       // Channel badge for non-gateway threads
       const ch = thread.channel || 'gateway';
@@ -3194,6 +4362,14 @@ function loadThreads() {
       meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
 
+      // Processing spinner
+      if ((thread.state === 'Processing' || processingThreads.has(thread.id)) && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        item.appendChild(spinner);
+      }
+
       // Unread dot
       const unread = unreadThreads.get(thread.id) || 0;
       if (unread > 0 && !isActive) {
@@ -3206,6 +4382,8 @@ function loadThreads() {
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
+
+    activeWorkStore.rememberThreads(rememberedThreads);
 
     // Restore thread from URL hash if pending (deferred from restoreFromHash)
     if (window._pendingThreadRestore) {
@@ -3220,14 +4398,40 @@ function loadThreads() {
       }
     }
 
-    // Default to assistant thread on first load if no thread selected
-    if (!currentThreadId && assistantThreadId) {
-      switchToAssistant();
+    // Preserve the currently open thread even when it falls outside the
+    // sidebar's recency window. The history view can still load that thread
+    // directly, and follow-up sends must stay attached to it.
+
+    // Reopen the server's active thread on first load. This keeps the visible
+    // chat attached to an in-flight agent turn after a browser refresh, even
+    // when the URL does not carry an explicit thread hash.
+    if (!currentThreadId) {
+      const activeThreadId = data.active_thread || null;
+      if (activeThreadId && activeThreadId === assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
+      if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
+        // Skip external-channel threads (e.g. HTTP, Telegram) — they are
+        // read-only in the web UI, so auto-switching to one would leave the
+        // chat input disabled.  Fall through to the assistant thread instead.
+        const activeThread = threads.find(t => t.id === activeThreadId);
+        if (!isReadOnlyChannel(activeThread.channel)) {
+          switchThread(activeThreadId);
+          return;
+        }
+      }
+      if (assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
     }
 
     // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      const currentThread = threads.find(t => t.id === currentThreadId);
+      const currentThread = currentThreadId === assistantThreadId
+        ? data.assistant_thread
+        : threads.find(t => t.id === currentThreadId);
       const ch = currentThread ? currentThread.channel : 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
@@ -3277,6 +4481,7 @@ function switchThread(threadId) {
   }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
+  processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -3460,6 +4665,7 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
 });
 
 function switchTab(tab) {
+  tab = normalizeTabForEngineMode(tab);
   currentTab = tab;
   // NOTE: this function takes a `tab` argument that may originate from
   // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
@@ -3484,7 +4690,13 @@ function switchTab(tab) {
     if (!currentMemoryPath) readMemoryFile('README.md');
   }
   if (tab === 'jobs') loadJobs();
-  if (tab === 'missions') loadMissions();
+  if (tab === 'projects') {
+    loadProjectsOverview();
+  } else if (crCurrentProjectId) {
+    // Tear down project widgets and reset drill-in state when leaving
+    // the Projects tab so widgets don't keep running in the background.
+    crBackToOverview();
+  }
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -3996,9 +5208,11 @@ function renderAvailableExtensionCard(entry) {
         showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: entry.name,
             auth_url: res.auth_url,
+            display_name: entry.display_name || entry.name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: entry.display_name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -4404,9 +5618,11 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -4416,9 +5632,11 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        showAuthCard({
+        handleAuthRequired({
           extension_name: name,
           auth_url: res.auth_url,
+          display_name: name,
+          block_chat: false,
         });
         showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
         openOAuthUrl(res.auth_url);
@@ -4475,8 +5693,6 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   // Remove directly (don't clear authFlowPending) since a new overlay is about to be appended.
   var existingOverlay = document.querySelector('.configure-overlay');
   if (existingOverlay && existingOverlay.getAttribute('data-auth-flow')) {
-    var extName = existingOverlay.getAttribute('data-auth-extension') || existingOverlay.getAttribute('data-extension-name');
-    apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName } }).catch(function() {});
     existingOverlay.remove();
   } else {
     closeConfigureModal();
@@ -4665,6 +5881,8 @@ function submitConfigureModal(name, fields, options) {
   }
 
   const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  const requestId = overlay ? overlay.getAttribute('data-request-id') : null;
+  const threadId = overlay ? overlay.getAttribute('data-thread-id') : null;
   clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
@@ -4673,33 +5891,31 @@ function submitConfigureModal(name, fields, options) {
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
-    body: { secrets, fields: setupFields },
+    body: {
+      request_id: requestId || undefined,
+      thread_id: threadId || undefined,
+      secrets,
+      fields: setupFields,
+    },
   })
     .then((res) => {
       if (res.success) {
         // Strip auth-flow flag before closing so closeConfigureModal
-        // does not trigger a spurious auth-cancel API call.
+        // does not trigger a spurious gate cancellation.
         if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
           refreshCurrentSettingsTab();
         }
-        // Transition to pairing if the channel requires it.
-        if (res.onboarding_state === 'pairing_required') {
-          showPairingCard({
-            channel: name,
-            instructions: res.onboarding && res.onboarding.pairing_instructions,
-            onboarding: res.onboarding || null,
-          });
-          refreshCurrentSettingsTab();
-        }
-        // For non-OAuth success: the server always broadcasts auth_completed SSE,
+        // For non-OAuth success: the server always broadcasts onboarding_state SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
       } else {
         // Keep modal open so the user can correct their input and retry.
@@ -4725,14 +5941,33 @@ function closeConfigureModal(extensionName) {
   }
 }
 
+function requestAuthCancellation(requestId, threadId) {
+  const targetThreadId = threadId || currentThreadId || undefined;
+  if (requestId) {
+    return apiFetch('/api/chat/gate/resolve', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        thread_id: targetThreadId,
+        resolution: 'cancelled'
+      }
+    });
+  }
+
+  // Legacy `pending_auth` cancel path. Remove this when web auth no longer
+  // uses thread-level auth mode and every prompt is gate-backed.
+  return apiFetch('/api/chat/auth-cancel', {
+    method: 'POST',
+    body: {
+      thread_id: targetThreadId,
+    }
+  });
+}
+
 function cancelAuthFromConfigureModal(overlay) {
-  var extName = overlay.getAttribute('data-auth-extension') || overlay.getAttribute('data-extension-name');
   var requestId = overlay.getAttribute('data-request-id');
   var threadId = overlay.getAttribute('data-thread-id');
-  var request = requestId
-    ? apiFetch('/api/chat/gate/resolve', { method: 'POST', body: { request_id: requestId, thread_id: threadId || currentThreadId || undefined, resolution: 'cancelled' } })
-    : apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName, thread_id: threadId || currentThreadId || undefined } });
-  request.catch(function() {});
+  requestAuthCancellation(requestId, threadId).catch(function() {});
   overlay.remove();
   if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
     setAuthFlowPending(false);
@@ -4961,9 +6196,17 @@ function approvePairing(channel, code, options) {
     return Promise.resolve();
   }
 
+  const card = getPairingCard(channel);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+
   return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code: normalizedCode },
+    body: {
+      code: normalizedCode,
+      thread_id: threadId || currentThreadId || undefined,
+      request_id: requestId || undefined,
+    },
   }).then(res => {
     if (res.success) {
       _recentLocalPairingApprovals.set(channel, Date.now());
@@ -5098,6 +6341,7 @@ function loadJobs() {
     apiFetch('/api/jobs/summary'),
     apiFetch('/api/jobs'),
   ]).then(([summary, jobList]) => {
+    activeWorkStore.rememberJobs(jobList.jobs);
     renderJobsSummary(summary);
     renderJobsList(jobList.jobs);
   }).catch(() => {});
@@ -5557,7 +6801,11 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'tool_result': {
       const trSuccess = data.success !== false;
       const trIcon = trSuccess ? '&#10003;' : '&#10007;';
-      const trOutput = data.output || data.error || '';
+      const trOutput = getToolActivityBodyText({
+        error: data.error || '',
+        result: data.output || '',
+        result_preview: '',
+      });
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
       el.innerHTML = '<details class="' + trClass + '"><summary>'
@@ -5849,12 +7097,583 @@ function deleteRoutine(id, name) {
     .catch((err) => showToast(I18n.t('routines.deleteFailed', { message: err.message }), 'error'));
 }
 
-// ── Missions ──────────────────────────────────────────────
+// ── Projects Control Room (engine v2) ─────────────────────
+//
+// 4-layer control room: attention bar → project cards → drill-in → detail.
+// Replaces the legacy missions tab when ENGINE_V2 is enabled.
 
 let currentMissionId = null;
+let crOverview = null; // cached overview response
+let crCurrentProjectId = null; // currently drilled-into project
+
+function applyEngineModeToTabs() {
+  document.querySelectorAll('.tab-bar [data-v2-only]').forEach(function(el) {
+    el.style.display = engineV2Enabled ? '' : 'none';
+  });
+  document.querySelectorAll('.tab-bar [data-v1-only]').forEach(function(el) {
+    el.style.display = engineV2Enabled ? 'none' : '';
+  });
+  var activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  if (activeBtn && activeBtn.style.display === 'none') switchTab('chat');
+  updateTabIndicator();
+}
+
+function loadProjectsOverview() {
+  apiFetch('/api/engine/projects/overview').then(function(data) {
+    crOverview = data;
+    renderCrAttention(data.attention || []);
+    renderCrCards(data.projects || []);
+    // If we were drilled in, stay drilled in (refresh data).
+    if (crCurrentProjectId) drillIntoProject(crCurrentProjectId);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load overview:', err);
+    document.getElementById('cr-cards').innerHTML =
+      '<div class="cr-empty">Failed to load projects.</div>';
+  });
+}
+
+function renderCrAttention(items) {
+  var el = document.getElementById('cr-attention');
+  if (!el) return;
+  if (!items.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '<div class="cr-attention-title">Needs attention</div>'
+    + items.map(function(a) {
+      var icon = a.type === 'gate' ? '<span class="cr-att-icon cr-att-gate">&#x1F511;</span>'
+        : '<span class="cr-att-icon cr-att-fail">&#x26A0;</span>';
+      return '<button class="cr-att-item" data-action="cr-att-click" data-project="'
+        + escapeHtml(a.project_id) + '" data-thread="' + escapeHtml(a.thread_id || '') + '">'
+        + icon + '<span class="cr-att-proj">' + escapeHtml(a.project_name) + '</span>'
+        + '<span class="cr-att-msg">' + escapeHtml(a.message) + '</span></button>';
+    }).join('');
+}
+
+function renderCrCards(projects) {
+  var el = document.getElementById('cr-cards');
+  if (!el) return;
+
+  // Separate default project from user-created projects.
+  var defaultProj = projects.find(function(p) { return p.name === 'default'; });
+  var userProjects = projects.filter(function(p) { return p.name !== 'default'; });
+
+  var html = '';
+
+  // Default project as a special "General" section.
+  if (defaultProj) {
+    var dStats = defaultProj.active_missions + ' missions · '
+      + defaultProj.threads_today + ' threads today';
+    html += '<div class="cr-general">'
+      + '<button class="cr-general-card" data-action="cr-drill" data-id="' + escapeHtml(defaultProj.id) + '">'
+      + '<div class="cr-general-name">General</div>'
+      + '<div class="cr-card-stats">' + escapeHtml(dStats) + '</div>'
+      + '</button></div>';
+  }
+
+  // User-created project cards.
+  if (!userProjects.length && !defaultProj) {
+    html += '<div class="cr-empty">No projects yet. Ask the assistant to create one, or use the button below.</div>';
+  }
+  html += userProjects.map(function(p) {
+    var dot = p.health === 'green' ? 'cr-dot-green'
+      : p.health === 'yellow' ? 'cr-dot-yellow' : 'cr-dot-red';
+    var stats = p.active_missions + ' active · '
+      + p.threads_today + ' threads today · $' + (p.cost_today_usd || 0).toFixed(2);
+    var lastAct = p.last_activity ? formatRelativeTime(p.last_activity) : 'no activity';
+    return '<button class="cr-card" data-action="cr-drill" data-id="' + escapeHtml(p.id) + '">'
+      + '<div class="cr-card-head"><span class="cr-dot ' + dot + '"></span>'
+      + '<span class="cr-card-name">' + escapeHtml(p.name) + '</span></div>'
+      + '<div class="cr-card-stats">' + escapeHtml(stats) + '</div>'
+      + '<div class="cr-card-last">Last: ' + escapeHtml(lastAct) + '</div>'
+      + '</button>';
+  }).join('');
+
+  // "New Project" card.
+  html += '<button class="cr-card cr-card-new" data-action="cr-new-project">'
+    + '<div class="cr-card-head"><span class="cr-card-name">+ New Project</span></div>'
+    + '<div class="cr-card-stats">Create an autonomous workspace</div>'
+    + '</button>';
+
+  el.innerHTML = html;
+}
+
+function drillIntoProject(projectId) {
+  crCurrentProjectId = projectId;
+  document.getElementById('cr-cards').style.display = 'none';
+  var drill = document.getElementById('cr-drill');
+  drill.style.display = '';
+  document.getElementById('cr-detail').style.display = 'none';
+
+  // Find project from cached overview.
+  var proj = crOverview && crOverview.projects
+    ? crOverview.projects.find(function(p) { return p.id === projectId; }) : null;
+  var name = proj ? proj.name : 'Project';
+  var desc = proj ? proj.description : '';
+
+  document.getElementById('cr-drill-header').innerHTML =
+    '<button class="cr-back" data-action="cr-back">&larr; All Projects</button>'
+    + '<h2 class="cr-drill-name">' + escapeHtml(name) + '</h2>'
+    + (desc ? '<p class="cr-drill-desc">' + escapeHtml(desc) + '</p>' : '');
+
+  // Show goals/metrics if present.
+  if (proj && (proj.goals && proj.goals.length || proj.metrics && proj.metrics.length)) {
+    var gmHtml = '';
+    if (proj.goals && proj.goals.length) {
+      gmHtml += '<div class="cr-goals"><div class="cr-section-title">Goals</div>';
+      proj.goals.forEach(function(g) {
+        gmHtml += '<div class="cr-goal-item">' + escapeHtml(g) + '</div>';
+      });
+      gmHtml += '</div>';
+    }
+    // Metrics would come from project detail; overview doesn't include them yet.
+    document.getElementById('cr-drill-header').innerHTML += gmHtml;
+  }
+
+  // Fetch missions and threads for this project.
+  Promise.all([
+    apiFetch('/api/engine/missions?project_id=' + encodeURIComponent(projectId)).catch(function(e) { console.error('[projects] missions fetch:', e); return { missions: [] }; }),
+    apiFetch('/api/engine/threads?project_id=' + encodeURIComponent(projectId)).catch(function(e) { console.error('[projects] threads fetch:', e); return { threads: [] }; }),
+  ]).then(function(res) {
+    var missions = res[0].missions || [];
+    var threads = res[1].threads || [];
+    renderCrDrillMissions(missions);
+    renderCrDrillActivity(threads, missions);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load project details:', err);
+  });
+
+  // Load project-scoped widgets into header/section slots.
+  loadProjectWidgets(projectId);
+}
+
+function crBackToOverview() {
+  crCurrentProjectId = null;
+  destroyProjectWidgets();
+  document.getElementById('cr-drill').style.display = 'none';
+  document.getElementById('cr-detail').style.display = 'none';
+  document.getElementById('cr-cards').style.display = '';
+}
+
+function renderCrDrillMissions(missions) {
+  var el = document.getElementById('cr-drill-missions');
+  if (!el) return;
+  if (!missions.length) {
+    el.innerHTML = '<div class="cr-section-title">Missions</div>'
+      + '<div class="cr-empty">No missions configured yet.</div>';
+    return;
+  }
+  var html = '<div class="cr-section-title">Missions</div>';
+  missions.forEach(function(m) {
+    var statusClass = m.status === 'Active' ? 'in_progress'
+      : m.status === 'Completed' ? 'completed'
+      : m.status === 'Paused' ? 'pending' : 'failed';
+    html += '<button class="cr-mission-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
+      + '<div class="cr-mc-head">'
+      + '<span class="cr-mc-name">' + escapeHtml(m.name) + '</span>'
+      + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>'
+      + '<div class="cr-mc-sub">'
+      + escapeHtml(m.cadence_description || m.cadence_type || 'manual')
+      + ' · ' + m.thread_count + ' threads'
+      + '</div>'
+      + '</button>';
+  });
+  el.innerHTML = html;
+}
+
+function renderCrDrillActivity(threads, missions) {
+  var el = document.getElementById('cr-drill-activity');
+  if (!el) return;
+  if (!threads.length) {
+    el.innerHTML = '<div class="cr-section-title">Activity</div>'
+      + '<div class="cr-empty">No threads yet.</div>';
+    return;
+  }
+  // Sort by updated_at descending.
+  var sorted = threads.slice().sort(function(a, b) {
+    return new Date(b.updated_at) - new Date(a.updated_at);
+  });
+  var html = '<div class="cr-section-title">Recent Activity</div>';
+  sorted.slice(0, 30).forEach(function(t) {
+    var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+      : t.state === 'Failed' ? 'failed'
+      : t.state === 'Running' ? 'in_progress' : 'pending';
+    var label = t.title || t.goal || ('Thread ' + (t.id || '').slice(0, 8));
+    var time = formatRelativeTime(t.updated_at);
+    html += '<button class="cr-activity-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+      + '<span class="cr-act-label">' + escapeHtml(label) + '</span>'
+      + '<span class="cr-act-time">' + escapeHtml(time) + '</span>'
+      + '</button>';
+  });
+  el.innerHTML = html;
+}
+
+function crShowDetail(html) {
+  var detail = document.getElementById('cr-detail');
+  detail.style.display = '';
+  detail.innerHTML = html;
+}
+
+// CR-specific mission detail: renders into the control-room cr-detail panel.
+function crOpenMissionDetail(id) {
+  currentMissionId = id;
+  apiFetch('/api/engine/missions/' + id).then(function(data) {
+    renderMissionDetailInCr(data.mission);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load mission:', err);
+    showToast('Failed to load mission: ' + err.message, 'error');
+  });
+}
+
+function renderMissionDetailInCr(m) {
+  var statusClass = m.status === 'Active' ? 'in_progress'
+    : m.status === 'Completed' ? 'completed'
+    : m.status === 'Paused' ? 'pending' : 'failed';
+  var html = '<div class="cr-detail-header">'
+    + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
+    + '<h2>' + escapeHtml(m.name) + '</h2>'
+    + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>';
+  html += '<div class="job-description"><h3>Goal</h3>'
+    + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+  html += '<div class="job-meta-grid">'
+    + metaItem('Cadence', m.cadence_description || m.cadence_type)
+    + metaItem('Threads today', m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
+    + metaItem('Total threads', m.thread_count)
+    + metaItem('Created', formatDate(m.created_at))
+    + metaItem('Next fire', m.next_fire_at ? formatDate(m.next_fire_at) : '\u2014')
+    + '</div>';
+  if (m.current_focus) {
+    html += '<div class="job-description"><h3>Current Focus</h3>'
+      + '<div class="job-description-body">' + renderMarkdown(m.current_focus) + '</div></div>';
+  }
+  if (m.approach_history && m.approach_history.length) {
+    html += '<div class="job-description"><h3>Approach History</h3>';
+    m.approach_history.forEach(function(a, i) {
+      html += '<div class="job-description-body" style="margin-bottom:8px">'
+        + '<strong>Run ' + (i + 1) + '</strong><br>' + renderMarkdown(a) + '</div>';
+    });
+    html += '</div>';
+  }
+  // Action buttons.
+  html += '<div style="margin-top:16px;">';
+  if (m.status === 'Active') html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ';
+  if (m.status === 'Paused') html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ';
+  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire now</button>';
+  html += '</div>';
+  // Spawned threads.
+  if (m.threads && m.threads.length) {
+    html += '<div class="job-description"><h3>Spawned Threads</h3>';
+    m.threads.forEach(function(t) {
+      var tState = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+        : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
+      html += '<button class="cr-activity-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+        + '<span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span>'
+        + '<span class="cr-act-label">' + escapeHtml(t.goal) + '</span>'
+        + '<span class="cr-act-time">' + escapeHtml(formatDate(t.created_at)) + '</span></button>';
+    });
+    html += '</div>';
+  }
+  crShowDetail(html);
+}
+
+function crOpenEngineThread(threadId) {
+  apiFetch('/api/engine/threads/' + threadId).then(function(data) {
+    var t = data.thread;
+    var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+      : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
+    var html = '<div class="cr-detail-header">'
+      + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
+      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span></div>';
+    html += '<div class="job-meta-grid">'
+      + metaItem('Type', t.thread_type) + metaItem('Steps', t.step_count)
+      + metaItem('Tokens', t.total_tokens.toLocaleString())
+      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '\u2014')
+      + metaItem('Created', formatDate(t.created_at))
+      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '\u2014')
+      + '</div>';
+    if (t.messages && t.messages.length) {
+      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+      t.messages.forEach(function(msg) {
+        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+        html += '<div class="thread-message thread-msg-' + roleClass + '">'
+          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div></div>';
+      });
+      html += '</div>';
+    }
+    crShowDetail(html);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load thread:', err);
+    showToast('Failed to load thread: ' + err.message, 'error');
+  });
+}
+
+// ── Project-scoped widgets ─────────────────────────────────
+// Loaded dynamically on drill-in, destroyed on back/tab-switch.
+
+var _projectWidgets = []; // { id, destroy }
+
+function loadProjectWidgets(projectId) {
+  destroyProjectWidgets();
+  apiFetch('/api/engine/projects/' + encodeURIComponent(projectId) + '/widgets')
+    .then(function(widgets) {
+      if (!Array.isArray(widgets) || !widgets.length) return;
+      widgets.forEach(function(w) {
+        var manifest = w.manifest;
+        var slot = manifest.slot;
+        var parentId = slot === 'project_header' ? 'cr-widget-header' : 'cr-widget-sections';
+        var parent = document.getElementById(parentId);
+        if (!parent) return;
+
+        // Create scoped container.
+        var container = document.createElement('div');
+        container.setAttribute('data-widget', manifest.id);
+        container.setAttribute('data-project-widget', 'true');
+        parent.appendChild(container);
+
+        // Inject scoped CSS if present (already scoped server-side via scope_css).
+        var style = null;
+        if (w.css) {
+          style = document.createElement('style');
+          style.setAttribute('data-widget', manifest.id);
+          style.textContent = w.css;
+          document.head.appendChild(style);
+        }
+
+        // Eval the JS module to register the widget.
+        try {
+          var api = typeof IronClaw !== 'undefined' ? IronClaw.api : null;
+          var fn = new Function('container', 'api', 'projectId', w.js);
+          fn(container, api, projectId);
+
+          _projectWidgets.push({
+            id: manifest.id,
+            container: container,
+            style: style || null,
+            destroy: function() {
+              container.remove();
+              if (style) style.remove();
+            }
+          });
+        } catch (err) {
+          console.error('[projects] Failed to mount widget ' + manifest.id + ':', err);
+          container.innerHTML = '<div class="cr-empty">Widget error: ' + manifest.id + '</div>';
+        }
+      });
+    })
+    .catch(function(err) {
+      console.error('[projects] Failed to load project widgets:', err);
+    });
+}
+
+function destroyProjectWidgets() {
+  _projectWidgets.forEach(function(w) {
+    try { w.destroy(); } catch (e) { /* ignore */ }
+  });
+  _projectWidgets = [];
+  var header = document.getElementById('cr-widget-header');
+  if (header) header.innerHTML = '';
+  var sections = document.getElementById('cr-widget-sections');
+  if (sections) sections.innerHTML = '';
+}
+
+function crNewProject() {
+  // Switch to chat tab and pre-fill with a project creation prompt.
+  switchTab('chat');
+  var input = document.getElementById('chat-input');
+  if (input) {
+    input.value = 'Create a new project for me. I want to set up an autonomous workspace for: ';
+    input.focus();
+    autoGrow(input);
+  }
+}
+
+function enrichMissionProgress(missions) {
+  const activeMissions = (missions || []).filter((mission) => mission.status === 'Active');
+  activeMissions.forEach((mission) => {
+    const cachedMission = missionDetailCache.get(mission.id);
+    if (cachedMission) {
+      activeWorkStore.rememberMissionThreads(cachedMission);
+    }
+    fetchMissionDetailForProgress(mission.id, { force: true });
+  });
+}
+
+function renderMissionProgressMarkup(progress) {
+  return progress
+    ? '<span class="mission-progress-live">' + escapeHtml(progress) + '</span>'
+    : '<span class="mission-progress-idle">Idle</span>';
+}
+
+function renderMissionProgressCell(missionId) {
+  return '<span data-mission-progress-id="' + escapeHtml(missionId) + '">'
+    + renderMissionProgressMarkup(activeWorkStore.getMissionProgress(missionId))
+    + '</span>';
+}
+
+function renderMissionThreadProgress(threadId) {
+  return '<span data-thread-progress-id="' + escapeHtml(threadId) + '">'
+    + renderMissionProgressMarkup(activeWorkStore.getThreadProgress(threadId))
+    + '</span>';
+}
+
+function missionThreadIds(mission) {
+  if (!mission || !Array.isArray(mission.threads)) return [];
+  return mission.threads.map((thread) => thread.id).filter(Boolean).sort();
+}
+
+function haveMissionThreadsChanged(previousMission, nextMission) {
+  const previousIds = missionThreadIds(previousMission);
+  const nextIds = missionThreadIds(nextMission);
+  if (previousIds.length !== nextIds.length) return true;
+  for (let i = 0; i < previousIds.length; i += 1) {
+    if (previousIds[i] !== nextIds[i]) return true;
+  }
+  return false;
+}
+
+function applyMissionDetailUpdate(mission) {
+  if (!mission || !mission.id) return;
+  const previousMission = missionDetailCache.get(mission.id) || null;
+  missionDetailCache.set(mission.id, mission);
+  activeWorkStore.rememberMissions([mission]);
+  activeWorkStore.rememberMissionThreads(mission);
+
+  if (currentMissionData && currentMissionData.id === mission.id) {
+    const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission);
+    currentMissionData = mission;
+    if (currentTab === 'missions' && !currentEngineThreadDetail && shouldRerenderDetail) {
+      renderMissionDetail(currentMissionData);
+      return;
+    }
+  }
+
+  let missionListChanged = false;
+  if (currentMissionList.length > 0) {
+    currentMissionList = currentMissionList.map((entry) => {
+      if (!entry || entry.id !== mission.id) return entry;
+      const updatedEntry = {
+        ...entry,
+        status: mission.status,
+        thread_count: mission.thread_count,
+        current_focus: mission.current_focus,
+        next_fire_at: mission.next_fire_at,
+      };
+      if (
+        updatedEntry.status !== entry.status
+        || updatedEntry.thread_count !== entry.thread_count
+        || updatedEntry.current_focus !== entry.current_focus
+        || updatedEntry.next_fire_at !== entry.next_fire_at
+      ) {
+        missionListChanged = true;
+      }
+      return updatedEntry;
+    });
+  }
+
+  if (currentTab === 'missions' && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
+    renderMissionsList(currentMissionList);
+    return;
+  }
+
+  if (previousMission && haveMissionThreadsChanged(previousMission, mission)) {
+    scheduleMissionProgressViewsRefresh();
+  }
+}
+
+function fetchMissionDetailForProgress(missionId, options = {}) {
+  if (!missionId) return Promise.resolve(null);
+  if (missionDetailFetchInFlight.has(missionId)) {
+    if (options.force) {
+      missionMappingsLastRefreshedAt = Date.now();
+    }
+    return Promise.resolve(null);
+  }
+  missionDetailFetchInFlight.add(missionId);
+  return apiFetch('/api/engine/missions/' + missionId)
+    .then((data) => {
+      if (!data || !data.mission) return null;
+      applyMissionDetailUpdate(data.mission);
+      return data.mission;
+    })
+    .catch(() => null)
+    .finally(() => {
+      missionDetailFetchInFlight.delete(missionId);
+      if (options.force) {
+        missionMappingsLastRefreshedAt = Date.now();
+      }
+    });
+}
+
+function refreshPersistentActivityBar() {
+  if (activityBarSnapshotInFlight) return;
+  activityBarSnapshotInFlight = true;
+  Promise.all([
+    apiFetch('/api/jobs').catch(() => null),
+    engineV2Enabled ? apiFetch('/api/engine/missions').catch(() => null) : Promise.resolve(null),
+  ]).then(([jobList, missionList]) => {
+    if (jobList && Array.isArray(jobList.jobs)) {
+      activeWorkStore.rememberJobs(jobList.jobs);
+    }
+    if (missionList && Array.isArray(missionList.missions)) {
+      activeWorkStore.rememberMissions(missionList.missions);
+      missionList.missions
+        .filter((mission) => mission && mission.id && mission.status === 'Active')
+        .forEach((mission) => {
+          fetchMissionDetailForProgress(mission.id, { force: true });
+        });
+    }
+  }).finally(() => {
+    activityBarSnapshotInFlight = false;
+  });
+}
+
+function getTrackedActiveMissionIds() {
+  return activeWorkStore.getActiveMissionIds();
+}
+
+function scheduleActiveMissionMappingRefresh() {
+  const missionIds = getTrackedActiveMissionIds();
+  if (missionIds.length === 0 || missionMappingRefreshTimer) return;
+  const now = Date.now();
+  const refreshDelay = Math.max(0, ACTIVE_MISSION_MAPPING_REFRESH_MS - (now - missionMappingsLastRefreshedAt));
+  missionMappingRefreshTimer = window.setTimeout(() => {
+    missionMappingRefreshTimer = null;
+    missionIds.forEach((missionId) => {
+      fetchMissionDetailForProgress(missionId, { force: true });
+    });
+  }, refreshDelay);
+}
+
+function scheduleMissionProgressViewsRefresh() {
+  if (missionProgressRefreshScheduled) return;
+  missionProgressRefreshScheduled = true;
+  window.requestAnimationFrame(() => {
+    missionProgressRefreshScheduled = false;
+    refreshMissionProgressViews();
+  });
+}
+
+function refreshMissionProgressViews() {
+  document.querySelectorAll('[data-mission-progress-id]').forEach((node) => {
+    node.innerHTML = renderMissionProgressMarkup(activeWorkStore.getMissionProgress(node.dataset.missionProgressId));
+  });
+  document.querySelectorAll('[data-thread-progress-id]').forEach((node) => {
+    node.innerHTML = renderMissionProgressMarkup(activeWorkStore.getThreadProgress(node.dataset.threadProgressId));
+  });
+  document.querySelectorAll('[data-thread-progress-block-id]').forEach((block) => {
+    const progress = activeWorkStore.getThreadProgress(block.dataset.threadProgressBlockId);
+    const body = block.querySelector('[data-thread-progress-text-id]');
+    block.hidden = !progress;
+    if (body) body.textContent = progress || '';
+  });
+  scheduleActiveMissionMappingRefresh();
+}
 
 function loadMissions() {
   currentMissionId = null;
+  currentMissionData = null;
+  currentEngineThreadDetail = null;
   const detail = document.getElementById('mission-detail');
   if (detail) detail.style.display = 'none';
   const table = document.getElementById('missions-table');
@@ -5864,8 +7683,11 @@ function loadMissions() {
     apiFetch('/api/engine/missions/summary'),
     apiFetch('/api/engine/missions'),
   ]).then(([summary, listData]) => {
+    currentMissionList = listData.missions || [];
+    activeWorkStore.rememberMissions(currentMissionList);
     renderMissionsSummary(summary);
-    renderMissionsList(listData.missions);
+    renderMissionsList(currentMissionList);
+    enrichMissionProgress(currentMissionList);
   }).catch(() => {});
 }
 
@@ -5901,6 +7723,7 @@ function renderMissionsList(missions) {
       + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
+      + '<td>' + renderMissionProgressCell(m.id) + '</td>'
       + '<td>'
       + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ' : '')
       + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ' : '')
@@ -5913,7 +7736,15 @@ function renderMissionsList(missions) {
 function openMissionDetail(id) {
   currentMissionId = id;
   apiFetch('/api/engine/missions/' + id).then((data) => {
-    renderMissionDetail(data.mission);
+    currentEngineThreadDetail = null;
+    currentMissionData = data.mission;
+    applyMissionDetailUpdate(data.mission);
+    // Route to control room or standalone detail depending on active tab.
+    if (currentTab === 'projects') {
+      renderMissionDetailInCr(data.mission);
+    } else {
+      renderMissionDetail(currentMissionData);
+    }
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
   });
@@ -5921,6 +7752,8 @@ function openMissionDetail(id) {
 
 function closeMissionDetail() {
   currentMissionId = null;
+  currentMissionData = null;
+  currentEngineThreadDetail = null;
   loadMissions();
 }
 
@@ -5950,7 +7783,7 @@ function renderMissionDetail(m) {
   html += '<div class="job-meta-grid">'
     + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
-    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
+    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
     + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
     + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
@@ -5984,7 +7817,7 @@ function renderMissionDetail(m) {
   if (m.threads && m.threads.length > 0) {
     html += '<div class="job-description"><h3>Spawned Threads</h3>'
       + '<table class="missions-table"><thead><tr>'
-      + '<th>Goal</th><th>Type</th><th>State</th><th>Steps</th><th>Tokens</th><th>Created</th>'
+      + '<th>Goal</th><th>Type</th><th>State</th><th>' + escapeHtml(I18n.t('missions.progress')) + '</th><th>Steps</th><th>Tokens</th><th>Created</th>'
       + '</tr></thead><tbody>';
     m.threads.forEach((t) => {
       var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
@@ -5995,6 +7828,7 @@ function renderMissionDetail(m) {
         + '<td class="truncate">' + escapeHtml(t.goal) + '</td>'
         + '<td>' + escapeHtml(t.thread_type) + '</td>'
         + '<td><span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span></td>'
+        + '<td>' + renderMissionThreadProgress(t.id) + '</td>'
         + '<td>' + t.step_count + '</td>'
         + '<td>' + t.total_tokens.toLocaleString() + '</td>'
         + '<td>' + formatDate(t.created_at) + '</td>'
@@ -6017,83 +7851,104 @@ function renderMissionDetail(m) {
   detail.innerHTML = html;
 }
 
+function renderEngineThreadDetail(t) {
+  var detail = document.getElementById('mission-detail');
+
+  var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+    : t.state === 'Failed' ? 'failed'
+    : t.state === 'Running' ? 'in_progress'
+    : 'pending';
+  var progress = activeWorkStore.getThreadProgress(t.id);
+
+  var html = '<div class="job-detail-header">'
+    + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
+    + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+    + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+    + '</div>';
+
+  html += '<div class="job-description mission-thread-progress" data-thread-progress-block-id="' + escapeHtml(t.id) + '"'
+    + (progress ? '' : ' hidden')
+    + '><h3>Current Progress</h3>'
+    + '<div class="job-description-body" data-thread-progress-text-id="' + escapeHtml(t.id) + '">' + escapeHtml(progress || '') + '</div></div>';
+
+  html += '<div class="job-meta-grid">'
+    + metaItem(I18n.t('missions.threadId'), t.id)
+    + metaItem(I18n.t('missions.type'), t.thread_type)
+    + metaItem(I18n.t('missions.steps'), t.step_count)
+    + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
+    + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
+    + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
+    + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
+    + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
+    + '</div>';
+
+  if (t.messages && t.messages.length > 0) {
+    html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+    t.messages.forEach(function(msg) {
+      var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+      html += '<div class="thread-message thread-msg-' + roleClass + '">'
+        + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+        + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
+        + '</div>';
+    });
+    html += '</div>';
+  }
+
+  detail.innerHTML = html;
+}
+
 function openEngineThread(threadId) {
+  // Route to control room or standalone detail depending on active tab.
+  if (currentTab === 'projects') {
+    crOpenEngineThread(threadId);
+    return;
+  }
   apiFetch('/api/engine/threads/' + threadId).then((data) => {
-    var t = data.thread;
-    var detail = document.getElementById('mission-detail');
-
-    var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
-      : t.state === 'Failed' ? 'failed'
-      : t.state === 'Running' ? 'in_progress'
-      : 'pending';
-
-    var html = '<div class="job-detail-header">'
-      + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
-      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
-      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
-      + '</div>';
-
-    html += '<div class="job-meta-grid">'
-      + metaItem(I18n.t('missions.threadId'), t.id)
-      + metaItem(I18n.t('missions.type'), t.thread_type)
-      + metaItem(I18n.t('missions.steps'), t.step_count)
-      + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
-      + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
-      + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
-      + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
-      + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
-      + '</div>';
-
-    if (t.messages && t.messages.length > 0) {
-      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
-      t.messages.forEach(function(msg, i) {
-        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
-        html += '<div class="thread-message thread-msg-' + roleClass + '">'
-          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
-          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
-          + '</div>';
-      });
-      html += '</div>';
-    }
-
-    detail.innerHTML = html;
+    currentEngineThreadDetail = data.thread;
+    renderEngineThreadDetail(currentEngineThreadDetail);
   }).catch(function(err) {
     showToast(I18n.t('missions.threadLoadFailed', { message: err.message }), 'error');
   });
 }
 
+function refreshMissionView(missionId) {
+  // Refresh the currently visible mission context.
+  if (currentMissionId === missionId) {
+    openMissionDetail(missionId);
+  } else if (crCurrentProjectId) {
+    drillIntoProject(crCurrentProjectId);
+  }
+}
+
 function fireMission(id) {
   apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
-    .then((data) => {
+    .then(function(data) {
       if (data.fired) {
         showToast(I18n.t('missions.fired', { id: data.thread_id }), 'success');
       } else {
         showToast(I18n.t('missions.notFired'), 'warning');
       }
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.fireFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.fireFailed', { message: err.message }), 'error'); });
 }
 
 function pauseMission(id) {
   apiFetch('/api/engine/missions/' + id + '/pause', { method: 'POST' })
-    .then(() => {
+    .then(function() {
       showToast(I18n.t('missions.paused'), 'success');
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.pauseFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.pauseFailed', { message: err.message }), 'error'); });
 }
 
 function resumeMission(id) {
   apiFetch('/api/engine/missions/' + id + '/resume', { method: 'POST' })
-    .then(() => {
+    .then(function() {
       showToast(I18n.t('missions.resumed'), 'success');
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.resumeFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.resumeFailed', { message: err.message }), 'error'); });
 }
 
 function formatRelativeTime(isoString) {
@@ -6282,6 +8137,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 let gatewayStatusInterval = null;
 
 function startGatewayStatusPolling() {
+  if (gatewayStatusInterval) return; // already polling
   fetchGatewayStatus();
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }
@@ -6310,16 +8166,31 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    activeWorkStore.setEngineV2Enabled(!!data.engine_v2);
+    applyEngineModeUi();
+    refreshPersistentActivityBar();
+
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
 
+    // Apply engine v2 / v1 tab visibility once.
+    if (!engineModeApplied) {
+      engineV2Enabled = !!data.engine_v2_enabled;
+      applyEngineModeToTabs();
+      engineModeApplied = true;
+    }
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
-    // Version
+    // Version — show commit hash when not a tagged release
     if (data.version) {
-      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      var versionText = 'IronClaw v' + escapeHtml(data.version);
+      if (data.commit_hash) {
+        versionText += ' (' + escapeHtml(data.commit_hash) + ')';
+      }
+      html += '<div class="gw-section-label">' + versionText + '</div>';
       html += '<div class="gw-divider"></div>';
     }
 
@@ -6980,7 +8851,9 @@ document.addEventListener('keydown', (e) => {
   // Mod+1-5: switch tabs
   if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
+    const tabs = engineV2
+      ? ['chat', 'memory', 'projects', 'settings', 'jobs']
+      : ['chat', 'memory', 'routines', 'settings', 'jobs'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -8111,11 +9984,26 @@ document.addEventListener('click', function(e) {
     case 'close-routine-detail':
       closeRoutineDetail();
       break;
+    case 'cr-drill':
+      drillIntoProject(el.dataset.id);
+      break;
+    case 'cr-back':
+      crBackToOverview();
+      break;
+    case 'cr-close-detail':
+      document.getElementById('cr-detail').style.display = 'none';
+      break;
+    case 'cr-att-click':
+      if (el.dataset.project) drillIntoProject(el.dataset.project);
+      break;
+    case 'cr-new-project':
+      crNewProject();
+      break;
     case 'open-mission':
       openMissionDetail(el.dataset.id);
       break;
     case 'close-mission-detail':
-      closeMissionDetail();
+      if (crCurrentProjectId) { document.getElementById('cr-detail').style.display = 'none'; }
       break;
     case 'fire-mission':
       e.stopPropagation();
@@ -8134,7 +10022,16 @@ document.addEventListener('click', function(e) {
       break;
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
-      else closeMissionDetail();
+      else document.getElementById('cr-detail').style.display = 'none';
+      break;
+    case 'open-active-work':
+      if (el.dataset.kind === 'job') {
+        switchTab('jobs');
+        openJobDetail(el.dataset.id);
+      } else {
+        switchTab('missions');
+        openMissionDetail(el.dataset.missionId || el.dataset.id);
+      }
       break;
     case 'view-run-job':
       e.preventDefault();
@@ -8263,9 +10160,12 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var query = this.value.toLowerCase();
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
-  var rows = activePanel.querySelectorAll('.settings-row');
-  if (rows.length === 0) return;
   var visibleCount = 0;
+
+  // --- Filter individual items ---
+
+  // 1. Structured settings rows (Agent, Inference, Networking)
+  var rows = activePanel.querySelectorAll('.settings-row');
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
@@ -8275,7 +10175,57 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       row.classList.add('search-hidden');
     }
   });
-  // Show/hide group titles based on visible children
+
+  // 2. Extension/channel/MCP/skill cards (Channels, Extensions, MCP, Skills)
+  var cards = activePanel.querySelectorAll('.ext-card');
+  cards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 2b. Provider cards (Inference)
+  var providerCards = activePanel.querySelectorAll('.provider-card');
+  providerCards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 3. Tool permission rows (Tools)
+  var toolRows = activePanel.querySelectorAll('.tool-permission-row');
+  toolRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // 4. User table rows (User Management)
+  var userRows = activePanel.querySelectorAll('#users-tbody tr');
+  userRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // --- Update container visibility after all items are filtered ---
+
   var groups = activePanel.querySelectorAll('.settings-group');
   groups.forEach(function(group) {
     var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
@@ -8285,6 +10235,17 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       group.style.display = '';
     }
   });
+
+  var sections = activePanel.querySelectorAll('.extensions-section');
+  sections.forEach(function(section) {
+    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden), .provider-card:not(.search-hidden)');
+    if (visibleItems.length === 0 && query !== '') {
+      section.style.display = 'none';
+    } else {
+      section.style.display = '';
+    }
+  });
+
   // Show/hide empty state
   var existingEmpty = activePanel.querySelector('.settings-search-empty');
   if (existingEmpty) existingEmpty.remove();

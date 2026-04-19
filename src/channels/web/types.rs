@@ -57,12 +57,16 @@ pub struct ThreadListResponse {
 #[derive(Debug, Serialize)]
 pub struct TurnInfo {
     pub turn_number: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     pub user_input: String,
     pub response: Option<String>,
     pub state: String,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_images: Vec<GeneratedImageInfo>,
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
@@ -74,12 +78,25 @@ pub struct ToolCallInfo {
     pub has_result: bool,
     pub has_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Agent's reasoning for choosing this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneratedImageInfo {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +112,9 @@ pub struct HistoryResponse {
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,
+    /// Durable in-flight turn state used to rehydrate the UI after refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_progress: Option<InProgressInfo>,
 }
 
 /// Lightweight DTO for unified pending gate state.
@@ -106,7 +126,19 @@ pub struct PendingGateInfo {
     pub tool_name: String,
     pub description: String,
     pub parameters: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_name: Option<ironclaw_common::ExtensionName>,
     pub resume_kind: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InProgressInfo {
+    pub turn_number: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
+    pub state: String,
+    pub user_input: String,
+    pub started_at: String,
 }
 
 // --- Approval ---
@@ -142,9 +174,28 @@ pub struct GateResolveRequest {
     pub resolution: GateResolutionPayload,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AuthTokenRequest {
+    #[serde(default)]
+    pub extension_name: Option<String>,
+    pub token: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthCancelRequest {
+    #[serde(default)]
+    pub extension_name: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
 // --- App Event (re-exported from ironclaw_common) ---
 
-pub use ironclaw_common::{AppEvent, ToolDecisionDto};
+pub use ironclaw_common::{AppEvent, OnboardingStateDto, ToolDecisionDto};
 
 // --- Admin System Prompt ---
 
@@ -342,7 +393,7 @@ pub enum ExtensionActivationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ChannelOnboardingState {
     SetupRequired,
-    ActivationInProgress,
+    AuthRequired,
     PairingRequired,
     Ready,
     Failed,
@@ -504,6 +555,10 @@ pub struct SetupFieldInfo {
 #[derive(Debug, Deserialize)]
 pub struct ExtensionSetupRequest {
     #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
     pub secrets: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub fields: std::collections::HashMap<String, String>,
@@ -525,9 +580,6 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
-    /// Pending manual verification challenge, if the setup flow requires one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification: Option<crate::extensions::VerificationChallenge>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarding_state: Option<ChannelOnboardingState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -543,8 +595,6 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         }
@@ -558,12 +608,122 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         }
     }
+}
+
+// --- Admin User Management ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+    /// Present on the detail endpoint; omitted from list entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserCreateResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub token: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Detail is just `AdminUserInfo` with `metadata` populated. Kept as a named
+/// alias so handler signatures stay explicit.
+pub type AdminUserDetailResponse = AdminUserInfo;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserProfileResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserStatusResponse {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDeleteResponse {
+    pub id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageEntry {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageStatsResponse {
+    pub period: String,
+    pub since: String,
+    pub usage: Vec<AdminUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryUsers {
+    pub total: i64,
+    pub active: i64,
+    pub suspended: i64,
+    pub admins: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryJobs {
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryWindow {
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryResponse {
+    pub users: AdminUsageSummaryUsers,
+    pub jobs: AdminUsageSummaryJobs,
+    pub usage_30d: AdminUsageSummaryWindow,
+    pub uptime_seconds: u64,
 }
 
 // --- Registry ---
@@ -610,6 +770,12 @@ pub struct PairingRequestInfo {
 #[derive(Debug, Deserialize)]
 pub struct PairingApproveRequest {
     pub code: String,
+    /// Current thread_id from the frontend so the agent can respond in the
+    /// same conversation after pairing completes.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 // --- Skills ---
@@ -655,25 +821,6 @@ pub struct SkillInstallRequest {
     pub content: Option<String>,
 }
 
-// --- Auth Token ---
-
-/// Request to submit an auth token for an extension (dedicated endpoint).
-#[derive(Debug, Deserialize)]
-pub struct AuthTokenRequest {
-    pub extension_name: String,
-    pub token: String,
-    pub request_id: Option<String>,
-    pub thread_id: Option<String>,
-}
-
-/// Request to cancel an in-progress auth flow.
-#[derive(Debug, Deserialize)]
-pub struct AuthCancelRequest {
-    pub extension_name: String,
-    pub request_id: Option<String>,
-    pub thread_id: Option<String>,
-}
-
 // --- WebSocket ---
 
 /// Message sent by a WebSocket client to the server.
@@ -699,15 +846,23 @@ pub enum WsClientMessage {
         /// Thread that owns the pending approval.
         thread_id: Option<String>,
     },
-    /// Submit an auth token for an extension (bypasses message pipeline).
+    /// Legacy auth token alias retained for non-bundled WebSocket clients.
     #[serde(rename = "auth_token")]
     AuthToken {
-        extension_name: String,
+        #[serde(default)]
+        extension_name: Option<String>,
         token: String,
+        #[serde(default)]
+        thread_id: Option<String>,
     },
-    /// Cancel an in-progress auth flow.
+    /// Legacy auth cancel alias retained for non-bundled WebSocket clients.
     #[serde(rename = "auth_cancel")]
-    AuthCancel { extension_name: String },
+    AuthCancel {
+        #[serde(default)]
+        extension_name: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
     /// Client heartbeat ping.
     #[serde(rename = "ping")]
     Ping,
@@ -1107,6 +1262,40 @@ mod tests {
     }
 
     #[test]
+    fn test_ws_client_auth_token_parse() {
+        let json = r#"{"type":"auth_token","extension_name":"telegram","token":"secret","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthToken {
+                extension_name,
+                token,
+                thread_id,
+            } => {
+                assert_eq!(extension_name.as_deref(), Some("telegram"));
+                assert_eq!(token, "secret");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected AuthToken variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_auth_cancel_parse() {
+        let json = r#"{"type":"auth_cancel","extension_name":"telegram","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthCancel {
+                extension_name,
+                thread_id,
+            } => {
+                assert_eq!(extension_name.as_deref(), Some("telegram"));
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected AuthCancel variant"),
+        }
+    }
+
+    #[test]
     fn test_ws_client_unknown_type_fails() {
         let json = r#"{"type":"unknown"}"#;
         let result: Result<WsClientMessage, _> = serde_json::from_str(json);
@@ -1202,46 +1391,24 @@ mod tests {
     // ---- Auth type tests ----
 
     #[test]
-    fn test_ws_client_auth_token_parse() {
-        let json = r#"{"type":"auth_token","extension_name":"notion","token":"sk-123"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            WsClientMessage::AuthToken {
-                extension_name,
-                token,
-            } => {
-                assert_eq!(extension_name, "notion");
-                assert_eq!(token, "sk-123");
-            }
-            _ => panic!("Expected AuthToken variant"),
-        }
-    }
-
-    #[test]
-    fn test_ws_client_auth_cancel_parse() {
-        let json = r#"{"type":"auth_cancel","extension_name":"notion"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            WsClientMessage::AuthCancel { extension_name } => {
-                assert_eq!(extension_name, "notion");
-            }
-            _ => panic!("Expected AuthCancel variant"),
-        }
-    }
-
-    #[test]
-    fn test_app_event_auth_required_serialize() {
-        let event = AppEvent::AuthRequired {
-            extension_name: "notion".to_string(),
+    fn test_app_event_onboarding_state_auth_required_serialize() {
+        let event = AppEvent::OnboardingState {
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
+            state: OnboardingStateDto::AuthRequired,
+            request_id: Some("req-123".to_string()),
+            message: None,
             instructions: Some("Get your token from...".to_string()),
             auth_url: None,
             setup_url: Some("https://notion.so/integrations".to_string()),
+            onboarding: None,
             thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["type"], "auth_required");
+        assert_eq!(parsed["type"], "onboarding_state");
         assert_eq!(parsed["extension_name"], "notion");
+        assert_eq!(parsed["state"], "auth_required");
+        assert_eq!(parsed["request_id"], "req-123");
         assert_eq!(parsed["instructions"], "Get your token from...");
         assert!(parsed.get("auth_url").is_none());
         assert_eq!(parsed["setup_url"], "https://notion.so/integrations");
@@ -1249,52 +1416,69 @@ mod tests {
     }
 
     #[test]
-    fn test_app_event_auth_completed_serialize() {
-        let event = AppEvent::AuthCompleted {
-            extension_name: "notion".to_string(),
-            success: true,
-            message: "notion authenticated (3 tools loaded)".to_string(),
+    fn test_app_event_onboarding_state_ready_serialize() {
+        let event = AppEvent::OnboardingState {
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
+            state: OnboardingStateDto::Ready,
+            request_id: None,
+            message: Some("notion authenticated (3 tools loaded)".to_string()),
+            instructions: None,
+            auth_url: None,
+            setup_url: None,
+            onboarding: None,
             thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["type"], "auth_completed");
+        assert_eq!(parsed["type"], "onboarding_state");
         assert_eq!(parsed["extension_name"], "notion");
-        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["state"], "ready");
+        assert_eq!(parsed["message"], "notion authenticated (3 tools loaded)");
         assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
-    fn test_ws_server_from_app_event_auth_required() {
-        let event = AppEvent::AuthRequired {
-            extension_name: "openai".to_string(),
+    fn test_ws_server_from_app_event_onboarding_state_auth_required() {
+        let event = AppEvent::OnboardingState {
+            extension_name: ironclaw_common::ExtensionName::new("openai").unwrap(),
+            state: OnboardingStateDto::AuthRequired,
+            request_id: None,
+            message: None,
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
+            onboarding: None,
             thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, "auth_required");
+                assert_eq!(event_type, "onboarding_state");
                 assert_eq!(data["extension_name"], "openai");
+                assert_eq!(data["state"], "auth_required");
             }
             _ => panic!("Expected Event variant"),
         }
     }
 
     #[test]
-    fn test_app_event_pairing_required_serialize() {
-        let event = AppEvent::PairingRequired {
-            channel: "telegram".to_string(),
+    fn test_app_event_onboarding_state_pairing_required_serialize() {
+        let event = AppEvent::OnboardingState {
+            extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
+            state: OnboardingStateDto::PairingRequired,
+            request_id: None,
+            message: None,
             instructions: Some("Send any message to receive a pairing code.".to_string()),
+            auth_url: None,
+            setup_url: None,
             onboarding: None,
             thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["type"], "pairing_required");
-        assert_eq!(parsed["channel"], "telegram");
+        assert_eq!(parsed["type"], "onboarding_state");
+        assert_eq!(parsed["extension_name"], "telegram");
+        assert_eq!(parsed["state"], "pairing_required");
         assert_eq!(
             parsed["instructions"],
             "Send any message to receive a pairing code."
@@ -1303,42 +1487,34 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_app_event_auth_completed() {
-        let event = AppEvent::AuthCompleted {
-            extension_name: "slack".to_string(),
-            success: false,
-            message: "Invalid token".to_string(),
+    fn test_ws_server_from_app_event_onboarding_state_failed() {
+        let event = AppEvent::OnboardingState {
+            extension_name: ironclaw_common::ExtensionName::new("slack").unwrap(),
+            state: OnboardingStateDto::Failed,
+            request_id: None,
+            message: Some("Invalid token".to_string()),
+            instructions: None,
+            auth_url: None,
+            setup_url: None,
+            onboarding: None,
             thread_id: None,
         };
         let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, "auth_completed");
-                assert_eq!(data["success"], false);
+                assert_eq!(event_type, "onboarding_state");
+                assert_eq!(data["state"], "failed");
             }
             _ => panic!("Expected Event variant"),
         }
     }
 
     #[test]
-    fn test_auth_token_request_deserialize() {
-        let json = r#"{"extension_name":"telegram","token":"bot12345"}"#;
-        let req: AuthTokenRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extension_name, "telegram");
-        assert_eq!(req.token, "bot12345");
-    }
-
-    #[test]
-    fn test_auth_cancel_request_deserialize() {
-        let json = r#"{"extension_name":"telegram"}"#;
-        let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extension_name, "telegram");
-    }
-
-    #[test]
     fn test_extension_setup_request_defaults() {
         let json = r#"{}"#;
         let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert!(req.request_id.is_none());
+        assert!(req.thread_id.is_none());
         assert!(req.secrets.is_empty());
         assert!(req.fields.is_empty());
     }
@@ -1346,10 +1522,14 @@ mod tests {
     #[test]
     fn test_extension_setup_request_deserialize_with_fields() {
         let json = r#"{
+            "request_id": "req-123",
+            "thread_id": "thread-abc",
             "secrets": { "api_key": "sk-123" },
             "fields": { "llm_backend": "openai", "selected_model": "gpt-4o" }
         }"#;
         let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id.as_deref(), Some("req-123"));
+        assert_eq!(req.thread_id.as_deref(), Some("thread-abc"));
         assert_eq!(req.secrets.get("api_key").unwrap(), "sk-123");
         assert_eq!(req.fields.get("llm_backend").unwrap(), "openai");
         assert_eq!(req.fields.get("selected_model").unwrap(), "gpt-4o");

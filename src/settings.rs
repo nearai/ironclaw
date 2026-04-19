@@ -415,8 +415,10 @@ pub struct ChannelSettings {
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
     /// Enabled WASM channels by name.
-    /// Channels not in this list but present in the channels directory will still load.
-    /// This is primarily used by the setup wizard to track which channels were configured.
+    /// Primarily used by the setup wizard to track which channels were configured.
+    ///
+    /// Startup treats this as a fallback restore source only until
+    /// `activated_channels` has been persisted by the runtime.
     #[serde(default)]
     pub wasm_channels: Vec<String>,
 
@@ -1432,6 +1434,31 @@ mod tests {
         assert_eq!(
             restored.selected_model,
             Some("claude-3-5-sonnet-20241022".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_db_map_tool_permissions() {
+        use crate::tools::permissions::PermissionState;
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "tool_permissions.http".to_string(),
+            serde_json::Value::String("always_allow".to_string()),
+        );
+        map.insert(
+            "tool_permissions.shell".to_string(),
+            serde_json::Value::String("ask_each_time".to_string()),
+        );
+        let settings = Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("http"),
+            Some(&PermissionState::AlwaysAllow),
+            "tool_permissions.http should be AlwaysAllow, got {:?}",
+            settings.tool_permissions
+        );
+        assert_eq!(
+            settings.tool_permissions.get("shell"),
+            Some(&PermissionState::AskEachTime),
         );
     }
 

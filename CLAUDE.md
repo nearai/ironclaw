@@ -32,6 +32,44 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 
 Prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
 
+### Extension/Auth Invariants
+
+Extension and channel onboarding has two distinct identities that must not be conflated:
+
+- `credential_name`: backend secret identity used for storage, injection, and gate resume
+- `extension_name`: user-facing installed extension/channel identity used for setup routing and UI
+
+Examples:
+
+- Telegram:
+  - `credential_name = telegram_bot_token`
+  - `extension_name = telegram`
+- Gmail:
+  - `credential_name = google_oauth_token`
+  - `extension_name = gmail`
+
+Rules:
+
+- Never route web setup/configure UI directly from `credential_name`.
+- Chat and Settings must use the same setup/configure path for installable extensions/channels.
+- Generic auth-card UI is only for non-extension credential prompts or pure OAuth launch prompts.
+- If an auth flow is for an installed extension/channel, resolve the `extension_name` once in shared backend logic and carry it through the wire contract rather than re-deriving it in multiple layers.
+- New auth/onboarding code must reuse the shared resolver/controller path instead of adding channel-specific or frontend-only fallbacks.
+
+Current ownership:
+
+- `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
+- `src/bridge/router.rs`: auth gate display + submit routing
+- `src/channels/web/server.rs`: pending-gate/history rehydration
+- `crates/ironclaw_gateway/static/app.js`: unified onboarding controller and configure-modal routing
+
+Temporary compatibility boundary:
+
+- Web auth prompts with a gate `request_id` are the v2 path and must resolve through `/api/chat/gate/resolve`.
+- Web auth prompts without a `request_id` are legacy engine v1 `pending_auth` compatibility only.
+- Keep that compatibility isolated; do not add new features to it.
+- Once v1 auth mode is removed, delete the legacy `/api/chat/auth-token` and `/api/chat/auth-cancel` shim endpoints and the matching no-`request_id` UI branch.
+
 Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `SuccessEvaluator`, `EmbeddingProvider`, `NetworkPolicyDecider`, `Hook`, `Observer`, `Tunnel`.
 
 All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurrent access.
@@ -254,6 +292,20 @@ incremental migration.
 See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
 and migration status. The dispatcher itself lives in
 `src/tools/dispatch.rs`.
+
+## Engine v2 Per-Project Sandbox
+
+When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
+(`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
+paths through a per-project Docker container instead of the host filesystem.
+The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
+`/project/` inside the container, and a `sandbox_daemon` binary inside the
+container speaks NDJSON over `docker exec -i`.
+
+When unset, the same code path uses a host-filesystem `MountBackend` —
+behavior is unchanged. See `docs/plans/2026-04-10-engine-v2-sandbox.md`.
+
+Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .`
 
 ## Workspace & Memory
 

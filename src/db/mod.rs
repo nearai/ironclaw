@@ -24,6 +24,8 @@ pub mod libsql;
 #[cfg(feature = "libsql")]
 pub mod libsql_migrations;
 
+pub mod cached_settings;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1046,6 +1048,12 @@ pub trait UserStore: Send + Sync {
         user_id: Option<&str>,
     ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
 
+    /// Aggregated usage summary for the admin dashboard.
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<AdminUsageSummary, DatabaseError>;
+
     /// Create a user and their initial API token atomically.
     /// If either operation fails, both are rolled back.
     async fn create_user_with_token(
@@ -1081,6 +1089,24 @@ pub struct UserSummaryStats {
     pub last_active_at: Option<DateTime<Utc>>,
 }
 
+/// Aggregated usage summary for the admin dashboard.
+///
+/// LLM usage fields (`llm_calls`, `input_tokens`, `output_tokens`, `usage_cost`)
+/// are scoped to the 30-day window passed as `since` — this keeps the query
+/// index-driven and avoids full `llm_calls` scans on every dashboard refresh.
+#[derive(Debug, Clone)]
+pub struct AdminUsageSummary {
+    pub total_users: i64,
+    pub active_users: i64,
+    pub suspended_users: i64,
+    pub admin_users: i64,
+    pub total_jobs: i64,
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub usage_cost: Decimal,
+}
+
 /// A pending pairing request.
 #[derive(Debug, Clone)]
 pub struct PairingRequestRecord {
@@ -1091,6 +1117,16 @@ pub struct PairingRequestRecord {
     pub created: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Result of approving a pairing request.
+#[derive(Debug, Clone)]
+pub struct PairingApprovalRecord {
+    pub request_id: uuid::Uuid,
+    pub channel: String,
+    pub external_id: String,
+    pub owner_id: String,
+    pub previous_owner_id: Option<String>,
 }
 
 /// Pairing and channel identity operations.
@@ -1110,6 +1146,14 @@ pub trait ChannelPairingStore: Send + Sync {
     /// allow-list-based WASM channel admission.
     async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError>;
 
+    /// Resolve the durable external actor ID bound to `(channel, owner_id)`.
+    /// Used for proactive notifications and runtime owner recovery.
+    async fn resolve_channel_external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &str,
+    ) -> Result<Option<String>, DatabaseError>;
+
     /// Create or replace the pending pairing request for `(channel, external_id)`.
     /// Any existing non-expired pending request for the same sender is retired and a new code
     /// is issued so retrying the claim flow always rotates to a fresh code.
@@ -1128,6 +1172,12 @@ pub trait ChannelPairingStore: Send + Sync {
         channel: &str,
         code: &str,
         owner_id: &str,
+    ) -> Result<PairingApprovalRecord, DatabaseError>;
+
+    /// Revert a previously approved pairing when runtime propagation fails.
+    async fn revert_pairing_approval(
+        &self,
+        approval: &PairingApprovalRecord,
     ) -> Result<(), DatabaseError>;
 
     /// List pending (unapproved, non-expired) pairing requests for a channel.

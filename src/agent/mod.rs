@@ -45,7 +45,9 @@ pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::{RoutineEngine, SandboxReadiness};
 pub use scheduler::{Scheduler, SchedulerDeps};
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
-pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
+pub use session::{
+    PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnOutcome, TurnState,
+};
 pub use session_manager::SessionManager;
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
