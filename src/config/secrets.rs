@@ -115,19 +115,27 @@ impl SecretsConfig {
             );
         }
 
-        let (key_hex, source) =
+        let (key_hex, source, generated) =
             Self::auto_generate_and_persist(env_path, allow_keychain_persist).await?;
-        Self::build(Some(SecretString::from(key_hex)), source, true)
+        Self::build(Some(SecretString::from(key_hex)), source, generated)
     }
 
     /// Generate a new master key and persist it.
     ///
-    /// Tries the OS keychain first. If the keychain is unavailable
-    /// (headless Linux, CI without secret-service, macOS without
-    /// keychain access), writes the key to `env_path` as
-    /// `SECRETS_MASTER_KEY=…` via `upsert_bootstrap_vars_to` (the same
-    /// writer the onboarding wizard uses) and injects it into the
-    /// process env overlay so the current run sees it immediately.
+    /// If `allow_keychain_persist` is true and the OS keychain accepts
+    /// the write, stores there. Otherwise (keychain disabled for
+    /// tests, unavailable on headless Linux, or denied), writes to
+    /// `env_path` as `SECRETS_MASTER_KEY=…` via
+    /// `upsert_bootstrap_vars_to` (the same writer the onboarding
+    /// wizard uses) and injects it into the process env overlay so
+    /// the current run sees it immediately.
+    ///
+    /// Returns `(key_hex, source, generated)`. `generated` is `true`
+    /// when this process's freshly-generated key was persisted, and
+    /// `false` when the TOCTOU re-check picked up a key another
+    /// process wrote concurrently — that key is legitimate (same
+    /// round of generation as ours), so the startup safety gate in
+    /// `AppBuilder::init_secrets` must not treat it as stale.
     ///
     /// TOCTOU note: before writing to `.env`, we re-read the file to
     /// catch the case where a concurrently-started process already
@@ -139,7 +147,7 @@ impl SecretsConfig {
     async fn auto_generate_and_persist(
         env_path: &Path,
         allow_keychain_persist: bool,
-    ) -> Result<(String, crate::settings::KeySource), ConfigError> {
+    ) -> Result<(String, crate::settings::KeySource, bool), ConfigError> {
         use crate::settings::KeySource;
 
         let key_bytes = crate::secrets::keychain::generate_master_key();
@@ -151,19 +159,24 @@ impl SecretsConfig {
                 .is_ok()
         {
             tracing::debug!("Auto-generated secrets master key; stored in OS keychain");
-            return Ok((key_hex, KeySource::Keychain));
+            return Ok((key_hex, KeySource::Keychain, true));
         }
 
         // Re-check for a concurrently-written key BEFORE persisting ours.
         // Keeps us from overwriting a winner of the generate race that
-        // sits between resolve() and this function.
+        // sits between resolve() and this function. When we reuse that
+        // key, we return `generated = false` — the key came from a
+        // sibling process that is also fresh-generating, and any rows
+        // it has encrypted so far are encrypted with *this same key*.
+        // Marking it `generated` would cause the safety gate in
+        // `init_secrets` to fire spuriously.
         if let Some(existing) = read_secrets_master_key(env_path) {
             tracing::debug!(
                 "Found concurrent master key in {}; using that instead of generated",
                 env_path.display()
             );
             crate::config::inject_single_var("SECRETS_MASTER_KEY", &existing);
-            return Ok((existing, KeySource::Env));
+            return Ok((existing, KeySource::Env, false));
         }
 
         crate::bootstrap::upsert_bootstrap_vars_to(env_path, &[("SECRETS_MASTER_KEY", &key_hex)])
@@ -179,7 +192,7 @@ impl SecretsConfig {
             "Auto-generated secrets master key; stored in {}",
             env_path.display()
         );
-        Ok((key_hex, KeySource::Env))
+        Ok((key_hex, KeySource::Env, true))
     }
 
     fn build(
@@ -304,6 +317,11 @@ mod tests {
         let prior = std::env::var("SECRETS_MASTER_KEY").ok();
         let dir = tempfile::tempdir().unwrap();
 
+        // Defensive: clear any overlay entry left by a prior test so
+        // the env-branch read below doesn't spuriously succeed on a
+        // leaked injection instead of the `set_var` we're about to do.
+        crate::config::clear_injected_var("SECRETS_MASTER_KEY");
+
         // env-first branch: generated = false.
         // SAFETY: serialized via ENV_MUTEX (lock_env).
         unsafe {
@@ -322,6 +340,7 @@ mod tests {
         unsafe {
             std::env::remove_var("SECRETS_MASTER_KEY");
         }
+        crate::config::clear_injected_var("SECRETS_MASTER_KEY");
         let cfg = SecretsConfig::resolve_inner(
             Some(vec![0xaau8; 32]),
             &dir.path().join(".env-kc"),
@@ -533,6 +552,13 @@ mod tests {
                 .map(|k| k.expose_secret().to_string()),
             Some(winner_hex.clone()),
             "must reuse the concurrent writer's key, not generate a new one"
+        );
+        assert!(
+            !cfg.generated,
+            "TOCTOU-reuse key came from a sibling process's fresh generation and \
+             matches whatever rows that sibling has encrypted; marking it generated \
+             would cause init_secrets to spuriously bail when the store is already \
+             populated by the sibling"
         );
 
         // The .env file should still contain only the winner's key

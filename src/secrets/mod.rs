@@ -147,9 +147,71 @@ pub fn crypto_from_hex(hex: &str) -> Result<std::sync::Arc<SecretsCrypto>, Secre
     Ok(std::sync::Arc::new(crypto))
 }
 
+/// Outcome of [`verify_generated_key_safe`].
+///
+/// Separate from `Result<(), E>` so the probe-failure case surfaces
+/// as an error the caller is forced to handle, not as a silent
+/// `Ok(())`. Fail-closed: an unreadable store is treated as a hard
+/// stop, because we cannot rule out the stale-data hazard the gate
+/// exists to catch.
+#[derive(Debug, thiserror::Error)]
+pub enum GeneratedKeySafetyError {
+    /// A freshly-generated master key met a secrets store that
+    /// already contained encrypted data. Those rows were encrypted
+    /// with a previous key, so the new key cannot decrypt them and
+    /// continuing would shadow unrecoverable data.
+    #[error(
+        "Secrets store already contains encrypted data, but IronClaw auto-generated \
+         a new master key because no SECRETS_MASTER_KEY env var and no OS-keychain \
+         entry were available. The existing rows were encrypted with a different key \
+         and cannot be decrypted. Restore the original key (set SECRETS_MASTER_KEY or \
+         re-populate the keychain entry) before restarting. If the existing data is \
+         expendable, clear the `secrets` table first."
+    )]
+    StoreAlreadyPopulated,
+
+    /// The safety probe itself failed. Treated as fail-closed: we
+    /// can't confirm the store is safe to write to, so we refuse to
+    /// proceed rather than silently risk shadowing data.
+    #[error(
+        "Unable to verify secrets store state during post-auto-generate safety \
+         check: {0}. Refusing to proceed — re-run once the store is reachable."
+    )]
+    ProbeFailed(SecretError),
+}
+
+/// Startup safety gate: if this process auto-generated a fresh master
+/// key (because no `SECRETS_MASTER_KEY` env var, no keychain entry,
+/// and no concurrent writer supplied one) but the secrets store
+/// already holds encrypted rows, those rows were encrypted with a
+/// previous key and cannot be decrypted with the new one. Continuing
+/// would layer new writes on top of unrecoverable data.
+///
+/// `generated = false` short-circuits: a key sourced from env,
+/// keychain, or a concurrent-writer TOCTOU reuse is already
+/// consistent with the stored rows (or the store is empty and the
+/// point is moot).
+///
+/// Fail-closed on probe error — see [`GeneratedKeySafetyError`].
+pub async fn verify_generated_key_safe(
+    generated: bool,
+    store: &(dyn SecretsStore + Send + Sync),
+) -> Result<(), GeneratedKeySafetyError> {
+    if !generated {
+        return Ok(());
+    }
+    match store.any_exist().await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(GeneratedKeySafetyError::StoreAlreadyPopulated),
+        Err(e) => Err(GeneratedKeySafetyError::ProbeFailed(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::types::CreateSecretParams;
+    use crate::testing::credentials::{TEST_SECRET_VALUE, test_secrets_store};
 
     #[test]
     fn test_crypto_from_hex_valid() {
@@ -163,5 +225,141 @@ mod tests {
     fn test_crypto_from_hex_invalid() {
         let result = crypto_from_hex("too_short");
         assert!(result.is_err()); // safety: test assertion
+    }
+
+    /// `generated = false` always short-circuits — a key that came
+    /// from env, keychain, or a TOCTOU-reused sibling is consistent
+    /// with whatever is in the store.
+    #[tokio::test]
+    async fn verify_generated_key_safe_allows_non_generated_key() {
+        let store = test_secrets_store();
+        store
+            .create("u", CreateSecretParams::new("k", TEST_SECRET_VALUE))
+            .await
+            .unwrap();
+
+        verify_generated_key_safe(false, &store)
+            .await
+            .expect("non-generated key must always pass, even against a populated store");
+    }
+
+    /// Happy path for a first-time install: freshly generated key
+    /// meets an empty store. Must proceed.
+    #[tokio::test]
+    async fn verify_generated_key_safe_allows_generated_key_with_empty_store() {
+        let store = test_secrets_store();
+
+        verify_generated_key_safe(true, &store)
+            .await
+            .expect("generated key on empty store is the first-install happy path");
+    }
+
+    /// Headline behavior: freshly generated key meets a populated
+    /// store. Must abort — those rows were encrypted with a different
+    /// key and silently continuing would shadow unrecoverable data.
+    #[tokio::test]
+    async fn verify_generated_key_safe_blocks_generated_key_against_populated_store() {
+        let store = test_secrets_store();
+        store
+            .create("u", CreateSecretParams::new("k", TEST_SECRET_VALUE))
+            .await
+            .unwrap();
+
+        let err = verify_generated_key_safe(true, &store)
+            .await
+            .expect_err("generated key + populated store must fail loudly");
+
+        assert!(
+            matches!(err, GeneratedKeySafetyError::StoreAlreadyPopulated),
+            "wrong variant: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SECRETS_MASTER_KEY"),
+            "error must name the env var the user can restore; got: {msg}"
+        );
+        assert!(
+            msg.contains("secrets"),
+            "error must reference the store / table the user can clear; got: {msg}"
+        );
+    }
+
+    /// Fail-closed on probe failure: a store whose `any_exist`
+    /// returns an error must abort startup rather than silently
+    /// proceed. Otherwise a transient DB hiccup would let us skip
+    /// the check and the next write could shadow stale rows once
+    /// the DB recovers.
+    #[tokio::test]
+    async fn verify_generated_key_safe_fails_closed_on_probe_error() {
+        use crate::secrets::types::DecryptedSecret;
+        use async_trait::async_trait;
+
+        struct ErroringStore;
+
+        #[async_trait]
+        impl SecretsStore for ErroringStore {
+            async fn create(
+                &self,
+                _: &str,
+                _: CreateSecretParams,
+            ) -> Result<crate::secrets::types::Secret, SecretError> {
+                unreachable!()
+            }
+            async fn get(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<crate::secrets::types::Secret, SecretError> {
+                unreachable!()
+            }
+            async fn get_decrypted(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<DecryptedSecret, SecretError> {
+                unreachable!()
+            }
+            async fn exists(&self, _: &str, _: &str) -> Result<bool, SecretError> {
+                unreachable!()
+            }
+            async fn any_exist(&self) -> Result<bool, SecretError> {
+                Err(SecretError::Database("simulated probe failure".into()))
+            }
+            async fn list(
+                &self,
+                _: &str,
+            ) -> Result<Vec<crate::secrets::types::SecretRef>, SecretError> {
+                unreachable!()
+            }
+            async fn delete(&self, _: &str, _: &str) -> Result<bool, SecretError> {
+                unreachable!()
+            }
+            async fn record_usage(&self, _: uuid::Uuid) -> Result<(), SecretError> {
+                unreachable!()
+            }
+            async fn is_accessible(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[String],
+            ) -> Result<bool, SecretError> {
+                unreachable!()
+            }
+        }
+
+        let err = verify_generated_key_safe(true, &ErroringStore)
+            .await
+            .expect_err("probe error must not be swallowed as `safe`");
+        assert!(
+            matches!(err, GeneratedKeySafetyError::ProbeFailed(_)),
+            "wrong variant: {err:?}"
+        );
+
+        // `generated = false` must still short-circuit without invoking
+        // the probe — otherwise a probe-broken store would fail every
+        // startup, even when the user has a known-good env-var key.
+        verify_generated_key_safe(false, &ErroringStore)
+            .await
+            .expect("generated=false must never call the probe");
     }
 }

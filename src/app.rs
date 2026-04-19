@@ -275,35 +275,17 @@ impl AppBuilder {
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
         // Safety gate: if we auto-generated a fresh master key this run
-        // (no env var, no keychain entry, nothing on disk), but the
-        // secrets table already carries rows from a prior key, those
-        // rows are undecryptable and silently continuing would shadow
-        // unrecoverable data. Fail loudly so the user can restore the
-        // original key before any new writes pile on top.
-        if self.config.secrets.generated
-            && let Some(ref secrets) = store
-        {
-            match secrets.any_exist().await {
-                Ok(true) => {
-                    return Err(anyhow::anyhow!(
-                        "Secrets store already contains encrypted data, but IronClaw \
-                         auto-generated a new master key because no SECRETS_MASTER_KEY \
-                         env var and no OS-keychain entry were available. The existing \
-                         rows were encrypted with a different key and cannot be \
-                         decrypted. Restore the original key (set SECRETS_MASTER_KEY or \
-                         re-populate the keychain entry) before restarting. If the \
-                         existing data is expendable, clear the `secrets` table first."
-                    ));
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "Unable to probe secrets store for preexisting data during \
-                         post-generate safety check: {e}. Proceeding — loss-of-data \
-                         risk exists if the store is non-empty."
-                    );
-                }
-            }
+        // but the secrets table already carries rows from a prior key,
+        // those rows are undecryptable and silently continuing would
+        // shadow unrecoverable data. Fail loudly (and fail-closed on
+        // probe error) so the user can restore the original key before
+        // any new writes pile on top.
+        if let Some(ref secrets) = store {
+            crate::secrets::verify_generated_key_safe(
+                self.config.secrets.generated,
+                secrets.as_ref(),
+            )
+            .await?;
         }
 
         if let Some(ref secrets) = store {
