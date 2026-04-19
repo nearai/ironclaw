@@ -3595,14 +3595,20 @@ async fn persist_v2_tool_calls(
 ) {
     // Load the thread -- it's still in the store after join_thread
     // (join only removes from the runtime running map, not the store).
+    //
+    // Logging level: failures here mean the chat history will be missing
+    // the tool_calls row for this turn (web UI shows empty array). That's
+    // a user-visible gap, so emit at `warn!` — this path is an HTTP
+    // handler, not a TUI-corrupting background task, so CLAUDE.md's
+    // "background tasks must not use info!/warn!" rule does not apply.
     let thread = match store.load_thread(thread_id).await {
         Ok(Some(t)) => t,
         Ok(None) => {
-            debug!(thread_id = %thread_id, "thread not found in store for tool_calls persist");
+            tracing::warn!(thread_id = %thread_id, "thread not found in store for tool_calls persist");
             return;
         }
         Err(e) => {
-            debug!(thread_id = %thread_id, "failed to load thread for tool_calls persist: {e}");
+            tracing::warn!(thread_id = %thread_id, "failed to load thread for tool_calls persist: {e}");
             return;
         }
     };
@@ -3647,7 +3653,7 @@ async fn persist_v2_tool_calls(
     let content = match serde_json::to_string(&wrapper) {
         Ok(c) => c,
         Err(e) => {
-            debug!("failed to serialize v2 tool_calls: {e}");
+            tracing::warn!(thread_id = %thread_id, "failed to serialize v2 tool_calls: {e}");
             return;
         }
     };
@@ -3664,7 +3670,7 @@ async fn persist_v2_tool_calls(
         {
             Ok(cid) => Some(cid),
             Err(e) => {
-                debug!(
+                tracing::warn!(
                     thread_id = %thread_id,
                     "failed to resolve v1 conversation for tool_calls persist: {e}"
                 );
@@ -3677,7 +3683,7 @@ async fn persist_v2_tool_calls(
             .add_conversation_message(cid, "tool_calls", &content)
             .await
     {
-        debug!("failed to persist v2 tool_calls to v1 DB: {e}");
+        tracing::warn!(thread_id = %thread_id, "failed to persist v2 tool_calls to v1 DB: {e}");
     }
 }
 
@@ -7554,6 +7560,141 @@ mod tests {
             tool_calls_msgs.len(),
             0,
             "no tool_calls row for text-only thread"
+        );
+    }
+
+    /// Regression: the truncation logic in `persist_v2_tool_calls` uses
+    /// `char_indices()` + `len_utf8()` to avoid slicing in the middle of a
+    /// multi-byte UTF-8 sequence. Exercise the path with a content string
+    /// that is well over 500 bytes and composed entirely of 3-byte chars,
+    /// where a naive `&s[..500]` would panic on a char boundary.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_truncates_multibyte_content_on_char_boundary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Content: 400 repetitions of a 3-byte CJK char = 1200 bytes, well
+        // over the 500-byte truncation threshold.
+        let big = "日".repeat(400);
+        assert!(big.len() > 500, "fixture must exceed threshold");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-utf8",
+            "echo",
+            &big,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "hi").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let preview = parsed["calls"][0]["result_preview"]
+            .as_str()
+            .expect("result_preview is a string");
+
+        // The preview must be valid UTF-8 (JSON deserialization above would
+        // have failed otherwise), must end with the truncation marker, and
+        // must be bounded. The truncation rule is "include every char
+        // whose *start index* is below 500", so for multi-byte runs the
+        // last included char may extend past byte 500 by up to
+        // `max_char_bytes - 1` bytes (≤3 for UTF-8). That's the correct
+        // behavior — pinning a generous bound is what the char-boundary
+        // safety actually provides.
+        assert!(
+            preview.ends_with("..."),
+            "expected truncation marker, got: {preview:?}"
+        );
+        let body = preview.strip_suffix("...").unwrap();
+        assert!(
+            body.len() < 504,
+            "body must be bounded near 500 bytes (≤500+char_overhead), got {}: {body:?}",
+            body.len()
+        );
+        assert!(
+            body.chars().all(|c| c == '日'),
+            "body must contain only complete 3-byte chars, got: {body:?}"
+        );
+        // And critically: body.len() must be on a char boundary. If the
+        // truncator sliced mid-char, the earlier JSON parse would have
+        // rejected invalid UTF-8; this assertion is belt-and-braces.
+        assert!(
+            body.len().is_multiple_of(3),
+            "body length must be a multiple of 3-byte char width, got {}",
+            body.len()
+        );
+    }
+
+    /// Regression for the bug fixed in commit 652315e8: `persist_v2_tool_calls`
+    /// must only be called from the `ThreadOutcome::Completed` arm. If a
+    /// future refactor moves the call out of that arm, partial tool
+    /// executions on `GatePaused` would orphan a `role="tool_calls"` DB row
+    /// that then duplicates when the gate resumes. Pin the call-site
+    /// conditional by inspecting the source of `await_thread_outcome`.
+    #[test]
+    fn persist_v2_tool_calls_only_called_from_completed_arm() {
+        let source = include_str!("router.rs");
+        let (before_fn, _after_fn) = source
+            .split_once("async fn persist_v2_tool_calls")
+            .expect("persist_v2_tool_calls must exist in router.rs");
+
+        // There should be exactly one call site in the pre-definition body
+        // (the call inside `await_thread_outcome`). The text below the
+        // definition is allowed to reference it (doc comments, unit tests).
+        let call_sites = before_fn.matches("persist_v2_tool_calls(").count();
+        assert_eq!(
+            call_sites, 1,
+            "expected exactly one call site for persist_v2_tool_calls, found {call_sites}"
+        );
+
+        // The call must live inside `ThreadOutcome::Completed` and must not
+        // appear in any of the terminal arms that represent non-completion
+        // outcomes. `GatePaused` is the one that triggered the bug.
+        let completed_idx = before_fn
+            .find("ThreadOutcome::Completed")
+            .expect("Completed arm must exist");
+        let gate_paused_idx = before_fn
+            .find("ThreadOutcome::GatePaused")
+            .expect("GatePaused arm must exist");
+        let call_idx = before_fn
+            .find("persist_v2_tool_calls(")
+            .expect("call site must exist");
+
+        assert!(
+            completed_idx < call_idx && call_idx < gate_paused_idx,
+            "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
+             completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
         );
     }
 }
