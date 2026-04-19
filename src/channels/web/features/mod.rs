@@ -11,4 +11,7 @@
 //! `src/channels/web/CLAUDE.md` for the staged plan tracked in
 //! ironclaw#2599.
 
+pub(crate) mod logs;
 pub(crate) mod oauth;
+pub(crate) mod pairing;
+pub(crate) mod status;

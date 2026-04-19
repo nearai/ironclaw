@@ -22,13 +22,16 @@ use axum::{
 use sha2::{Digest, Sha256};
 
 use ironclaw_gateway::assets;
-use ironclaw_gateway::{FrontendBundle, LayoutConfig, NONCE_PLACEHOLDER};
+use ironclaw_gateway::{
+    FrontendBundle, LayoutConfig, NONCE_PLACEHOLDER, ResolvedWidget, WidgetManifest,
+    is_safe_widget_id,
+};
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::handlers::frontend::{load_resolved_widgets, read_layout_config};
 use crate::channels::web::platform::state::{FrontendCacheKey, FrontendHtmlCache, GatewayState};
 use crate::channels::web::types::HealthResponse;
+use crate::workspace::Workspace;
 
 // --- Content Security Policy ---
 //
@@ -303,6 +306,204 @@ fn layout_has_customizations(layout: &LayoutConfig) -> bool {
         || c.image_upload.is_some()
         || c.upgrade_inline_json.is_some()
         || !layout.widgets.is_empty()
+}
+
+// --- Workspace-backed layout + widget readers ---
+//
+// These helpers are shared between `build_frontend_html` above (platform
+// layer, builds the `/` HTML bundle at request time) and the `/api/frontend/*`
+// HTTP handlers in `handlers/frontend.rs`. They live in the platform layer
+// because any handler that wants to read layout/widget state must go
+// through them — there's only one on-disk contract for
+// `.system/gateway/layout.json` and `.system/gateway/widgets/`, and
+// keeping both callers on the same helper forces any change to the
+// fallback / parse / warning behavior to land in exactly one place.
+
+/// Workspace path to the layout config document.
+pub(crate) const LAYOUT_PATH: &str = ".system/gateway/layout.json";
+
+/// Workspace directory containing widget subdirectories. Trailing slash is
+/// kept so it can be passed straight to `Workspace::list()`.
+pub(crate) const WIDGETS_DIR: &str = ".system/gateway/widgets/";
+
+/// Per-widget size caps. Widget JS/CSS is inlined into every page response
+/// (and cached), so a single oversized file bloats every page load. The
+/// caps are generous enough for real-world widget bundles but stop a
+/// multi-MB file from ending up in the cached HTML.
+pub(crate) const MAX_WIDGET_JS_BYTES: usize = 512 * 1024; // 512 KB
+pub(crate) const MAX_WIDGET_CSS_BYTES: usize = 256 * 1024; // 256 KB
+
+/// Read and parse `.system/gateway/layout.json` from the workspace.
+///
+/// * Missing file → returns [`LayoutConfig::default`] silently. A workspace
+///   with no customizations is the common case and shouldn't generate log
+///   noise.
+/// * Malformed JSON → logs a `warn!` with the parse error and falls back to
+///   the default. A broken file must never be allowed to crash a page load.
+pub(crate) async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
+    match workspace.read(LAYOUT_PATH).await {
+        Ok(doc) => match serde_json::from_str(&doc.content) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = LAYOUT_PATH,
+                    "layout.json is invalid — falling back to default layout"
+                );
+                LayoutConfig::default()
+            }
+        },
+        // A workspace with no `.system/gateway/layout.json` is the common
+        // case (no customizations) and must stay silent — every page load
+        // hits this path. Any OTHER error variant (IoError, SearchFailed,
+        // backend connectivity, etc.) is unexpected and would otherwise
+        // silently drop customizations without any operator signal; log
+        // it at warn! so backend problems surface even though the caller
+        // falls back to the default layout either way.
+        Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => LayoutConfig::default(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = LAYOUT_PATH,
+                "workspace read failed — falling back to default layout \
+                 (customizations may be silently skipped)"
+            );
+            LayoutConfig::default()
+        }
+    }
+}
+
+/// Read and parse a single widget's `manifest.json`. Returns `None` (with a
+/// `warn!`) for parse failures and `None` silently when the file is missing.
+///
+/// Validates the on-disk `directory_name` against [`is_safe_widget_id`]
+/// BEFORE touching the workspace, and additionally enforces that the parsed
+/// `manifest.id` also satisfies `is_safe_widget_id` and equals the on-disk
+/// directory name. See the longer rationale in the git history (migrated
+/// from `handlers/frontend.rs` with the rest of the widget readers).
+pub(crate) async fn read_widget_manifest(
+    workspace: &Workspace,
+    directory_name: &str,
+) -> Option<WidgetManifest> {
+    if !is_safe_widget_id(directory_name) {
+        tracing::warn!(
+            directory = directory_name,
+            "skipping widget: directory name is not a safe widget identifier \
+             (alphanumeric + `._-`, first char alphanumeric, ≤64 chars)"
+        );
+        return None;
+    }
+    let manifest_path = format!("{WIDGETS_DIR}{directory_name}/manifest.json");
+    let doc = workspace.read(&manifest_path).await.ok()?;
+    let manifest = match serde_json::from_str::<WidgetManifest>(&doc.content) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            tracing::warn!(
+                path = %manifest_path,
+                error = %e,
+                "skipping widget with invalid manifest"
+            );
+            return None;
+        }
+    };
+    if !is_safe_widget_id(&manifest.id) {
+        tracing::warn!(
+            path = %manifest_path,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id contains characters outside the \
+             safe widget identifier charset (alphanumeric + `._-`, ≤64 chars)"
+        );
+        return None;
+    }
+    if manifest.id != directory_name {
+        tracing::warn!(
+            path = %manifest_path,
+            directory = directory_name,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id does not match the on-disk directory name"
+        );
+        return None;
+    }
+    Some(manifest)
+}
+
+/// Discover every widget in `.system/gateway/widgets/` and return the
+/// fully-resolved set (manifest + `index.js` + optional `style.css`), filtered
+/// by the `enabled` flag in the supplied layout. Widgets missing `index.js`
+/// are skipped silently — they're assumed to be in-progress scaffolds.
+pub(crate) async fn load_resolved_widgets(
+    workspace: &Workspace,
+    layout: &LayoutConfig,
+) -> Vec<ResolvedWidget> {
+    let entries = match workspace.list(WIDGETS_DIR).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = WIDGETS_DIR,
+                "workspace list failed — rendering index with no widgets \
+                 (installed widgets may be silently skipped)"
+            );
+            Vec::new()
+        }
+    };
+
+    let mut widgets = Vec::new();
+    for entry in entries {
+        if !entry.is_directory {
+            continue;
+        }
+        let name = entry.name();
+        let Some(manifest) = read_widget_manifest(workspace, name).await else {
+            continue;
+        };
+
+        let js_path = format!("{WIDGETS_DIR}{name}/index.js");
+        let js = match workspace.read(&js_path).await {
+            Ok(doc) => doc.content,
+            Err(_) => continue,
+        };
+        if js.len() > MAX_WIDGET_JS_BYTES {
+            tracing::warn!(
+                widget = name,
+                bytes = js.len(),
+                cap = MAX_WIDGET_JS_BYTES,
+                "skipping widget: index.js exceeds size cap"
+            );
+            continue;
+        }
+
+        let css = workspace
+            .read(&format!("{WIDGETS_DIR}{name}/style.css"))
+            .await
+            .ok()
+            .map(|doc| doc.content)
+            .filter(|c| !c.trim().is_empty())
+            .filter(|c| {
+                if c.len() > MAX_WIDGET_CSS_BYTES {
+                    tracing::warn!(
+                        widget = name,
+                        bytes = c.len(),
+                        cap = MAX_WIDGET_CSS_BYTES,
+                        "dropping oversized widget style.css"
+                    );
+                    return false;
+                }
+                true
+            });
+
+        let enabled = layout
+            .widgets
+            .get(&manifest.id)
+            .map(|w| w.enabled)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+
+        widgets.push(ResolvedWidget { manifest, js, css });
+    }
+    widgets
 }
 
 // --- Static file handlers ---

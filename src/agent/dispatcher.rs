@@ -148,9 +148,28 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self
+        let (active_skills, rewritten_content, skill_feedback) = self
             .select_active_skills(&message.content, &message.user_id)
             .await;
+
+        // Surface the selection decision to the channel so the web UI can
+        // render an activation card. We emit even when no skills activated
+        // if the selector produced notes (e.g. "budget exhausted") — those
+        // explain *why nothing loaded*, which is exactly the surface this
+        // feedback is meant to illuminate. Silent on the fully-empty case.
+        if !active_skills.is_empty() || !skill_feedback.is_empty() {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::SkillActivated {
+                        skill_names: active_skills.iter().map(|s| s.name().to_string()).collect(),
+                        feedback: skill_feedback,
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
