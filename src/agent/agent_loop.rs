@@ -105,13 +105,20 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 /// approval or downgraded to regular user input.
 ///
 /// Returns `true` when the message should be routed as an approval (there IS
-/// a pending approval or it's an explicit slash command). Returns `false`
-/// when the message should be treated as regular `UserInput`.
+/// a pending approval in the current thread or elsewhere in the session, or
+/// it's an explicit slash command). Returns `false` when the message should be
+/// treated as regular `UserInput`.
 ///
 /// Used by the legacy routing path; the engine_v2 path performs an equivalent
 /// check earlier (before the BeforeInbound hook).
-fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
-    thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
+fn should_route_as_approval(
+    thread_state: ThreadState,
+    raw_content: &str,
+    has_pending_approval_in_session: bool,
+) -> bool {
+    thread_state == ThreadState::AwaitingApproval
+        || has_pending_approval_in_session
+        || raw_content.trim().starts_with('/')
 }
 
 #[cfg(test)]
@@ -1953,16 +1960,23 @@ impl Agent {
                 message: "Auth gate resolution requires ENGINE_V2".to_string(),
             }),
             Submission::ApprovalResponse { approved, always } => {
-                let thread_state = {
+                let (thread_state, has_pending_approval_in_session) = {
                     let sess = session.lock().await;
-                    sess.threads
-                        .get(&thread_id)
-                        .map(|t| t.state)
-                        .unwrap_or(ThreadState::Idle)
+                    (
+                        sess.threads
+                            .get(&thread_id)
+                            .map(|t| t.state)
+                            .unwrap_or(ThreadState::Idle),
+                        sess.threads.values().any(|t| t.pending_approval.is_some()),
+                    )
                 };
                 // NOTE: TOCTOU possible — state could change between check
                 // and process_approval; process_approval handles stale cases.
-                if should_route_as_approval(thread_state, &message.content) {
+                if should_route_as_approval(
+                    thread_state,
+                    &message.content,
+                    has_pending_approval_in_session,
+                ) {
                     self.process_approval(message, session, thread_id, None, approved, always)
                         .await
                 } else {
@@ -2450,19 +2464,19 @@ mod tests {
             ThreadState::Interrupted,
         ] {
             assert!(
-                !should_route_as_approval(state, "yes"),
+                !should_route_as_approval(state, "yes", false),
                 "bare 'yes' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "no"),
+                !should_route_as_approval(state, "no", false),
                 "bare 'no' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "always"),
+                !should_route_as_approval(state, "always", false),
                 "bare 'always' should not route as approval in {state:?}"
             );
             assert!(
-                !should_route_as_approval(state, "ok"),
+                !should_route_as_approval(state, "ok", false),
                 "bare 'ok' should not route as approval in {state:?}"
             );
         }
@@ -2476,15 +2490,18 @@ mod tests {
 
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "yes"
+            "yes",
+            false,
         ));
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "no"
+            "no",
+            false,
         ));
         assert!(should_route_as_approval(
             ThreadState::AwaitingApproval,
-            "always"
+            "always",
+            false,
         ));
     }
 
@@ -2495,10 +2512,32 @@ mod tests {
         use super::should_route_as_approval;
         use crate::agent::session::ThreadState;
 
-        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
-        assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
-        assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
-        assert!(should_route_as_approval(ThreadState::Processing, "/always"));
+        assert!(should_route_as_approval(
+            ThreadState::Idle,
+            "/approve",
+            false
+        ));
+        assert!(should_route_as_approval(ThreadState::Idle, "/deny", false));
+        assert!(should_route_as_approval(ThreadState::Idle, "/yes", false));
+        assert!(should_route_as_approval(
+            ThreadState::Processing,
+            "/always",
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_route_as_approval_accepts_bare_keywords_when_other_thread_pending() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(should_route_as_approval(ThreadState::Idle, "yes", true));
+        assert!(should_route_as_approval(ThreadState::Completed, "no", true));
+        assert!(should_route_as_approval(
+            ThreadState::Interrupted,
+            "always",
+            true
+        ));
     }
 
     /// The thread-resolution guard must only early-reject `ExecApproval`

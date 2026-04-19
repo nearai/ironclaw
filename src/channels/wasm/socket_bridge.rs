@@ -40,6 +40,7 @@ use crate::tools::wasm::{AllowlistValidator, EndpointPattern};
 /// Returns a shutdown sender — drop or send `()` to stop the bridge.
 pub fn spawn_socket_bridge(
     channel: Arc<WasmChannel>,
+    bridge_id: u64,
     config: SocketModeConfig,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     owner_scope_id: String,
@@ -49,22 +50,28 @@ pub fn spawn_socket_bridge(
     let channel_name = channel.channel_name().to_string();
 
     tokio::spawn(async move {
-        if let Err(e) = run_bridge(
-            channel,
+        let result = run_bridge(
+            Arc::clone(&channel),
             config,
             secrets_store,
             &owner_scope_id,
             http_allowlist,
             shutdown_rx,
         )
-        .await
-        {
+        .await;
+
+        let error = result.err().map(|e| {
+            let error_text = e.to_string();
             tracing::error!(
                 channel = %channel_name,
-                error = %e,
+                bridge_id,
+                error = %error_text,
                 "Socket Mode bridge exited with error"
             );
-        }
+            error_text
+        });
+
+        channel.note_socket_bridge_exit(bridge_id, error).await;
     });
 }
 

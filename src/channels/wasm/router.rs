@@ -159,6 +159,11 @@ impl WasmChannelRouter {
         self.channels.read().await.get(channel_name).cloned()
     }
 
+    /// Get a channel by its registered name.
+    pub async fn get_channel(&self, channel_name: &str) -> Option<Arc<WasmChannel>> {
+        self.channels.read().await.get(channel_name).cloned()
+    }
+
     /// Validate a secret for a channel.
     pub async fn validate_secret(&self, channel_name: &str, provided: &str) -> bool {
         let secrets = self.secrets.read().await;
@@ -706,6 +711,12 @@ mod tests {
         let found = router.get_channel_for_path("/webhook/slack").await;
         assert!(found.is_some());
         assert_eq!(found.unwrap().channel_name(), "slack");
+
+        // Should also find channel by name (used by Socket Mode channels that
+        // intentionally skip webhook path registration).
+        let found_by_name = router.get_channel("slack").await;
+        assert!(found_by_name.is_some());
+        assert_eq!(found_by_name.unwrap().channel_name(), "slack");
 
         // Should not find non-existent path
         let not_found = router.get_channel_for_path("/webhook/telegram").await;

@@ -30,7 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -871,6 +871,15 @@ pub struct WasmChannel {
     /// Shutdown sender for the Socket Mode bridge task.
     socket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
+    /// Monotonic generation counter for Socket Mode bridge runs.
+    socket_bridge_generation: AtomicU64,
+
+    /// Generation of the currently active Socket Mode bridge (0 = none).
+    socket_bridge_active_id: AtomicU64,
+
+    /// Fatal error from the most recent Socket Mode bridge run, if any.
+    socket_bridge_last_error: RwLock<Option<String>>,
+
     /// Last-seen message metadata (contains chat_id for broadcast routing).
     /// Populated from incoming messages so `broadcast()` knows where to send.
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -1052,6 +1061,9 @@ impl WasmChannel {
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             consecutive_errors: AtomicU32::new(0),
             socket_shutdown_tx: RwLock::new(None),
+            socket_bridge_generation: AtomicU64::new(0),
+            socket_bridge_active_id: AtomicU64::new(0),
+            socket_bridge_last_error: RwLock::new(None),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
@@ -2156,7 +2168,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), host_state))) => {
+                self.finalize_callback_host_state("on_respond", host_state)
+                    .await?;
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -2281,7 +2295,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), host_state))) => {
+                self.finalize_callback_host_state("on_broadcast", host_state)
+                    .await?;
                 tracing::debug!(
                     channel = %channel_name,
                     "WASM channel on_broadcast completed"
@@ -2739,6 +2755,21 @@ impl WasmChannel {
         Ok(())
     }
 
+    async fn finalize_callback_host_state(
+        &self,
+        callback: &str,
+        mut host_state: ChannelHostState,
+    ) -> Result<(), WasmChannelError> {
+        let emitted = host_state.take_emitted_messages();
+        tracing::debug!(
+            channel = %self.name,
+            callback,
+            emitted_count = emitted.len(),
+            "Dispatching emitted messages from WASM callback"
+        );
+        self.process_emitted_messages(emitted).await
+    }
+
     /// Ensure the polling loop is running with the interval from `config`.
     ///
     /// Stops any existing polling task and starts a fresh one.  Safe to call
@@ -2900,6 +2931,25 @@ impl WasmChannel {
         }
     }
 
+    pub(crate) async fn note_socket_bridge_exit(
+        &self,
+        bridge_id: u64,
+        error: Option<String>,
+    ) {
+        if self.socket_bridge_active_id.load(Ordering::SeqCst) != bridge_id {
+            tracing::debug!(
+                channel = %self.name,
+                bridge_id,
+                "Ignoring stale Socket Mode bridge exit"
+            );
+            return;
+        }
+
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
+        let _ = self.socket_shutdown_tx.write().await.take();
+        *self.socket_bridge_last_error.write().await = error;
+    }
+
     /// Start the Socket Mode bridge if configured.
     ///
     /// Requires an `Arc<WasmChannel>` because the bridge needs to call
@@ -2928,6 +2978,7 @@ impl WasmChannel {
             .unwrap_or(false);
 
         if !in_secrets && !in_env {
+            *self.socket_bridge_last_error.write().await = None;
             tracing::info!(
                 channel = %self.name,
                 secret = %socket_config.app_token_secret,
@@ -2947,12 +2998,20 @@ impl WasmChannel {
             );
             return;
         }
+        let bridge_id = self
+            .socket_bridge_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         *guard = Some(shutdown_tx);
         drop(guard);
 
+        self.socket_bridge_active_id.store(bridge_id, Ordering::SeqCst);
+        *self.socket_bridge_last_error.write().await = None;
+
         tracing::info!(
             channel = %self.name,
+            bridge_id,
             "Starting Socket Mode bridge"
         );
 
@@ -2969,6 +3028,7 @@ impl WasmChannel {
 
         crate::channels::wasm::socket_bridge::spawn_socket_bridge(
             channel_arc,
+            bridge_id,
             socket_config,
             self.secrets_store.clone(),
             self.owner_scope_id.clone(),
@@ -2985,6 +3045,7 @@ impl WasmChannel {
     /// bridge is currently running.
     pub async fn restart_socket_bridge(self: &Arc<Self>) {
         // Stop any existing bridge
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
         if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
             let _ = tx.send(());
             tracing::info!(
@@ -3518,14 +3579,24 @@ impl Channel for WasmChannel {
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        // Check if we have an active message sender
-        if self.message_tx.read().await.is_some() {
-            Ok(())
-        } else {
-            Err(ChannelError::HealthCheckFailed {
+        if self.message_tx.read().await.is_none() {
+            return Err(ChannelError::HealthCheckFailed {
                 name: self.name.clone(),
-            })
+            });
         }
+
+        if let Some(error) = self.socket_bridge_last_error.read().await.clone() {
+            tracing::warn!(
+                channel = %self.name,
+                error = %error,
+                "Socket Mode bridge health check failed"
+            );
+            return Err(ChannelError::HealthCheckFailed {
+                name: self.name.clone(),
+            });
+        }
+
+        Ok(())
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
@@ -3543,6 +3614,7 @@ impl Channel for WasmChannel {
         let _ = self.websocket_shutdown_tx.write().await.take();
 
         // Stop Socket Mode bridge
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
         if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
@@ -4799,9 +4871,11 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use secrecy::SecretString;
+    use tokio::sync::oneshot;
 
     use crate::channels::Channel;
     use crate::channels::OutgoingResponse;
@@ -5387,6 +5461,78 @@ mod tests {
 
         // Health check should fail after shutdown
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finalize_callback_host_state_dispatches_emitted_messages() {
+        use crate::channels::wasm::host::EmittedMessage;
+        use futures::StreamExt;
+
+        let channel = create_test_channel();
+        let mut stream = channel.start().await.expect("Channel should start");
+
+        let mut host_state = ChannelHostState::new("test", ChannelCapabilities::for_channel("test"));
+        host_state
+            .emit_message(EmittedMessage::new("user-1", "callback message"))
+            .expect("emit into host state");
+
+        channel
+            .finalize_callback_host_state("on_respond", host_state)
+            .await
+            .expect("finalize should dispatch emitted messages");
+
+        let msg = stream.next().await.expect("emitted message should reach stream");
+        assert_eq!(msg.content, "callback message");
+        assert_eq!(msg.sender_id, "user-1");
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_socket_bridge_exit_marks_channel_unhealthy() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *channel.socket_shutdown_tx.write().await = Some(shutdown_tx);
+        channel.socket_bridge_active_id.store(7, Ordering::SeqCst);
+
+        channel
+            .note_socket_bridge_exit(7, Some("socket auth failed".to_string()))
+            .await;
+
+        assert!(
+            channel.socket_shutdown_tx.read().await.is_none(),
+            "bridge marker should clear on fatal exit"
+        );
+        assert_eq!(channel.socket_bridge_active_id.load(Ordering::SeqCst), 0);
+        assert!(channel.health_check().await.is_err());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_stale_socket_bridge_exit_does_not_clear_new_bridge_state() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *channel.socket_shutdown_tx.write().await = Some(shutdown_tx);
+        channel.socket_bridge_active_id.store(9, Ordering::SeqCst);
+
+        channel
+            .note_socket_bridge_exit(8, Some("old bridge failed".to_string()))
+            .await;
+
+        assert!(
+            channel.socket_shutdown_tx.read().await.is_some(),
+            "stale exit must not clear the current bridge marker"
+        );
+        assert_eq!(channel.socket_bridge_active_id.load(Ordering::SeqCst), 9);
+        assert!(channel.socket_bridge_last_error.read().await.is_none());
+        assert!(channel.health_check().await.is_ok());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
     }
 
     #[tokio::test]

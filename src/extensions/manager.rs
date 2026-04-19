@@ -5995,6 +5995,14 @@ impl ExtensionManager {
             .as_ref()
             .map(|f| f.webhook_secret_managed_by_host())
             .unwrap_or(true);
+        let secret_header = capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_secret_header().map(|s| s.to_string()));
+        let has_socket_mode = capabilities_file
+            .as_ref()
+            .and_then(|f| f.capabilities.channel.as_ref())
+            .and_then(|c| c.socket_mode.as_ref())
+            .is_some();
 
         let sig_key_secret_name = capabilities_file
             .as_ref()
@@ -6022,6 +6030,9 @@ impl ExtensionManager {
         )
         .await;
         let mut should_rerun_on_start = false;
+        let mut host_webhook_secret = None;
+        let mut has_signature_key = false;
+        let mut has_hmac_secret = false;
 
         // Refresh webhook secret
         if webhook_secret_managed_by_host
@@ -6030,13 +6041,13 @@ impl ExtensionManager {
                 .get_decrypted(user_id, &webhook_secret_name)
                 .await
         {
-            router
-                .update_secret(name, secret.expose().to_string())
-                .await;
+            let secret_value = secret.expose().to_string();
+            router.update_secret(name, secret_value.clone()).await;
             config_updates.insert(
                 "webhook_secret".to_string(),
-                serde_json::Value::String(secret.expose().to_string()),
+                serde_json::Value::String(secret_value.clone()),
             );
+            host_webhook_secret = Some(secret_value);
             should_rerun_on_start = true;
         }
 
@@ -6049,6 +6060,7 @@ impl ExtensionManager {
                 .await
             {
                 Ok(()) => {
+                    has_signature_key = true;
                     tracing::info!(channel = %name, "Refreshed signature verification key")
                 }
                 Err(e) => {
@@ -6065,6 +6077,7 @@ impl ExtensionManager {
                 .await
             {
                 Ok(secret) => {
+                    has_hmac_secret = true;
                     router.register_hmac_secret(name, secret.expose()).await;
                     tracing::info!(channel = %name, "Refreshed HMAC signing secret");
                 }
@@ -6084,7 +6097,37 @@ impl ExtensionManager {
             existing_channel.set_owner_actor_id(Some(owner_id)).await;
         }
 
-        // Re-call on_start() to trigger webhook registration with the
+        let has_webhook_auth = host_webhook_secret.is_some() || has_signature_key || has_hmac_secret;
+        let refreshed_endpoints = if !has_webhook_auth && has_socket_mode {
+            tracing::info!(
+                channel = %name,
+                "Keeping webhook route unregistered: Socket Mode enabled without webhook auth"
+            );
+            vec![]
+        } else {
+            vec![RegisteredEndpoint {
+                channel_name: name.to_string(),
+                path: webhook_path,
+                methods: vec!["POST".to_string()],
+                require_secret: host_webhook_secret.is_some(),
+            }]
+        };
+        router
+            .register(
+                Arc::clone(&existing_channel),
+                refreshed_endpoints,
+                host_webhook_secret.clone(),
+                secret_header,
+            )
+            .await;
+        tracing::info!(
+            channel = %name,
+            has_webhook_auth,
+            has_socket_mode,
+            "Refreshed webhook router registration for already-active channel"
+        );
+
+        // Re-call on_start() to trigger provider-side setup with the
         // now-available credentials (e.g., setWebhook for Telegram).
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
@@ -9712,6 +9755,103 @@ mod tests {
             config.get("owner_id"),
             Some(&serde_json::json!(99887766_i64)),
             "config owner_id should be restored from capabilities fallback",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_activate_refreshes_webhook_route_for_active_socket_mode_channel_with_hmac_auth(
+    ) -> Result<(), String> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test slack channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_signing_secret", "prompt": "signing secret" }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "socket_mode": {
+                            "app_token_secret": "slack_app_token",
+                            "open_url": "https://slack.com/api/apps.connections.open",
+                            "max_reconnect_attempts": 3,
+                            "reconnect_delay_ms": 1000
+                        },
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let manager = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        manager
+            .active_channel_names
+            .write()
+            .await
+            .insert("slack".to_string());
+
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "slack",
+            Arc::clone(&pairing_store),
+            serde_json::json!({}),
+        );
+        let existing_channel = Arc::new(loaded.channel);
+        router
+            .register(Arc::clone(&existing_channel), vec![], None, None)
+            .await;
+
+        require(
+            router.get_channel_for_path("/webhook/slack").await.is_none(),
+            "socket-mode-only active channel should start without webhook path".to_string(),
+        )?;
+
+        store_test_secret(&manager, "slack_signing_secret", "signing-secret").await;
+
+        let result = manager
+            .activate("slack", "test")
+            .await
+            .map_err(|e| format!("activate: {e}"))?;
+
+        require_eq(
+            result.name,
+            "slack".to_string(),
+            "activation result name for refreshed channel",
+        )?;
+        require(
+            router.get_channel_for_path("/webhook/slack").await.is_some(),
+            "refresh should re-register webhook path once hmac auth is present".to_string(),
+        )?;
+        require_eq(
+            router.get_hmac_secret("slack").await,
+            Some("signing-secret".to_string()),
+            "router should cache refreshed hmac secret",
         )
     }
 

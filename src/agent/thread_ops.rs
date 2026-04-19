@@ -1481,20 +1481,53 @@ impl Agent {
                         ));
                     }
 
-                    if awaiting.len() > 1 {
-                        tracing::warn!(
-                            session_id = %sess.id,
-                            source_channel = %message.channel,
-                            count = awaiting.len(),
-                            thread_ids = ?awaiting,
-                            "Rejecting ambiguous cross-thread approval: multiple threads awaiting"
-                        );
-                        return Ok(SubmissionResult::error(
-                            "Multiple pending approvals — please reply in the correct thread.",
-                        ));
-                    }
-
-                    let target_tid = awaiting[0];
+                    let target_tid = if let Some(req_id) = request_id {
+                        if let Some(target_tid) = awaiting.iter().copied().find(|candidate_tid| {
+                            sess.threads
+                                .get(candidate_tid)
+                                .and_then(|t| t.pending_approval.as_ref())
+                                .map(|pending| pending.request_id == req_id)
+                                .unwrap_or(false)
+                        }) {
+                            tracing::debug!(
+                                session_id = %sess.id,
+                                source_channel = %message.channel,
+                                source_thread = %thread_id,
+                                target_thread = %target_tid,
+                                request_id = %req_id,
+                                "Cross-thread approval request_id matched awaiting thread"
+                            );
+                            target_tid
+                        } else if awaiting.len() > 1 {
+                            tracing::warn!(
+                                session_id = %sess.id,
+                                source_channel = %message.channel,
+                                request_id = %req_id,
+                                count = awaiting.len(),
+                                thread_ids = ?awaiting,
+                                "Rejecting cross-thread approval: request_id did not match any awaiting thread"
+                            );
+                            return Ok(SubmissionResult::error(
+                                "Request ID mismatch. Use the correct request ID.",
+                            ));
+                        } else {
+                            awaiting[0]
+                        }
+                    } else {
+                        if awaiting.len() > 1 {
+                            tracing::warn!(
+                                session_id = %sess.id,
+                                source_channel = %message.channel,
+                                count = awaiting.len(),
+                                thread_ids = ?awaiting,
+                                "Rejecting ambiguous cross-thread approval: multiple threads awaiting"
+                            );
+                            return Ok(SubmissionResult::error(
+                                "Multiple pending approvals — please reply in the correct thread.",
+                            ));
+                        }
+                        awaiting[0]
+                    };
                     let session_id = sess.id;
 
                     // Peek at the pending tool name before taking it, so we
@@ -3984,6 +4017,103 @@ mod tests {
             thread.pending_approval.as_ref().unwrap().request_id,
             correct_request_id,
             "Restored pending approval should have the original request_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cross_thread_approval_request_id_disambiguates_multiple_pending_threads() {
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let source_thread_id = Uuid::new_v4();
+        let target_a_id = Uuid::new_v4();
+        let target_b_id = Uuid::new_v4();
+        let request_a = Uuid::new_v4();
+        let request_b = Uuid::new_v4();
+
+        let source_thread = Thread::with_id(source_thread_id, session_id, Some("test"));
+
+        let mut target_a = Thread::with_id(target_a_id, session_id, Some("test"));
+        target_a.await_approval(PendingApproval {
+            request_id: request_a,
+            tool_name: "tool-a".to_string(),
+            parameters: serde_json::json!({"value": "a"}),
+            display_parameters: serde_json::json!({"value": "a"}),
+            description: "Tool A".to_string(),
+            tool_call_id: "call_a".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        });
+
+        let mut target_b = Thread::with_id(target_b_id, session_id, Some("test"));
+        target_b.await_approval(PendingApproval {
+            request_id: request_b,
+            tool_name: "tool-b".to_string(),
+            parameters: serde_json::json!({"value": "b"}),
+            display_parameters: serde_json::json!({"value": "b"}),
+            description: "Tool B".to_string(),
+            tool_call_id: "call_b".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        });
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(source_thread_id, source_thread);
+        session.threads.insert(target_a_id, target_a);
+        session.threads.insert(target_b_id, target_b);
+        let session = Arc::new(Mutex::new(session));
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+        let message = IncomingMessage::new("test", "test-user", "/deny");
+
+        let result = agent
+            .process_approval(
+                &message,
+                Arc::clone(&session),
+                source_thread_id,
+                Some(request_b),
+                false,
+                false,
+            )
+            .await
+            .expect("cross-thread approval should resolve");
+        match &result {
+            SubmissionResult::Response { content } => {
+                assert!(
+                    content.contains("tool-b"),
+                    "expected rejection to target tool-b, got: {content}"
+                );
+            }
+            other => panic!("expected rejection response, got: {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let source = sess.threads.get(&source_thread_id).expect("source thread");
+        assert_eq!(source.state, ThreadState::Idle);
+
+        let target_a = sess.threads.get(&target_a_id).expect("target_a");
+        assert_eq!(target_a.state, ThreadState::AwaitingApproval);
+        assert_eq!(
+            target_a
+                .pending_approval
+                .as_ref()
+                .expect("target_a pending")
+                .request_id,
+            request_a
+        );
+
+        let target_b = sess.threads.get(&target_b_id).expect("target_b");
+        assert_eq!(target_b.state, ThreadState::Idle);
+        assert!(
+            target_b.pending_approval.is_none(),
+            "matched approval should be consumed"
         );
     }
 
