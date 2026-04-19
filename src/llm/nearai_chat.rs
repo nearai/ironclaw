@@ -1014,7 +1014,13 @@ impl From<ChatMessage> for ChatCompletionMessage {
         } else if !msg.content_parts.is_empty() {
             // Build multimodal content array: text + image parts
             let mut parts = vec![crate::llm::ContentPart::Text { text: msg.content }];
-            parts.extend(msg.content_parts);
+            parts.extend(msg.content_parts.into_iter().map(|part| match part {
+                crate::llm::ContentPart::ImageUrl { mut image_url } => {
+                    image_url.detail = Some(image_url.normalized_openai_detail());
+                    crate::llm::ContentPart::ImageUrl { image_url }
+                }
+                other => other,
+            }));
             Some(MessageContent::Parts(parts))
         } else {
             Some(MessageContent::Text(msg.content))
@@ -1230,6 +1236,47 @@ mod tests {
             chat_msg.content.as_ref().and_then(|c| c.as_text()),
             Some("Hello")
         );
+    }
+
+    #[test]
+    fn test_message_conversion_defaults_missing_image_detail_to_auto() {
+        let msg = ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/jpeg;base64,Zm9v".to_string(),
+                    detail: None,
+                },
+            }],
+        );
+        let chat_msg: ChatCompletionMessage = msg.into();
+
+        let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,Zm9v"
+        );
+        assert_eq!(content[1]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn test_message_conversion_preserves_explicit_image_detail() {
+        for expected in ["low", "high"] {
+            let msg = ChatMessage::user_with_parts(
+                "describe this",
+                vec![crate::llm::ContentPart::ImageUrl {
+                    image_url: crate::llm::ImageUrl {
+                        url: format!("https://example.com/{expected}.png"),
+                        detail: Some(expected.to_string()),
+                    },
+                }],
+            );
+            let chat_msg: ChatCompletionMessage = msg.into();
+            let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+            assert_eq!(content[1]["image_url"]["detail"], expected);
+        }
     }
 
     #[test]
