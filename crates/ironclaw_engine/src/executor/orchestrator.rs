@@ -3167,16 +3167,14 @@ mod tests {
             "paused_lease": lease,
         });
         let outcome = parse_outcome(&result);
-        assert!(
-            matches!(
-                outcome,
-                ThreadOutcome::GatePaused {
-                    action_name,
-                    paused_lease: Some(_),
-                    ..
-                } if action_name == "shell"
-            )
-        );
+        assert!(matches!(
+            outcome,
+            ThreadOutcome::GatePaused {
+                action_name,
+                paused_lease: Some(_),
+                ..
+            } if action_name == "shell"
+        ));
     }
 
     #[test]
