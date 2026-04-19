@@ -1277,6 +1277,49 @@ mod tests {
         assert_eq!(result.servers[0].name, "good-server");
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_load_from_db_skips_invalid_server_name() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let user_id = "mcp-user";
+
+        // Mirror the legacy-upgrade case: one invalid persisted entry should
+        // not prevent the loader from returning the remaining valid servers.
+        db.set_setting(
+            user_id,
+            "mcp_servers",
+            &serde_json::json!({
+                "schema_version": 7,
+                "servers": [
+                    {
+                        "name": "bad;rm -rf /",
+                        "url": "https://mcp.example.com",
+                        "enabled": true,
+                        "headers": {}
+                    },
+                    {
+                        "name": "good-server",
+                        "url": "https://mcp.good.com",
+                        "enabled": true,
+                        "headers": {}
+                    }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = load_mcp_servers_from_db(db.as_ref(), user_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.schema_version, 7,
+            "DB load should preserve schema version"
+        );
+        assert_eq!(result.servers.len(), 1, "Should skip invalid, keep valid");
+        assert_eq!(result.servers[0].name, "good-server");
+    }
+
     #[test]
     fn test_header_crlf_injection_rejected() {
         let mut headers = HashMap::new();
