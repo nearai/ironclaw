@@ -31,8 +31,8 @@ use axum::{
 use sha2::{Digest, Sha256};
 
 use crate::channels::relay::DEFAULT_RELAY_NAME;
+use crate::channels::web::platform::legacy_auth::clear_auth_mode;
 use crate::channels::web::platform::state::{GatewayState, rate_limit_key_from_headers};
-use crate::channels::web::server::clear_auth_mode;
 use crate::channels::web::types::AppEvent;
 use crate::channels::web::util::web_incoming_message;
 use crate::extensions::naming::extension_name_candidates;
