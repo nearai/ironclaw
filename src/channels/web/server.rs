@@ -336,11 +336,11 @@ pub(crate) async fn chat_auth_token_handler(
 async fn restore_pending_auth_mode(
     session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
     thread_id: Uuid,
-    extension_name: &str,
+    extension_name: &ironclaw_common::ExtensionName,
 ) {
     let mut sess = session.lock().await;
     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-        thread.enter_auth_mode(extension_name.to_string());
+        thread.enter_auth_mode(extension_name.clone());
     }
 }
 
@@ -421,11 +421,11 @@ pub(crate) async fn handle_legacy_auth_token_submission(
 
     let result = if let Some(auth_manager) = state.auth_manager.as_ref() {
         auth_manager
-            .submit_auth_token(&pending_auth.extension_name, token, user_id)
+            .submit_auth_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else if let Some(ext_mgr) = state.extension_manager.as_ref() {
         ext_mgr
-            .configure_token(&pending_auth.extension_name, token, user_id)
+            .configure_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else {
         restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
@@ -635,7 +635,7 @@ async fn pending_gate_extension_name(
     tool_name: &str,
     parameters: &str,
     resume_kind: &ironclaw_engine::ResumeKind,
-) -> Option<String> {
+) -> Option<ironclaw_common::ExtensionName> {
     let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = resume_kind
@@ -646,43 +646,24 @@ async fn pending_gate_extension_name(
     let parsed_parameters =
         serde_json::from_str::<serde_json::Value>(parameters).unwrap_or(serde_json::Value::Null);
 
-    if let Some(auth_manager) = state.auth_manager.as_ref() {
-        return Some(
-            auth_manager
-                .resolve_extension_name_for_auth_flow(
-                    tool_name,
-                    &parsed_parameters,
-                    credential_name.as_str(),
-                    user_id,
-                )
-                .await,
-        );
-    }
-
-    if matches!(
-        tool_name,
-        "tool_install"
-            | "tool-install"
-            | "tool_activate"
-            | "tool-activate"
-            | "tool_auth"
-            | "tool-auth"
-    ) && let Some(name) = parsed_parameters.get("name").and_then(|v| v.as_str())
-        && !name.trim().is_empty()
-    {
-        return Some(name.to_string());
-    }
-
-    if let Some(tools) = state.tool_registry.as_ref()
-        && let Some(name) = tools.provider_extension_for_tool(tool_name).await
-    {
-        return Some(name);
-    }
-
-    // auth_manager is None only when no secrets backend exists (e.g. bare
-    // test harness). Fall back to the raw credential name rather than
-    // duplicating AuthManager resolution logic here.
-    Some(credential_name.as_str().to_string())
+    // Both the "auth manager present" and "bare test harness" paths
+    // delegate to the single canonical resolver (see
+    // `src/bridge/auth_manager.rs::resolve_auth_flow_extension_name`) so
+    // the four branches stay aligned. Without this delegation the wrapper
+    // would drift — check #8 in `scripts/pre-commit-safety.sh` and the
+    // "one resolver" rule in `src/bridge/CLAUDE.md` exist to prevent
+    // exactly that drift.
+    Some(
+        crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+            tool_name,
+            &parsed_parameters,
+            credential_name.as_str(),
+            user_id,
+            state.tool_registry.as_deref(),
+            state.extension_manager.as_deref(),
+        )
+        .await,
+    )
 }
 
 async fn engine_pending_gate_info(
@@ -1670,8 +1651,17 @@ pub(crate) async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // The URL path segment is user input — validate at the boundary via
+    // `ExtensionName::new` and use the canonical form for all downstream
+    // extension-manager calls and response formatting.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     tracing::trace!(
-        extension = %name,
+        extension = %name.as_str(),
         user_id = %user.user_id,
         "extensions_activate_handler: received activate request"
     );
@@ -1682,14 +1672,14 @@ pub(crate) async fn extensions_activate_handler(
 
     match ext_mgr
         .ensure_extension_ready(
-            &name,
+            name.as_str(),
             &user.user_id,
             crate::extensions::EnsureReadyIntent::ExplicitActivate,
         )
         .await
     {
         Ok(readiness) => {
-            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name));
+            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name.as_str()));
             apply_extension_readiness_to_response(&mut resp, readiness, false);
             Ok(Json(resp))
         }
@@ -1702,12 +1692,21 @@ pub(crate) async fn extensions_remove_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Validate user-controlled path segment before it reaches the extension
+    // manager — rejects path-traversal, invalid characters, and malformed
+    // slugs with a 400.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.remove(&name, &user.user_id).await {
+    match ext_mgr.remove(name.as_str(), &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
@@ -1782,13 +1781,21 @@ pub(crate) async fn extensions_setup_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
+    // Validate user-controlled path segment at entry. Downstream lookups
+    // (`get_setup_schema`, `list().find(...)`) consume the canonical form.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
     let setup = ext_mgr
-        .get_setup_schema(&name, &user.user_id)
+        .get_setup_schema(name.as_str(), &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1796,12 +1803,12 @@ pub(crate) async fn extensions_setup_handler(
         .list(None, false, &user.user_id)
         .await
         .ok()
-        .and_then(|list| list.into_iter().find(|e| e.name == name))
+        .and_then(|list| list.into_iter().find(|e| e.name == name.as_str()))
         .map(|e| e.kind.to_string())
         .unwrap_or_default();
 
     Ok(Json(ExtensionSetupResponse {
-        name,
+        name: name.as_str().to_string(),
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
@@ -1821,12 +1828,23 @@ pub(crate) async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // The URL path segment is user input — validate at the boundary via
+    // `ExtensionName::new`. Reject path-traversal, invalid characters, or
+    // malformed slugs with a 400 before the value reaches extension
+    // lookup, SSE broadcast, or any `from_trusted` wrap below.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+
     // Clear auth mode regardless of outcome so the next user message goes
     // through to the LLM instead of being intercepted as a token.
     clear_auth_mode(&state, &user.user_id).await;
 
     match ext_mgr
-        .configure(&name, &req.secrets, &req.fields, &user.user_id)
+        .configure(name.as_str(), &req.secrets, &req.fields, &user.user_id)
         .await
     {
         Ok(result) => {
@@ -1868,7 +1886,7 @@ pub(crate) async fn extensions_setup_submit_handler(
                                 &user.user_id,
                                 request_id,
                                 Some(thread_id),
-                                &name,
+                                name.as_str(),
                             )
                             .await
                             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2026,7 +2044,7 @@ pub(crate) async fn pairing_approve_handler(
         state.sse.broadcast_for_user(
             &user.user_id,
             AppEvent::OnboardingState {
-                extension_name: channel.clone(),
+                extension_name: ironclaw_common::ExtensionName::from_trusted(channel.clone()),
                 state: crate::channels::web::types::OnboardingStateDto::Failed,
                 request_id: None,
                 message: Some(message.clone()),
@@ -2044,7 +2062,7 @@ pub(crate) async fn pairing_approve_handler(
     state.sse.broadcast_for_user(
         &user.user_id,
         AppEvent::OnboardingState {
-            extension_name: channel.clone(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(channel.clone()),
             state: crate::channels::web::types::OnboardingStateDto::Ready,
             request_id: None,
             message: Some("Pairing approved.".to_string()),
@@ -3057,7 +3075,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("telegram"));
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
     }
 
     #[tokio::test]
@@ -3079,7 +3100,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("telegram"));
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
     }
 
     #[tokio::test]
@@ -3134,7 +3158,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("notion"));
+        assert_eq!(extension_name.as_ref().map(|n| n.as_str()), Some("notion"));
     }
 
     /// Build a test router with just the OAuth callback route.
@@ -3321,7 +3345,7 @@ mod tests {
             let thread_id = {
                 let thread = sess.create_thread(Some("gateway"));
                 let thread_id = thread.id;
-                thread.enter_auth_mode("telegram".to_string());
+                thread.enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
                 thread_id
             };
             sess.switch_thread(thread_id);
@@ -3378,9 +3402,9 @@ mod tests {
             let target_thread_id = Uuid::new_v4();
             let other_thread_id = Uuid::new_v4();
             sess.create_thread_with_id(target_thread_id, Some("gateway"))
-                .enter_auth_mode("telegram".to_string());
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
             sess.create_thread_with_id(other_thread_id, Some("gateway"))
-                .enter_auth_mode("notion".to_string());
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("notion").unwrap());
             sess.switch_thread(other_thread_id);
         }
 
@@ -3527,7 +3551,7 @@ mod tests {
             let thread = sess.create_thread(Some("gateway"));
             let thread_id = thread.id;
             thread.pending_auth = Some(crate::agent::session::PendingAuth {
-                extension_name: "telegram".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
                 created_at: chrono::Utc::now() - chrono::Duration::minutes(16),
             });
             sess.switch_thread(thread_id);
@@ -4083,7 +4107,7 @@ mod tests {
         oauth_proxy_auth_token: Option<String>,
     ) -> crate::auth::oauth::PendingOAuthFlow {
         crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -4105,6 +4129,138 @@ mod tests {
             client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
             auto_activate_extension: true,
+        }
+    }
+
+    /// Regression for the PR #2617 review (Gemini HIGH/security): the
+    /// `extensions_setup_submit_handler` used to wrap the URL path segment
+    /// in `ExtensionName::from_trusted`, skipping the newtype's path-
+    /// traversal and invalid-character rejection. A handler-level test (not
+    /// an `identity.rs`-level test) locks in the boundary: a malformed path
+    /// must produce a 400 before the value reaches any downstream
+    /// `from_trusted` wrap, extension lookup, or SSE broadcast.
+    #[tokio::test]
+    async fn test_extensions_setup_submit_rejects_path_traversal_name() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        // Each of these slugs would have silently reached extension lookup
+        // under the old `from_trusted(name)` wrap. All must reject at 400.
+        // We use axum::http::uri::PathAndQuery-safe escape where needed so
+        // the path extractor still decodes into a valid `String`.
+        for bad in [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ] {
+            let req_body = serde_json::json!({"secrets": {}});
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/extensions/{bad}/setup"))
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .expect("request");
+            req.extensions_mut().insert(UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            });
+
+            let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                .await
+                .expect("response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for malformed extension name {bad:?}, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    /// Regression for the PR #2617 Copilot review: the sibling
+    /// `/api/extensions/{name}/...` handlers (`activate`, `remove`, setup GET)
+    /// used to accept `Path<String>` and hand it straight to the extension
+    /// manager, leaving path-traversal / malformed slugs unvalidated at the
+    /// web boundary. All three must now reject at 400 before any downstream
+    /// lookup — same guarantee as `extensions_setup_submit_handler`.
+    #[tokio::test]
+    async fn test_extensions_sibling_handlers_reject_path_traversal_name() {
+        use axum::body::Body;
+        use axum::routing::{get, post};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/activate",
+                post(extensions_activate_handler),
+            )
+            .route(
+                "/api/extensions/{name}/remove",
+                post(extensions_remove_handler),
+            )
+            .route(
+                "/api/extensions/{name}/setup",
+                get(extensions_setup_handler),
+            )
+            .with_state(state);
+
+        let bad_names = [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ];
+        let routes = [("POST", "activate"), ("POST", "remove"), ("GET", "setup")];
+
+        for bad in bad_names {
+            for (method, suffix) in routes {
+                let mut builder = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/api/extensions/{bad}/{suffix}"));
+                if method == "POST" {
+                    builder = builder.header("content-type", "application/json");
+                }
+                let body = if method == "POST" {
+                    Body::from("{}")
+                } else {
+                    Body::empty()
+                };
+                let mut req = builder.body(body).expect("request");
+                req.extensions_mut().insert(UserIdentity {
+                    user_id: "test".to_string(),
+                    role: "admin".to_string(),
+                    workspace_read_scopes: Vec::new(),
+                });
+
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "expected 400 for {method} {suffix} with malformed name {bad:?}, got {:?}",
+                    resp.status()
+                );
+            }
         }
     }
 
@@ -5159,7 +5315,7 @@ mod tests {
 
         // Insert an expired flow.
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -5231,7 +5387,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -5344,7 +5500,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -5434,7 +5590,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -5518,7 +5674,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),

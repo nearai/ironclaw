@@ -4056,6 +4056,7 @@ dependencies = [
  "arboard",
  "chrono",
  "image",
+ "ironclaw_common",
  "pulldown-cmark",
  "ratatui",
  "serde",

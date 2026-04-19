@@ -30,12 +30,15 @@ WS, static serving) that feature handlers depend on.
 **The "no back-edges" rule has one intentional exception: the router.**
 Route composition is inherently the coupling point where transport
 meets features — `platform/router.rs` imports every feature handler it
-registers. Every *other* platform submodule (state, static_files, and
-the auth/SSE/WS modules once they move) must stay handler-agnostic,
-and that's what the future CI check (ironclaw#2599 stage 5) will
-enforce: forbid cross-imports between `platform/{state,static_files,
-auth,sse,ws}.rs` and `handlers/*` / `features/*`, but allow
-`platform/router.rs` to reference both sides.
+registers. Every *other* platform submodule (state, static_files,
+auth, sse, ws) must stay handler-agnostic, and
+`scripts/check_gateway_boundaries.py` (wired into the `code_style`
+CI workflow as of ironclaw#2599 stage 5) enforces this: it fails the
+build on any added import from `platform/{state,static_files,auth,
+sse,ws}.rs` into `handlers/*` or `features/*`, while explicitly
+exempting `platform/router.rs`. The script also carries a minimal
+allowlist for pre-existing back-edges that are targeted for follow-up
+migration; the allowlist must not grow without reviewer sign-off.
 
 The flat `handlers/` folder is a transitional fallback — individual
 handlers will migrate into `features/<slice>/` directories once their
@@ -139,12 +142,45 @@ Rules:
 - Generic auth cards are only for non-extension credential prompts or OAuth-only flows that do not have extension setup UI.
 - If an auth-related change adds a new identity derivation path, stop and consolidate it into the shared backend resolver instead.
 
+Identity types at the web boundary:
+
+These rules are enforced by check #8 in `scripts/pre-commit-safety.sh`
+(`CREDNAME`). Suppress individual intentional uses with
+`// web-identity-exempt: <reason>`.
+
+- **Setup / configure / activate routes take `ExtensionName`, not `String`.**
+  Any handler on `/api/extensions/{name}/...` whose path segment is the
+  extension identity MUST parse it at entry via
+  `ExtensionName::new(&name).map_err(|e| (StatusCode::BAD_REQUEST, ...))?`
+  before the value reaches extension lookup, SSE broadcast, or any
+  `from_trusted` wrap. A path-traversal or malformed slug must return 400.
+
+- **Web request/response DTOs and web handlers must not reference
+  `CredentialName`.** Credential identity is a backend concern. The web
+  layer accepts and emits `ExtensionName`; the dispatcher / auth manager
+  resolves credential identity from it server-side. If you find yourself
+  importing `CredentialName` in `src/channels/web/**`, you're on the
+  wrong side of the boundary — push the resolution into
+  `bridge::auth_manager` and have the handler consume its output.
+
+- **Auth-flow extension resolution happens in one place.** The only
+  supported way to map an auth gate → extension name is
+  `AuthManager::resolve_extension_name_for_auth_flow`. Web handlers,
+  TUI channels, relay adapters, and SSE broadcasters must call through
+  it rather than re-deriving an extension name from `pending.action_name`,
+  a credential-name prefix, or a format-string. Four recent identity
+  bugs (#2561, #2473, #2512, #2574) were duplicate-resolution drift —
+  this rule exists to make a fifth impossible.
+
 Current consolidation points:
 
-- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)`
-- `src/bridge/router.rs`: auth-gate display and submit target resolution
-- `src/channels/web/server.rs`: pending-gate/history normalization
+- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
+- `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
+- `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
 - `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+
+All three of the backend wrappers above delegate to the canonical resolver
+or return `Option<ExtensionName>`; they must not duplicate its logic.
 
 Legacy cleanup note:
 
