@@ -1235,10 +1235,7 @@ mod tests {
     fn test_server_name_64_chars_accepted() {
         let name = "a".repeat(64);
         let config = McpServerConfig::new(&name, "https://mcp.example.com");
-        assert!(
-            config.validate().is_ok(),
-            "64-char name should be accepted"
-        );
+        assert!(config.validate().is_ok(), "64-char name should be accepted");
     }
 
     #[test]
