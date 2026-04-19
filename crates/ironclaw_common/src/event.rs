@@ -501,6 +501,7 @@ mod tests {
             AppEvent::SkillActivated {
                 skill_names: vec![],
                 thread_id: None,
+                feedback: vec![],
             },
             AppEvent::ExtensionStatus {
                 extension_name: String::new(),
