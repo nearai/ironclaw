@@ -747,6 +747,9 @@ impl Channel for ReplChannel {
                     eprintln!("  {}{url}{}", fmt::link(), fmt::reset());
                 }
                 eprintln!();
+                // Resume readline so the user can paste a token or continue the
+                // auth flow via the normal submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthCompleted {
                 extension_name,
@@ -808,7 +811,7 @@ impl Channel for ReplChannel {
             | StatusUpdate::ConversationHistory { .. } => {
                 // Infrastructure status events are only rendered by the TUI.
             }
-            StatusUpdate::SkillActivated { skill_names } => {
+            StatusUpdate::SkillActivated { skill_names, .. } => {
                 if !skill_names.is_empty() {
                     eprintln!(
                         "  \x1b[36m\u{25C8} skills: {}\x1b[0m",
@@ -874,6 +877,53 @@ mod tests {
                 .expect("timed out waiting for stream to close")
                 .is_none(),
             "stream should end after the single message"
+        );
+    }
+
+    /// Regression: per `.claude/rules/testing.md` ("Test Through the Caller,
+    /// Not Just the Helper"), a unit test that only asserts the
+    /// `stdin_locked` flag flipped is insufficient — the side effect that
+    /// matters is the input thread's polling loop in `start()` actually
+    /// resuming. This test mirrors that polling pattern and asserts it
+    /// observes the unlock after `send_status(AuthRequired)`.
+    #[tokio::test]
+    async fn auth_required_status_unblocks_input_polling_loop() {
+        let repl = ReplChannel::with_user_id("test-user");
+        repl.stdin_locked.store(true, Ordering::Relaxed);
+
+        let stdin_locked = Arc::clone(&repl.stdin_locked);
+        let poller = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while stdin_locked.load(Ordering::Relaxed) {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            true
+        });
+
+        repl.send_status(
+            StatusUpdate::AuthRequired {
+                extension_name: ironclaw_common::ExtensionName::new("google_oauth_token").unwrap(),
+                instructions: Some("Paste your token".to_string()),
+                auth_url: None,
+                setup_url: Some("http://127.0.0.1:8080/auth".to_string()),
+                request_id: None,
+            },
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("auth required status should render successfully");
+
+        let resumed = poller.join().expect("polling thread panicked");
+        assert!(
+            resumed,
+            "input polling loop must observe the unlock so the next readline can start"
+        );
+        assert!(
+            !repl.stdin_locked.load(Ordering::Relaxed),
+            "stdin_locked must remain false after AuthRequired so subsequent prompts aren't blocked"
         );
     }
 }

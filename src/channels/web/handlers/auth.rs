@@ -235,8 +235,10 @@ async fn handle_callback(
                 "Login requires a verified email address from an authorized domain.",
             );
         }
-        if let Err(msg) = check_email_domain(profile.email.as_deref(), &state.oauth_allowed_domains)
-        {
+        if let Err(msg) = crate::channels::web::platform::auth::check_email_domain(
+            profile.email.as_deref(),
+            &state.oauth_allowed_domains,
+        ) {
             tracing::warn!(
                 provider = %provider_name,
                 email = ?profile.email,
@@ -808,34 +810,6 @@ fn rate_limit_key(headers: &axum::http::HeaderMap) -> String {
     crate::channels::web::server::rate_limit_key_from_headers(headers)
 }
 
-/// Check that the email belongs to one of the allowed domains.
-///
-/// Used by both OAuth callback and OIDC middleware to enforce domain
-/// restrictions.
-pub(crate) fn check_email_domain(
-    email: Option<&str>,
-    allowed_domains: &[String],
-) -> Result<(), String> {
-    let email = email.ok_or_else(|| {
-        "Login requires an email address, but your account does not have one.".to_string()
-    })?;
-    let domain = email
-        .rsplit_once('@')
-        .map(|(_, d)| d.to_ascii_lowercase())
-        .unwrap_or_default();
-    if allowed_domains
-        .iter()
-        .any(|d| d.eq_ignore_ascii_case(&domain))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "Your email domain '{domain}' is not authorized. \
-             Contact your administrator for access."
-        ))
-    }
-}
-
 fn error_page(message: &str) -> Response {
     let escaped = message
         .replace('&', "&amp;")
@@ -857,42 +831,6 @@ fn error_page(message: &str) -> Response {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-
-    fn domains(ds: &[&str]) -> Vec<String> {
-        ds.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn test_check_email_domain_allows_matching() {
-        let allowed = domains(&["company.com", "partner.org"]);
-        assert!(check_email_domain(Some("alice@company.com"), &allowed).is_ok());
-        assert!(check_email_domain(Some("bob@partner.org"), &allowed).is_ok());
-    }
-
-    #[test]
-    fn test_check_email_domain_rejects_non_matching() {
-        let allowed = domains(&["company.com"]);
-        assert!(check_email_domain(Some("alice@gmail.com"), &allowed).is_err());
-    }
-
-    #[test]
-    fn test_check_email_domain_case_insensitive() {
-        let allowed = domains(&["company.com"]);
-        assert!(check_email_domain(Some("alice@COMPANY.COM"), &allowed).is_ok());
-        assert!(check_email_domain(Some("alice@Company.Com"), &allowed).is_ok());
-    }
-
-    #[test]
-    fn test_check_email_domain_rejects_missing_email() {
-        let allowed = domains(&["company.com"]);
-        assert!(check_email_domain(None, &allowed).is_err());
-    }
-
-    #[test]
-    fn test_check_email_domain_rejects_malformed_email() {
-        let allowed = domains(&["company.com"]);
-        assert!(check_email_domain(Some("no-at-sign"), &allowed).is_err());
-    }
 
     #[test]
     fn test_extract_session_cookie_handles_quoted_neighbors() {

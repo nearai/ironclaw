@@ -160,6 +160,7 @@ mod tests {
             expires_at: Utc::now() + Duration::minutes(30),
             original_message: None,
             resume_output: None,
+            paused_lease: None,
             approval_already_granted: false,
         }
     }

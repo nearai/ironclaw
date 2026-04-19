@@ -215,10 +215,11 @@ impl EffectExecutor for InstallThenAliasEffects {
                 call_id: "call_install_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "github".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
                     instructions: "Authenticate GitHub".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -283,6 +284,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -294,10 +296,11 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_2".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Authentication {
-                        credential_name: "notion".into(),
+                        credential_name: ironclaw_common::CredentialName::new("notion").unwrap(),
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -311,6 +314,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -323,10 +327,11 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_2".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "test_api_key".into(),
+                    credential_name: ironclaw_common::CredentialName::new("test_api_key").unwrap(),
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -660,6 +665,7 @@ fn sample_pending_gate(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
+        paused_lease: None,
         resume_output: None,
         approval_already_granted: false,
     }
@@ -2096,4 +2102,129 @@ async fn auto_approve_mode_still_pauses_always_tools() {
 
     // Verify the mode is correctly propagated
     assert_eq!(ctx.execution_mode, ExecutionMode::InteractiveAutoApprove);
+}
+
+/// Execution obligation fires on the resume path: a thread hits a gate,
+/// is resumed with a user message that signals execution intent ("run the
+/// echo tool"), and the orchestrator's per-message intent detection enables
+/// the obligation nudge even though the thread config did not have
+/// `require_action_attempt` set at spawn time.
+#[tokio::test]
+async fn gate_resume_with_execution_obligation() {
+    let project_id = ProjectId::new();
+    let effects = GateMockEffects::new(vec!["http".into()], vec![]);
+
+    // LLM responses for both phases:
+    // Phase 1 (initial): tool_call(http) → gate fires
+    // Phase 2 (resume):  text refusal → obligation nudge → tool_call(echo) → text done
+    let llm = ScriptedLlm::new(vec![
+        // Phase 1: triggers the http gate
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_http_1".into(),
+                    action_name: "http".into(),
+                    parameters: serde_json::json!({"url": "https://example.com"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        // Phase 2 after resume: http succeeds (approved), then LLM returns text
+        // refusal. The orchestrator should detect "run the echo tool" intent from
+        // the injected resume message and fire the obligation nudge.
+        LlmOutput {
+            response: LlmResponse::Text("I cannot execute tools from this reply path.".into()),
+            usage: TokenUsage::default(),
+        },
+        // After obligation nudge: echo tool call
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_echo_1".into(),
+                    action_name: "echo".into(),
+                    parameters: serde_json::json!({"message": "obligation resume test"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        // Final text
+        LlmOutput {
+            response: LlmResponse::Text("Echo returned: obligation resume test".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps(false)),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    // Phase 1: spawn with NO execution intent in the goal
+    let tid = mgr
+        .spawn_thread(
+            "check the api status",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(), // require_action_attempt = false
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let first = mgr.join_thread(tid).await.expect("first join");
+    assert!(
+        matches!(first, ThreadOutcome::GatePaused { .. }),
+        "expected GatePaused, got: {first:?}"
+    );
+    assert_eq!(
+        store.load_thread(tid).await.unwrap().unwrap().state,
+        ThreadState::Waiting,
+    );
+
+    // Phase 2: approve the gate, resume with execution intent message.
+    // "run the echo tool" triggers signals_execution_intent() in the Python
+    // orchestrator's context check on run_loop startup.
+    effects.mark_approved("http").await;
+    mgr.resume_thread(
+        tid,
+        "test-user",
+        Some(ThreadMessage::user(
+            "run the echo tool with 'obligation resume test'",
+        )),
+        Some(("call_gate_1".into(), true)),
+        None,
+    )
+    .await
+    .expect("resume_thread");
+
+    let resumed = mgr.join_thread(tid).await.expect("second join");
+    assert!(
+        matches!(resumed, ThreadOutcome::Completed { .. }),
+        "expected Completed, got: {resumed:?}"
+    );
+
+    // Verify the echo tool was called — proves obligation worked.
+    // Without the per-message intent detection fix, the LLM's text refusal
+    // would have been accepted as the final response (no nudge), and the
+    // echo tool would never execute.
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let echo_executed = thread.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
+                if action_name == "echo"
+        )
+    });
+    assert!(
+        echo_executed,
+        "echo tool should have been called after obligation nudge on resume"
+    );
 }

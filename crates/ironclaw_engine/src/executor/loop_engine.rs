@@ -244,9 +244,9 @@ impl ExecutionLoop {
         // Load versioned Python orchestrator using pre-fetched docs.
         // Self-modification is disabled by default — only the compiled-in v0
         // runs unless explicitly opted in via ORCHESTRATOR_SELF_MODIFY=true.
-        let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // The flag is read from the process-wide snapshot (set once on first
+        // call) so a runtime env mutation cannot flip the gate mid-task.
+        let allow_self_modify = crate::runtime::self_modify_enabled();
         let (orchestrator_code, orchestrator_version) =
             crate::executor::orchestrator::load_orchestrator_from_docs(
                 &system_docs,

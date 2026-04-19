@@ -14,17 +14,26 @@
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
-pub mod auth;
+pub(crate) mod features;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
+pub(crate) mod onboarding;
 pub mod openai_compat;
+pub mod platform;
 pub mod responses_api;
 pub mod server;
-pub mod sse;
 pub mod types;
 pub(crate) mod util;
-pub mod ws;
+
+// Backward-compat re-exports for the ironclaw#2599 migration. The auth,
+// SSE, and WebSocket modules moved to `platform::*` in stage 3; every
+// existing `crate::channels::web::{auth,sse,ws}::...` call site
+// continues to resolve via these re-exports until a follow-up PR
+// updates them directly.
+pub use platform::auth;
+pub use platform::sse;
+pub use platform::ws;
 
 /// Test helpers for gateway integration tests.
 ///
@@ -154,6 +163,9 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -164,7 +176,9 @@ impl GatewayChannel {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                server::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -214,6 +228,9 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            llm_reload: self.state.llm_reload.clone(),
+            llm_session_manager: self.state.llm_session_manager.clone(),
+            config_toml_path: self.state.config_toml_path.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             auth_manager: self.state.auth_manager.clone(),
@@ -224,7 +241,7 @@ impl GatewayChannel {
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
-            active_config: self.state.active_config.clone(),
+            active_config: Arc::clone(&self.state.active_config),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
             pairing_store: self.state.pairing_store.clone(),
@@ -363,6 +380,26 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the LLM hot-reload controller for the settings handlers.
+    pub fn with_llm_reload(mut self, reload: Arc<crate::llm::LlmReloadHandle>) -> Self {
+        self.rebuild_state(|s| s.llm_reload = Some(reload));
+        self
+    }
+
+    /// Inject the LLM session manager so a hot-reload can rebuild the
+    /// provider chain without dropping the current auth session.
+    pub fn with_llm_session_manager(mut self, sm: Arc<crate::llm::SessionManager>) -> Self {
+        self.rebuild_state(|s| s.llm_session_manager = Some(sm));
+        self
+    }
+
+    /// Inject the TOML config path so `Config::from_db_with_toml` can be
+    /// replayed identically during a hot-reload.
+    pub fn with_config_toml_path(mut self, path: std::path::PathBuf) -> Self {
+        self.rebuild_state(|s| s.config_toml_path = Some(path));
+        self
+    }
+
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
         self.rebuild_state(|s| s.registry_entries = entries);
@@ -383,7 +420,9 @@ impl GatewayChannel {
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
     pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.rebuild_state(|s| s.active_config = config);
+        self.rebuild_state(|s| {
+            s.active_config = Arc::new(tokio::sync::RwLock::new(config));
+        });
         self
     }
 
@@ -615,9 +654,14 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted {
                 name,
                 detail,
+                call_id,
+            } => AppEvent::ToolStarted {
+                name,
+                detail,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -625,17 +669,25 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
-                ..
+                call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
+                call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult {
                 name,
                 preview,
+                call_id,
+            } => AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::StreamChunk(content) => AppEvent::StreamChunk {
@@ -675,22 +727,36 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
-            } => AppEvent::AuthRequired {
+                request_id,
+            } => AppEvent::OnboardingState {
                 extension_name,
+                state: ironclaw_common::OnboardingStateDto::AuthRequired,
+                request_id,
+                message: None,
                 instructions,
                 auth_url,
                 setup_url,
-                thread_id: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::AuthCompleted {
                 extension_name,
                 success,
                 message,
-            } => AppEvent::AuthCompleted {
+            } => AppEvent::OnboardingState {
                 extension_name,
-                success,
-                message,
-                thread_id: None,
+                state: if success {
+                    ironclaw_common::OnboardingStateDto::Ready
+                } else {
+                    ironclaw_common::OnboardingStateDto::Failed
+                },
+                request_id: None,
+                message: Some(message),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::ImageGenerated {
                 event_id,
@@ -740,9 +806,13 @@ impl Channel for GatewayChannel {
                 session_id: None,
                 fallback_deliverable: None,
             },
-            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+            StatusUpdate::SkillActivated {
+                skill_names,
+                feedback,
+            } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
+                feedback,
             },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }
