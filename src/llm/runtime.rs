@@ -49,7 +49,6 @@ fn intern_model_name(name: &str) -> &'static str {
     leaked
 }
 
-#[derive(Clone)]
 struct ProviderSnapshot {
     inner: Arc<dyn LlmProvider>,
     model_name: &'static str,
@@ -195,6 +194,10 @@ impl LlmProvider for SwappableLlmProvider {
 pub struct LlmReloadHandle {
     primary: Arc<SwappableLlmProvider>,
     cheap: Option<Arc<SwappableLlmProvider>>,
+    /// Serializes concurrent `reload()` calls so rapid setting toggles
+    /// don't fire overlapping chain rebuilds (each rebuild can touch OAuth
+    /// refresh and HTTP probes; letting them pile up wastes upstream quota
+    /// and leaves the wrapper briefly pointing at a half-built chain).
     reload_lock: tokio::sync::Mutex<()>,
 }
 

@@ -179,8 +179,8 @@ pub async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if llm_setting_requires_reload(&key) {
-        reload_llm_after_settings_change(&state).await?;
+    if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
+        reload_llm_after_settings_change(&state, &effective_user_id).await?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -197,7 +197,6 @@ fn llm_setting_requires_reload(key: &str) -> bool {
         key,
         "llm_backend"
             | "selected_model"
-            | "llm_model"
             | "llm_custom_providers"
             | "llm_builtin_overrides"
             | "ollama_base_url"
@@ -208,15 +207,37 @@ fn llm_setting_requires_reload(key: &str) -> bool {
     )
 }
 
+/// True when writes to `effective_user_id` actually feed the global provider
+/// chain. The chain is (re)built by layering `__admin__` then `owner_id` in
+/// `Config::from_db_with_toml`, so only writes to those two scopes can
+/// change its resolved value — a member's per-user scope is ignored.
+///
+/// Gates two things at once: (a) scope-correctness (a write that would be
+/// invisible to the reload read never triggers it) and (b) DoS prevention
+/// (any authenticated user writing their own `selected_model` cannot force
+/// an expensive global chain rebuild).
+fn scope_feeds_global_chain(state: &GatewayState, effective_user_id: &str) -> bool {
+    let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+    effective_user_id == admin_scope || effective_user_id == state.owner_id
+}
+
 /// Rebuild the active provider chain from the latest settings and atomically
 /// swap the running primary/cheap providers.
+///
+/// `effective_user_id` is the scope that was just written — it's the scope
+/// the reload also reads from so the just-committed value is visible. The
+/// caller is responsible for gating this with [`scope_feeds_global_chain`]
+/// so per-user writes don't trigger a no-op rebuild.
 ///
 /// Returns `Ok(())` when the reload completes *or* when hot-reload is not
 /// wired into this gateway instance (test harnesses, CLI-only runs). A
 /// missing subsystem is logged at `warn!` so operators can distinguish
 /// "setting landed, provider still stale because hot-reload is disabled"
 /// from "setting landed and new provider is live".
-async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), StatusCode> {
+async fn reload_llm_after_settings_change(
+    state: &GatewayState,
+    effective_user_id: &str,
+) -> Result<(), StatusCode> {
     let Some(reloader) = state.llm_reload.as_ref() else {
         tracing::warn!(
             "LLM setting changed but llm_reload is not wired into the gateway; \
@@ -240,11 +261,15 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), St
         return Ok(());
     };
 
-    // Re-resolve at the owner scope because LlmConfig is admin-scope resolved
-    // (same precedence layers `AppBuilder::init_config` uses at startup).
-    let config = crate::config::Config::from_db_with_toml(
+    // Load the base config from DB at the write's scope so the
+    // just-committed value is visible, then re-resolve the LLM slice with
+    // the secrets store overlay. `from_db_with_toml` on its own does NOT
+    // hydrate API keys from secrets, so a plain fetch here would rebuild
+    // the chain without the `OPENAI_API_KEY` / `NEARAI_SESSION_TOKEN` the
+    // user may have added alongside the backend switch.
+    let mut config = crate::config::Config::from_db_with_toml(
         store.as_ref(),
-        &state.owner_id,
+        effective_user_id,
         state.config_toml_path.as_deref(),
         true,
     )
@@ -254,6 +279,22 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), St
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    if let Some(secrets) = state.secrets_store.as_ref() {
+        config
+            .re_resolve_llm_with_secrets(
+                Some(store.as_ref()),
+                effective_user_id,
+                state.config_toml_path.as_deref(),
+                Some(secrets.as_ref()),
+                true,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to re-hydrate LLM secrets for hot reload: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
+
     reloader
         .reload(&config.llm, Arc::clone(session_manager))
         .await
@@ -262,7 +303,10 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> Result<(), St
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Refresh the active-config snapshot the status handler reads.
+    // Refresh the active-config snapshot the status handler reads. Only
+    // llm_backend / llm_model are touched — `enabled_channels` is
+    // intentionally left alone because channel enablement is a
+    // channels-manager concern and is not affected by LLM config changes.
     let active_model = state
         .llm_provider
         .as_ref()
@@ -405,8 +449,8 @@ pub async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if llm_setting_requires_reload(&key) {
-        reload_llm_after_settings_change(&state).await?;
+    if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
+        reload_llm_after_settings_change(&state, &effective_user_id).await?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -459,8 +503,13 @@ pub async fn settings_import_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if body.settings.keys().any(|k| llm_setting_requires_reload(k)) {
-        reload_llm_after_settings_change(&state).await?;
+    // Import writes to the *caller's* own scope (not admin scope), so only
+    // reload if that scope feeds the global chain — i.e., the caller is
+    // the gateway owner.
+    if body.settings.keys().any(|k| llm_setting_requires_reload(k))
+        && scope_feeds_global_chain(&state, &user.user_id)
+    {
+        reload_llm_after_settings_change(&state, &user.user_id).await?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -1548,6 +1597,198 @@ mod tests {
         .await
         .expect("handler should not 500 when llm_reload is None");
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// Build the same "real provider chain + wired GatewayState" harness as
+    /// `settings_set_handler_triggers_llm_provider_hot_reload`, but with the
+    /// gateway `owner_id` set to `"owner"` and the admin scope pre-seeded
+    /// with backend + model. Returns the wired state plus the provider
+    /// wrapper so tests can observe swap side effects.
+    async fn hot_reload_harness() -> (
+        Arc<GatewayState>,
+        Arc<dyn crate::llm::LlmProvider>,
+        tempfile::TempDir,
+    ) {
+        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+
+        let secrets = test_secrets_store();
+        let (db, tmp) = crate::testing::test_db().await;
+
+        let initial = LlmConfig {
+            backend: "nearai".to_string(),
+            session: SessionConfig::default(),
+            nearai: crate::llm::config::NearAiConfig {
+                model: "model-start".to_string(),
+                cheap_model: None,
+                base_url: "https://api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            openai_codex: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial chain");
+
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        db.set_setting(admin_scope, "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed llm_backend");
+        db.set_setting(
+            admin_scope,
+            "selected_model",
+            &serde_json::json!("model-start"),
+        )
+        .await
+        .expect("seed selected_model");
+
+        let mut state = test_gateway_state(Arc::clone(&secrets));
+        state.store = Some(Arc::clone(&db));
+        state.llm_provider = Some(Arc::clone(&primary));
+        state.llm_reload = Some(Arc::clone(&reload_handle));
+        state.llm_session_manager = Some(Arc::clone(&session));
+        // Gateway owner is a distinct identity from admin scope, so tests
+        // can tell when a reload was gated out by scope.
+        state.owner_id = "owner".to_string();
+        (Arc::new(state), primary, tmp)
+    }
+
+    /// A non-admin member must be rejected when trying to change the
+    /// `llm_backend` setting — provider choice is shared across the
+    /// gateway and must stay admin-gated per the product directive
+    /// ("admins choose the provider; members pick the model within it").
+    #[tokio::test]
+    async fn settings_set_handler_rejects_member_writing_llm_backend() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_set_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_backend".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("openai"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// Members writing their own `selected_model` must succeed (the model
+    /// is a per-user choice) AND must NOT trigger a global chain reload —
+    /// the active chain is resolved from admin/owner scope, so a member's
+    /// own setting has no effect on it. This simultaneously guards the
+    /// product directive and the DoS vector where any member could force
+    /// expensive chain rebuilds by spamming their settings endpoint.
+    #[tokio::test]
+    async fn settings_set_handler_member_selected_model_skips_reload() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("member-pick"),
+            }),
+        )
+        .await
+        .expect("member can write their own selected_model");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The setting landed in the member's scope, readable on a later get.
+        let stored = state
+            .store
+            .as_ref()
+            .expect("store")
+            .get_setting("member", "selected_model")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored, serde_json::json!("member-pick"));
+
+        // Critical: the global chain was NOT rebuilt — primary still points
+        // at the model we seeded into admin scope.
+        assert_eq!(
+            primary.active_model_name(),
+            "model-start",
+            "member's per-user write must not trigger global reload",
+        );
+    }
+
+    /// An admin writing `selected_model` to the `owner` scope (their own
+    /// scope when the admin is also the gateway owner) DOES feed the
+    /// global chain — this is the single-user / admin-is-owner case that
+    /// `scope_feeds_global_chain` explicitly allows alongside the admin
+    /// scope. Without this branch, the default "write to my own settings"
+    /// UX would never trigger a reload for the owner.
+    #[tokio::test]
+    async fn settings_set_handler_owner_scope_triggers_reload() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+
+        // Seed the owner scope so `Config::from_db_with_toml` resolves to
+        // the new model when it reads it back via the `owner` user_id.
+        state
+            .store
+            .as_ref()
+            .expect("store")
+            .set_setting("owner", "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed owner backend");
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "owner".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("owner-pick"),
+            }),
+        )
+        .await
+        .expect("admin owner write should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        assert_eq!(primary.active_model_name(), "owner-pick");
     }
 
     #[tokio::test]

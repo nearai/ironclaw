@@ -985,6 +985,44 @@ mod tests {
         );
     }
 
+    /// When `build_provider_chain_components` fails (e.g. backend changed to
+    /// one whose credentials are missing), `reload()` must leave the primary
+    /// wrapper pointing at the *old* chain. Partial reloads where the
+    /// wrapper reports the new model but uses the old inner would be much
+    /// worse than a 500 on the setting-write call.
+    #[tokio::test]
+    async fn llm_reload_handle_preserves_old_chain_on_build_failure() {
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+
+        let mut initial = test_llm_config();
+        initial.nearai.model = "still-good".to_string();
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial chain");
+        assert_eq!(primary.model_name(), "still-good");
+
+        // Switch to a registry backend without a provider config — this is
+        // a deterministic failure path in `create_llm_provider` (returns
+        // `AuthFailed`). See `src/llm/mod.rs::create_llm_provider`.
+        let mut broken = test_llm_config();
+        broken.backend = "openai".to_string();
+        broken.provider = None;
+        let reload_err = reload_handle
+            .reload(&broken, Arc::clone(&session))
+            .await
+            .expect_err("reload must surface the build failure");
+        assert!(
+            matches!(reload_err, LlmError::AuthFailed { .. }),
+            "expected AuthFailed, got {reload_err:?}",
+        );
+
+        // The wrapper must still observe the old chain — any other answer
+        // would mean callers holding this Arc silently start talking to a
+        // half-built provider.
+        assert_eq!(primary.model_name(), "still-good");
+    }
+
     /// When the new config omits a cheap model that was present at startup,
     /// `reload()` must fall back to the primary provider rather than leave
     /// the cheap wrapper dangling. This covers the reload asymmetry that
