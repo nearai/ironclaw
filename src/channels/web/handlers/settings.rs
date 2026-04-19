@@ -171,6 +171,21 @@ pub async fn settings_set_handler(
         _ => body.value.clone(),
     };
 
+    // Snapshot the current value BEFORE the write so a post-reload failure
+    // can roll the DB back to its pre-request state. Without this, a bad
+    // `llm_backend=openai` write would leave DB + runtime out of sync
+    // until the admin manually corrects it.
+    let reload_triggered =
+        llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
+    let prev_value = if reload_triggered {
+        store
+            .get_setting(&effective_user_id, &key)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
     store
         .set_setting(&effective_user_id, &key, &sanitized_value)
         .await
@@ -179,8 +194,20 @@ pub async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
-        reload_llm_after_settings_change(&state, &effective_user_id).await;
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                rollback_settings_write(store, &effective_user_id, &key, prev_value.as_ref()).await;
+                tracing::error!(
+                    key = %key,
+                    reason = %reason,
+                    "Rejected LLM settings write because the resulting config \
+                     would not produce a buildable provider chain; rolled back to prior value"
+                );
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -221,28 +248,46 @@ fn scope_feeds_global_chain(state: &GatewayState, effective_user_id: &str) -> bo
     effective_user_id == admin_scope || effective_user_id == state.owner_id
 }
 
+/// Outcome classes from [`reload_llm_after_settings_change`].
+///
+/// The distinction matters at the call site: a `BuildFailed` outcome means
+/// the DB write produced an unbuildable chain, so the caller must roll
+/// back the setting to avoid stored-state-vs-runtime split-brain. All
+/// other outcomes mean the chain is consistent with the committed state
+/// (either it reloaded, or nothing to reload).
+enum ReloadOutcome {
+    /// Chain was rebuilt successfully and is now live.
+    Swapped,
+    /// Hot-reload wiring missing (test harness / CLI) or no DB store —
+    /// nothing to do. The setting lands; the process keeps serving with
+    /// the pre-change config until restart.
+    Skipped,
+    /// Reading the DB back for the new config failed. Logged at `error!`.
+    /// Caller may roll back defensively.
+    ConfigLoadFailed(String),
+    /// The proposed config resolved OK but building the provider chain
+    /// against it failed (e.g. `llm_backend` switched to a value whose
+    /// credentials aren't present yet). Caller MUST roll back the write
+    /// to keep DB and runtime aligned.
+    BuildFailed(String),
+}
+
 /// Rebuild the active provider chain from the latest settings and atomically
 /// swap the running primary/cheap providers.
 ///
-/// `effective_user_id` is the scope that was just written — it's the scope
-/// the reload also reads from so the just-committed value is visible. The
-/// caller is responsible for gating this with [`scope_feeds_global_chain`]
-/// so per-user writes don't trigger a no-op rebuild.
-///
-/// Reload failures are logged at `error!` but do not propagate: the
-/// `set_setting` write has already committed, so surfacing a reload failure
-/// as HTTP 500 would misrepresent the actual outcome (setting persisted,
-/// provider chain stale). Operators find stale-chain cases via log search or
-/// the `/api/gateway/status` endpoint (whose `llm_model` only updates on a
-/// successful reload). A future iteration should publish a gateway-wide
-/// "provider stale" event so clients can surface it in the Settings UI.
-async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_id: &str) {
+/// The reload reads from the same scope `AppBuilder::init_config` uses at
+/// startup — [`GatewayState::owner_id`] — so `Config::from_db_with_toml`
+/// layers admin → owner in the same precedence order the running chain was
+/// originally built with. Using the just-written `effective_user_id`
+/// instead would skip the admin-merge branch for `__admin__` writes and
+/// drop owner-scope overlays (see #2673 review).
+async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome {
     let Some(reloader) = state.llm_reload.as_ref() else {
         tracing::warn!(
             "LLM setting changed but llm_reload is not wired into the gateway; \
              provider chain will keep using the pre-change config until restart"
         );
-        return;
+        return ReloadOutcome::Skipped;
     };
     let store_opt = state.store.as_ref(); // dispatch-exempt: read-only re-resolve of LlmConfig for chain rebuild
     let Some(store) = store_opt else {
@@ -250,25 +295,24 @@ async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_i
             "LLM setting changed but no database store is configured; \
              cannot reload provider chain"
         );
-        return;
+        return ReloadOutcome::Skipped;
     };
     let Some(session_manager) = state.llm_session_manager.as_ref() else {
         tracing::warn!(
             "LLM setting changed but llm_session_manager is not wired into the gateway; \
              cannot reload provider chain"
         );
-        return;
+        return ReloadOutcome::Skipped;
     };
 
-    // Load the base config from DB at the write's scope so the
-    // just-committed value is visible, then re-resolve the LLM slice with
-    // the secrets store overlay. `from_db_with_toml` on its own does NOT
-    // hydrate API keys from secrets, so a plain fetch here would rebuild
-    // the chain without the `OPENAI_API_KEY` / `NEARAI_SESSION_TOKEN` the
-    // user may have added alongside the backend switch.
+    // Use the gateway owner scope so the admin-scope merge happens the
+    // same way it did at startup. `re_resolve_llm_with_secrets` also
+    // hydrates API keys from the secrets store — without that,
+    // `from_db_with_toml` alone would miss `OPENAI_API_KEY` /
+    // `NEARAI_SESSION_TOKEN` added alongside the backend switch.
     let mut config = match crate::config::Config::from_db_with_toml(
         store.as_ref(),
-        effective_user_id,
+        &state.owner_id,
         state.config_toml_path.as_deref(),
         true,
     )
@@ -276,11 +320,8 @@ async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_i
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(
-                "Setting was saved but LLM config reload failed at from_db_with_toml: {}",
-                e
-            );
-            return;
+            tracing::error!("LLM hot reload: from_db_with_toml failed: {}", e);
+            return ReloadOutcome::ConfigLoadFailed(e.to_string());
         }
     };
 
@@ -288,29 +329,23 @@ async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_i
         && let Err(e) = config
             .re_resolve_llm_with_secrets(
                 Some(store.as_ref()),
-                effective_user_id,
+                &state.owner_id,
                 state.config_toml_path.as_deref(),
                 Some(secrets.as_ref()),
                 true,
             )
             .await
     {
-        tracing::error!(
-            "Setting was saved but LLM secret re-hydration failed: {}",
-            e
-        );
-        return;
+        tracing::error!("LLM hot reload: secret re-hydration failed: {}", e);
+        return ReloadOutcome::ConfigLoadFailed(e.to_string());
     }
 
     if let Err(e) = reloader
         .reload(&config.llm, Arc::clone(session_manager))
         .await
     {
-        tracing::error!(
-            "Setting was saved but LLM provider chain reload failed: {}",
-            e
-        );
-        return;
+        tracing::error!("LLM hot reload: provider chain build failed: {}", e);
+        return ReloadOutcome::BuildFailed(e.to_string());
     }
 
     // Refresh the active-config snapshot the status handler reads. Only
@@ -332,6 +367,33 @@ async fn reload_llm_after_settings_change(state: &GatewayState, effective_user_i
         backend = %config.llm.backend,
         "LLM provider chain hot-reloaded from updated settings"
     );
+    ReloadOutcome::Swapped
+}
+
+/// Restore the previous value of a settings key (or delete the key if it
+/// wasn't previously set), swallowing rollback errors at `warn!`. Used
+/// after a reload returned `ReloadOutcome::BuildFailed` to keep DB
+/// state aligned with the running provider chain — a best-effort
+/// compensating action so a bad `llm_backend` write doesn't leave the
+/// DB saying "openai" while the runtime is still on "nearai".
+async fn rollback_settings_write(
+    store: &(dyn crate::db::SettingsStore + Send + Sync),
+    user_id: &str,
+    key: &str,
+    prev: Option<&serde_json::Value>,
+) {
+    let rollback_err = match prev {
+        Some(value) => store.set_setting(user_id, key, value).await.err(),
+        None => store.delete_setting(user_id, key).await.err(),
+    };
+    if let Some(e) = rollback_err {
+        tracing::warn!(
+            user_id,
+            key,
+            "LLM hot reload: rollback of setting failed — DB and runtime may now diverge: {}",
+            e
+        );
+    }
 }
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
@@ -449,6 +511,18 @@ pub async fn settings_delete_handler(
         .await?;
     }
 
+    // Snapshot for rollback — see `settings_set_handler` for rationale.
+    let reload_triggered =
+        llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
+    let prev_value = if reload_triggered {
+        store
+            .get_setting(&effective_user_id, &key)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
     store
         .delete_setting(&effective_user_id, &key)
         .await
@@ -457,8 +531,20 @@ pub async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id) {
-        reload_llm_after_settings_change(&state, &effective_user_id).await;
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                rollback_settings_write(store, &effective_user_id, &key, prev_value.as_ref()).await;
+                tracing::error!(
+                    key = %key,
+                    reason = %reason,
+                    "Rejected LLM settings delete because the resulting config \
+                     would not produce a buildable provider chain; rolled back",
+                );
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -503,6 +589,29 @@ pub async fn settings_import_handler(
         sanitized.insert("llm_custom_providers".to_string(), clean);
     }
 
+    // Import writes to the *caller's* own scope (not admin scope), so only
+    // reload if that scope feeds the global chain — i.e., the caller is
+    // the gateway owner.
+    let reload_triggered = body.settings.keys().any(|k| llm_setting_requires_reload(k))
+        && scope_feeds_global_chain(&state, &user.user_id);
+
+    // Snapshot every LLM-affecting key from the caller's scope so we can
+    // roll the whole set back atomically if the post-import reload finds
+    // the new config unbuildable. We deliberately don't snapshot keys
+    // that aren't in the reload allowlist — those don't participate in
+    // the build that can fail.
+    let mut prev_values: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+    if reload_triggered {
+        for key in body
+            .settings
+            .keys()
+            .filter(|k| llm_setting_requires_reload(k))
+        {
+            let prev = store.get_setting(&user.user_id, key).await.unwrap_or(None);
+            prev_values.push((key.clone(), prev));
+        }
+    }
+
     store
         .set_all_settings(&user.user_id, &sanitized)
         .await
@@ -511,13 +620,23 @@ pub async fn settings_import_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Import writes to the *caller's* own scope (not admin scope), so only
-    // reload if that scope feeds the global chain — i.e., the caller is
-    // the gateway owner.
-    if body.settings.keys().any(|k| llm_setting_requires_reload(k))
-        && scope_feeds_global_chain(&state, &user.user_id)
-    {
-        reload_llm_after_settings_change(&state, &user.user_id).await;
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                for (key, prev) in &prev_values {
+                    rollback_settings_write(store, &user.user_id, key, prev.as_ref()).await;
+                }
+                tracing::error!(
+                    reason = %reason,
+                    "Rejected LLM settings import because the resulting config \
+                     would not produce a buildable provider chain; rolled back \
+                     {} LLM key(s)",
+                    prev_values.len(),
+                );
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -1799,59 +1918,154 @@ mod tests {
         assert_eq!(primary.active_model_name(), "owner-pick");
     }
 
-    /// When the settings write succeeds but the provider chain rebuild
-    /// fails (e.g. admin switches `llm_backend` to a value that has no
-    /// credentials yet), the handler must still return 204 — the write
-    /// did commit, it would be misleading to tell the client otherwise,
-    /// and a 500 would trigger retries that re-run the same failing
-    /// reload. The stale provider chain is discoverable via `warn!` logs
-    /// and the `/api/gateway/status` `llm_model` field, which is only
-    /// refreshed on successful reload.
+    /// When the settings write produces a config that can't be resolved
+    /// or built, the handler must return 422 AND roll back the DB value
+    /// so stored-state and live-runtime stay in sync. Without rollback, a
+    /// bad write would leave the DB saying one thing while the runtime
+    /// kept running the old chain — exactly the split-brain the PR
+    /// review flagged.
+    ///
+    /// Repro setup: pre-seed an admin-scope config that fails at
+    /// `LlmConfig::resolve` time (`bedrock_cross_region` outside the
+    /// allowed set). The reload attempt during the handler's write will
+    /// see this broken sibling-config, fail resolution, and roll back the
+    /// caller's write.
     #[tokio::test]
-    async fn settings_set_handler_returns_success_when_reload_fails() {
+    async fn settings_set_handler_rolls_back_on_reload_failure() {
         let (state, primary, _tmp) = hot_reload_harness().await;
         let before_model = primary.active_model_name();
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness
 
-        // Admin switches `llm_backend` to "openai" via the admin scope.
-        // `create_llm_provider` will return `AuthFailed` because no
-        // registry provider config / API key is present in this test DB,
-        // so the reload path surfaces an error.
-        let status = settings_set_handler(
+        // Poison the admin-scope LLM config so any reload will fail at
+        // resolve time. We flip the backend to bedrock and give it an
+        // invalid cross-region value — `LlmConfig::resolve` rejects
+        // anything outside `{us, eu, apac, global}` unconditionally, no
+        // network or credentials involved.
+        store
+            .set_setting(admin_scope, "llm_backend", &serde_json::json!("bedrock"))
+            .await
+            .expect("seed broken backend");
+        store
+            .set_setting(
+                admin_scope,
+                "bedrock_region",
+                &serde_json::json!("us-east-1"),
+            )
+            .await
+            .expect("seed region");
+        store
+            .set_setting(
+                admin_scope,
+                "bedrock_cross_region",
+                &serde_json::json!("banana"),
+            )
+            .await
+            .expect("seed invalid cross_region");
+
+        // Now the caller writes some *other* reload-triggering key. The
+        // write itself is well-formed, but the reload re-reads the whole
+        // admin-scope config (including the poisoned values) and bails.
+        let err = settings_set_handler(
             State(Arc::clone(&state)),
             AuthenticatedUser(UserIdentity {
-                user_id: crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string(),
+                user_id: admin_scope.to_string(),
                 role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
-            Path("llm_backend".to_string()),
+            Path("llm_custom_providers".to_string()),
             Query(SettingScopeQuery {
                 scope: Some("admin".to_string()),
             }),
             Json(SettingWriteRequest {
-                value: serde_json::json!("openai"),
+                value: serde_json::json!([]),
             }),
         )
         .await
-        .expect("handler must return Ok even when reload fails");
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        .expect_err("handler must reject unbuildable LLM config");
+        assert_eq!(err, StatusCode::UNPROCESSABLE_ENTITY);
 
-        // DB is updated (the setting's commit is decoupled from reload).
-        let stored = state
-            .store
-            .as_ref()
-            .expect("store")
-            .get_setting(
-                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
-                "llm_backend",
+        // DB rolled back to the pre-request state for the caller's key
+        // (was never set → delete-on-rollback → still not set).
+        let after = store
+            .get_setting(admin_scope, "llm_custom_providers")
+            .await
+            .expect("read");
+        assert!(
+            after.is_none(),
+            "rollback should have removed the newly-written key; got {:?}",
+            after,
+        );
+
+        // Provider chain unchanged — the old, working chain keeps serving.
+        assert_eq!(primary.active_model_name(), before_model);
+    }
+
+    /// Regression for the review finding that `reload_llm_after_settings_change`
+    /// was reading `Config::from_db_with_toml(effective_user_id, …)`. When
+    /// the write was `scope=admin`, that user_id is `__admin__`, and the
+    /// loader's `if user_id != admin_scope` guard skipped the admin-merge
+    /// step entirely — so owner-scope overlays that were present at
+    /// startup would silently disappear after the first admin-scope write.
+    /// The fix uses `state.owner_id` so the startup layering (admin →
+    /// owner) is preserved.
+    ///
+    /// This test pre-seeds a distinct `selected_model` at the owner scope,
+    /// then admin writes `llm_custom_providers` under scope=admin. If the
+    /// reload still uses `__admin__` as its read scope, the owner's model
+    /// override is lost and the provider ends up reporting the admin-scope
+    /// model instead. With the fix, the owner's model survives.
+    #[tokio::test]
+    async fn reload_rebuilds_from_owner_scope_not_effective_scope() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness
+
+        // Owner scope has its own `selected_model` overlay that admin
+        // scope doesn't have. This is the layering AppBuilder sees at
+        // startup.
+        store
+            .set_setting("owner", "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed owner backend");
+        store
+            .set_setting(
+                "owner",
+                "selected_model",
+                &serde_json::json!("owner-overlay"),
             )
             .await
-            .expect("read")
-            .expect("row");
-        assert_eq!(stored, serde_json::json!("openai"));
+            .expect("seed owner overlay");
 
-        // Provider chain stayed on the old (working) chain — reload failure
-        // must not leave the wrapper pointing at a half-built provider.
-        assert_eq!(primary.active_model_name(), before_model);
+        // Admin writes a benign change under scope=admin. The value
+        // itself isn't the point — it's the side-effect reload that
+        // should layer admin + owner and produce `owner-overlay`, not
+        // the admin-scope `model-start`.
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: admin_scope.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_custom_providers".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!([]),
+            }),
+        )
+        .await
+        .expect("admin-scope write should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            primary.active_model_name(),
+            "owner-overlay",
+            "reload must layer admin → owner (same as AppBuilder startup); \
+             reading at effective_user_id=__admin__ drops the owner overlay",
+        );
     }
 
     #[tokio::test]
