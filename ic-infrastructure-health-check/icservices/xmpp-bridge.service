@@ -1,0 +1,39 @@
+[Unit]
+Description=Ironclaw XMPP Bridge Service
+Documentation=https://github.com/IronclawCustomTools/ironclaw/tree/main/bridges/xmpp-bridge
+After=network.target
+Wants=network.target
+PartOf=ironclaw.service
+
+[Service]
+Type=simple
+User=cmc
+Group=cmc
+WorkingDirectory=/home/cmc/ironclaw/bridges/xmpp-bridge
+
+# Optional overrides:
+# Environment="XMPP_BRIDGE_BIND=127.0.0.1:8787"
+# Environment="XMPP_BRIDGE_TOKEN=GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+
+ExecStart=/home/cmc/ironclaw/bridges/xmpp-bridge/target/release/xmpp-bridge
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+ReadWritePaths=/home/cmc/ironclaw
+ReadWritePaths=/tmp
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xmpp-bridge
+
+[Install]
+WantedBy=multi-user.target

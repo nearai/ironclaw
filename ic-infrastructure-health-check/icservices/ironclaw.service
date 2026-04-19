@@ -1,0 +1,57 @@
+[Unit]
+Description=Ironclaw AI Agent Service
+Documentation=https://github.com/IronclawCustomTools/ironclaw
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=cmc
+Group=cmc
+WorkingDirectory=/home/cmc/ironclaw
+
+# Environment variables from run.sh
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=IRONCLAW_SOCKET=/tmp/ironclaw.sock
+Environment="ALLOW_PRIVATE_IPS=1"
+Environment="PGSSLMODE=disable"
+Environment="HTTP_PORT=9098"
+Environment="LLM_BASE_URL=http://192.168.1.157:3002"
+Environment="HTTP_WEBHOOK_SECRET=FFFFFFFFFFFFFFFFFFFFf"
+Environment="XMPP_JID=ruffles@xmpp.sobe.world"
+Environment="XMPP_PASSWORD=FFFFFFFFFFFFFFFFFFFFFFFF"
+Environment="XMPP_ALLOW_FROM=cmc@xmpp.sobe.world"
+Environment="XMPP_RESOURCE=ruffles"
+Environment="XMPP_ALLOW_ROOMS=FFFFFFFFFFFFFFFFF@conference.xmpp.sobe.world"
+Environment="XMPP_ENCRYPTED_ROOMS=GGGGGGGGGGGGGGGG@conference.xmpp.sobe.world,GGGGGGGGGGGGGGGGGGG-encrypted@conference.xmpp.sobe.world"
+Environment="XMPP_MAX_MESSAGES_PER_HOUR=11"
+# Main executable
+ExecStart=/home/cmc/ironclaw/target/release/ironclaw run
+
+# Graceful shutdown
+TimeoutStopSec=30
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Allow write access to ironclaw directory
+ReadWritePaths=/home/cmc/ironclaw
+ReadWritePaths=/tmp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ironclaw
+
+[Install]
+WantedBy=multi-user.target
