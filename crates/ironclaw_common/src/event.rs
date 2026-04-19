@@ -5,6 +5,7 @@
 //! frames, but other subsystems (agent loop, orchestrator, extensions)
 //! produce and consume them too.
 
+use crate::identity::ExtensionName;
 use serde::{Deserialize, Serialize};
 
 /// A single step in a plan progress update (SSE DTO).
@@ -44,6 +45,47 @@ impl ToolDecisionDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingStateDto {
+    SetupRequired,
+    AuthRequired,
+    PairingRequired,
+    Ready,
+    Failed,
+}
+
+impl OnboardingStateDto {
+    /// Build the canonical `AppEvent::OnboardingState` for a
+    /// pairing-required transition.
+    ///
+    /// `auth_url` and `setup_url` are always `None` for pairing —
+    /// forcing construction through this function prevents the three
+    /// emit sites (auth-token submit, setup-handler submit, activation
+    /// post-pairing) from silently disagreeing when new fields land on
+    /// `AppEvent::OnboardingState`.
+    pub fn pairing_required(
+        extension_name: ExtensionName,
+        request_id: Option<String>,
+        thread_id: Option<String>,
+        message: Option<String>,
+        instructions: Option<String>,
+        onboarding: Option<serde_json::Value>,
+    ) -> AppEvent {
+        AppEvent::OnboardingState {
+            extension_name,
+            state: Self::PairingRequired,
+            request_id,
+            message,
+            instructions,
+            auth_url: None,
+            setup_url: None,
+            onboarding,
+            thread_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppEvent {
@@ -61,6 +103,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
@@ -72,12 +116,18 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         parameters: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         name: String,
         preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -110,9 +160,14 @@ pub enum AppEvent {
         /// Whether the "always" auto-approve option should be shown.
         allow_always: bool,
     },
-    #[serde(rename = "auth_required")]
-    AuthRequired {
-        extension_name: String,
+    #[serde(rename = "onboarding_state")]
+    OnboardingState {
+        extension_name: ExtensionName,
+        state: OnboardingStateDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,31 +175,7 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         setup_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-    },
-    #[serde(rename = "auth_completed")]
-    AuthCompleted {
-        extension_name: String,
-        success: bool,
-        message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-    },
-    #[serde(rename = "pairing_required")]
-    PairingRequired {
-        channel: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        instructions: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         onboarding: Option<serde_json::Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-    },
-    #[serde(rename = "pairing_completed")]
-    PairingCompleted {
-        channel: String,
-        success: bool,
-        message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -155,6 +186,8 @@ pub enum AppEvent {
         tool_name: String,
         description: String,
         parameters: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extension_name: Option<ExtensionName>,
         resume_kind: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -257,7 +290,7 @@ pub enum AppEvent {
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
-        extension_name: String,
+        extension_name: ExtensionName,
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -343,10 +376,7 @@ impl AppEvent {
             Self::Status { .. } => "status",
             Self::JobStarted { .. } => "job_started",
             Self::ApprovalNeeded { .. } => "approval_needed",
-            Self::AuthRequired { .. } => "auth_required",
-            Self::AuthCompleted { .. } => "auth_completed",
-            Self::PairingRequired { .. } => "pairing_required",
-            Self::PairingCompleted { .. } => "pairing_completed",
+            Self::OnboardingState { .. } => "onboarding_state",
             Self::GateRequired { .. } => "gate_required",
             Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
@@ -392,6 +422,7 @@ mod tests {
             AppEvent::ToolStarted {
                 name: String::new(),
                 detail: None,
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::ToolCompleted {
@@ -399,11 +430,14 @@ mod tests {
                 success: true,
                 error: None,
                 parameters: None,
+                call_id: None,
+                duration_ms: None,
                 thread_id: None,
             },
             AppEvent::ToolResult {
                 name: String::new(),
                 preview: String::new(),
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::StreamChunk {
@@ -427,29 +461,25 @@ mod tests {
                 thread_id: None,
                 allow_always: false,
             },
-            AppEvent::AuthRequired {
-                extension_name: String::new(),
+            AppEvent::OnboardingState {
+                extension_name: ExtensionName::from_trusted(String::new()),
+                state: OnboardingStateDto::AuthRequired,
+                request_id: None,
+                message: None,
                 instructions: None,
                 auth_url: None,
                 setup_url: None,
-                thread_id: None,
-            },
-            AppEvent::AuthCompleted {
-                extension_name: String::new(),
-                success: true,
-                message: String::new(),
-                thread_id: None,
-            },
-            AppEvent::PairingRequired {
-                channel: String::new(),
-                instructions: None,
                 onboarding: None,
                 thread_id: None,
             },
-            AppEvent::PairingCompleted {
-                channel: String::new(),
-                success: true,
-                message: String::new(),
+            AppEvent::GateRequired {
+                request_id: String::new(),
+                gate_name: String::new(),
+                tool_name: String::new(),
+                description: String::new(),
+                parameters: String::new(),
+                extension_name: None,
+                resume_kind: serde_json::Value::Null,
                 thread_id: None,
             },
             AppEvent::Error {
@@ -504,7 +534,7 @@ mod tests {
                 feedback: vec![],
             },
             AppEvent::ExtensionStatus {
-                extension_name: String::new(),
+                extension_name: ExtensionName::from_trusted(String::new()),
                 status: String::new(),
                 message: None,
             },
@@ -554,6 +584,64 @@ mod tests {
                 variant
             );
         }
+    }
+
+    #[test]
+    fn pairing_required_constructor_sets_invariant_fields() {
+        let event = OnboardingStateDto::pairing_required(
+            ExtensionName::new("telegram").unwrap(),
+            Some("req-1".to_string()),
+            Some("thread-1".to_string()),
+            Some("Paired!".to_string()),
+            Some("Send /start to the bot.".to_string()),
+            Some(serde_json::json!({ "pairing_code": "ABC123" })),
+        );
+
+        match event {
+            AppEvent::OnboardingState {
+                extension_name,
+                state,
+                request_id,
+                message,
+                instructions,
+                auth_url,
+                setup_url,
+                onboarding,
+                thread_id,
+            } => {
+                assert_eq!(extension_name, "telegram");
+                assert_eq!(state, OnboardingStateDto::PairingRequired);
+                assert_eq!(request_id.as_deref(), Some("req-1"));
+                assert_eq!(thread_id.as_deref(), Some("thread-1"));
+                assert_eq!(message.as_deref(), Some("Paired!"));
+                assert_eq!(instructions.as_deref(), Some("Send /start to the bot."));
+                assert!(auth_url.is_none(), "auth_url must be None for pairing");
+                assert!(setup_url.is_none(), "setup_url must be None for pairing");
+                assert_eq!(
+                    onboarding,
+                    Some(serde_json::json!({ "pairing_code": "ABC123" }))
+                );
+            }
+            other => panic!("expected OnboardingState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pairing_required_constructor_serializes_to_onboarding_state_event() {
+        let event = OnboardingStateDto::pairing_required(
+            ExtensionName::new("telegram").unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "onboarding_state");
+        assert_eq!(json["state"], "pairing_required");
+        assert_eq!(json["extension_name"], "telegram");
+        assert!(json.get("auth_url").is_none());
+        assert!(json.get("setup_url").is_none());
     }
 
     #[test]

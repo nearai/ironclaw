@@ -1432,13 +1432,21 @@ mod tests {
         use crate::tools::tool::ApprovalRequirement;
 
         let registry = test_registry();
-        {
-            let mut guard = registry.write().unwrap();
-            guard
-                .install_skill(&skill_content("ceo-setup", &[]))
-                .await
-                .expect("install should succeed");
-        }
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(
+                &dir,
+                "ceo-setup",
+                &skill_content("ceo-setup", &[]),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
         let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
 
         assert_eq!(
@@ -1468,13 +1476,21 @@ mod tests {
     #[tokio::test]
     async fn skill_install_execute_honors_dependencies_when_already_loaded() {
         let registry = test_registry();
-        {
-            let mut guard = registry.write().unwrap();
-            guard
-                .install_skill(&skill_content("bundle", &["dep-a"]))
-                .await
-                .expect("install should succeed");
-        }
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(
+                &dir,
+                "bundle",
+                &skill_content("bundle", &["dep-a"]),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
         let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
 
         let output = tool
