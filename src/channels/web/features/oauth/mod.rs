@@ -31,7 +31,9 @@ use axum::{
 use sha2::{Digest, Sha256};
 
 use crate::channels::relay::DEFAULT_RELAY_NAME;
-use crate::channels::web::platform::legacy_auth::clear_auth_mode;
+use crate::channels::web::platform::legacy_auth::{
+    clear_auth_mode, clear_session_auth_mode_for_thread,
+};
 use crate::channels::web::platform::state::{GatewayState, rate_limit_key_from_headers};
 use crate::channels::web::types::AppEvent;
 use crate::channels::web::util::web_incoming_message;
@@ -311,9 +313,17 @@ pub(crate) async fn oauth_callback_handler(
         }
     }
 
-    // Clear auth mode regardless of outcome so the next user message goes
-    // through to the LLM instead of being intercepted as a token.
-    clear_auth_mode(&state, &flow.user_id).await;
+    // Clear legacy session auth mode regardless of outcome so the next
+    // user message goes through to the LLM instead of being intercepted
+    // as a token.
+    //
+    // Do NOT clear the engine pending-auth gate here: the successful
+    // callback path still needs the pending gate so it can resolve and
+    // replay the paused action (preserving the paused_lease), and failed
+    // callbacks should leave the gate visible for retry from the UI.
+    // The gate is cleared by the engine itself when `ExternalCallback`
+    // resolves (success) or when the user explicitly cancels (failure).
+    let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
 
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.

@@ -96,6 +96,8 @@ pub(crate) async fn gateway_status_handler(
         }
     };
 
+    let active_config = state.active_config.read().await.clone();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit_hash,
@@ -108,9 +110,9 @@ pub(crate) async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
-        llm_backend: state.active_config.llm_backend.clone(),
-        llm_model: state.active_config.llm_model.clone(),
-        enabled_channels: state.active_config.enabled_channels.clone(),
+        llm_backend: active_config.llm_backend,
+        llm_model: active_config.llm_model,
+        enabled_channels: active_config.enabled_channels,
         engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
     })
 }

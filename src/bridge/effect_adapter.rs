@@ -169,6 +169,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
+        paused_lease: Option<CapabilityLease>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -177,6 +178,7 @@ impl EffectBridgeAdapter {
             parameters: Box::new(parameters),
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
+            paused_lease: paused_lease.map(Box::new),
         }
     }
 
@@ -185,6 +187,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         context: &ThreadExecutionContext,
         output_value: &serde_json::Value,
+        lease: &CapabilityLease,
     ) -> Option<EngineError> {
         let status = output_value.get("status").and_then(|v| v.as_str())?;
         let name = output_value.get("name").and_then(|v| v.as_str())?;
@@ -221,6 +224,7 @@ impl EffectBridgeAdapter {
                     ),
                 },
                 None,
+                Some(lease.clone()),
             )),
             _ => None,
         }
@@ -726,7 +730,7 @@ impl EffectBridgeAdapter {
         &self,
         action_name: &str,
         parameters: serde_json::Value,
-        _lease: &CapabilityLease,
+        lease: &CapabilityLease,
         context: &ThreadExecutionContext,
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
@@ -826,6 +830,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
@@ -898,6 +903,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -939,6 +945,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -996,6 +1003,7 @@ impl EffectBridgeAdapter {
                                 allow_always: false,
                             },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1011,6 +1019,7 @@ impl EffectBridgeAdapter {
                             parameters,
                             ironclaw_engine::ResumeKind::Approval { allow_always: true },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1163,6 +1172,7 @@ impl EffectBridgeAdapter {
                         parameters.clone(),
                         context,
                         &output_value,
+                        lease,
                     )
                 {
                     return Err(err);
@@ -1204,6 +1214,7 @@ impl EffectBridgeAdapter {
                             auth_url: None,
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
 

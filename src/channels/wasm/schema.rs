@@ -234,6 +234,14 @@ impl ChannelCapabilitiesSchema {
                 caps.workspace_prefix = prefix.clone();
             }
 
+            if !channel.durable_workspace_paths.is_empty() {
+                caps.durable_workspace_paths = channel
+                    .durable_workspace_paths
+                    .iter()
+                    .map(|path| caps.prefix_workspace_path(path))
+                    .collect();
+            }
+
             if let Some(rate) = &channel.emit_rate_limit {
                 caps.emit_rate_limit = rate.to_emit_rate_limit();
             }
@@ -278,6 +286,10 @@ pub struct ChannelSpecificCapabilitiesSchema {
     /// Workspace prefix for storage (overrides default).
     #[serde(default)]
     pub workspace_prefix: Option<String>,
+
+    /// Workspace paths that are safe to persist across restarts.
+    #[serde(default)]
+    pub durable_workspace_paths: Vec<String>,
 
     /// Rate limiting for emit_message.
     #[serde(default)]
@@ -633,6 +645,27 @@ mod tests {
         let caps = file.to_capabilities();
 
         assert_eq!(caps.workspace_prefix, "integrations/custom/");
+    }
+
+    #[test]
+    fn test_durable_workspace_paths_are_prefixed() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "workspace_prefix": "channels/slack/",
+                    "durable_workspace_paths": ["state/active_threads"]
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.durable_workspace_paths,
+            vec!["channels/slack/state/active_threads".to_string()]
+        );
     }
 
     #[test]
