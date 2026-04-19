@@ -332,6 +332,9 @@ I18n.register('ko', {
   'approval.denied': '거부됨',
   'approval.showParams': '매개변수 표시',
   'approval.hideParams': '매개변수 숨기기',
+  'approval.tag': '승인 필요',
+  'approval.approveOnce': '한 번 승인',
+  'approval.alwaysAllow': '항상 허용',
 
   // 인증 필요
   'authRequired.title': '{name}에 인증 필요',
@@ -682,6 +685,7 @@ I18n.register('ko', {
   'message.system': '시스템',
   'message.copy': '복사',
   'message.copied': '복사됨!',
+  'message.thinking': '생각 중',
 
   // 승인
   'approval.pressY': '승인하려면 Y, 거부하려면 N을 누르세요',

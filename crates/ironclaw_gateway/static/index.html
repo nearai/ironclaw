@@ -593,6 +593,44 @@
   </div>
 
   <div id="toasts"></div>
+
+  <!-- Application modules (load order matters — dependencies first) -->
+  <script src="/modules/state.js"></script>
+  <script src="/modules/ui-utils.js"></script>
+  <script src="/modules/rendering.js"></script>
+  <script src="/modules/theme.js"></script>
+  <script src="/modules/reasoning.js"></script>
+  <script src="/modules/hash-nav.js"></script>
+  <script src="/modules/api.js"></script>
+  <script src="/modules/auth.js"></script>
+  <script src="/modules/restart.js"></script>
+  <script src="/modules/tool-activity.js"></script>
+  <script src="/modules/approval.js"></script>
+  <script src="/modules/images.js"></script>
+  <script src="/modules/slash.js"></script>
+  <script src="/modules/chat.js"></script>
+  <script src="/modules/gates.js"></script>
+  <script src="/modules/threads.js"></script>
+  <script src="/modules/tabs.js"></script>
+  <script src="/modules/sse.js"></script>
+  <script src="/modules/memory.js"></script>
+  <script src="/modules/logs.js"></script>
+  <script src="/modules/extensions.js"></script>
+  <script src="/modules/pairing.js"></script>
+  <script src="/modules/jobs.js"></script>
+  <script src="/modules/routines.js"></script>
+  <script src="/modules/projects.js"></script>
+  <script src="/modules/users.js"></script>
+  <script src="/modules/gateway-status.js"></script>
+  <script src="/modules/tee.js"></script>
+  <script src="/modules/skills.js"></script>
+  <script src="/modules/tools-permissions.js"></script>
+  <script src="/modules/keyboard.js"></script>
+  <script src="/modules/settings.js"></script>
+  <script src="/modules/config.js"></script>
+  <script src="/modules/init.js"></script>
+
+  <!-- Slim orchestrator (after all modules) -->
   <script src="/app.js"></script>
   <script src="/i18n-app.js"></script>
 </body>

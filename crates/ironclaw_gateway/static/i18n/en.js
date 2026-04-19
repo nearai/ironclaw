@@ -332,6 +332,9 @@ I18n.register('en', {
   'approval.denied': 'Denied',
   'approval.showParams': 'Show parameters',
   'approval.hideParams': 'Hide parameters',
+  'approval.tag': 'approval required',
+  'approval.approveOnce': 'Approve once',
+  'approval.alwaysAllow': 'Always allow',
   
   // Authentication Required
   'authRequired.title': 'Authentication required for {name}',
@@ -683,6 +686,7 @@ I18n.register('en', {
   'message.system': 'System',
   'message.copy': 'Copy',
   'message.copied': 'Copied!',
+  'message.thinking': 'Thinking',
 
   // Approval
   'approval.pressY': 'Press Y to approve, N to deny',

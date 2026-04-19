@@ -495,6 +495,57 @@ pub(crate) async fn js_handler() -> impl IntoResponse {
     )
 }
 
+pub(crate) async fn module_js_handler(Path(name): Path<String>) -> Response {
+    let js: Option<&'static str> = match name.as_str() {
+        "state.js" => Some(assets::MODULE_STATE_JS),
+        "ui-utils.js" => Some(assets::MODULE_UI_UTILS_JS),
+        "rendering.js" => Some(assets::MODULE_RENDERING_JS),
+        "theme.js" => Some(assets::MODULE_THEME_JS),
+        "reasoning.js" => Some(assets::MODULE_REASONING_JS),
+        "hash-nav.js" => Some(assets::MODULE_HASH_NAV_JS),
+        "api.js" => Some(assets::MODULE_API_JS),
+        "auth.js" => Some(assets::MODULE_AUTH_JS),
+        "restart.js" => Some(assets::MODULE_RESTART_JS),
+        "tool-activity.js" => Some(assets::MODULE_TOOL_ACTIVITY_JS),
+        "approval.js" => Some(assets::MODULE_APPROVAL_JS),
+        "images.js" => Some(assets::MODULE_IMAGES_JS),
+        "slash.js" => Some(assets::MODULE_SLASH_JS),
+        "chat.js" => Some(assets::MODULE_CHAT_JS),
+        "gates.js" => Some(assets::MODULE_GATES_JS),
+        "threads.js" => Some(assets::MODULE_THREADS_JS),
+        "tabs.js" => Some(assets::MODULE_TABS_JS),
+        "sse.js" => Some(assets::MODULE_SSE_JS),
+        "memory.js" => Some(assets::MODULE_MEMORY_JS),
+        "logs.js" => Some(assets::MODULE_LOGS_JS),
+        "extensions.js" => Some(assets::MODULE_EXTENSIONS_JS),
+        "pairing.js" => Some(assets::MODULE_PAIRING_JS),
+        "jobs.js" => Some(assets::MODULE_JOBS_JS),
+        "routines.js" => Some(assets::MODULE_ROUTINES_JS),
+        "projects.js" => Some(assets::MODULE_PROJECTS_JS),
+        "users.js" => Some(assets::MODULE_USERS_JS),
+        "gateway-status.js" => Some(assets::MODULE_GATEWAY_STATUS_JS),
+        "tee.js" => Some(assets::MODULE_TEE_JS),
+        "skills.js" => Some(assets::MODULE_SKILLS_JS),
+        "tools-permissions.js" => Some(assets::MODULE_TOOLS_PERMISSIONS_JS),
+        "keyboard.js" => Some(assets::MODULE_KEYBOARD_JS),
+        "settings.js" => Some(assets::MODULE_SETTINGS_JS),
+        "config.js" => Some(assets::MODULE_CONFIG_JS),
+        "init.js" => Some(assets::MODULE_INIT_JS),
+        _ => None,
+    };
+    match js {
+        Some(content) => (
+            [
+                (header::CONTENT_TYPE, "application/javascript"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            content,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub(crate) async fn theme_init_handler() -> impl IntoResponse {
     (
         [

@@ -67,8 +67,9 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
     favicon_handler, health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler,
-    i18n_ko_handler, i18n_zh_handler, index_handler, js_handler, project_file_handler,
-    project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
+    i18n_ko_handler, i18n_zh_handler, index_handler, js_handler, module_js_handler,
+    project_file_handler, project_index_handler, project_redirect_handler, theme_css_handler,
+    theme_init_handler,
 };
 
 // Feature handlers still inline in `server.rs` pending migration into
@@ -424,6 +425,7 @@ pub async fn start_server(
         .route("/theme.css", get(theme_css_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/modules/{name}", get(module_js_handler))
         .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))

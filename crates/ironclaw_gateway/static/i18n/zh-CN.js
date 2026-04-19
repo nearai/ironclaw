@@ -332,6 +332,9 @@ I18n.register('zh-CN', {
   'approval.denied': '已拒绝',
   'approval.showParams': '显示参数',
   'approval.hideParams': '隐藏参数',
+  'approval.tag': '需要审批',
+  'approval.approveOnce': '批准一次',
+  'approval.alwaysAllow': '始终允许',
   
   // 认证
   'authRequired.title': '{name} 需要认证',
@@ -682,6 +685,7 @@ I18n.register('zh-CN', {
   'message.system': '系统',
   'message.copy': '复制',
   'message.copied': '已复制！',
+  'message.thinking': '思考中',
 
   // Approval
   'approval.pressY': '按 Y 批准，N 拒绝',

@@ -18,7 +18,12 @@
   --radius: 8px;
   --radius-lg: 12px;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+  --docs-primary: #1191f0;
+  --docs-primary-hover: #0e7bcd;
+  --docs-primary-soft: rgba(17, 145, 240, 0.15);
+  --mascot-blue: #1191f0;
   --bg-overlay: rgba(0, 0, 0, 0.5);
   --bg-modal: #1a1a1a;
   --border-modal: #333;
