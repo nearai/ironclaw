@@ -1756,7 +1756,7 @@ mod tests {
             tool_name: "tool_install".to_string(),
             description: "Need auth".to_string(),
             parameters: "{\"name\":\"notion\"}".to_string(),
-            extension_name: Some("notion".to_string()),
+            extension_name: Some(ironclaw_common::ExtensionName::new("notion").unwrap()),
             resume_kind: serde_json::json!({
                 "Authentication": {
                     "credential_name": "notion_api_token",

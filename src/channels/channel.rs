@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use ironclaw_common::ExtensionName;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -379,7 +380,7 @@ pub enum StatusUpdate {
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
@@ -387,7 +388,7 @@ pub enum StatusUpdate {
     },
     /// Extension authentication completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },

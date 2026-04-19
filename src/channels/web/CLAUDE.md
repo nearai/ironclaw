@@ -12,10 +12,11 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
 | `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
-| `sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients |
-| `ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker` |
-| `auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) |
+| `platform/sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients. Re-exported as `channels::web::sse` for backward compat. |
+| `platform/ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker`. Re-exported as `channels::web::ws`. |
+| `platform/auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) + DB-token + OIDC extractors. Re-exported as `channels::web::auth`. |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
+| `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
 | `handlers/` | Feature handler functions split by domain: `auth`, `chat`, `engine`, `extensions`, `frontend`, `jobs`, `llm`, `memory`, `routines`, `secrets`, `settings`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration into `features/<slice>/` per ironclaw#2599. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`build_turns_from_db_messages`, `truncate_preview`) |
@@ -29,12 +30,15 @@ WS, static serving) that feature handlers depend on.
 **The "no back-edges" rule has one intentional exception: the router.**
 Route composition is inherently the coupling point where transport
 meets features — `platform/router.rs` imports every feature handler it
-registers. Every *other* platform submodule (state, static_files, and
-the auth/SSE/WS modules once they move) must stay handler-agnostic,
-and that's what the future CI check (ironclaw#2599 stage 5) will
-enforce: forbid cross-imports between `platform/{state,static_files,
-auth,sse,ws}.rs` and `handlers/*` / `features/*`, but allow
-`platform/router.rs` to reference both sides.
+registers. Every *other* platform submodule (state, static_files,
+auth, sse, ws) must stay handler-agnostic, and
+`scripts/check_gateway_boundaries.py` (wired into the `code_style`
+CI workflow as of ironclaw#2599 stage 5) enforces this: it fails the
+build on any added import from `platform/{state,static_files,auth,
+sse,ws}.rs` into `handlers/*` or `features/*`, while explicitly
+exempting `platform/router.rs`. The script also carries a minimal
+allowlist for pre-existing back-edges that are targeted for follow-up
+migration; the allowlist must not grow without reviewer sign-off.
 
 The flat `handlers/` folder is a transitional fallback — individual
 handlers will migrate into `features/<slice>/` directories once their
@@ -138,12 +142,45 @@ Rules:
 - Generic auth cards are only for non-extension credential prompts or OAuth-only flows that do not have extension setup UI.
 - If an auth-related change adds a new identity derivation path, stop and consolidate it into the shared backend resolver instead.
 
+Identity types at the web boundary:
+
+These rules are enforced by check #8 in `scripts/pre-commit-safety.sh`
+(`CREDNAME`). Suppress individual intentional uses with
+`// web-identity-exempt: <reason>`.
+
+- **Setup / configure / activate routes take `ExtensionName`, not `String`.**
+  Any handler on `/api/extensions/{name}/...` whose path segment is the
+  extension identity MUST parse it at entry via
+  `ExtensionName::new(&name).map_err(|e| (StatusCode::BAD_REQUEST, ...))?`
+  before the value reaches extension lookup, SSE broadcast, or any
+  `from_trusted` wrap. A path-traversal or malformed slug must return 400.
+
+- **Web request/response DTOs and web handlers must not reference
+  `CredentialName`.** Credential identity is a backend concern. The web
+  layer accepts and emits `ExtensionName`; the dispatcher / auth manager
+  resolves credential identity from it server-side. If you find yourself
+  importing `CredentialName` in `src/channels/web/**`, you're on the
+  wrong side of the boundary — push the resolution into
+  `bridge::auth_manager` and have the handler consume its output.
+
+- **Auth-flow extension resolution happens in one place.** The only
+  supported way to map an auth gate → extension name is
+  `AuthManager::resolve_extension_name_for_auth_flow`. Web handlers,
+  TUI channels, relay adapters, and SSE broadcasters must call through
+  it rather than re-deriving an extension name from `pending.action_name`,
+  a credential-name prefix, or a format-string. Four recent identity
+  bugs (#2561, #2473, #2512, #2574) were duplicate-resolution drift —
+  this rule exists to make a fifth impossible.
+
 Current consolidation points:
 
-- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)`
-- `src/bridge/router.rs`: auth-gate display and submit target resolution
-- `src/channels/web/server.rs`: pending-gate/history normalization
+- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
+- `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
+- `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
 - `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+
+All three of the backend wrappers above delegate to the canonical resolver
+or return `Option<ExtensionName>`; they must not duplicate its logic.
 
 Legacy cleanup note:
 

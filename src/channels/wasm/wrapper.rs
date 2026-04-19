@@ -5725,7 +5725,7 @@ mod tests {
         let metadata = serde_json::json!({"chat_id": 42});
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthRequired {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
@@ -5890,7 +5890,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: true,
                 message: "Token saved".to_string(),
             },
@@ -5913,7 +5913,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: false,
                 message: "Invalid token".to_string(),
             },

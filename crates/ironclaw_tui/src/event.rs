@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 
+use ironclaw_common::ExtensionName;
 use ratatui::crossterm::event::KeyEvent;
 
 /// A single log entry displayed in the TUI Logs tab.
@@ -280,13 +281,13 @@ pub enum TuiEvent {
 
     /// Extension needs user authentication.
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
     },
 
     /// Extension auth completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },

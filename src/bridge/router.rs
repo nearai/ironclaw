@@ -279,8 +279,10 @@ async fn resolve_extension_for_action(
     parameters: &serde_json::Value,
     credential_fallback: &str,
     user_id: &str,
-) -> String {
+) -> ironclaw_common::ExtensionName {
     if let Some(auth_manager) = auth_manager {
+        // Resolver enforces identity validation on user-influenced branches
+        // and returns a typed `ExtensionName` directly — no wrap needed.
         return auth_manager
             .resolve_extension_name_for_auth_flow(
                 action_name,
@@ -290,25 +292,35 @@ async fn resolve_extension_for_action(
             )
             .await;
     }
-    tools
+    // No auth manager (bare test harness): try the tool registry's
+    // provider-extension hint, else fall back to the credential-name
+    // string the caller already typed upstream.
+    let fallback = tools
         .provider_extension_for_tool(action_name)
         .await
-        .unwrap_or_else(|| credential_fallback.to_string())
+        .unwrap_or_else(|| credential_fallback.to_string());
+    ironclaw_common::ExtensionName::from_trusted(fallback)
 }
 
-/// Resolve the user-facing name to use when surfacing an authentication
-/// gate to a channel. Thin wrapper around `resolve_extension_for_action`
-/// that handles the non-Authentication ResumeKind variants by falling back
-/// to the action name (since they don't have a credential name to use).
-async fn resolve_auth_gate_display_name(
+/// Resolve the installed extension identifier that owns an authentication
+/// gate, for surfacing that gate on a channel.
+///
+/// Returns `Some(ExtensionName)` only for `Authentication` gates — the
+/// resolver delegates to [`resolve_extension_for_action`]. Non-auth
+/// gate variants (`Approval`, `External`) don't have an extension
+/// identity and return `None`.
+async fn resolve_auth_gate_extension_name(
     auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
-) -> String {
-    if let ironclaw_engine::ResumeKind::Authentication {
+) -> Option<ironclaw_common::ExtensionName> {
+    let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = &pending.resume_kind
-    {
+    else {
+        return None;
+    };
+    Some(
         resolve_extension_for_action(
             auth_manager,
             tools,
@@ -317,19 +329,15 @@ async fn resolve_auth_gate_display_name(
             credential_name.as_str(),
             &pending.user_id,
         )
-        .await
-    } else {
-        // Non-authentication gates don't use this string; return
-        // something innocuous.
-        pending.action_name.clone()
-    }
+        .await,
+    )
 }
 
 async fn send_pending_gate_status(
     agent: &Agent,
     message: &IncomingMessage,
     pending: &PendingGate,
-    auth_display_name: &str,
+    extension_name: Option<&ironclaw_common::ExtensionName>,
 ) {
     let display_parameters = gate_display_parameters(pending);
 
@@ -355,12 +363,23 @@ async fn send_pending_gate_status(
             auth_url,
             ..
         } => {
+            // `resolve_auth_gate_extension_name` always returns `Some` for
+            // Authentication gates; a `None` here would be an upstream
+            // plumbing bug (wrong variant reached this arm).
+            let Some(extension_name) = extension_name else {
+                tracing::warn!(
+                    gate = %pending.gate_name,
+                    request_id = %pending.request_id,
+                    "Authentication gate reached send_pending_gate_status without a resolved extension name"
+                );
+                return;
+            };
             let _ = agent
                 .channels
                 .send_status(
                     &message.channel,
                     StatusUpdate::AuthRequired {
-                        extension_name: auth_display_name.to_string(),
+                        extension_name: extension_name.clone(),
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
@@ -550,7 +569,7 @@ async fn notify_pending_gate(
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<BridgeOutcome, Error> {
-    let auth_display_name = resolve_auth_gate_display_name(auth_manager, tools, pending).await;
+    let extension_name = resolve_auth_gate_extension_name(auth_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -575,11 +594,7 @@ async fn notify_pending_gate(
                 description: pending.description.clone(),
                 parameters: serde_json::to_string_pretty(&display_parameters)
                     .unwrap_or_else(|_| display_parameters.to_string()),
-                extension_name: matches!(
-                    &pending.resume_kind,
-                    ironclaw_engine::ResumeKind::Authentication { .. }
-                )
-                .then(|| auth_display_name.clone()),
+                extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
                 thread_id: pending
                     .scope_thread_id
@@ -588,7 +603,7 @@ async fn notify_pending_gate(
             },
         );
     }
-    send_pending_gate_status(agent, message, pending, &auth_display_name).await;
+    send_pending_gate_status(agent, message, pending, extension_name.as_ref()).await;
     Ok(BridgeOutcome::Pending)
 }
 
@@ -2241,7 +2256,7 @@ pub async fn resolve_gate(
                 }
                 if let Some(ref auth_manager) = state.auth_manager {
                     match auth_manager
-                        .submit_auth_token(&submit_target, &token, &message.user_id)
+                        .submit_auth_token(submit_target.as_str(), &token, &message.user_id)
                         .await
                     {
                         Ok(result)
@@ -2271,7 +2286,7 @@ pub async fn resolve_gate(
                                 onboarding,
                             } => {
                             let next_pending =
-                                requeue_pairing_pending_gate(state, &pending, &display_name)
+                                requeue_pairing_pending_gate(state, &pending, display_name.as_str())
                                     .await?;
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(
@@ -2618,8 +2633,25 @@ pub async fn handle_expected(
         "thread_state": thread.state,
     });
 
-    // Fire the expected-behavior learning mission
+    // Ensure learning missions exist for this user before firing.
+    // They may be missing if the user wasn't the owner at init_engine time
+    // or if their missions failed to initialize.
     let mgr = state.effect_adapter.mission_manager().await;
+    if let Some(ref mgr) = mgr {
+        let user_project_id =
+            resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+        if let Err(e) = mgr
+            .ensure_learning_missions(user_project_id, &message.user_id)
+            .await
+        {
+            debug!(
+                "failed to ensure learning missions for user {}: {e}",
+                message.user_id
+            );
+        }
+    }
+
+    // Fire the expected-behavior learning mission
     let fired = if let Some(mgr) = mgr {
         match mgr
             .fire_on_system_event(
@@ -3453,7 +3485,9 @@ async fn await_thread_outcome(
                     .send_status(
                         &message.channel,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name.clone(),
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
@@ -3534,13 +3568,13 @@ async fn await_thread_outcome(
             // (agent_loop) detects the pending gate and maps to
             // HandleOutcome::Pending.
             {
-                let auth_display_name = resolve_auth_gate_display_name(
+                let extension_name = resolve_auth_gate_extension_name(
                     state.auth_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending,
                 )
                 .await;
-                send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
+                send_pending_gate_status(agent, message, &pending, extension_name.as_ref()).await;
             }
             Ok(BridgeOutcome::Pending)
         }
@@ -3811,7 +3845,7 @@ async fn forward_event_to_channel(
                     .send_status(
                         channel_name,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name,
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(cred_name),
                             instructions: Some(
                                 "Store the credential with: ironclaw secret set <name> <value>"
                                     .into(),
@@ -4846,6 +4880,50 @@ pub async fn reset_engine_state() {
     }
 }
 
+/// Build retrospective `ExecutionTrace`s for every currently-known engine
+/// thread. Returns an empty vector when engine v2 is not initialized.
+///
+/// Test-only helper: snapshot-based replay tests fold each trace into
+/// per-thread entries under `ReplayOutcome.engine_threads`. Not part of any
+/// public API; exposed under `#[doc(hidden)]` because integration tests live
+/// in a separate crate and cannot see `#[cfg(test)]`-only items.
+///
+/// **Caller must serialize access** when more than one engine v2 replay can
+/// run concurrently — `ENGINE_STATE` is a process-global singleton and this
+/// function iterates every thread across every project. Snapshot tests in
+/// `tests/e2e_engine_v2.rs` take `engine_v2_test_lock()` for this reason;
+/// new test suites that spawn engine threads must do the same or clear state
+/// via `reset_engine_state()` before calling.
+#[cfg(feature = "libsql")]
+pub async fn engine_retrospectives_for_test()
+-> Vec<ironclaw_engine::executor::trace::ExecutionTrace> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Vec::new();
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let projects = match state.store.list_all_projects().await {
+        Ok(projects) => projects,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for project in projects {
+        let threads = match state.store.list_all_threads(project.id).await {
+            Ok(threads) => threads,
+            Err(_) => continue,
+        };
+        for mut thread in threads {
+            if let Ok(events) = state.store.load_events(thread.id).await {
+                thread.events = events;
+            }
+            out.push(ironclaw_engine::executor::trace::build_trace(&thread));
+        }
+    }
+    out
+}
+
 /// Resolve the effective user_id for mission management operations.
 ///
 /// If the mission is shared-owned, requires admin role and returns the shared owner id
@@ -5508,7 +5586,7 @@ mod tests {
                     ..
                 } if tool_name == "shell"
                     && *event_thread_id == thread_id.to_string()
-                    && *extension_name == expected_extension_name
+                    && extension_name.as_str() == expected_extension_name.as_str()
             ),
             "expected GateRequired auth event, got: {event:?}"
         );

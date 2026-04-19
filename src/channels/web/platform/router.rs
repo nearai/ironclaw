@@ -74,6 +74,9 @@ use crate::channels::web::platform::static_files::{
 // Feature handlers still inline in `server.rs` pending migration into
 // `features/<slice>/`. Kept `pub(crate)` so the router can reference them
 // without exposing them outside the crate.
+use crate::channels::web::features::oauth::{
+    oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
+};
 use crate::channels::web::server::{
     chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler,
     chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
@@ -81,8 +84,7 @@ use crate::channels::web::server::{
     extensions_list_handler, extensions_readiness_handler, extensions_registry_handler,
     extensions_remove_handler, extensions_setup_handler, extensions_setup_submit_handler,
     extensions_tools_handler, gateway_status_handler, logs_events_handler, logs_level_get_handler,
-    logs_level_set_handler, oauth_callback_handler, pairing_approve_handler, pairing_list_handler,
-    relay_events_handler, routines_runs_handler, slack_relay_oauth_callback_handler,
+    logs_level_set_handler, pairing_approve_handler, pairing_list_handler, routines_runs_handler,
 };
 
 /// Start the gateway HTTP server.

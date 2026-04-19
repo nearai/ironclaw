@@ -20,7 +20,12 @@ SEL = {
     "auth_screen": "#auth-screen",
     "token_input": "#token-input",
     # Tabs
-    "tab_button": '.tab-bar button[data-tab="{tab}"]',
+    # Scope to the main tab-bar buttons only. `.status-logs-btn` covers the
+    # right-aligned auxiliary buttons (logs, docs link) and `.tab-btn` covers
+    # widget-injected tabs added by `_addWidgetTab`. Excluding both keeps the
+    # selector a single match under Playwright strict mode even if a widget
+    # or auxiliary button is ever introduced with a colliding `data-tab` id.
+    "tab_button": '.tab-bar > button[data-tab="{tab}"]:not(.status-logs-btn):not(.tab-btn)',
     "tab_panel": "#tab-{tab}",
     # Chat
     "chat_input": "#chat-input",

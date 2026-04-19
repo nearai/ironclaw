@@ -915,6 +915,38 @@ fn extract_oidc_email_claims(jwt: &str) -> (Option<String>, bool) {
     (email, verified)
 }
 
+/// Check that the email belongs to one of the allowed domains.
+///
+/// Used by both OAuth callback and OIDC middleware to enforce domain
+/// restrictions. Lives in the platform layer because OIDC validation
+/// inside `validate_oidc_jwt()` calls it before any feature handler
+/// runs — keeping the helper here avoids a `platform → handlers`
+/// back-edge that would otherwise violate the ironclaw#2599 layering
+/// rule (see `scripts/check_gateway_boundaries.py`).
+pub(crate) fn check_email_domain(
+    email: Option<&str>,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    let email = email.ok_or_else(|| {
+        "Login requires an email address, but your account does not have one.".to_string()
+    })?;
+    let domain = email
+        .rsplit_once('@')
+        .map(|(_, d)| d.to_ascii_lowercase())
+        .unwrap_or_default();
+    if allowed_domains
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(&domain))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Your email domain '{domain}' is not authorized. \
+             Contact your administrator for access."
+        ))
+    }
+}
+
 // ── Token extraction helpers ─────────────────────────────────────────────
 
 /// Whether query-string token auth is allowed for this request.
@@ -1060,10 +1092,9 @@ pub async fn auth_middleware(
                         )
                             .into_response();
                     }
-                    if let Err(msg) = crate::channels::web::handlers::auth::check_email_domain(
-                        email.as_deref(),
-                        &auth.oidc_allowed_domains,
-                    ) {
+                    if let Err(msg) =
+                        check_email_domain(email.as_deref(), &auth.oidc_allowed_domains)
+                    {
                         tracing::warn!(sub = %sub, error = %msg, "OIDC login rejected by domain restriction");
                         return (StatusCode::FORBIDDEN, msg).into_response();
                     }
@@ -1092,6 +1123,42 @@ pub async fn auth_middleware(
 mod tests {
     use super::*;
     use crate::testing::credentials::TEST_AUTH_SECRET_TOKEN;
+
+    fn domains(ds: &[&str]) -> Vec<String> {
+        ds.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_check_email_domain_allows_matching() {
+        let allowed = domains(&["company.com", "partner.org"]);
+        assert!(check_email_domain(Some("alice@company.com"), &allowed).is_ok());
+        assert!(check_email_domain(Some("bob@partner.org"), &allowed).is_ok());
+    }
+
+    #[test]
+    fn test_check_email_domain_rejects_non_matching() {
+        let allowed = domains(&["company.com"]);
+        assert!(check_email_domain(Some("alice@gmail.com"), &allowed).is_err());
+    }
+
+    #[test]
+    fn test_check_email_domain_case_insensitive() {
+        let allowed = domains(&["company.com"]);
+        assert!(check_email_domain(Some("alice@COMPANY.COM"), &allowed).is_ok());
+        assert!(check_email_domain(Some("alice@Company.Com"), &allowed).is_ok());
+    }
+
+    #[test]
+    fn test_check_email_domain_rejects_missing_email() {
+        let allowed = domains(&["company.com"]);
+        assert!(check_email_domain(None, &allowed).is_err());
+    }
+
+    #[test]
+    fn test_check_email_domain_rejects_malformed_email() {
+        let allowed = domains(&["company.com"]);
+        assert!(check_email_domain(Some("no-at-sign"), &allowed).is_err());
+    }
 
     #[test]
     fn test_multi_auth_state_single() {
