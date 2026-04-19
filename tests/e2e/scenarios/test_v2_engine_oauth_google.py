@@ -262,7 +262,13 @@ async def _wait_for_response(
     timeout: float = 45.0,
     expect_substring: str | None = None,
 ) -> dict:
-    """Poll chat history until an assistant response appears."""
+    """Poll chat history until an assistant response appears or a pending_gate is raised.
+
+    Either surface counts as "thread is done acting on the latest input" —
+    auth/approval prompts are now delivered as pending_gate SSE events, so a
+    retry that hits another auth gate will not produce a turn response but
+    still advances the flow.
+    """
     for _ in range(int(timeout * 2)):
         r = await api_get(
             base_url,
@@ -277,6 +283,8 @@ async def _wait_for_response(
             if last_response:
                 if expect_substring is None or expect_substring.lower() in last_response.lower():
                     return history
+        if expect_substring is None and history.get("pending_gate"):
+            return history
         await asyncio.sleep(0.5)
 
     raise AssertionError(
@@ -292,16 +300,7 @@ async def _wait_for_auth_prompt(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Poll until response mentions authentication or credential prompt."""
-    auth_indicators = [
-        "authentication",
-        "credential",
-        "paste your token",
-        "token below",
-        "google_drive_token",
-        "api key",
-        "access token",
-    ]
+    """Poll until the thread is gate-paused for authentication via pending_gate."""
     for _ in range(int(timeout * 2)):
         r = await api_get(
             base_url,
@@ -310,10 +309,13 @@ async def _wait_for_auth_prompt(
         )
         r.raise_for_status()
         history = r.json()
-        turns = history.get("turns", [])
-        if turns:
-            last_response = (turns[-1].get("response") or "").lower()
-            if last_response and any(ind in last_response for ind in auth_indicators):
+        pending = history.get("pending_gate")
+        if isinstance(pending, dict):
+            resume_kind = pending.get("resume_kind") or {}
+            gate_name = (pending.get("gate_name") or "").lower()
+            if gate_name == "authentication" or (
+                isinstance(resume_kind, dict) and "Authentication" in resume_kind
+            ):
                 return history
         await asyncio.sleep(0.5)
 
