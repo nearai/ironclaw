@@ -326,10 +326,11 @@ jobs:
 
   public-smoke:
     name: Public Live Smoke
-    # Intentionally NOT triggered by pull_request: hits real Anthropic API on
-    # every push, which is slow (~15 min), costly, and flakes on upstream
-    # outages. Scheduled + manual coverage only.
+    # Temporarily enabled on pull_request for testing (remove after verification).
+    # Normally NOT triggered by pull_request: hits real Anthropic API on every
+    # push, which is slow (~15 min), costly, and flakes on upstream outages.
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: ubuntu-latest
