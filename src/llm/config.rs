@@ -216,6 +216,38 @@ impl LlmConfig {
             }
         })
     }
+
+    /// Resolve the model name to show in status/UI after a hot-reload.
+    ///
+    /// This is used by the gateway status handler to refresh
+    /// `ActiveConfigSnapshot.llm_model` when the provider chain is swapped
+    /// without touching an active provider instance (e.g. before the first
+    /// request lands on the new chain).
+    pub fn active_model_name(&self) -> String {
+        match self.backend.as_str() {
+            "nearai" | "near_ai" | "near" => self.nearai.model.clone(),
+            "bedrock" | "aws_bedrock" | "aws" => self
+                .bedrock
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+            "gemini_oauth" | "gemini-oauth" => self
+                .gemini_oauth
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+            "openai_codex" | "openai-codex" | "codex" => self
+                .openai_codex
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
+            _ => self
+                .provider
+                .as_ref()
+                .map(|cfg| cfg.model.clone())
+                .unwrap_or_else(|| self.nearai.model.clone()),
+        }
+    }
 }
 
 /// NEAR AI configuration.

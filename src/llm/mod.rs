@@ -33,6 +33,7 @@ pub mod registry;
 pub mod response_cache;
 pub mod retry;
 mod rig_adapter;
+pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
@@ -75,6 +76,7 @@ pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
+pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
@@ -567,18 +569,22 @@ fn create_cheap_provider_for_backend(
 ///
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
-#[allow(clippy::type_complexity)]
-pub async fn build_provider_chain(
+///
+/// Raw primary + cheap providers as rebuilt from config.
+///
+/// Used by [`build_provider_chain`] (for startup wiring) and by
+/// [`LlmReloadHandle::reload`] (for hot-swap): the latter needs the
+/// *unwrapped* primary so it can feed it into the existing
+/// [`SwappableLlmProvider`] without stacking another wrapper.
+pub(crate) struct ProviderChainComponents {
+    pub primary: Arc<dyn LlmProvider>,
+    pub cheap: Option<Arc<dyn LlmProvider>>,
+}
+
+pub(crate) async fn build_provider_chain_components(
     config: &LlmConfig,
     session: Arc<SessionManager>,
-) -> Result<
-    (
-        Arc<dyn LlmProvider>,
-        Option<Arc<dyn LlmProvider>>,
-        Option<Arc<RecordingLlm>>,
-    ),
-    LlmError,
-> {
+) -> Result<ProviderChainComponents, LlmError> {
     let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
     } else {
@@ -702,21 +708,62 @@ pub async fn build_provider_chain(
         llm
     };
 
-    // 6. Recording (trace capture for replay testing)
-    let recording_handle = RecordingLlm::from_env(llm.clone());
-    let llm: Arc<dyn LlmProvider> = if let Some(ref recorder) = recording_handle {
-        Arc::clone(recorder) as Arc<dyn LlmProvider>
-    } else {
-        llm
-    };
-
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = create_cheap_llm_provider(config, session)?;
     if let Some(ref cheap) = cheap_llm {
         tracing::debug!("Cheap LLM provider initialized: {}", cheap.model_name());
     }
 
-    Ok((llm, cheap_llm, recording_handle))
+    Ok(ProviderChainComponents {
+        primary: llm,
+        cheap: cheap_llm,
+    })
+}
+
+/// Build the full provider chain and wrap the primary (and cheap, if any)
+/// in hot-swap capable [`SwappableLlmProvider`] handles. The returned
+/// [`LlmReloadHandle`] can rebuild the chain later from a fresh config.
+///
+/// This is the single source of truth for provider chain construction,
+/// called by both `main.rs` and `app.rs`.
+#[allow(clippy::type_complexity)]
+pub async fn build_provider_chain(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<
+    (
+        Arc<dyn LlmProvider>,
+        Option<Arc<dyn LlmProvider>>,
+        Option<Arc<RecordingLlm>>,
+        Arc<LlmReloadHandle>,
+    ),
+    LlmError,
+> {
+    let components = build_provider_chain_components(config, session).await?;
+
+    let primary_swappable = Arc::new(SwappableLlmProvider::new(components.primary));
+    let cheap_swappable = components
+        .cheap
+        .map(|cheap| Arc::new(SwappableLlmProvider::new(cheap)));
+    let reload_handle = Arc::new(LlmReloadHandle::new(
+        Arc::clone(&primary_swappable),
+        cheap_swappable.clone(),
+    ));
+
+    // 6. Recording (trace capture for replay testing) wraps the swappable
+    // wrapper so traces follow the active inner provider across swaps.
+    let primary: Arc<dyn LlmProvider> = primary_swappable;
+    let recording_handle = RecordingLlm::from_env(primary.clone());
+    let primary: Arc<dyn LlmProvider> = if let Some(ref recorder) = recording_handle {
+        Arc::clone(recorder) as Arc<dyn LlmProvider>
+    } else {
+        primary
+    };
+
+    let cheap: Option<Arc<dyn LlmProvider>> =
+        cheap_swappable.map(|handle| handle as Arc<dyn LlmProvider>);
+
+    Ok((primary, cheap, recording_handle, reload_handle))
 }
 
 pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -924,6 +971,111 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    /// Exercise the `LlmReloadHandle::reload` path end-to-end: build an
+    /// initial chain from a NEAR AI config, call `reload()` with a config
+    /// that has a different model, and verify the wrapper now reports the
+    /// new model. This is the caller-side coverage for the hot-reload
+    /// feature — a unit test on `SwappableLlmProvider::swap` alone does not
+    /// catch regressions where `reload()` fails to rebuild the chain.
+    #[tokio::test]
+    async fn llm_reload_handle_swaps_primary_model_on_reload() {
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+
+        let mut initial = test_llm_config();
+        initial.nearai.model = "model-a".to_string();
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial build_provider_chain");
+        assert_eq!(primary.model_name(), "model-a");
+
+        let mut updated = test_llm_config();
+        updated.nearai.model = "model-b".to_string();
+        reload_handle
+            .reload(&updated, Arc::clone(&session))
+            .await
+            .expect("reload should succeed");
+
+        // The primary handle returned from the first build must observe the
+        // new model after the swap — callers hold on to this Arc across
+        // reloads, so the wrapper identity is preserved.
+        assert_eq!(primary.model_name(), "model-b");
+        assert_eq!(
+            reload_handle.primary_provider().model_name(),
+            "model-b",
+            "handle should also report the new model",
+        );
+    }
+
+    /// When `build_provider_chain_components` fails (e.g. backend changed to
+    /// one whose credentials are missing), `reload()` must leave the primary
+    /// wrapper pointing at the *old* chain. Partial reloads where the
+    /// wrapper reports the new model but uses the old inner would be much
+    /// worse than a 500 on the setting-write call.
+    #[tokio::test]
+    async fn llm_reload_handle_preserves_old_chain_on_build_failure() {
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+
+        let mut initial = test_llm_config();
+        initial.nearai.model = "still-good".to_string();
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial chain");
+        assert_eq!(primary.model_name(), "still-good");
+
+        // Switch to a registry backend without a provider config — this is
+        // a deterministic failure path in `create_llm_provider` (returns
+        // `AuthFailed`). See `src/llm/mod.rs::create_llm_provider`.
+        let mut broken = test_llm_config();
+        broken.backend = "openai".to_string();
+        broken.provider = None;
+        let reload_err = reload_handle
+            .reload(&broken, Arc::clone(&session))
+            .await
+            .expect_err("reload must surface the build failure");
+        assert!(
+            matches!(reload_err, LlmError::AuthFailed { .. }),
+            "expected AuthFailed, got {reload_err:?}",
+        );
+
+        // The wrapper must still observe the old chain — any other answer
+        // would mean callers holding this Arc silently start talking to a
+        // half-built provider.
+        assert_eq!(primary.model_name(), "still-good");
+    }
+
+    /// When the new config omits a cheap model that was present at startup,
+    /// `reload()` must fall back to the primary provider rather than leave
+    /// the cheap wrapper dangling. This covers the reload asymmetry that
+    /// motivated the review feedback.
+    #[tokio::test]
+    async fn llm_reload_handle_falls_back_to_primary_when_cheap_disappears() {
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+
+        let mut initial = test_llm_config();
+        initial.nearai.model = "primary-a".to_string();
+        initial.nearai.cheap_model = Some("cheap-a".to_string());
+        let (_primary, cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial build_provider_chain");
+        let cheap = cheap.expect("cheap provider wired at startup");
+        assert_eq!(cheap.model_name(), "cheap-a");
+
+        let mut updated = test_llm_config();
+        updated.nearai.model = "primary-b".to_string();
+        updated.nearai.cheap_model = None;
+        reload_handle
+            .reload(&updated, Arc::clone(&session))
+            .await
+            .expect("reload should succeed");
+
+        // The cheap wrapper now reflects the primary — not left stale at
+        // "cheap-a" — so the chain stays consistent.
+        assert_eq!(cheap.model_name(), "primary-b");
     }
 
     #[test]
