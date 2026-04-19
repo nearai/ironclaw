@@ -1402,4 +1402,59 @@ And also check the token price:\n\
             "depth>0 must use cheap provider's pricing (zero), not primary's"
         );
     }
+
+    /// Subscription-billed providers (e.g. OpenAI Codex via ChatGPT OAuth)
+    /// report `(Decimal::ZERO, Decimal::ZERO)` per token and must
+    /// round-trip through `cost_usd_from` as a clean `0.0` — not panic,
+    /// not NaN. Exercises the fallback `.unwrap_or(0.0)` on a case that
+    /// matters in production.
+    #[tokio::test]
+    async fn complete_with_subscription_billed_provider_yields_zero_cost() {
+        struct SubscriptionProvider;
+        #[async_trait]
+        impl LlmProvider for SubscriptionProvider {
+            fn model_name(&self) -> &str {
+                "subscription-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                Ok(crate::llm::CompletionResponse {
+                    content: "ok".into(),
+                    input_tokens: 10_000,
+                    output_tokens: 5_000,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(SubscriptionProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.usage.cost_usd, 0.0,
+            "zero cost_per_token must produce exactly 0.0 cost_usd"
+        );
+        assert!(
+            output.usage.cost_usd.is_finite(),
+            "cost_usd must be finite, never NaN/Inf"
+        );
+    }
 }

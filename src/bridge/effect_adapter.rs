@@ -15,10 +15,9 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use ironclaw_engine::CapabilityRegistry;
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, MountError,
-    ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, EffectExecutor, EngineError,
+    MountError, ThreadExecutionContext, WorkspaceMounts,
 };
 
 use crate::auth::oauth::sanitize_auth_url;
@@ -1328,6 +1327,15 @@ impl EffectExecutor for EffectBridgeAdapter {
                 };
                 for action in &cap.actions {
                     if !lease.granted_actions.covers(&action.name) {
+                        continue;
+                    }
+                    // Defensive: apply the same v1-isolation filters we run
+                    // on v1 tools. If a future engine capability registers
+                    // an action under a v1-denylisted name (`create_job`,
+                    // `tool_auth`, ...), the v1 filters above would have
+                    // hidden it — the engine path must not become a
+                    // silent bypass.
+                    if is_v1_only_tool(&action.name) || is_v1_auth_tool(&action.name) {
                         continue;
                     }
                     if !seen.insert(action.name.clone()) {
@@ -4303,5 +4311,153 @@ mod tests {
                 "{name} must not appear without a lease: {names:?}"
             );
         }
+    }
+
+    /// Trivial v1 tool for the combined advertising test. Keeps the test
+    /// close to the helper so it doesn't pollute the top-level tool list.
+    struct V1EchoTool;
+
+    #[async_trait]
+    impl Tool for V1EchoTool {
+        fn name(&self) -> &str {
+            "v1_echo"
+        }
+        fn description(&self) -> &str {
+            "v1 echo tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_merges_v1_tools_with_engine_capabilities() {
+        // Exercises the real production shape: the adapter has both a v1
+        // `ToolRegistry` (echo tool) and a capability registry (missions).
+        // With a missions lease active, the LLM's tools list must include
+        // BOTH. Prior tests covered each path in isolation; this pins the
+        // combined advertising on the same call.
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(V1EchoTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"v1_echo"),
+            "v1 tool should be advertised: {names:?}"
+        );
+        for mission in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&mission),
+                "engine capability action {mission} should be advertised alongside v1 tools: {names:?}"
+            );
+        }
+    }
+
+    /// Defensive: an engine capability must not be able to sneak a
+    /// v1-denylisted action (`create_job` etc.) past the v1-isolation
+    /// filters by registering under a different capability name. The
+    /// engine-capability path applies the same `is_v1_only_tool` /
+    /// `is_v1_auth_tool` gates as the v1 path.
+    #[tokio::test]
+    async fn available_actions_filters_v1_denylisted_names_from_engine_capabilities() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        // A hypothetical malformed capability that tries to expose v1
+        // tools through the v2 advertising path.
+        registry.register(ironclaw_engine::Capability {
+            name: "rogue".into(),
+            description: "should not surface denylisted v1 names".into(),
+            actions: vec![
+                ActionDef {
+                    name: "create_job".into(), // v1-only denylist
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "tool_auth".into(), // v1 auth tool
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "safe_action".into(),
+                    description: "allowed".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let rogue_lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "rogue".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+
+        let actions = adapter
+            .available_actions(&[rogue_lease])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            !names.contains(&"create_job"),
+            "create_job is v1-denylisted and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            !names.contains(&"tool_auth"),
+            "tool_auth is a v1 auth tool and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            names.contains(&"safe_action"),
+            "safe_action should surface through the engine capability path: {names:?}"
+        );
     }
 }
