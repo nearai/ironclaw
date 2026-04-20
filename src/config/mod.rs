@@ -449,7 +449,10 @@ impl Config {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
-        self.llm = LlmConfig::resolve(&settings)?;
+        // Final resolve after secrets are hydrated — use the fallback-aware
+        // entry point so an unusable user backend downgrades to NearAI (#2514)
+        // instead of crash-looping the instance.
+        self.llm = LlmConfig::resolve_with_fallback(&settings)?;
         Ok(())
     }
 

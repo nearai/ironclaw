@@ -78,13 +78,21 @@ impl LlmConfig {
         }
     }
 
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Startup resilience: if the user-configured backend cannot be used
-        // (missing API key, missing base URL, etc.), fall back to the NearAI
-        // default rather than crashing the instance. This prevents the
-        // "activate Anthropic with no API key → restart → crash loop" trap
-        // (#2514) and lets the user reach the Web UI to fix their config.
-        match Self::resolve_once(settings) {
+    /// Resolve LLM configuration, with NearAI fallback for unusable configs.
+    ///
+    /// This entry point is for the **final** resolve after secrets have been
+    /// hydrated from the encrypted store. If the user-configured backend is
+    /// not usable (missing API key, missing base URL), we fall back to NearAI
+    /// rather than crashing — this prevents the #2514 crash-loop when a user
+    /// activates a provider via the UI without completing all required
+    /// fields.
+    ///
+    /// Do NOT call this during early startup (`Config::build()`) when
+    /// secrets are not yet hydrated — use [`resolve`] instead, otherwise
+    /// the fallback fires spuriously and gets overridden by the later
+    /// re-resolve, spamming operators with misleading error logs.
+    pub(crate) fn resolve_with_fallback(settings: &Settings) -> Result<Self, ConfigError> {
+        match Self::resolve(settings) {
             Ok(cfg) => {
                 if let Some(reason) = Self::unusable_reason(&cfg, settings) {
                     tracing::error!(
@@ -170,7 +178,7 @@ impl LlmConfig {
     ) -> Result<Self, ConfigError> {
         let mut fallback = settings.clone();
         fallback.llm_backend = Some("nearai".to_string());
-        let cfg = Self::resolve_once(&fallback).map_err(|e| {
+        let cfg = Self::resolve(&fallback).map_err(|e| {
             tracing::error!(
                 attempted = %attempted_backend,
                 fallback_error = %e,
@@ -186,7 +194,18 @@ impl LlmConfig {
         Ok(cfg)
     }
 
-    fn resolve_once(settings: &Settings) -> Result<Self, ConfigError> {
+    /// Resolve LLM configuration without any fallback behavior.
+    ///
+    /// Returns the config exactly as computed from env/DB/defaults, with no
+    /// safety net for missing credentials. Use this for:
+    /// - Early startup (before secrets are hydrated), so a spurious fallback
+    ///   doesn't fire and get overridden by the later re-resolve.
+    /// - Tests that verify pure resolution mechanics (model/base_url priority
+    ///   chains, alias normalization, etc.).
+    ///
+    /// The top-level `AppBuilder` path calls [`resolve_with_fallback`] after
+    /// hydrating secrets, which handles #2514-style crash-loop prevention.
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let registry = ProviderRegistry::load();
 
         // Determine backend: db settings > env var > default ("nearai")
@@ -944,7 +963,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(provider.model, "openai/gpt-5.1-codex");
@@ -966,7 +985,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(
@@ -1088,7 +1107,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(provider.model, "llama3.2");
@@ -1109,7 +1128,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(
@@ -1135,7 +1154,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(
@@ -1155,7 +1174,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(provider.base_url, "https://localhost:8443/v1");
@@ -1172,7 +1191,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(provider.base_url, "http://100.64.0.10:8000/v1");
@@ -1194,7 +1213,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "groq");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "groq");
@@ -1218,7 +1237,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "tinfoil");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.base_url, "https://inference.tinfoil.sh/v1");
@@ -1247,7 +1266,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "zai");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "zai");
@@ -1271,7 +1290,7 @@ mod tests {
 
         let settings = Settings::default();
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "github_copilot");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "github_copilot");
@@ -1313,7 +1332,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "nearai");
         assert!(cfg.provider.is_none());
     }
@@ -1329,7 +1348,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "openai",
             "alias 'open_ai' should be normalized to canonical 'openai'"
@@ -1355,7 +1374,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "openai_compatible");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(provider.provider_id, "openai_compatible");
@@ -1378,7 +1397,7 @@ mod tests {
                 std::env::set_var("LLM_BACKEND", alias);
             }
             let settings = Settings::default();
-            let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+            let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
             assert_eq!(
                 cfg.backend, "nearai",
                 "alias '{alias}' should resolve to 'nearai'"
@@ -1413,7 +1432,7 @@ mod tests {
         };
 
         // DB settings should take priority over env var
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
             provider.base_url, "http://localhost:9000/v1",
@@ -1426,7 +1445,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings_no_base).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings_no_base).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
             provider.base_url, "http://localhost:8000/v1",
@@ -1469,7 +1488,7 @@ mod tests {
             llm_backend: Some("anthropic".to_string()),
             ..Default::default()
         };
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(
@@ -1508,7 +1527,7 @@ mod tests {
             llm_backend: Some("anthropic".to_string()),
             ..Default::default()
         };
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert_eq!(
@@ -1540,7 +1559,7 @@ mod tests {
             llm_backend: Some("openai".to_string()),
             ..Default::default()
         };
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
 
         assert!(
@@ -1642,7 +1661,7 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
         }
-        let config = LlmConfig::resolve_once(&Settings::default()).expect("resolve");
+        let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(config.request_timeout_secs, 120);
     }
 
@@ -1653,7 +1672,7 @@ mod tests {
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
         }
-        let config = LlmConfig::resolve_once(&Settings::default()).expect("resolve");
+        let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(config.request_timeout_secs, 300);
         // SAFETY: Cleanup
         unsafe {
@@ -1686,7 +1705,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "myprovider");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "myprovider");
@@ -1729,7 +1748,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "myprovider",
             "DB setting should override LLM_BACKEND env var"
@@ -1772,7 +1791,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(
             provider.model, "llama-3.1-8b-instant",
@@ -1790,7 +1809,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "openai_codex");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "gpt-5.3-codex"); // default
@@ -1825,7 +1844,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(
             provider.model, "llama-3.3-70b-versatile",
@@ -1847,7 +1866,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "o3-pro");
 
@@ -1882,7 +1901,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         use secrecy::ExposeSecret as _;
         let key = provider
@@ -1909,7 +1928,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "gpt-4o");
 
@@ -1930,7 +1949,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "gpt-4o-mini");
     }
@@ -1953,7 +1972,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = LlmConfig::resolve_once(&settings).unwrap_err();
+        let err = LlmConfig::resolve(&settings).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("OPENAI_CODEX_API_URL"),
@@ -1981,7 +2000,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = LlmConfig::resolve_once(&settings).unwrap_err();
+        let err = LlmConfig::resolve(&settings).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("OPENAI_CODEX_AUTH_URL"),
@@ -2016,7 +2035,7 @@ mod tests {
             std::env::set_var("LLM_MAX_RETRIES", "10");
         }
 
-        let cfg = LlmConfig::resolve_once(&Settings::default()).expect("resolve");
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(cfg.max_retries, 10);
 
         unsafe {
@@ -2034,7 +2053,7 @@ mod tests {
             std::env::set_var("NEARAI_MAX_RETRIES", "7");
         }
 
-        let cfg = LlmConfig::resolve_once(&Settings::default()).expect("resolve");
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve");
         assert_eq!(cfg.max_retries, 7);
 
         unsafe {
@@ -2051,7 +2070,7 @@ mod tests {
             std::env::set_var("LLM_MAX_RETRIES", "not-a-number");
         }
 
-        let err = LlmConfig::resolve_once(&Settings::default()).unwrap_err();
+        let err = LlmConfig::resolve(&Settings::default()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("LLM_MAX_RETRIES"),
@@ -2090,7 +2109,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         use secrecy::ExposeSecret as _;
         assert_eq!(
@@ -2132,7 +2151,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(
             provider.model, "model-from-db",
@@ -2169,7 +2188,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(
             provider.model, "model-from-db",
@@ -2197,7 +2216,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(
             codex.model, "codex-from-db",
@@ -2225,7 +2244,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.model, "nearai-from-db",
             "DB selected_model must take priority over NEARAI_MODEL env var"
@@ -2261,7 +2280,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.model, "model-from-db-override",
             "DB builtin_overrides model must take priority over NEARAI_MODEL env var"
@@ -2298,7 +2317,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.model, "model-from-selected",
             "selected_model must take priority over builtin_overrides model"
@@ -2330,7 +2349,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.base_url, "http://localhost:9002",
             "DB builtin_overrides base_url must take priority over NEARAI_BASE_URL env var"
@@ -2357,7 +2376,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.base_url, "http://localhost:9001",
             "NEARAI_BASE_URL env var should be used when no DB override exists"
@@ -2393,7 +2412,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         use secrecy::ExposeSecret as _;
         assert_eq!(
             cfg.nearai
@@ -2426,7 +2445,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.base_url, "https://private.near.ai",
             "Without API key, should default to private.near.ai"
@@ -2448,7 +2467,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings_with_key).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings_with_key).expect("resolve should succeed");
         assert_eq!(
             cfg.nearai.base_url, "https://cloud-api.near.ai",
             "With API key, should default to cloud-api.near.ai"
@@ -2481,7 +2500,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(
             provider.base_url, "http://localhost:9004",
@@ -2519,7 +2538,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve_once(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.nearai.model, "env-model");
 
         // SAFETY: Under ENV_MUTEX.
@@ -2558,7 +2577,7 @@ mod tests {
         };
 
         // This must succeed without attempting DNS resolution on private.near.ai.
-        let cfg = LlmConfig::resolve_once(&settings)
+        let cfg = LlmConfig::resolve(&settings)
             .expect("resolve should succeed for non-NearAI backend without NearAI URL validation");
         assert_eq!(cfg.backend, "openai_compatible");
     }
@@ -2586,9 +2605,10 @@ mod tests {
             ..Default::default()
         };
 
-        // resolve_once would hand back an unusable anthropic config (no key);
-        // resolve() must notice that and fall back to NearAI.
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed via fallback");
+        // resolve() would hand back an unusable anthropic config (no key);
+        // resolve_with_fallback() must notice that and fall back to NearAI.
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
         assert_eq!(
             cfg.backend, "nearai",
             "unusable anthropic backend must fall back to NearAI"
@@ -2617,7 +2637,8 @@ mod tests {
         // openai_compatible has base_url_required=true and no default — this
         // previously returned Err(MissingRequired), causing main.rs to bail
         // and the container to crash-loop. resolve() now recovers.
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed via fallback");
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
         assert_eq!(cfg.backend, "nearai");
     }
 
@@ -2635,7 +2656,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "groq",
             "a properly-configured backend must NOT trigger fallback"
@@ -2664,7 +2685,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "anthropic",
             "anthropic with OAuth token must NOT fall back"
@@ -2701,7 +2722,8 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed via fallback");
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
         assert_eq!(
             cfg.backend, "nearai",
             "custom provider with empty base_url must fall back to NearAI"
@@ -2725,7 +2747,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "ollama",
             "ollama without api_key must NOT trigger fallback"
@@ -2757,10 +2779,41 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
         assert_eq!(
             cfg.backend, "my-ollama",
             "custom ollama provider without api_key must NOT fall back"
+        );
+    }
+
+    #[test]
+    fn resolve_pure_does_not_trigger_fallback_or_log() {
+        // Regression test for the spurious "Falling back to NearAI" log that
+        // fired at early-startup resolve (before secrets were hydrated) and
+        // then got overridden by the later re-resolve. The fix split the
+        // entry points: resolve() is pure, resolve_with_fallback() is the
+        // one that may swap in NearAI. build() calls resolve() so the log
+        // never fires spuriously.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+
+        // Pure resolve keeps the configured backend even when it would be
+        // considered unusable — the caller is responsible for hydrating
+        // secrets and calling resolve_with_fallback afterwards.
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "anthropic",
+            "pure resolve must not auto-fall-back; that is resolve_with_fallback's job"
         );
     }
 }

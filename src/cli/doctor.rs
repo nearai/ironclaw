@@ -753,17 +753,12 @@ mod tests {
         }
 
         let _mutex = crate::config::helpers::lock_env();
-        let prev_backend = std::env::var("LLM_BACKEND").ok();
-        let prev_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("LLM_BACKEND", "anthropic");
-            // Provide a dummy API key so LlmConfig::resolve does not fall
-            // back to NearAI (which would defeat this test's purpose).
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-test-dummy");
         }
-        let _env_guard = EnvGuard("LLM_BACKEND", prev_backend);
-        let _key_guard = EnvGuard("ANTHROPIC_API_KEY", prev_key);
+        let _env_guard = EnvGuard("LLM_BACKEND", prev);
 
         let settings = Settings::default();
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
