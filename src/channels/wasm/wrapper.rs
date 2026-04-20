@@ -1438,13 +1438,17 @@ impl WasmChannel {
                 &owner_scope_id,
             )
             .await;
-            // Defense in depth: if a required secret disappeared between
-            // preflight (in `Channel::start`) and here, do not enter the
-            // reconnect loop — peer will reject with an auth close code.
+            // Defense in depth: if an identify template or secret cannot be
+            // resolved here, do not enter the reconnect loop — peer will
+            // reject with an auth close code. `resolve_websocket_identify_message`
+            // returns `None` on several distinct failures (missing secret,
+            // decrypt error, missing identify template, store failure), so the
+            // message enumerates them rather than naming one.
             if config.identify_secret_name.is_some() && identify_payload.is_none() {
                 tracing::warn!(
                     channel = %channel_name,
-                    "Websocket runtime exiting: required auth secret unavailable at runtime start"
+                    has_identify_template = config.identify.is_some(),
+                    "Websocket runtime exiting: failed to build identify payload (missing secret, decrypt error, or unresolved template)"
                 );
                 return;
             }
@@ -1602,7 +1606,7 @@ impl WasmChannel {
                                     {
                                         let code = u16::from(frame.code);
                                         if let WebsocketCloseDisposition::Terminal { reason } =
-                                            classify_websocket_close_code(code)
+                                            classify_websocket_close_code(code, &config.url)
                                         {
                                             tracing::warn!(
                                                 channel = %channel_name,
@@ -3440,6 +3444,13 @@ impl Channel for WasmChannel {
                     "Skipping websocket runtime start: required auth secret is not present"
                 );
             }
+            WebsocketStartDecision::MalformedConfig { reason } => {
+                tracing::warn!(
+                    channel = %self.name,
+                    reason = %reason,
+                    "Skipping websocket runtime start: malformed capability configuration"
+                );
+            }
         }
 
         tracing::info!(
@@ -3669,6 +3680,11 @@ pub(crate) enum WebsocketAuthPreflight {
 pub(crate) enum WebsocketStartDecision {
     /// No websocket capability, or `connect_on_start` is false.
     NotConfigured,
+    /// The capability is internally inconsistent and the runtime cannot build
+    /// a valid connection — e.g. `identify_secret_name` is declared but the
+    /// `identify` template is missing, so no identify payload could ever be
+    /// built even with a valid secret.
+    MalformedConfig { reason: &'static str },
     /// Websocket is configured but the required auth secret is not present.
     MissingAuth { secret_name: String },
     /// All gates pass; the runtime should be spawned with this config.
@@ -3688,6 +3704,11 @@ pub(crate) enum WebsocketCloseDisposition {
 /// under `owner_scope_id` or the caller must skip the spawn — otherwise the
 /// runtime connects, is rejected (e.g. Discord close code 4003), and the
 /// reconnect loop retries forever (issue #2557).
+///
+/// Transient errors from the secrets store (e.g. a dropped DB connection)
+/// are logged and treated as `Ready` so a store blip does not permanently
+/// block channel activation. If the secret is genuinely missing, the
+/// runtime-entry guard in `start_websocket_runtime` still catches it.
 async fn websocket_auth_preflight(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
@@ -3703,9 +3724,18 @@ async fn websocket_auth_preflight(
     };
     match store.exists(owner_scope_id, secret_name).await {
         Ok(true) => WebsocketAuthPreflight::Ready,
-        _ => WebsocketAuthPreflight::MissingSecret {
+        Ok(false) => WebsocketAuthPreflight::MissingSecret {
             secret_name: secret_name.clone(),
         },
+        Err(error) => {
+            tracing::warn!(
+                owner_scope_id = %owner_scope_id,
+                secret_name = %secret_name,
+                error = %error,
+                "Websocket auth preflight store lookup failed; proceeding to spawn and deferring to runtime-entry guard"
+            );
+            WebsocketAuthPreflight::Ready
+        }
     }
 }
 
@@ -3721,6 +3751,14 @@ async fn websocket_start_decision(
     if !config.connect_on_start {
         return WebsocketStartDecision::NotConfigured;
     }
+    // Declaring a secret without an identify template means the runtime could
+    // never build an identify payload even with a valid secret. Catch it here
+    // so the log message is accurate instead of the generic "secret missing".
+    if config.identify_secret_name.is_some() && config.identify.is_none() {
+        return WebsocketStartDecision::MalformedConfig {
+            reason: "identify_secret_name declared without identify template",
+        };
+    }
     match websocket_auth_preflight(&config, store, owner_scope_id).await {
         WebsocketAuthPreflight::Ready => WebsocketStartDecision::Spawn(config),
         WebsocketAuthPreflight::MissingSecret { secret_name } => {
@@ -3729,13 +3767,33 @@ async fn websocket_start_decision(
     }
 }
 
+/// True if `url` points at a Discord gateway host.
+///
+/// Websocket close codes 4000–4999 are application-defined (RFC 6455). Discord
+/// publishes specific semantics for 4003/4004/4010–4014; other providers may
+/// reuse the same numeric codes for different meanings, so the Discord-specific
+/// terminal-code table must be gated on the actual host.
+fn is_discord_gateway_host(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host_str().map(str::to_ascii_lowercase) {
+        Some(host) => host == "gateway.discord.gg" || host == "gateway.discord.com",
+        None => false,
+    }
+}
+
 /// Classify a websocket close code to decide whether to reconnect or stop.
 ///
 /// Fatal Discord gateway codes (per the Discord opcodes/close-code
 /// documentation) always indicate a configuration problem the runtime cannot
 /// recover from on its own — more reconnects will produce the same rejection.
-/// Everything else is treated as potentially transient.
-fn classify_websocket_close_code(code: u16) -> WebsocketCloseDisposition {
+/// The Discord-specific code table is only applied when `url` is a Discord
+/// gateway host; other providers fall through to `Reconnect`.
+fn classify_websocket_close_code(code: u16, url: &str) -> WebsocketCloseDisposition {
+    if !is_discord_gateway_host(url) {
+        return WebsocketCloseDisposition::Reconnect;
+    }
     match code {
         4003 => WebsocketCloseDisposition::Terminal {
             reason: "not_authenticated",
@@ -5487,29 +5545,85 @@ mod tests {
         assert_eq!(decision, WebsocketStartDecision::NotConfigured);
     }
 
+    /// A capability that declares `identify_secret_name` without an `identify`
+    /// template can never build a valid identify payload. Start decision must
+    /// surface that as `MalformedConfig`, not `MissingAuth`, so the operator
+    /// log line points at the real cause.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_without_identify_template() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord_bot_token"
+                // No `identify` template — malformed.
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert!(
+            matches!(decision, WebsocketStartDecision::MalformedConfig { .. }),
+            "expected MalformedConfig, got {decision:?}"
+        );
+    }
+
     /// Regression test for #2557: fatal Discord gateway auth codes must be
-    /// terminal so the reconnect loop stops instead of spinning forever.
+    /// terminal so the reconnect loop stops instead of spinning forever — but
+    /// only for Discord-gateway URLs, since 4000-series codes are
+    /// application-defined per RFC 6455.
     #[test]
-    fn test_classify_websocket_close_code_terminal_for_auth_failures() {
+    fn test_classify_websocket_close_code_terminal_for_discord_auth_failures() {
+        let discord_url = "wss://gateway.discord.gg/?v=10&encoding=json";
         for code in [4003u16, 4004, 4010, 4011, 4012, 4013, 4014] {
             assert!(
                 matches!(
-                    classify_websocket_close_code(code),
+                    classify_websocket_close_code(code, discord_url),
                     WebsocketCloseDisposition::Terminal { .. }
                 ),
-                "code {code} should be terminal"
+                "code {code} on Discord should be terminal"
             );
         }
     }
 
     #[test]
     fn test_classify_websocket_close_code_reconnect_for_transient() {
+        let discord_url = "wss://gateway.discord.gg/?v=10&encoding=json";
         for code in [1000u16, 1001, 1006, 4000, 4007, 4008, 4009] {
             assert_eq!(
-                classify_websocket_close_code(code),
+                classify_websocket_close_code(code, discord_url),
                 WebsocketCloseDisposition::Reconnect,
                 "code {code} should be reconnectable"
             );
+        }
+    }
+
+    /// The Discord-specific terminal codes must not apply to other providers:
+    /// 4000–4999 is application-defined (RFC 6455), so the same numeric code
+    /// on a non-Discord websocket could mean anything and must default to
+    /// Reconnect.
+    #[test]
+    fn test_classify_websocket_close_code_non_discord_host_never_terminal() {
+        for url in [
+            "wss://example.test/",
+            "wss://ws.slack.com/",
+            "wss://gateway.discord.gg.attacker.example/", // host-suffix spoof
+        ] {
+            for code in [4003u16, 4004, 4010, 4011, 4012, 4013, 4014] {
+                assert_eq!(
+                    classify_websocket_close_code(code, url),
+                    WebsocketCloseDisposition::Reconnect,
+                    "code {code} on {url} must default to Reconnect"
+                );
+            }
         }
     }
 
