@@ -16,18 +16,14 @@ use crate::workspace::Workspace;
 
 /// Resolve the workspace for the authenticated user.
 ///
-/// In multi-tenant mode, route through `workspace_pool` so each authenticated
-/// user gets their own workspace. In single-user mode, always use the shared
-/// owner workspace even if a pool is present for deeper runtime/tool plumbing;
-/// this keeps authenticated gateway reads/writes aligned with the unauthenticated
-/// bootstrap routes (`/`, `/style.css`), which also read from `state.workspace`.
+/// Authenticated memory APIs should prefer the per-user workspace pool whenever
+/// it is available so user-scoped reads and writes stay isolated even if the
+/// deployment is otherwise using single-user bootstrap/static routes.
 pub(crate) async fn resolve_workspace(
     state: &GatewayState,
     user: &UserIdentity,
 ) -> Result<Arc<Workspace>, (StatusCode, String)> {
-    if state.multi_tenant_mode
-        && let Some(ref pool) = state.workspace_pool
-    {
+    if let Some(ref pool) = state.workspace_pool {
         return Ok(pool.get_or_create(user).await);
     }
     state.workspace.as_ref().cloned().ok_or((
@@ -227,4 +223,162 @@ pub async fn memory_search_handler(
         .collect();
 
     Ok(Json(MemorySearchResponse { results: hits }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::middleware;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use crate::channels::web::auth::{MultiAuthState, UserIdentity, auth_middleware};
+    use crate::channels::web::platform::state::{
+        ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, RateLimiter, WorkspacePool,
+    };
+    use crate::channels::web::sse::SseManager;
+    use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+    use crate::db::Database;
+    use crate::workspace::{EmbeddingCacheConfig, Workspace};
+
+    use super::memory_read_handler;
+
+    async fn test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("memory-handler-test.db");
+        let backend = LibSqlBackend::new_local(&path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+        (Arc::new(backend) as Arc<dyn Database>, dir)
+    }
+
+    fn test_state(
+        db: Arc<dyn Database>,
+        workspace: Arc<Workspace>,
+        pool: Arc<WorkspacePool>,
+    ) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: Some(workspace),
+            workspace_pool: Some(pool),
+            multi_tenant_mode: false,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(db),
+            settings_cache: None,
+            job_manager: None,
+            prompt_queue: None,
+            scheduler: None,
+            owner_id: "owner".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
+            skill_registry: None,
+            skill_catalog: None,
+            auth_manager: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+        })
+    }
+
+    fn read_router(state: Arc<GatewayState>) -> Router {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-bob".to_string(),
+            UserIdentity {
+                user_id: "bob".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+
+        Router::new()
+            .route("/api/memory/read", get(memory_read_handler))
+            .layer(middleware::from_fn_with_state(auth.into(), auth_middleware))
+            .with_state(state)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_read_prefers_workspace_pool_even_when_multi_tenant_mode_is_false() {
+        let (db, _dir) = test_db().await;
+        let owner_workspace = Arc::new(Workspace::new_with_db("owner", Arc::clone(&db)));
+        owner_workspace
+            .write("note.md", "owner note")
+            .await
+            .expect("write owner note");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+        let bob = UserIdentity {
+            user_id: "bob".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        };
+        let bob_workspace = pool.get_or_create(&bob).await;
+        bob_workspace
+            .write("note.md", "bob note")
+            .await
+            .expect("write bob note");
+
+        let app = read_router(test_state(db, owner_workspace, pool));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory/read?path=note.md")
+                    .header("Authorization", "Bearer tok-bob")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("dispatch request");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse memory read response");
+        assert_eq!(payload["content"], "bob note");
+    }
 }

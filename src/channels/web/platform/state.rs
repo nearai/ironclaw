@@ -342,7 +342,11 @@ pub struct GatewayState {
     pub sse: Arc<SseManager>,
     /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
-    /// Per-user workspace pool for multi-user mode.
+    /// Optional per-user workspace resolver/pool.
+    ///
+    /// This is independent of `multi_tenant_mode`: the runtime may provide a
+    /// per-user workspace pool even in single-user mode for plumbing or test
+    /// harnesses.
     pub workspace_pool: Option<Arc<WorkspacePool>>,
     /// Whether the gateway started in multi-tenant mode.
     ///

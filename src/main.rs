@@ -833,6 +833,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if enable_non_cli && let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
+        gw = gw.with_multi_tenant_mode(config.is_multi_tenant_deployment());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
