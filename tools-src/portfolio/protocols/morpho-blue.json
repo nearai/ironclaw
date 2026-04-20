@@ -1,0 +1,23 @@
+{
+  "id": "morpho-blue",
+  "name": "Morpho Blue",
+  "category": "lending",
+  "match_protocol_ids": ["morpho_blue", "morpho-blue", "morpho", "metamorpho"],
+  "chains": ["ethereum", "base"],
+  "contract_addrs_by_chain": {
+    "ethereum": ["0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"],
+    "base": ["0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"]
+  },
+  "base_risk_score": 2,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": "supply_apy",
+  "audits": ["Spearbit", "Cantina", "OpenZeppelin"],
+  "tvl_floor_usd": 1500000000,
+  "oracle_deps": ["per-market: Chainlink or other"],
+  "health_metric": {
+    "name": "ltv",
+    "danger_threshold": 0.95
+  },
+  "notes": "Per-market isolated risk. M2 treats all Morpho markets as one protocol; M3 may split per-market."
+}

@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{
     AdminUsageEntry, AdminUsageStatsResponse, AdminUsageSummaryJobs, AdminUsageSummaryResponse,
     AdminUsageSummaryUsers, AdminUsageSummaryWindow, AdminUserCreateResponse,
@@ -658,4 +658,116 @@ pub async fn usage_summary_handler(
         },
         uptime_seconds,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{Router, http::StatusCode};
+
+    use crate::channels::web::auth::UserIdentity;
+
+    use crate::channels::web::test_helpers::{
+        insert_test_user, test_gateway_state_with_dependencies,
+    };
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_delete_user_evicts_auth_and_pairing_caches() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        insert_test_user(&db, "admin-1", "admin").await;
+        insert_test_user(&db, "member-1", "member").await;
+
+        let token = "member-token-123";
+        let hash = crate::channels::web::auth::hash_token(token);
+        db.create_api_token("member-1", "test-token", &hash, &token[..8], None) // safety: test-only, ASCII literal
+            .await
+            .expect("create api token");
+
+        let db_auth = Arc::new(crate::channels::web::auth::DbAuthenticator::new(
+            Arc::clone(&db),
+        ));
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new(
+            Arc::clone(&db),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        ));
+
+        let auth_identity = db_auth
+            .authenticate(token)
+            .await
+            .expect("db auth lookup")
+            .expect("db auth identity");
+        assert_eq!(auth_identity.user_id, "member-1");
+
+        let request = pairing_store
+            .upsert_request("telegram", "tg-delete-1", None)
+            .await
+            .expect("create pairing request");
+        pairing_store
+            .approve(
+                "telegram",
+                &request.code,
+                &crate::ownership::UserId::from_trusted(
+                    "member-1".into(),
+                    crate::ownership::UserRole::Regular,
+                ),
+            )
+            .await
+            .expect("approve pairing");
+        assert!(
+            pairing_store
+                .resolve_identity("telegram", "tg-delete-1")
+                .await
+                .expect("prime pairing cache")
+                .is_some()
+        );
+
+        let state = test_gateway_state_with_dependencies(
+            None,
+            Some(Arc::clone(&db)),
+            Some(Arc::clone(&db_auth)),
+            Some(Arc::clone(&pairing_store)),
+        );
+        let app = Router::new()
+            .route(
+                "/api/admin/users/{id}",
+                axum::routing::delete(crate::channels::web::handlers::users::users_delete_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/admin/users/member-1")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-1".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            db_auth
+                .authenticate(token)
+                .await
+                .expect("post-delete auth lookup")
+                .is_none()
+        );
+        assert!(
+            pairing_store
+                .resolve_identity("telegram", "tg-delete-1")
+                .await
+                .expect("post-delete pairing lookup")
+                .is_none()
+        );
+    }
 }

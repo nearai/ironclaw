@@ -14,7 +14,7 @@ mod tests {
 
     use ironclaw::db::libsql::LibSqlBackend;
     use ironclaw::db::{ChannelPairingStore, Database, UserRecord, UserStore};
-    use ironclaw::ownership::{Identity, OwnerId, UserRole};
+    use ironclaw::ownership::{UserId, UserRole};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -202,7 +202,7 @@ mod tests {
         let (backend, _dir) = setup_db().await;
         let db: Arc<dyn Database> = Arc::new(backend);
 
-        let alice_identity = Identity::new(OwnerId::from("alice"), UserRole::Member);
+        let alice_identity = UserId::from_trusted("alice".into(), UserRole::Regular);
         let alice_scope =
             ironclaw::tenant::TenantScope::with_identity(alice_identity, Arc::clone(&db));
         alice_scope
@@ -210,8 +210,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Bob uses Identity with Admin role — still cannot see Alice's setting
-        let bob_identity = Identity::new(OwnerId::from("bob"), UserRole::Admin);
+        // Bob uses UserId with Admin role — still cannot see Alice's setting
+        let bob_identity = UserId::from_trusted("bob".into(), UserRole::Admin);
         let bob_scope = ironclaw::tenant::TenantScope::with_identity(bob_identity, Arc::clone(&db));
         let result = bob_scope.get_setting("lang").await.unwrap();
         assert!(
@@ -220,7 +220,7 @@ mod tests {
         );
 
         // Alice sees her own setting
-        let alice_identity2 = Identity::new(OwnerId::from("alice"), UserRole::Member);
+        let alice_identity2 = UserId::from_trusted("alice".into(), UserRole::Regular);
         let alice_scope2 =
             ironclaw::tenant::TenantScope::with_identity(alice_identity2, Arc::clone(&db));
         let alices = alice_scope2.get_setting("lang").await.unwrap();
@@ -232,11 +232,11 @@ mod tests {
         let (backend, _dir) = setup_db().await;
         let db: Arc<dyn Database> = Arc::new(backend);
 
-        let identity = Identity::new(OwnerId::from("henry"), UserRole::Admin);
+        let identity = UserId::from_trusted("henry".into(), UserRole::Admin);
         let scope = ironclaw::tenant::TenantScope::with_identity(identity, db);
         assert_eq!(scope.user_id(), "henry");
-        assert_eq!(scope.identity().owner_id.as_str(), "henry");
-        assert_eq!(scope.identity().role, UserRole::Admin);
+        assert_eq!(scope.identity().as_str(), "henry");
+        assert_eq!(scope.identity().role(), UserRole::Admin);
     }
 
     // -----------------------------------------------------------------------
@@ -276,9 +276,9 @@ mod tests {
             .unwrap()
             .expect("bob should be linked");
 
-        assert_eq!(alice_id.owner_id.as_str(), "alice");
-        assert_eq!(bob_id.owner_id.as_str(), "bob");
-        assert_ne!(alice_id.owner_id, bob_id.owner_id);
+        assert_eq!(alice_id.as_str(), "alice");
+        assert_eq!(bob_id.as_str(), "bob");
+        assert_ne!(alice_id, bob_id);
     }
 
     #[tokio::test]
@@ -317,19 +317,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // OwnerId / Identity unit-level sanity
+    // UserId unit-level sanity
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_owner_id_equality_and_display() {
-        let a = OwnerId::from("alice");
-        let b = OwnerId::from("alice");
-        let c = OwnerId::from("bob");
+    fn test_user_id_equality_and_display() {
+        let a = UserId::from_trusted("alice".into(), UserRole::Regular);
+        let b = UserId::from_trusted("alice".into(), UserRole::Regular);
+        let c = UserId::from_trusted("bob".into(), UserRole::Regular);
 
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.as_str(), "alice");
         assert_eq!(a.to_string(), "alice");
+    }
+
+    #[test]
+    fn test_user_id_new_validates() {
+        assert!(UserId::new("", UserRole::Regular).is_err());
+        assert!(UserId::new("   ", UserRole::Regular).is_err());
+        assert!(UserId::new("alice", UserRole::Owner).is_ok());
+    }
+
+    #[test]
+    fn test_user_role_from_db_role_covers_owner_admin_regular() {
+        assert_eq!(UserRole::from_db_role("owner"), UserRole::Owner);
+        assert_eq!(UserRole::from_db_role("admin"), UserRole::Admin);
+        assert_eq!(UserRole::from_db_role("regular"), UserRole::Regular);
+        // Legacy value from the old two-variant enum must keep deserializing.
+        assert_eq!(UserRole::from_db_role("member"), UserRole::Regular);
+    }
+
+    #[test]
+    fn test_owner_is_admin_regular_is_not() {
+        let owner = UserId::from_trusted("root".into(), UserRole::Owner);
+        assert!(owner.is_admin(), "Owner must satisfy is_admin()");
+        assert!(owner.is_owner());
+        assert!(!owner.is_regular());
+
+        let reg = UserId::from_trusted("alice".into(), UserRole::Regular);
+        assert!(!reg.is_admin());
+        assert!(!reg.is_owner());
+        assert!(reg.is_regular());
     }
 
     #[test]

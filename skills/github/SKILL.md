@@ -141,6 +141,8 @@ GitHub has three search endpoints. Build queries with the [search syntax](https:
 http(method="GET", url="https://api.github.com/search/issues?q=repo:{owner}/{repo}+is:pr+is:open+label:bug")
 ```
 
+- Note: There is no `/search/pulls` endpoint; `/search/issues` is the unified endpoint for both issues and PRs.
+
 **Search code:**
 ```
 http(method="GET", url="https://api.github.com/search/code?q=fn+main+language:rust+repo:{owner}/{repo}")

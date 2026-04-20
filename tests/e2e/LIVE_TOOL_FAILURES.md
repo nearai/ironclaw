@@ -270,7 +270,7 @@ The strongest improvements came from tightening:
 - `decision-capture`
 - `commitment-triage`
 - `idea-parking`
-- `content-creator-assistant`
+- `content-creator-setup`
 
 That is the right layer for "write before confirm" behavior.
 

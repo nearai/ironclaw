@@ -215,10 +215,11 @@ impl EffectExecutor for InstallThenAliasEffects {
                 call_id: "call_install_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "github".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
                     instructions: "Authenticate GitHub".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -283,6 +284,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -294,10 +296,11 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_2".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Authentication {
-                        credential_name: "notion".into(),
+                        credential_name: ironclaw_common::CredentialName::new("notion").unwrap(),
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -311,6 +314,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -323,10 +327,11 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_2".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "test_api_key".into(),
+                    credential_name: ironclaw_common::CredentialName::new("test_api_key").unwrap(),
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -660,6 +665,7 @@ fn sample_pending_gate(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
+        paused_lease: None,
         resume_output: None,
         approval_already_granted: false,
     }
@@ -980,6 +986,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         current_call_id: Some("call_approval_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
     };
 
     let tool_result = effects
@@ -1115,6 +1122,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         current_call_id: Some("call_auth_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
     };
 
     effects.mark_authenticated("http").await;
@@ -1225,6 +1233,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
     };
 
     effects.mark_approved("tool_install").await;
@@ -1365,6 +1374,7 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
     };
 
     effects.mark_authenticated("tool_install").await;

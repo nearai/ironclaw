@@ -1,5 +1,6 @@
 use crate::channels::web::types::{AppEvent, ChannelOnboardingState, OnboardingStateDto};
 use crate::extensions::ConfigureResult;
+use ironclaw_common::ExtensionName;
 
 pub(crate) enum ConfigureFlowOutcome {
     Ready,
@@ -45,7 +46,7 @@ pub(crate) fn classify_configure_result(result: &ConfigureResult) -> ConfigureFl
 }
 
 pub(crate) fn event_from_configure_result(
-    extension_name: String,
+    extension_name: ExtensionName,
     result: &ConfigureResult,
     thread_id: Option<String>,
 ) -> AppEvent {
@@ -83,6 +84,7 @@ mod tests {
     use super::{ConfigureFlowOutcome, classify_configure_result, event_from_configure_result};
     use crate::channels::web::types::ChannelOnboardingState;
     use crate::extensions::ConfigureResult;
+    use ironclaw_common::ExtensionName;
 
     #[test]
     fn classify_configure_result_treats_oauth_continuation_as_auth_required() {
@@ -112,7 +114,11 @@ mod tests {
             onboarding: None,
         };
 
-        let event = event_from_configure_result("notion".to_string(), &result, Some("t1".into()));
+        let event = event_from_configure_result(
+            ExtensionName::new("notion").unwrap(),
+            &result,
+            Some("t1".into()),
+        );
         match event {
             crate::channels::web::types::AppEvent::OnboardingState {
                 state,

@@ -1249,6 +1249,10 @@ struct ThreadArchiveSummary {
     total_tokens: u64,
     #[serde(default)]
     outcome_preview: String,
+    // `#[serde(default)]` lets summaries written before this field existed
+    // continue to deserialize as zero rather than failing.
+    #[serde(default)]
+    total_cost_usd: f64,
 }
 
 fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
@@ -1270,6 +1274,7 @@ fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
         step_count: thread.step_count,
         total_tokens: thread.total_tokens_used,
         outcome_preview: outcome,
+        total_cost_usd: thread.total_cost_usd,
     }
 }
 
@@ -1309,7 +1314,7 @@ fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
         completed_at,
         step_count: summary.step_count,
         total_tokens_used: summary.total_tokens,
-        total_cost_usd: 0.0,
+        total_cost_usd: summary.total_cost_usd,
     })
 }
 
@@ -1780,7 +1785,7 @@ impl Store for HybridStore {
 }
 
 #[cfg(test)]
-mod helper_tests {
+mod tests {
     use super::*;
     use ironclaw_engine::types::shared_owner_id;
 
@@ -2359,6 +2364,75 @@ mod helper_tests {
         // Sha256 hex digest is 64 chars
         assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── ThreadArchiveSummary serialization round-trip ──────────
+    //
+    // Regression: `thread_from_archive` previously hardcoded
+    // `total_cost_usd: 0.0`, silently losing accumulated cost when an
+    // archived thread got rehydrated for a mission detail page. Pin both
+    // a live cost round-trip (serialize → JSON → deserialize →
+    // reconstruct) and legacy compatibility (archive files written before
+    // this field existed still deserialize, falling back to 0.0).
+
+    fn archive_thread_fixture(cost: f64) -> ironclaw_engine::Thread {
+        let mut thread = ironclaw_engine::Thread::new(
+            "archive-round-trip",
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "u1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.step_count = 3;
+        thread.total_tokens_used = 1500;
+        thread.total_cost_usd = cost;
+        thread.completed_at = Some(thread.created_at);
+        thread.state = ironclaw_engine::ThreadState::Completed;
+        thread
+    }
+
+    #[test]
+    fn archive_summary_preserves_total_cost_usd_through_round_trip() {
+        let thread = archive_thread_fixture(0.0105);
+        let summary = compact_thread_summary(&thread);
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let restored: ThreadArchiveSummary = serde_json::from_str(&json).expect("deserialize");
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        let delta = (rehydrated.total_cost_usd - 0.0105_f64).abs();
+        assert!(
+            delta < 1e-12,
+            "total_cost_usd must round-trip: expected 0.0105, got {}",
+            rehydrated.total_cost_usd
+        );
+    }
+
+    #[test]
+    fn archive_summary_handles_legacy_json_without_total_cost_usd_field() {
+        // Craft JSON as it would have been written before this PR: no
+        // `total_cost_usd` key. `#[serde(default)]` must accept it.
+        let legacy = serde_json::json!({
+            "thread_id": uuid::Uuid::new_v4().to_string(),
+            "goal": "legacy",
+            "state": "Completed",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "step_count": 2,
+            "total_tokens": 900,
+            // total_cost_usd deliberately omitted
+        })
+        .to_string();
+
+        let restored: ThreadArchiveSummary =
+            serde_json::from_str(&legacy).expect("legacy summary must still deserialize");
+        assert_eq!(
+            restored.total_cost_usd, 0.0,
+            "missing field should default to 0.0"
+        );
+
+        let rehydrated =
+            thread_from_archive(&restored).expect("thread_from_archive should succeed");
+        assert_eq!(rehydrated.total_cost_usd, 0.0);
     }
 }
 
