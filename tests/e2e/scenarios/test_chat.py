@@ -310,6 +310,49 @@ async def test_turn_cost_event_does_not_render_message_badge(page):
     assert "$1.6296" not in badge_count["text"]
 
 
+async def test_gateway_image_picker_selection_stages_attachment_preview(page):
+    """Selecting an image via the chat file input should stage a unified attachment preview immediately."""
+    attachment_input = page.locator(SEL["attachment_input"])
+
+    await page.wait_for_function(
+        "() => typeof currentThreadId !== 'undefined' && !!currentThreadId",
+        timeout=15000,
+    )
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "preview.png",
+                "mimeType": "image/png",
+                "buffer": ONE_BY_ONE_PNG,
+            }
+        ]
+    )
+
+    await page.wait_for_function(
+        """() => (
+          stagedAttachments.length === 1 &&
+          document.querySelectorAll('#image-preview-strip .attachment-preview-container').length === 1
+        )""",
+        timeout=10000,
+    )
+
+    preview_state = await page.evaluate(
+        """
+        () => ({
+          stagedAttachments: stagedAttachments.length,
+          stagedImages: stagedImages.length,
+          attachmentPreviews: document.querySelectorAll('#image-preview-strip .attachment-preview-container').length,
+          legacyImagePreviews: document.querySelectorAll('#image-preview-strip .image-preview-container').length,
+        })
+        """
+    )
+    assert preview_state["stagedAttachments"] == 1, preview_state
+    assert preview_state["attachmentPreviews"] == 1, preview_state
+    assert preview_state["stagedImages"] == 0, preview_state
+    assert preview_state["legacyImagePreviews"] == 0, preview_state
+
+
 async def test_gateway_attachment_flow_renders_thread_and_reaches_llm(page, ironclaw_server, mock_llm_server):
     """Upload image/PDF/text/slides, render them in-thread, and verify the LLM payload."""
     attachment_input = page.locator(SEL["attachment_input"])

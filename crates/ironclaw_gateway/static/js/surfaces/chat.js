@@ -305,24 +305,6 @@ function handleImageFiles(files) {
   });
 }
 
-document.getElementById('attach-btn').addEventListener('click', () => {
-  document.getElementById('image-file-input').click();
-});
-
-document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
-  e.target.value = '';
-});
-
-document.getElementById('chat-input').addEventListener('paste', (e) => {
-  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
-      const file = items[i].getAsFile();
-      if (file) handleImageFiles([file]);
-    }
-  }
-});
 
 const chatMessagesEl = document.getElementById('chat-messages');
 chatMessagesEl.addEventListener('copy', (e) => {
@@ -698,33 +680,40 @@ function handleAttachmentFiles(files) {
   });
 }
 
+// Canonical upload wiring for the chat composer.
+//
+// Use delegated listeners instead of binding directly to the initial
+// `#image-file-input` node. The chat surface can be re-rendered, and when the
+// hidden file input is replaced the paperclip button still finds the new node
+// via `getElementById(...)` and opens the picker, but any listener attached to
+// the old input is gone. Delegation keeps file selection working across DOM
+// replacement and avoids the silent "picker closes, nothing happens" failure.
 (function wireAttachmentUI() {
-  const attachBtn = document.getElementById('attach-btn');
-  if (attachBtn) {
-    attachBtn.addEventListener('click', () => {
-      const input = document.getElementById('image-file-input');
-      if (input) input.click();
-    });
-  }
-  const fileInput = document.getElementById('image-file-input');
-  if (fileInput) {
-    fileInput.addEventListener('change', (e) => {
-      handleAttachmentFiles(e.target.files);
-      e.target.value = '';
-    });
-  }
-  const chatInputEl = document.getElementById('chat-input');
-  if (chatInputEl) {
-    chatInputEl.addEventListener('paste', (e) => {
-      const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
-          const file = items[i].getAsFile();
-          if (file) handleAttachmentFiles([file]);
-        }
+  document.addEventListener('click', (e) => {
+    const attachBtn = e.target && e.target.closest ? e.target.closest('#attach-btn') : null;
+    if (!attachBtn) return;
+    const input = document.getElementById('image-file-input');
+    if (input && !input.disabled) input.click();
+  });
+
+  document.addEventListener('change', (e) => {
+    const fileInput = e.target;
+    if (!fileInput || fileInput.id !== 'image-file-input') return;
+    handleAttachmentFiles(fileInput.files);
+    fileInput.value = '';
+  });
+
+  document.addEventListener('paste', (e) => {
+    const chatInputEl = e.target;
+    if (!chatInputEl || chatInputEl.id !== 'chat-input') return;
+    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+        const file = items[i].getAsFile();
+        if (file) handleAttachmentFiles([file]);
       }
-    });
-  }
+    }
+  });
 })();
 
 // --- User message attachment parsing/rendering ---
