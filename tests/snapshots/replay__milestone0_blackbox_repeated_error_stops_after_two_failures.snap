@@ -1,0 +1,16 @@
+---
+source: tests/e2e_engine_v2_milestone0_blackbox.rs
+---
+scenario_id: repeated_error_stops_after_two_failures
+response_count: 1
+has_final_response: true
+turn_count: 1
+llm_calls: 3
+tool_calls_total: 2
+tool_calls_failed: 2
+duplicate_tool_calls: 1
+max_failed_tool_streak: 2
+final_state: Done
+tool_sequence:
+  - json
+  - json

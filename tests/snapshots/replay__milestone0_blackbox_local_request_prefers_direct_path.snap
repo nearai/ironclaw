@@ -1,0 +1,15 @@
+---
+source: tests/e2e_engine_v2_milestone0_blackbox.rs
+---
+scenario_id: local_request_prefers_direct_path
+response_count: 1
+has_final_response: true
+turn_count: 1
+llm_calls: 2
+tool_calls_total: 1
+tool_calls_failed: 0
+duplicate_tool_calls: 0
+max_failed_tool_streak: 0
+final_state: Done
+tool_sequence:
+  - echo

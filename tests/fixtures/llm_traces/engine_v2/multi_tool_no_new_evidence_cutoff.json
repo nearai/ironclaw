@@ -1,0 +1,69 @@
+{
+  "model_name": "v2-m0-multi-tool-no-new-evidence-cutoff",
+  "expects": {
+    "response_contains": ["alpha evidence", "beta evidence"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "alpha evidence"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_multi_evidence_echo_1a",
+            "name": "echo",
+            "arguments": {
+              "message": "alpha evidence"
+            }
+          },
+          {
+            "id": "call_m0_multi_evidence_echo_1b",
+            "name": "echo",
+            "arguments": {
+              "message": "beta evidence"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 28
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_multi_evidence_echo_2a",
+            "name": "echo",
+            "arguments": {
+              "message": "alpha evidence"
+            }
+          },
+          {
+            "id": "call_m0_multi_evidence_echo_2b",
+            "name": "echo",
+            "arguments": {
+              "message": "beta evidence"
+            }
+          }
+        ],
+        "input_tokens": 170,
+        "output_tokens": 28
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "did not add meaningful new evidence"
+      },
+      "response": {
+        "type": "text",
+        "content": "I already had the needed results in context: the repeated batch only reconfirmed alpha evidence and beta evidence.",
+        "input_tokens": 230,
+        "output_tokens": 28
+      }
+    }
+  ]
+}

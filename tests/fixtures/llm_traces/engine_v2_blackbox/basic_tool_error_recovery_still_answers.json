@@ -1,0 +1,37 @@
+{
+  "model_name": "v2-m0-blackbox-tool-error-recovery",
+  "expects": {
+    "response_contains": ["not valid json", "error"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "not valid json {"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_recovery_json_1",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 110,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I tried to parse the input but it's not valid JSON. The parser returned an error because the input is malformed.",
+        "input_tokens": 150,
+        "output_tokens": 22
+      }
+    }
+  ]
+}

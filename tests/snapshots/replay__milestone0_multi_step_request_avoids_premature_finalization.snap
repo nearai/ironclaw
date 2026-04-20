@@ -1,7 +1,7 @@
 ---
 source: tests/e2e_engine_v2_milestone0.rs
 ---
-scenario_id: no_new_evidence_cutoff
+scenario_id: multi_step_request_avoids_premature_finalization
 response_count: 1
 has_final_response: true
 turn_count: 1
@@ -12,8 +12,8 @@ duplicate_tool_calls: 1
 max_failed_tool_streak: 0
 hit_iteration_limit: false
 safety_warning_count: 0
-saw_finalization_hint: true
-saw_no_new_evidence_hint: true
+saw_finalization_hint: false
+saw_no_new_evidence_hint: false
 saw_repeated_error_nudge: false
 saw_local_execution_bias_hint: false
 tool_sequence:

@@ -1,0 +1,55 @@
+{
+  "model_name": "v2-m0-local-execution-bias-no-new-evidence-cutoff",
+  "expects": {
+    "response_contains": ["local alpha"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "direct local execution path"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_local_evidence_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "local alpha"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_local_evidence_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "local alpha"
+            }
+          }
+        ],
+        "input_tokens": 155,
+        "output_tokens": 20
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "did not add meaningful new evidence"
+      },
+      "response": {
+        "type": "text",
+        "content": "The repeated local scan added no new information. The result already in context is: local alpha.",
+        "input_tokens": 210,
+        "output_tokens": 24
+      }
+    }
+  ]
+}

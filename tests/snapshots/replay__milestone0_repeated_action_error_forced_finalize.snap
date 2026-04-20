@@ -4,12 +4,18 @@ source: tests/e2e_engine_v2_milestone0.rs
 scenario_id: repeated_action_error_forced_finalize
 response_count: 1
 has_final_response: true
+turn_count: 1
 llm_calls: 3
 tool_calls_total: 3
 tool_calls_failed: 3
+duplicate_tool_calls: 2
 max_failed_tool_streak: 3
 hit_iteration_limit: false
 safety_warning_count: 0
+saw_finalization_hint: false
+saw_no_new_evidence_hint: false
+saw_repeated_error_nudge: true
+saw_local_execution_bias_hint: false
 tool_sequence:
   - json
   - json
