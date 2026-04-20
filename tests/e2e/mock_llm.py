@@ -34,6 +34,10 @@ CANNED_RESPONSES = [
         "Mock MCP search completed successfully.",
     ),
     (
+        re.compile(r"Tool `gmail` returned:|The gmail tool returned:", re.IGNORECASE | re.DOTALL),
+        "Gmail check completed successfully.",
+    ),
+    (
         re.compile(r"Tool `google_calendar` returned:", re.IGNORECASE | re.DOTALL),
         "Calendar check completed successfully.",
     ),
