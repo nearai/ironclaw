@@ -353,6 +353,8 @@ jobs:
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
+      - name: Pre-install zizmor
+        run: pip install zizmor || true
       - name: Run public smoke lane
         env:
           LANE: public-smoke
@@ -617,6 +619,8 @@ jobs:
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
         run: ./scripts/build-wasm-extensions.sh
+      - name: Pre-install zizmor
+        run: pip install zizmor || true
       - name: Run release public full lane
         env:
           LANE: release-public-full

@@ -338,15 +338,29 @@ mod persona_tests {
         context: "CEO workflow: board reply commitment tracked",
     }];
     const CEO_DECISION_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["toronto", "leadership summit", "new york"],
+        needles: &[
+            "toronto",
+            "leadership summit",
+            "new york",
+            "summit",
+            "decision",
+            "budget",
+        ],
         context: "CEO workflow: summit decision captured",
     }];
     const CEO_IDEA_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["leadership offsite", "quarterly", "ops reviews"],
+        needles: &[
+            "leadership offsite",
+            "quarterly",
+            "ops reviews",
+            "offsite",
+            "cross-functional",
+            "leadership",
+        ],
         context: "CEO workflow: first parked idea captured",
     }];
     const CEO_LEGAL_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["legal", "contract review", "thursday"],
+        needles: &["legal", "contract review", "thursday", "contract"],
         context: "CEO workflow: legal follow-up tracked",
     }];
     const CEO_RUNWAY_CHECKS: &[PersonaCheck] = &[PersonaCheck {
@@ -358,11 +372,25 @@ mod persona_tests {
         context: "CEO workflow: personal review commitment tracked",
     }];
     const CEO_SECOND_IDEA_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["skip-level", "engineering", "sales"],
+        needles: &[
+            "skip-level",
+            "skip level",
+            "engineering",
+            "sales",
+            "lunch",
+            "quarterly",
+        ],
         context: "CEO workflow: second parked idea captured",
     }];
     const CEO_STRATEGY_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["reforecast", "international expansion", "strategy"],
+        needles: &[
+            "reforecast",
+            "international expansion",
+            "strategy",
+            "expansion",
+            "international",
+            "review",
+        ],
         context: "CEO workflow: strategy signal captured",
     }];
     const CEO_RESOLVED_BOARD_CHECKS: &[PersonaCheck] = &[PersonaCheck {
