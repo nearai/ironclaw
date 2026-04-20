@@ -2554,6 +2554,7 @@ async fn dispatch_protected_write(
         current_call_id: None,
         source_channel: None,
         user_timezone: None,
+        thread_goal: None,
     };
 
     effects

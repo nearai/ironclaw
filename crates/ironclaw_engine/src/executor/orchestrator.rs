@@ -726,6 +726,7 @@ async fn handle_execute_code_step(
         current_call_id: None,
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -900,6 +901,7 @@ async fn handle_execute_action(
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1463,6 +1465,7 @@ async fn handle_execute_actions_parallel(
             // through the parallel batch path.
             source_channel: thread_source_channel(thread),
             user_timezone: thread_user_timezone(thread),
+            thread_goal: Some(thread.goal.clone()),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1506,6 +1509,7 @@ async fn handle_execute_actions_parallel(
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,
+                thread_goal: Some(thread.goal.clone()),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
