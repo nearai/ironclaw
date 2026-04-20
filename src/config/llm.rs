@@ -178,6 +178,13 @@ impl LlmConfig {
     ) -> Result<Self, ConfigError> {
         let mut fallback = settings.clone();
         fallback.llm_backend = Some("nearai".to_string());
+        // The previously-selected model was tied to the unusable backend
+        // (e.g. "openai/gpt-4o" for OpenRouter, "kimi-k2-turbo-preview" for
+        // a custom kimi provider). Sending it to NearAI would 404. Clear it
+        // so resolve_model falls through to NearAI's default. The DB sync in
+        // Config::re_resolve_llm_with_secrets deletes the row persistently;
+        // this keeps the in-memory config consistent for the current process.
+        fallback.selected_model = None;
         let cfg = Self::resolve(&fallback).map_err(|e| {
             tracing::error!(
                 attempted = %attempted_backend,
@@ -189,6 +196,7 @@ impl LlmConfig {
         tracing::warn!(
             attempted = %attempted_backend,
             active = %cfg.backend,
+            active_model = %cfg.nearai.model,
             "Active LLM backend fell back to NearAI default due to unusable user config"
         );
         Ok(cfg)
@@ -2616,6 +2624,46 @@ mod tests {
         assert!(
             cfg.provider.is_none(),
             "NearAI fallback should not populate provider slot"
+        );
+    }
+
+    #[test]
+    fn resolve_fallback_clears_stale_selected_model() {
+        // Regression: when the user-configured backend (e.g. openrouter) was
+        // paired with a selected_model tied to that backend (e.g.
+        // "openai/gpt-4o"), fallback used to carry the stale model into the
+        // NearAI config. The runtime would then POST /v1/chat/completions
+        // with `"model": "openai/gpt-4o"` to NearAI, which 404s forever.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_API_KEY");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            // Model a user would pick for openai_compatible/openrouter,
+            // nonsensical to NearAI.
+            selected_model: Some("openai/gpt-4o".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
+        assert_eq!(cfg.backend, "nearai");
+        assert_ne!(
+            cfg.nearai.model, "openai/gpt-4o",
+            "fallback must not carry the pre-fallback selected_model into NearAI config — \
+             got a stale model that would 404 on the first request"
+        );
+        assert_eq!(
+            cfg.nearai.model,
+            crate::llm::DEFAULT_MODEL,
+            "NearAI fallback should use the built-in default model when the pre-fallback \
+             selection is cleared"
         );
     }
 
