@@ -1186,6 +1186,20 @@ fn completed_turn_is_newer_than_in_progress(
         .is_some_and(|last_turn_time| last_turn_time >= in_progress_started_at)
 }
 
+/// Whether the tool calls recorded on a turn collectively succeeded.
+///
+/// A turn has "unfinished" tool calls if any recorded tool call errored
+/// (`has_error`) or never produced a result (`!has_result`). When a 502 or
+/// transport drop interrupts a turn mid-execution but a response text was
+/// already committed (e.g. "Done! I've sent..."), the naive
+/// "response.is_some() → completed" check mis-classifies that turn and the
+/// user sees fabricated success on reload. See #1993.
+fn turn_tool_calls_succeeded(turn: &TurnInfo) -> bool {
+    turn.tool_calls
+        .iter()
+        .all(|tc| tc.has_result && !tc.has_error)
+}
+
 fn reconcile_in_progress_with_turns(
     turns: &mut [TurnInfo],
     in_progress: Option<InProgressInfo>,
@@ -1201,7 +1215,12 @@ fn reconcile_in_progress_with_turns(
     };
 
     if in_progress_matches_turn(last_turn, &in_progress) {
-        if last_turn.response.is_some() {
+        // Only treat the matching turn as "already done" if the model wrote
+        // a final response AND every recorded tool call completed
+        // successfully. Otherwise the turn is really still in-progress and
+        // the UI should keep the processing affordance visible so the user
+        // can see (and, in a follow-up, retry) the stuck step (#1993).
+        if last_turn.response.is_some() && turn_tool_calls_succeeded(last_turn) {
             None
         } else {
             last_turn.state = in_progress.state.clone();
@@ -1356,6 +1375,60 @@ mod tests {
             info.tool_calls[0].result_preview.is_none(),
             "in-memory path has no separate preview — leave `result_preview` empty to match DB semantics"
         );
+    }
+
+    /// Regression for #1993 — after a 502 mid-turn the response text can
+    /// be persisted but the claimed tool call never completes. On chat
+    /// reopen, naive rehydration dropped the in-progress flag and showed
+    /// the fabricated "Done!" as if the action had succeeded. The fix
+    /// keeps the matching turn in-progress whenever any recorded tool
+    /// call errored or never produced a result.
+    #[test]
+    fn test_reconcile_retains_in_progress_when_tool_call_failed() {
+        use crate::channels::web::types::ToolCallInfo;
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "send 'hi' to telegram".to_string(),
+            // Model claimed success even though the tool call errored.
+            response: Some("Done! I've sent 'hi' to your Telegram.".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: vec![ToolCallInfo {
+                name: "telegram_send".to_string(),
+                has_result: false,
+                has_error: true,
+                call_id: None,
+                result_preview: None,
+                result: None,
+                error: Some("HTTP 502".to_string()),
+                rationale: None,
+            }],
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let reconciled = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "send 'hi' to telegram".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(
+            reconciled.is_some(),
+            "a turn with a failed tool call must stay in-progress so the UI \
+             does not show the fabricated success"
+        );
+        assert_eq!(turns[0].state, "Processing");
     }
 
     #[test]

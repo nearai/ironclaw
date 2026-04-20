@@ -86,6 +86,27 @@ pub struct AppBuilderFlags {
     pub no_db: bool,
 }
 
+/// Build an ephemeral in-memory secrets store backed by a freshly-generated
+/// master key.
+///
+/// Returns `None` only if the crypto routine fails to initialize — which
+/// should not happen in practice, since the key is produced by the same
+/// generator used throughout the test suite. Exposed as a free function so
+/// that both `install_ephemeral_secrets_store` and the unit tests can exercise
+/// the exact same construction path.
+fn build_ephemeral_secrets_store() -> Option<Arc<dyn SecretsStore + Send + Sync>> {
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+    let ephemeral_key =
+        secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+    match SecretsCrypto::new(ephemeral_key) {
+        Ok(crypto) => Some(Arc::new(InMemorySecretsStore::new(Arc::new(crypto)))),
+        Err(e) => {
+            tracing::warn!("Failed to initialize ephemeral secrets crypto: {e}");
+            None
+        }
+    }
+}
+
 /// Builder that orchestrates the 5 mechanical init phases.
 pub struct AppBuilder {
     config: Config,
@@ -227,6 +248,28 @@ impl AppBuilder {
         Ok(())
     }
 
+    /// Install an ephemeral in-memory secrets store so downstream WASM
+    /// tool/channel wiring can always rely on `self.secrets_store` being
+    /// `Some`.
+    ///
+    /// Used when persistent secrets construction fails (no master key, no DB
+    /// handle, crypto init failure). Without this fallback, WASM tool
+    /// credential injection silently does nothing on hosted TEE deployments
+    /// because the loader only wires a store when `self.secrets_store` is
+    /// `Some` — see #1537 ("WASM credential injection fails on hosted TEE").
+    ///
+    /// Tools that declare required credentials will then refuse to run via
+    /// the fail-closed branch in `resolve_host_credentials`, surfacing a
+    /// clear error instead of issuing unauthenticated HTTP requests.
+    fn install_ephemeral_secrets_store(&mut self) {
+        if let Some(store) = build_ephemeral_secrets_store() {
+            tracing::debug!(
+                "Installing ephemeral in-memory secrets store (persistent secrets unavailable)"
+            );
+            self.secrets_store = Some(store);
+        }
+    }
+
     /// Phase 2: Create secrets store.
     ///
     /// Requires a master key and a backend-specific DB handle. After creating
@@ -259,6 +302,7 @@ impl AppBuilder {
                     );
                 }
 
+                self.install_ephemeral_secrets_store();
                 return Ok(());
             }
         };
@@ -268,6 +312,7 @@ impl AppBuilder {
             Err(e) => {
                 tracing::warn!("Failed to initialize secrets crypto: {}", e);
                 self.handles.take();
+                self.install_ephemeral_secrets_store();
                 return Ok(());
             }
         };
@@ -356,6 +401,16 @@ impl AppBuilder {
         }
 
         self.secrets_store = store;
+
+        // If no persistent store was created (e.g. master key resolved but no
+        // DB handle was available), fall back to an ephemeral in-memory store
+        // so downstream WASM tool/channel wiring still goes through the
+        // credential-injection code path. See `install_ephemeral_secrets_store`
+        // for the rationale (#1537).
+        if self.secrets_store.is_none() {
+            self.install_ephemeral_secrets_store();
+        }
+
         Ok(())
     }
 
@@ -857,19 +912,22 @@ impl AppBuilder {
             }
         }
 
-        // Create extension manager. Use ephemeral in-memory secrets if no
-        // persistent store is configured (listing/install/activate still work).
-        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
-            self.secrets_store
+        // Create extension manager. `init_secrets` guarantees
+        // `self.secrets_store` is Some — either a persistent store or an
+        // ephemeral in-memory fallback — so the extension manager, WASM tool
+        // loader, and WASM channel setup all share the same store instance.
+        // See #1537 for the hosted-TEE regression that motivated unconditional
+        // wiring.
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = match self
+            .secrets_store
+            .as_ref()
         {
-            Arc::clone(s)
-        } else {
-            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-            let ephemeral_key =
-                secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
-            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
-            Arc::new(InMemorySecretsStore::new(crypto))
+            Some(s) => Arc::clone(s),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "secrets store not initialized; call init_secrets() before init_extensions()"
+                ));
+            }
         };
         let extension_manager = {
             let mut em = ExtensionManager::new(
@@ -1450,6 +1508,35 @@ mod tests {
     use crate::hooks::{
         Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
     };
+
+    /// Regression for #1537 — WASM credential injection silently failed on
+    /// hosted TEE deployments because the ephemeral-store fallback was only
+    /// wired for `ExtensionManager`, not for `WasmToolLoader` or
+    /// `setup_wasm_channels`. `build_ephemeral_secrets_store` is the shared
+    /// construction path that `install_ephemeral_secrets_store` uses to
+    /// guarantee `AppBuilder::secrets_store` is always `Some` after
+    /// `init_secrets` — so every downstream consumer sees the same store.
+    #[tokio::test]
+    async fn ephemeral_secrets_store_is_constructible_and_usable() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = super::build_ephemeral_secrets_store()
+            .expect("ephemeral store construction must not fail with a freshly generated key");
+
+        store
+            .create(
+                "user-1",
+                CreateSecretParams::new("matrix_access_token", "tok-abc"),
+            )
+            .await
+            .expect("storing a credential in the ephemeral store must succeed");
+
+        let decrypted = store
+            .get_decrypted("user-1", "matrix_access_token")
+            .await
+            .expect("reading the credential back from the ephemeral store must succeed");
+        assert_eq!(decrypted.expose(), "tok-abc");
+    }
 
     struct SessionStartHook {
         tx: mpsc::UnboundedSender<(String, String)>,

@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
@@ -96,12 +97,73 @@ fn normalize_pause_outcome(
     Ok(())
 }
 
+/// Default orchestrator VM wall-clock budget, in seconds.
+const ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS: u64 = 300;
+/// Floor for the configurable orchestrator budget, to prevent nonsense values.
+const ORCHESTRATOR_MIN_MAX_DURATION_SECS: u64 = 30;
+/// Ceiling for the configurable orchestrator budget, bounding resource waste.
+const ORCHESTRATOR_MAX_MAX_DURATION_SECS: u64 = 3600;
+
+/// Resolve the orchestrator VM wall-clock budget from
+/// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`. Cached for the process lifetime.
+fn orchestrator_max_duration() -> std::time::Duration {
+    static CACHED: OnceLock<std::time::Duration> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS)
+            .clamp(
+                ORCHESTRATOR_MIN_MAX_DURATION_SECS,
+                ORCHESTRATOR_MAX_MAX_DURATION_SECS,
+            );
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// Resource limits for the orchestrator VM.
 fn orchestrator_limits() -> ResourceLimits {
     ResourceLimits::new()
-        .max_duration(std::time::Duration::from_secs(300)) // 5 min (longer than user code)
+        .max_duration(orchestrator_max_duration())
         .max_allocations(5_000_000)
         .max_memory(128 * 1024 * 1024) // 128 MB
+}
+
+/// Detect Monty resource-limit errors and return a user-safe reason that
+/// does not leak the interpreter's internal trace.
+///
+/// The full `err_msg` (which frequently contains a Python traceback carrying
+/// internal file paths and upstream HTTP bodies) is always logged at debug
+/// so operators can correlate, but never returned in the user-visible reason
+/// — see `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
+/// Edge" (#2546).
+fn orchestrator_failure_reason(prefix: &str, err_msg: &str) -> String {
+    debug!(prefix, err_msg, "orchestrator VM failure");
+
+    let lower = err_msg.to_ascii_lowercase();
+    let hit_time_limit =
+        lower.contains("timed out") || lower.contains("timeout") || lower.contains("duration");
+    let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
+    let hit_resource_limit = lower.contains("resource limit")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted");
+    let has_python_traceback =
+        lower.contains("traceback (most recent call last)") || lower.contains("traceback:");
+
+    if hit_time_limit {
+        let secs = orchestrator_max_duration().as_secs();
+        format!(
+            "{prefix}: time budget exhausted after {secs}s (set IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS to raise the limit or simplify the task)"
+        )
+    } else if hit_memory_limit || hit_resource_limit {
+        format!("{prefix}: resource budget exhausted (memory or allocations)")
+    } else if has_python_traceback {
+        // Do not surface Python tracebacks to users; they routinely contain
+        // internal file paths, line numbers, and upstream HTTP response bodies.
+        format!("{prefix}: internal orchestrator failure (see debug logs for details)")
+    } else {
+        format!("{prefix}: {err_msg}")
+    }
 }
 
 /// Maximum consecutive failures before auto-rollback.
@@ -379,7 +441,7 @@ pub async fn execute_orchestrator(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             return Err(EngineError::Effect {
-                reason: format!("Orchestrator runtime error: {e}"),
+                reason: orchestrator_failure_reason("Orchestrator runtime error", &e.to_string()),
             });
         }
         Err(_) => {
@@ -517,7 +579,10 @@ pub async fn execute_orchestrator(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         return Err(EngineError::Effect {
-                            reason: format!("Orchestrator error after resume: {e}"),
+                            reason: orchestrator_failure_reason(
+                                "Orchestrator error after resume",
+                                &e.to_string(),
+                            ),
                         });
                     }
                     Err(_) => {
@@ -2604,6 +2669,78 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+
+    // ── Orchestrator budget / error mapping ─────────────────────
+
+    #[test]
+    fn failure_reason_maps_timeout_to_user_safe_message() {
+        let reason =
+            orchestrator_failure_reason("Orchestrator error after resume", "execution timed out");
+        assert!(
+            reason.contains("time budget exhausted"),
+            "expected user-safe timeout reason, got: {reason}"
+        );
+        assert!(
+            reason.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+            "reason must point operators at the override env var, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn failure_reason_maps_memory_limit() {
+        let reason = orchestrator_failure_reason("Orchestrator runtime error", "memory limit hit");
+        assert!(
+            reason.contains("resource budget exhausted"),
+            "memory-limit reason should not leak raw Monty text, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn failure_reason_passes_through_unknown_errors() {
+        let reason =
+            orchestrator_failure_reason("Orchestrator runtime error", "NameError: foo undefined");
+        assert!(reason.contains("NameError"));
+    }
+
+    #[test]
+    fn failure_reason_strips_python_traceback() {
+        // Regression for #2546 — bug bash 4/16 reported raw Python tracebacks
+        // from the Monty VM being shown verbatim to end users, including
+        // internal file paths ("orchestrator.py", line 907) and upstream
+        // HTTP response bodies.
+        let raw = "Traceback (most recent call last):\n  File \"orchestrator.py\", line 907, in run_loop\n  File \"orchestrator.py\", line 548, in __llm_complete__\nRuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        let reason = orchestrator_failure_reason("Orchestrator error after resume", raw);
+        assert!(
+            reason.contains("internal orchestrator failure"),
+            "should surface a generic internal-failure message, got: {reason}"
+        );
+        for forbidden in [
+            "Traceback",
+            "orchestrator.py",
+            "File \"",
+            "line 907",
+            "line 548",
+            "HTTP 502",
+        ] {
+            assert!(
+                !reason.contains(forbidden),
+                "user-visible reason must not leak `{forbidden}`, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_duration_default_and_bounds() {
+        // Default (no env var set): 300s — but OnceLock may already be
+        // primed by another test in the suite, so we only check it's within
+        // the documented bounds.
+        let secs = orchestrator_max_duration().as_secs();
+        assert!(
+            (ORCHESTRATOR_MIN_MAX_DURATION_SECS..=ORCHESTRATOR_MAX_MAX_DURATION_SECS)
+                .contains(&secs),
+            "orchestrator_max_duration must be within [{ORCHESTRATOR_MIN_MAX_DURATION_SECS}, {ORCHESTRATOR_MAX_MAX_DURATION_SECS}], got {secs}"
+        );
+    }
 
     // ── Python helper unit tests via Monty ──────────────────────
     //

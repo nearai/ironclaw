@@ -31,7 +31,7 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// (try the next provider). The question is: "could this exact same request
 /// succeed if we try again?"
 ///
-/// Retryable: `RequestFailed`, `RateLimited`, `InvalidResponse`,
+/// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
 /// `SessionRenewalFailed`, `Http`, `Io`.
 ///
 /// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
@@ -47,6 +47,7 @@ pub(crate) fn is_retryable(err: &LlmError) -> bool {
         err,
         LlmError::RequestFailed { .. }
             | LlmError::RateLimited { .. }
+            | LlmError::BadGateway { .. }
             | LlmError::InvalidResponse { .. }
             | LlmError::EmptyResponse { .. }
             | LlmError::SessionRenewalFailed { .. }
@@ -155,6 +156,10 @@ impl RetryProvider {
 
                     let delay = match &err {
                         LlmError::RateLimited {
+                            retry_after: Some(duration),
+                            ..
+                        }
+                        | LlmError::BadGateway {
                             retry_after: Some(duration),
                             ..
                         } => *duration,
@@ -336,6 +341,13 @@ mod tests {
             std::io::ErrorKind::ConnectionReset,
             "reset"
         ))));
+        // BadGateway — regression test for #1994 (NEAR AI 502s were
+        // surfacing to users unchanged because they were not retried).
+        assert!(is_retryable(&LlmError::BadGateway {
+            provider: "p".into(),
+            status: 502,
+            retry_after: None,
+        }));
 
         // NOT retryable
         assert!(!is_retryable(&LlmError::AuthFailed {

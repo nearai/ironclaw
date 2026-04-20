@@ -324,6 +324,25 @@ impl NearAiChatProvider {
                 }
             }
 
+            // HTTP 5xx from the upstream LLM gateway — map to BadGateway so the
+            // retry layer backs off, the circuit breaker counts a transient failure,
+            // and the channel boundary produces a user-safe message (never the raw
+            // upstream body, which often contains a Python traceback). The raw
+            // body is logged at debug for operators.
+            if matches!(status_code, 502..=504) {
+                tracing::debug!(
+                    provider = "nearai_chat",
+                    status = status_code,
+                    body_preview = crate::agent::truncate_for_preview(&response_text, 512).as_str(),
+                    "NEAR AI Chat upstream 5xx response"
+                );
+                return Err(LlmError::BadGateway {
+                    provider: "nearai_chat".to_string(),
+                    status: status_code,
+                    retry_after: retry_after_header,
+                });
+            }
+
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
