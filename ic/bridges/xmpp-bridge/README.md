@@ -20,6 +20,10 @@ XMPP_BRIDGE_TOKEN=change-me \
 ./target/release/xmpp-bridge
 ```
 
+For an isolated LunarWing/XMPP bridge test harness, including local API smoke
+tests, live configuration wrappers, and generated user-systemd units, see
+[`docs/LUNARWING_XMPP_TESTING.md`](../../docs/LUNARWING_XMPP_TESTING.md).
+
 ## systemd
 
 On Linux, `ironclaw service install` now installs a companion user unit for
