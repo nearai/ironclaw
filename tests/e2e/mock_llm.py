@@ -1745,8 +1745,8 @@ def main():
         site = web.TCPSite(runner, "127.0.0.1", args.port)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        app["port"] = port  # used by MCP handlers
         print(f"MOCK_LLM_PORT={port}", flush=True)
+        app["port"] = port  # used by MCP handlers
         await asyncio.Event().wait()
 
     asyncio.run(start())
