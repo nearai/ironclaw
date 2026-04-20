@@ -1,0 +1,12 @@
+[Unit]
+Description=LunarWing service watchdog
+Documentation=https://github.com/IronclawCustomTools/ironclaw
+
+[Service]
+Type=oneshot
+Environment=LUNARWING_WATCHDOG_SERVICE=lunarwing.service
+Environment=LUNARWING_WATCHDOG_LOG=/var/log/lunarwing-watchdog.log
+ExecStart=/usr/local/sbin/lunarwing-watchdog
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lunarwing-watchdog

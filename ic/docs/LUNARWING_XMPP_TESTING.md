@@ -231,6 +231,20 @@ sudo systemctl enable --now xmpp-bridge.service
 sudo systemctl enable --now lunarwing.service
 ```
 
+Install the production watchdog timer when you want systemd to check and restart
+`lunarwing.service` hourly:
+
+```bash
+sudo scripts/install-lunarwing-watchdog.sh
+sudo systemctl status lunarwing-watchdog.timer --no-pager
+sudo journalctl -u lunarwing-watchdog.service -n 100 --no-pager
+```
+
+Migration note: `install-lunarwing-watchdog.sh` disables and removes old
+`ironclaw-watchdog` units and the old `/usr/local/sbin/ironclaw-watchdog`
+binary before installing the renamed watchdog, so two watchdog timers do not
+run side by side.
+
 The current app binary is still named `ironclaw`. If you install a renamed
 `lunarwing` binary, change `ExecStart=` in `systemd/lunarwing.service`.
 

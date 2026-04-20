@@ -1,6 +1,6 @@
 # xmpp-bridge
 
-`xmpp-bridge` is the local sidecar used by the installable IronClaw `xmpp` WASM channel.
+`xmpp-bridge` is the local sidecar used by the installable LunarWing `xmpp` WASM channel.
 
 It owns the real XMPP connection, OMEMO state, room membership, and outbound delivery.
 The WASM channel talks to it over loopback HTTP.
@@ -26,18 +26,20 @@ tests, live configuration wrappers, and generated user-systemd units, see
 
 ## systemd
 
-On Linux, `ironclaw service install` now installs a companion user unit for
-`xmpp-bridge` when the bridge binary is available next to the current checkout.
-`ironclaw service start` and `ironclaw service stop` manage both units together.
+On Linux, `ironclaw service install` installs `lunarwing.service` and a
+companion `xmpp-bridge.service` user unit when the bridge binary is available
+next to the current checkout. `ironclaw service start` and
+`ironclaw service stop` manage both units together.
 
-If you run IronClaw as a system service instead of a user service, use the
-example units in:
+If you run LunarWing as a system service instead of a user service, use the
+production templates in:
 
-- `deploy/ironclaw.service`
-- `deploy/xmpp-bridge.service`
+- `systemd/lunarwing.service`
+- `systemd/xmpp-bridge.service`
 
-The main daemon unit now declares `Wants=` / `After=` on `xmpp-bridge.service`
-so the bridge starts before `ironclaw run`.
+The main daemon unit declares `Wants=` / `After=` on `xmpp-bridge.service` so
+the bridge starts before `ironclaw run`. The bridge unit declares
+`PartOf=lunarwing.service` so service stops and restarts are coupled.
 
 ## API
 
@@ -52,14 +54,14 @@ The server also rejects non-loopback clients.
 
 `GET /v1/status` includes the configured plain-room list in `configured_rooms`,
 rooms that have produced MUC presence in `rooms_with_presence`, and the active
-OMEMO `device_id` and `fingerprint` so you can verify or trust the IronClaw
+OMEMO `device_id` and `fingerprint` so you can verify or trust the LunarWing
 device from clients like Gajim. It also reports the configured outbound XMPP
 hourly cap (`configured_max_messages_per_hour`), the live active cap
 (`active_max_messages_per_hour`), and how many outbound messages are still
 counted in the current rolling hour (`outbound_messages_last_hour`).
 
 `POST /v1/outbound-rate-limit` lets you change the active outbound XMPP hourly
-cap without restarting the bridge or IronClaw. Example:
+cap without restarting the bridge or LunarWing. Example:
 
 ```bash
 curl -sS -X POST "$BASE/v1/outbound-rate-limit" \

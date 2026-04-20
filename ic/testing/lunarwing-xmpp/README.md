@@ -137,7 +137,7 @@ export LUNARWING_TEST_SYSTEMCTL_SCOPE=system
 If you use the watchdog with a renamed service, point it at the same main unit:
 
 ```bash
-IRONCLAW_WATCHDOG_SERVICE=lunarwing.service scripts/ironclaw-watchdog.sh
+LUNARWING_WATCHDOG_SERVICE=lunarwing.service scripts/lunarwing-watchdog.sh
 ```
 
 ## 4. Run the Local Bridge Smoke Test
@@ -347,6 +347,17 @@ sudo systemctl enable --now lunarwing.service
 
 Those templates expect `/etc/lunarwing/lunarwing.env` and
 `/etc/lunarwing/xmpp-bridge.env` for production config and secrets.
+
+Install the production watchdog timer with:
+
+```bash
+sudo scripts/install-lunarwing-watchdog.sh
+sudo systemctl status lunarwing-watchdog.timer --no-pager
+```
+
+Migration note: the installer disables/removes old `ironclaw-watchdog` units and
+the old `/usr/local/sbin/ironclaw-watchdog` binary before installing the renamed
+watchdog.
 
 ## 9. Troubleshoot
 
