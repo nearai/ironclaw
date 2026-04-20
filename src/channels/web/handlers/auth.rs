@@ -17,7 +17,7 @@ use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::oauth::state_store::{OAuthStateStore, new_oauth_flow};
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::db::{UserIdentityRecord, UserRecord};
 
 use crate::channels::web::auth::SESSION_COOKIE_NAME;
@@ -807,7 +807,7 @@ fn is_secure(base_url: &str) -> bool {
 
 /// Extract a rate-limit key from request headers (X-Forwarded-For or fallback).
 fn rate_limit_key(headers: &axum::http::HeaderMap) -> String {
-    crate::channels::web::server::rate_limit_key_from_headers(headers)
+    crate::channels::web::platform::state::rate_limit_key_from_headers(headers)
 }
 
 fn error_page(message: &str) -> Response {

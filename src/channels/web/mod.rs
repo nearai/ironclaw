@@ -22,7 +22,6 @@ pub(crate) mod onboarding;
 pub mod openai_compat;
 pub mod platform;
 pub mod responses_api;
-pub mod server;
 pub mod types;
 pub(crate) mod util;
 
@@ -71,7 +70,7 @@ use ironclaw_skills::registry::SkillRegistry;
 use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
 use self::auth::{CombinedAuthState, DbAuthenticator, MultiAuthState};
-use self::server::GatewayState;
+use self::platform::state::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
@@ -173,15 +172,15 @@ impl GatewayChannel {
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
+            chat_rate_limiter: platform::state::PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: platform::state::PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: Arc::new(tokio::sync::RwLock::new(
-                server::ActiveConfigSnapshot::default(),
+                platform::state::ActiveConfigSnapshot::default(),
             )),
             secrets_store: None,
             db_auth: None,
@@ -238,9 +237,9 @@ impl GatewayChannel {
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             auth_manager: self.state.auth_manager.clone(),
-            chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
+            chat_rate_limiter: platform::state::PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: platform::state::PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: platform::state::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
@@ -417,13 +416,13 @@ impl GatewayChannel {
     }
 
     /// Inject a shared routine engine slot used by other HTTP ingress paths.
-    pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
+    pub fn with_routine_engine_slot(mut self, slot: platform::state::RoutineEngineSlot) -> Self {
         self.rebuild_state(|s| s.routine_engine = slot);
         self
     }
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
-    pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
+    pub fn with_active_config(mut self, config: platform::state::ActiveConfigSnapshot) -> Self {
         self.rebuild_state(|s| {
             s.active_config = Arc::new(tokio::sync::RwLock::new(config));
         });
@@ -571,7 +570,7 @@ impl GatewayChannel {
     }
 
     /// Inject the per-user workspace pool for multi-user mode.
-    pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
+    pub fn with_workspace_pool(mut self, pool: Arc<platform::state::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
         self
     }
@@ -613,7 +612,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

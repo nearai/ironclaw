@@ -1,0 +1,7 @@
+{
+  "id": "portfolio",
+  "name": "Portfolio",
+  "slot": "tab",
+  "icon": "📊",
+  "position": "after:memory"
+}

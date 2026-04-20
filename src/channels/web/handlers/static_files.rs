@@ -95,7 +95,7 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio_stream::StreamExt;
 
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 
 pub async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,

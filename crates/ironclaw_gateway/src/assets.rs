@@ -88,6 +88,8 @@ pub const STYLE_CSS: &str = concat!(
     "\n",
     include_str!("../static/styles/components/markdown.css"),
     "\n",
+    include_str!("../static/styles/components/share-modal.css"),
+    "\n",
     include_str!("../static/styles/primitives/toast.css"),
     "\n",
     include_str!("../static/styles/surfaces/auth.css"),

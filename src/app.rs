@@ -489,7 +489,7 @@ impl AppBuilder {
             }
 
             let ws = Arc::new(ws);
-            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+            let pool = Arc::new(crate::channels::web::platform::state::WorkspacePool::new(
                 Arc::clone(db),
                 embeddings.clone(),
                 emb_cache_config,

@@ -22,14 +22,21 @@ use tokio::sync::mpsc;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::MultiAuthState;
-use crate::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter, start_server};
+use crate::channels::web::platform::router::start_server;
+use crate::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::ws::WsConnectionTracker;
 
 #[cfg(test)]
 use crate::channels::web::auth::DbAuthenticator;
 #[cfg(test)]
-use crate::channels::web::server::ActiveConfigSnapshot;
+use crate::channels::web::platform::state::ActiveConfigSnapshot;
+#[cfg(test)]
+use crate::db::Database;
+#[cfg(test)]
+use crate::extensions::ExtensionManager;
+#[cfg(test)]
+use crate::tools::ToolRegistry;
 
 /// Builder for constructing a [`GatewayState`] with sensible test defaults.
 ///
@@ -112,7 +119,7 @@ impl TestGatewayBuilder {
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: Arc::new(tokio::sync::RwLock::new(
-                crate::channels::web::server::ActiveConfigSnapshot::default(),
+                crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
             )),
             secrets_store: None,
             db_auth: None,
@@ -297,4 +304,100 @@ pub(crate) fn test_gateway_state_with_store_and_session_manager(
         frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     })
+}
+
+// --- Cross-slice fixtures (pairing/extensions/oauth/users tests) ---
+
+#[cfg(test)]
+#[cfg(feature = "libsql")]
+pub(crate) async fn insert_test_user(db: &Arc<dyn Database>, id: &str, role: &str) {
+    db.get_or_create_user(crate::db::UserRecord {
+        id: id.to_string(),
+        role: role.to_string(),
+        display_name: id.to_string(),
+        status: "active".to_string(),
+        email: None,
+        last_login_at: None,
+        created_by: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        metadata: serde_json::Value::Null,
+    })
+    .await
+    .expect("create test user"); // safety: cfg(test) fixture
+}
+
+#[cfg(test)]
+pub(crate) fn test_secrets_store() -> Arc<dyn crate::secrets::SecretsStore + Send + Sync> {
+    Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+        crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+            "test-key-at-least-32-chars-long!!".to_string(),
+        ))
+        .expect("crypto"), // safety: cfg(test) fixture
+    )))
+}
+
+#[cfg(test)]
+pub(crate) fn test_ext_mgr(
+    secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+) -> (Arc<ExtensionManager>, tempfile::TempDir, tempfile::TempDir) {
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+    let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+    let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir"); // safety: cfg(test) fixture
+    let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir"); // safety: cfg(test) fixture
+    let ext_mgr = Arc::new(ExtensionManager::new(
+        mcp_sm,
+        mcp_pm,
+        secrets,
+        tool_registry,
+        None,
+        None,
+        wasm_tools_dir.path().to_path_buf(),
+        wasm_channels_dir.path().to_path_buf(),
+        None,
+        "test".to_string(),
+        None,
+        vec![],
+    ));
+    (ext_mgr, wasm_tools_dir, wasm_channels_dir)
+}
+
+#[cfg(test)]
+pub(crate) async fn test_ext_mgr_with_db() -> (
+    Arc<ExtensionManager>,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let secrets = test_secrets_store();
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+    let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+    let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir"); // safety: cfg(test) fixture
+    let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir"); // safety: cfg(test) fixture
+    let (db, db_dir) = crate::testing::test_db().await;
+
+    // Pre-seed an empty servers list so the DB-backed loader does not
+    // fall back to `~/.ironclaw/mcp-servers.json` on dev machines.
+    let empty_servers = crate::tools::mcp::config::McpServersFile::default();
+    crate::tools::mcp::config::save_mcp_servers_to_db(db.as_ref(), "test", &empty_servers)
+        .await
+        .expect("seed empty mcp_servers setting"); // safety: cfg(test) fixture
+
+    let ext_mgr = Arc::new(ExtensionManager::new(
+        mcp_sm,
+        mcp_pm,
+        secrets,
+        tool_registry,
+        None,
+        None,
+        wasm_tools_dir.path().to_path_buf(),
+        wasm_channels_dir.path().to_path_buf(),
+        None,
+        "test".to_string(),
+        Some(db),
+        vec![],
+    ));
+    (ext_mgr, wasm_tools_dir, wasm_channels_dir, db_dir)
 }

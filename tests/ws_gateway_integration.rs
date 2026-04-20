@@ -20,7 +20,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use ironclaw::channels::IncomingMessage;
-use ironclaw::channels::web::server::{GatewayState, start_server};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::GatewayState;
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw_common::AppEvent;
@@ -62,15 +63,19 @@ async fn start_test_server() -> (
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
-        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
-        webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        chat_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            30, 60,
+        ),
+        oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            20, 60,
+        ),
+        webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: Arc::new(tokio::sync::RwLock::new(
-            ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            ironclaw::channels::web::platform::state::ActiveConfigSnapshot::default(),
         )),
         secrets_store: None,
         db_auth: None,
