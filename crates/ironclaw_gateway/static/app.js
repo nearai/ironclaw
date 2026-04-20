@@ -2600,17 +2600,81 @@ function copyCodeBlock(btn) {
 function copyMessage(btn) {
   const message = btn.closest('.message');
   if (!message) return;
-  const text = message.getAttribute('data-copy-text')
+  // `data-copy-text` holds the raw user/assistant content (markdown
+  // for assistant, plain text for user). Fallback chain covers
+  // streaming messages set up before `appendToLastAssistant` writes
+  // the attribute, and the ultimate fallback of the rendered
+  // textContent — but we explicitly strip the copy-button's own
+  // label from the end so "Copy" / "Copied" doesn't leak into the
+  // user's clipboard when the fallback fires.
+  let text = message.getAttribute('data-copy-text')
     || message.getAttribute('data-raw')
-    || message.textContent
     || '';
-  navigator.clipboard.writeText(text).then(() => {
+  if (!text) {
+    const contentEl = message.querySelector('.message-content');
+    text = contentEl ? contentEl.textContent : '';
+  }
+  text = text || '';
+
+  const succeed = () => {
     btn.textContent = I18n.t('message.copied');
     setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
-  }).catch(() => {
+  };
+  const fail = (err) => {
+    if (err) console.warn('copyMessage: clipboard write failed', err);
     btn.textContent = I18n.t('common.copyFailed');
     setTimeout(() => { btn.textContent = I18n.t('message.copy'); }, 1200);
-  });
+  };
+
+  // Prefer the async Clipboard API (requires a secure context — https
+  // or localhost — and an active document focus). Some environments
+  // (older browsers, insecure origins, extension sandboxes that strip
+  // `navigator.clipboard`) still need the legacy `execCommand` path,
+  // so fall back gracefully instead of silently dropping the copy.
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).then(succeed).catch((err) => {
+      // One retry via the legacy path before surfacing the failure.
+      if (fallbackCopyToClipboard(text)) {
+        succeed();
+      } else {
+        fail(err);
+      }
+    });
+    return;
+  }
+  if (fallbackCopyToClipboard(text)) {
+    succeed();
+  } else {
+    fail(null);
+  }
+}
+
+// Legacy `document.execCommand('copy')` path — used when the async
+// Clipboard API is unavailable or rejects. Returns `true` on success.
+// We intentionally use a hidden `<textarea>` (not `<input>`) so multi-
+// line content is preserved, set `readonly` to suppress the soft
+// keyboard on mobile, and position off-screen rather than `display:
+// none` because `display: none` elements can't be selected in some
+// browsers.
+function fallbackCopyToClipboard(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '-10000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (err) {
+    console.warn('fallbackCopyToClipboard: execCommand path failed', err);
+    return false;
+  }
 }
 
 let _lastMessageDate = null;
@@ -4055,12 +4119,25 @@ function loadHistory(before) {
   const isPaginating = !!before;
   if (isPaginating) loadingOlder = true;
 
-  // Show skeleton while loading (only for fresh loads)
+  // Show skeleton only for *first* fresh loads — repeat reloads
+  // (SSE-reconnect after a tab switch, etc.) already have rendered
+  // content and flipping it to a skeleton then back to the same
+  // content caused a visible bounce on every tab-focus cycle.
+  // Instead, keep the existing DOM visible until the new one is
+  // ready and swap atomically below. We also set a `history-replay`
+  // flag so slide-in animations on individual messages are
+  // suppressed while the reload runs — otherwise every message
+  // replays its `slideUp` keyframe and the whole list appears to
+  // cascade in.
   if (!isPaginating) {
     _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
-    chatContainer.innerHTML = '';
-    chatContainer.appendChild(renderSkeleton('message', 3));
+    const hasExistingContent = chatContainer.querySelector('.message, .shell-turn') !== null;
+    chatContainer.classList.add('history-replay');
+    if (!hasExistingContent) {
+      chatContainer.innerHTML = '';
+      chatContainer.appendChild(renderSkeleton('message', 3));
+    }
   }
 
   apiFetch(historyUrl).then((data) => {
@@ -4217,6 +4294,13 @@ function loadHistory(before) {
   }).finally(() => {
     loadingOlder = false;
     removeScrollSpinner();
+    // Clear the replay flag so future messages (streaming responses,
+    // freshly-sent user turns) animate in normally. Done in `.finally`
+    // so a failed fetch doesn't leave animations permanently disabled.
+    const chatContainer = document.getElementById('chat-messages');
+    if (chatContainer) {
+      chatContainer.classList.remove('history-replay');
+    }
   });
 }
 
@@ -11269,6 +11353,17 @@ if (window.__IRONCLAW_LAYOUT__
     return path.replace(/^\/home\/[^/]+\//, '~/').replace(/^\/Users\/[^/]+\//, '~/');
   }
 
+  // The engine creates a per-user fallback project with backend name
+  // "default" — the Projects overview has long rendered it as "General".
+  // Keep the stable backend identifier but present one consistent label
+  // in every UI surface (chrome bar, manage modal, anywhere else the
+  // name is user-visible) so people aren't confused by seeing both.
+  const DEFAULT_PROJECT_BACKEND_NAME = 'default';
+  const DEFAULT_PROJECT_DISPLAY_NAME = 'General';
+  function displayProjectName(name) {
+    return name === DEFAULT_PROJECT_BACKEND_NAME ? DEFAULT_PROJECT_DISPLAY_NAME : (name || '');
+  }
+
   function ensureChrome() {
     let bar = document.getElementById('project-chrome');
     if (bar) return bar;
@@ -11324,7 +11419,7 @@ if (window.__IRONCLAW_LAYOUT__
     bar.hidden = false;
     bar.classList.remove('project-chrome-empty-state');
     empty.hidden = true;
-    bar.querySelector('#project-chrome-name').textContent = threadProject.name || '';
+    bar.querySelector('#project-chrome-name').textContent = displayProjectName(threadProject.name);
     const folderEl = bar.querySelector('#project-chrome-folder');
     folderEl.textContent = contractHome(threadProject.workspace_path || '');
     folderEl.title = threadProject.workspace_path || '';
@@ -11536,7 +11631,7 @@ if (window.__IRONCLAW_LAYOUT__
     const defBranch = (p.metadata && p.metadata.default_branch) || '';
     row.innerHTML = ''
       + '<div class="project-modal-row-main">'
-      + '  <div class="project-modal-row-name">' + escapeHtml(p.name) + '</div>'
+      + '  <div class="project-modal-row-name">' + escapeHtml(displayProjectName(p.name)) + '</div>'
       + '  <div class="project-modal-row-meta">'
       +      (p.workspace_path
                 ? '<code>' + escapeHtml(contractHome(p.workspace_path)) + '</code>'
@@ -11614,12 +11709,21 @@ if (window.__IRONCLAW_LAYOUT__
   function showEditForm(p) {
     const body = document.getElementById('project-modal-body');
     if (!body) return;
+    // The auto-created `default` project is a system-managed shared
+    // "General" bucket; renaming it would break the backend's name
+    // lookup (`bridge::router` finds it by `p.name == "default"`).
+    // Lock the name field rather than hide it, so the user still sees
+    // the labelled row and understands the intent.
+    const isDefault = p.name === DEFAULT_PROJECT_BACKEND_NAME;
+    const nameValue = isDefault ? DEFAULT_PROJECT_DISPLAY_NAME : (p.name || '');
     body.innerHTML = '';
     const form = document.createElement('div');
     form.className = 'project-modal-form';
     form.innerHTML = ''
       + '<h4>' + escapeHtml(t('project.modal.editTitle', 'Edit project')) + '</h4>'
-      + '<label>Name<input type="text" id="pe-name" value="' + escapeHtml(p.name) + '"></label>'
+      + '<label>Name<input type="text" id="pe-name" value="' + escapeHtml(nameValue) + '"'
+      +     (isDefault ? ' disabled title="The shared General project cannot be renamed."' : '')
+      +     '></label>'
       + '<label>Description<input type="text" id="pe-description" value="'
       +     escapeHtml(p.description || '') + '"></label>'
       + '<label>GitHub repo<input type="text" id="pe-github" value="'
@@ -11634,8 +11738,13 @@ if (window.__IRONCLAW_LAYOUT__
       + '</div>';
     body.appendChild(form);
     form.querySelector('#pe-save').addEventListener('click', async () => {
+      // Never round-trip "General" as the name — it would rename the
+      // stable backend identifier and break project resolution for
+      // every thread that relies on it. Preserve the original `default`
+      // for the auto-created row.
+      const enteredName = form.querySelector('#pe-name').value.trim();
       const fields = {
-        name: form.querySelector('#pe-name').value.trim(),
+        name: isDefault ? DEFAULT_PROJECT_BACKEND_NAME : enteredName,
         description: form.querySelector('#pe-description').value.trim(),
         github_repo: form.querySelector('#pe-github').value.trim(),
         default_branch: form.querySelector('#pe-branch').value.trim(),

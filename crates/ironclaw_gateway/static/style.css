@@ -994,6 +994,18 @@ body {
   animation: slideUp 350ms var(--ease-spring);
 }
 
+/* During a history replay (SSE reconnect after the browser tab has
+   been backgrounded past SSE_RELOAD_THRESHOLD_MS) the list is rebuilt
+   from /api/chat/history. Suppressing the per-message slide-in in
+   that window removes the "bounce cascade" the user sees on every
+   tab refocus — the messages are the same ones they were just
+   looking at. `loadHistory()`'s `.finally` clears the flag so fresh
+   streaming turns still animate. */
+.history-replay .message,
+.history-replay .shell-turn {
+  animation: none !important;
+}
+
 @keyframes slideUp {
   0% { opacity: 0; transform: translateY(12px) scale(0.98); }
   70% { opacity: 1; transform: translateY(-2px) scale(1.005); }

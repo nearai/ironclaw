@@ -118,12 +118,22 @@ pub async fn chat_threads_handler(
             let mut threads = Vec::new();
 
             for s in &summaries {
-                let project = crate::channels::web::handlers::engine::thread_project_context(
-                    state.as_ref(),
-                    &identity.user_id,
-                    s.id,
-                )
-                .await;
+                // The pinned Assistant conversation is the user's home
+                // thread — it spans all projects and must not show
+                // project chrome. A previous active-project that got
+                // resolved here would have made the Assistant bar
+                // look like a project-scoped thread and confused
+                // the project/thread mental model.
+                let project = if s.id == assistant_id {
+                    None
+                } else {
+                    crate::channels::web::handlers::engine::thread_project_context(
+                        state.as_ref(),
+                        &identity.user_id,
+                        s.id,
+                    )
+                    .await
+                };
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),

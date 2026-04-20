@@ -1057,12 +1057,20 @@ pub(crate) async fn chat_threads_handler(
                 let mut threads = Vec::new();
 
                 for s in &summaries {
-                    let project = crate::channels::web::handlers::engine::thread_project_context(
-                        state.as_ref(),
-                        &user.user_id,
-                        s.id,
-                    )
-                    .await;
+                    // Assistant is the home conversation across projects
+                    // — never resolve a project for it so the chrome
+                    // bar stays hidden when the user selects it. See
+                    // handlers::chat for the matching comment.
+                    let project = if s.id == assistant_id {
+                        None
+                    } else {
+                        crate::channels::web::handlers::engine::thread_project_context(
+                            state.as_ref(),
+                            &user.user_id,
+                            s.id,
+                        )
+                        .await
+                    };
                     let info = ThreadInfo {
                         id: s.id,
                         state: live_thread_states
