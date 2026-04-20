@@ -97,15 +97,9 @@ pub struct Project {
 }
 
 impl Project {
-    /// Create a new project with a deterministic ID derived from
-    /// `(user_id, slugify(name))`. Calling `Project::new` twice with the
-    /// same inputs returns the same project ID, which is what makes
-    /// workspace-backed project storage idempotent: writing
-    /// `projects/<slug>/AGENTS.md` creates the same project every time.
-    ///
-    /// Callers that need a throwaway project with a random UUID (tests,
-    /// synthetic fixtures) should construct the struct directly with
-    /// `ProjectId::new()`.
+    /// Project with deterministic ID from `(user_id, slugify(name))` —
+    /// same inputs yield the same ID, so `memory_write` is idempotent.
+    /// For a random-UUID throwaway (tests), build the struct directly.
     pub fn new(
         user_id: impl Into<String>,
         name: impl Into<String>,
@@ -176,5 +170,95 @@ mod tests {
         // Different user same slug -> different ID
         let p3 = Project::new("user-2", "commitments", "");
         assert_ne!(p1.id, p3.id);
+    }
+
+    /// Every path that normalizes to the same slug must land on the
+    /// same `ProjectId`. If this breaks, workspace paths stop round-tripping
+    /// and auto-registered projects silently fork.
+    #[test]
+    fn slug_variants_collapse_to_one_project_id() {
+        use crate::types::slugify_simple;
+        let user = "user-1";
+        let canonical = Project::new(user, "my-project", "").id;
+        // Each input below must slugify to `my-project`.
+        let variants = [
+            "my-project",
+            "My Project",
+            "MY PROJECT",
+            "  my-project  ",
+            "my--project",
+            "my___project",
+            "my.project",
+            "my/project",
+            "my@project!",
+            "-my-project-",
+            "---my---project---",
+            "My\tProject",
+        ];
+        for name in variants {
+            assert_eq!(
+                slugify_simple(name),
+                "my-project",
+                "slugify_simple({name:?}) should produce `my-project`"
+            );
+            assert_eq!(
+                Project::new(user, name, "").id,
+                canonical,
+                "Project::new({name:?}) must share canonical ID"
+            );
+        }
+    }
+
+    /// Unicode names must slugify deterministically (folded to lowercase
+    /// ASCII by dropping non-alphanumerics), not panic or silently drop
+    /// characters in a way that changes the ID across platforms.
+    #[test]
+    fn unicode_names_slugify_consistently() {
+        use crate::types::slugify_simple;
+        // Non-ASCII letters become dashes (they are not ASCII alphanumeric).
+        assert_eq!(slugify_simple("Café"), "caf");
+        assert_eq!(slugify_simple("日本語"), "");
+        assert_eq!(slugify_simple("emoji 🚀 project"), "emoji-project");
+        // Accented but followed by ASCII — still deterministic.
+        let a = Project::new("u", "Café au Lait", "").id;
+        let b = Project::new("u", "Café au Lait", "").id;
+        assert_eq!(a, b);
+    }
+
+    /// A name that slugifies to an empty string still produces a valid
+    /// `ProjectId` — it shouldn't panic. Different empty-after-slugify
+    /// names share the same ID (they all map to the empty-slug bucket).
+    #[test]
+    fn empty_slug_produces_stable_id() {
+        use crate::types::slugify_simple;
+        assert_eq!(slugify_simple(""), "");
+        assert_eq!(slugify_simple("---"), "");
+        assert_eq!(slugify_simple("!@#$%"), "");
+        let a = Project::new("u", "", "").id;
+        let b = Project::new("u", "---", "").id;
+        let c = Project::new("u", "!@#$%", "").id;
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        // But a different user under the same empty slug gets a different ID.
+        let d = Project::new("other", "", "").id;
+        assert_ne!(a, d);
+    }
+
+    /// `slugify_simple` must trim trailing dashes and collapse runs —
+    /// it's the contract synth_bare_project and auto-registration both rely on.
+    #[test]
+    fn slugify_simple_normalizes_runs_and_edges() {
+        use crate::types::slugify_simple;
+        assert_eq!(slugify_simple("a"), "a");
+        assert_eq!(slugify_simple("-a-"), "a");
+        assert_eq!(slugify_simple("a-b"), "a-b");
+        assert_eq!(slugify_simple("a   b"), "a-b");
+        assert_eq!(slugify_simple("a!!!b"), "a-b");
+        // Digits preserved.
+        assert_eq!(slugify_simple("q4-2026-plan"), "q4-2026-plan");
+        // Very long input — slug length not truncated here (that's
+        // slugify()'s job, not slugify_simple's), but stays well-formed.
+        let long = "a".repeat(500);
+        assert_eq!(slugify_simple(&long), long);
     }
 }

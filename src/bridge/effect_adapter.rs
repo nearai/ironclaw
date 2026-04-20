@@ -3983,6 +3983,272 @@ Use this skill to set up a Pika meeting.
         assert_eq!(a.id, d.id, "case-different names with same slug match");
     }
 
+    // ── Caller-level project auto-registration tests ──────────
+    //
+    // `extract_project_slug_from_target` is a predicate that gates a
+    // side effect (`save_project`) via `ensure_project_for_memory_write`.
+    // Per .claude/rules/testing.md, a unit test on the extractor alone
+    // is not sufficient — we must drive execute_action("memory_write")
+    // through the full hook path and inspect the persisted state.
+
+    /// Tool stub that echoes a minimal success body — enough for the
+    /// auto-register post-hook to run and splice `project_id` into it.
+    struct MemoryWriteStub;
+
+    #[async_trait]
+    impl Tool for MemoryWriteStub {
+        fn name(&self) -> &str {
+            "memory_write"
+        }
+        fn description(&self) -> &str {
+            "stub memory_write for auto-register tests"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"status": "ok"}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    /// Drive one `memory_write` with the given target and return
+    /// (result_output, projects_in_store_for_user).
+    async fn run_memory_write(
+        target: &str,
+        user_id: &str,
+    ) -> (serde_json::Value, Vec<ironclaw_engine::Project>) {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _dyn_store) = make_adapter_with_missions_and_store(tools).await;
+
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user_id.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_1"))
+        };
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({"target": target, "content": "x"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("memory_write should succeed");
+        assert!(!result.is_error, "got error: {}", result.output);
+
+        let projects = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user_id)
+            .cloned()
+            .collect();
+        (result.output, projects)
+    }
+
+    /// Canonical slug: the project gets auto-registered and the
+    /// output has a `project_id` splicing matches `Project::new`.
+    #[tokio::test]
+    async fn memory_write_auto_registers_project_on_canonical_slug() {
+        let user = "alice";
+        let (output, projects) = run_memory_write("projects/commitments/AGENTS.md", user).await;
+
+        assert_eq!(projects.len(), 1, "exactly one project should exist");
+        let expected_id = ironclaw_engine::Project::new(user, "commitments", "").id;
+        assert_eq!(projects[0].id, expected_id);
+        assert_eq!(projects[0].name, "commitments");
+        assert_eq!(
+            output.get("project_id").and_then(|v| v.as_str()),
+            Some(expected_id.0.to_string().as_str()),
+            "output should carry the newly-registered project_id"
+        );
+    }
+
+    /// Idempotency: writing twice must not duplicate the project.
+    /// This is the invariant `ProjectId::from_slug` exists to enforce.
+    #[tokio::test]
+    async fn memory_write_is_idempotent_across_repeated_writes() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+        let user = "alice";
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+        };
+
+        for path in [
+            "projects/commitments/AGENTS.md",
+            "projects/commitments/open/foo.md",
+            "projects/commitments/.ceo-setup-complete",
+        ] {
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let projects: Vec<_> = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user)
+            .cloned()
+            .collect();
+        assert_eq!(
+            projects.len(),
+            1,
+            "three writes to the same project must not create duplicates"
+        );
+    }
+
+    /// Non-`projects/` writes must never trigger auto-registration.
+    #[tokio::test]
+    async fn memory_write_outside_projects_does_not_register() {
+        let (output, projects) = run_memory_write("daily/2026-04-14.md", "alice").await;
+        assert!(projects.is_empty(), "random writes must not auto-register");
+        assert!(
+            output.get("project_id").is_none(),
+            "no project_id splicing for non-project paths"
+        );
+    }
+
+    /// Edge case: nested subdirectories resolve to the TOP-level slug,
+    /// not a per-subdir project (which would fork identity).
+    #[tokio::test]
+    async fn memory_write_nested_path_registers_top_level_project() {
+        let user = "alice";
+        let (_output, projects) =
+            run_memory_write("projects/commitments/open/team/sarah-q2-budget.md", user).await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].id,
+            ironclaw_engine::Project::new(user, "commitments", "").id,
+            "nested writes must register the top-level project, not a sub-project"
+        );
+    }
+
+    /// Weird-slug case: `projects/My Project/...` still registers a
+    /// project, but the registered project's ID matches what
+    /// `Project::new` (which internally slugifies) would produce.
+    /// This is the anti-fork invariant the review flagged.
+    #[tokio::test]
+    async fn memory_write_weird_slug_matches_project_new_id() {
+        let user = "alice";
+        // These paths all slugify to `my-project`.
+        for path in [
+            "projects/My Project/AGENTS.md",
+            "projects/MY_PROJECT/context.md",
+            "projects/my-project/README.md",
+        ] {
+            let tools = Arc::new(ToolRegistry::new());
+            tools.register(Arc::new(MemoryWriteStub)).await;
+            let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error, "path={path}: {}", r.output);
+
+            let projects: Vec<_> = store.projects.read().await.values().cloned().collect();
+            assert_eq!(
+                projects.len(),
+                1,
+                "path={path}: expected exactly one project"
+            );
+            let expected = ironclaw_engine::Project::new(user, "my-project", "").id;
+            assert_eq!(
+                projects[0].id, expected,
+                "path={path}: auto-registered ID must equal Project::new(_, \"my-project\", _) \
+                 — divergence means the workspace dir will fork identity"
+            );
+        }
+    }
+
+    /// User isolation: two users writing to the same slug must end up
+    /// with different projects, never shared state across tenants.
+    #[tokio::test]
+    async fn memory_write_isolates_projects_by_user() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+
+        for user in ["alice", "bob"] {
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({
+                        "target": "projects/notes/entry.md",
+                        "content": "x"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let all: Vec<_> = store.projects.read().await.values().cloned().collect();
+        assert_eq!(all.len(), 2, "one project per user, never shared");
+        let a = all.iter().find(|p| p.user_id == "alice").unwrap();
+        let b = all.iter().find(|p| p.user_id == "bob").unwrap();
+        assert_ne!(a.id, b.id, "same slug across users must yield distinct IDs");
+    }
+
+    /// Pathological slug inputs that `extract_project_slug_from_target`
+    /// rejects outright — no project registration and no project_id in
+    /// the output. Covers `projects/` alone, bare `projects/foo`
+    /// (no file), traversal, and dotfile-prefixed dirs.
+    #[tokio::test]
+    async fn memory_write_rejects_pathological_project_targets() {
+        for target in [
+            "projects/",
+            "projects/foo",            // no file segment
+            "projects/./foo.md",       // dot segment
+            "projects/../escape.md",   // traversal
+            "projects/.hidden/foo.md", // dotfile-prefixed dir
+        ] {
+            let (output, projects) = run_memory_write(target, "alice").await;
+            assert!(
+                projects.is_empty(),
+                "{target}: must not auto-register; got {projects:?}"
+            );
+            assert!(
+                output.get("project_id").is_none(),
+                "{target}: must not splice project_id"
+            );
+        }
+    }
+
     // ── Caller-level mission action tests ─────────────────────
     //
     // These drive execute_action("mission_create"/...) through the full
@@ -3998,6 +4264,8 @@ Use this skill to set up a Pika meeting.
         pub(super) struct TestStore {
             threads: RwLock<HashMap<ThreadId, Thread>>,
             missions: RwLock<HashMap<MissionId, Mission>>,
+            pub(in crate::bridge::effect_adapter) projects:
+                RwLock<HashMap<ProjectId, ironclaw_engine::Project>>,
         }
 
         impl TestStore {
@@ -4005,6 +4273,7 @@ Use this skill to set up a Pika meeting.
                 Self {
                     threads: RwLock::new(HashMap::new()),
                     missions: RwLock::new(HashMap::new()),
+                    projects: RwLock::new(HashMap::new()),
                 }
             }
         }
@@ -4053,14 +4322,34 @@ Use this skill to set up a Pika meeting.
             ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
                 Ok(vec![])
             }
-            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+            async fn save_project(
+                &self,
+                project: &ironclaw_engine::Project,
+            ) -> Result<(), EngineError> {
+                self.projects
+                    .write()
+                    .await
+                    .insert(project.id, project.clone());
                 Ok(())
             }
             async fn load_project(
                 &self,
-                _: ProjectId,
+                id: ProjectId,
             ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
-                Ok(None)
+                Ok(self.projects.read().await.get(&id).cloned())
+            }
+            async fn list_projects(
+                &self,
+                user_id: &str,
+            ) -> Result<Vec<ironclaw_engine::Project>, EngineError> {
+                Ok(self
+                    .projects
+                    .read()
+                    .await
+                    .values()
+                    .filter(|p| p.user_id == user_id)
+                    .cloned()
+                    .collect())
             }
             async fn save_memory_doc(
                 &self,
@@ -4153,10 +4442,25 @@ Use this skill to set up a Pika meeting.
     /// Build a MissionManager backed by an in-memory store and wire it
     /// into an EffectBridgeAdapter so tests can drive `execute_action`.
     async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new()))
+            .await
+            .0
+    }
+
+    /// Same as `make_adapter_with_missions` but exposes both the adapter
+    /// (with a caller-provided `ToolRegistry` so tests can register stubs)
+    /// and the backing store, so assertions can inspect persisted state
+    /// after `execute_action` runs.
+    async fn make_adapter_with_missions_and_store(
+        tools: Arc<ToolRegistry>,
+    ) -> (
+        EffectBridgeAdapter,
+        Arc<mission_store::TestStore>,
+        Arc<dyn ironclaw_engine::Store>,
+    ) {
         use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
         use ironclaw_safety::SafetyConfig;
 
-        // Minimal LlmBackend mock — missions don't call the LLM in these tests.
         struct NoopLlm;
         #[async_trait]
         impl ironclaw_engine::LlmBackend for NoopLlm {
@@ -4176,7 +4480,6 @@ Use this skill to set up a Pika meeting.
             }
         }
 
-        // Minimal EffectExecutor mock.
         struct NoopEffects;
         #[async_trait]
         impl ironclaw_engine::EffectExecutor for NoopEffects {
@@ -4203,7 +4506,8 @@ Use this skill to set up a Pika meeting.
             }
         }
 
-        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(mission_store::TestStore::new());
+        let concrete_store = Arc::new(mission_store::TestStore::new());
+        let store: Arc<dyn ironclaw_engine::Store> = concrete_store.clone();
         let thread_manager = Arc::new(ThreadManager::new(
             Arc::new(NoopLlm),
             Arc::new(NoopEffects),
@@ -4215,7 +4519,7 @@ Use this skill to set up a Pika meeting.
         let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
 
         let adapter = EffectBridgeAdapter::new(
-            Arc::new(ToolRegistry::new()),
+            tools,
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -4223,7 +4527,7 @@ Use this skill to set up a Pika meeting.
             Arc::new(HookRegistry::default()),
         );
         adapter.set_mission_manager(Arc::new(mgr)).await;
-        adapter
+        (adapter, concrete_store, store)
     }
 
     /// Regression: mission_create with missing cadence must return an
