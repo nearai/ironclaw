@@ -105,13 +105,29 @@ impl McpClient {
     /// Use this for local development servers or servers that don't require auth.
     pub fn new(server_url: impl Into<String>) -> Self {
         let url: String = server_url.into();
-        let name_str = extract_server_name(&url);
         // `extract_server_name` is a heuristic URL parser that may emit
-        // names outside the strict allowlist (e.g. "unknown" when the URL
-        // cannot be parsed). `from_trusted` accepts whatever it produced;
-        // validation ran upstream in `McpServerConfig::validate` for the
-        // production path.
-        let name = McpServerName::from_trusted(name_str);
+        // values outside the strict allowlist — e.g. the bracketed IPv6
+        // host `[::1]` survives `host_str()` and contains the `:`
+        // forbidden by `McpServerName`'s rules. Apply the same
+        // hyphen→underscore fold as the other constructors (only when
+        // a hyphen is present, to avoid an unnecessary allocation), then
+        // validate through `McpServerName::new`. If validation fails we
+        // fall back to the canonical `"unknown"` value rather than
+        // bypassing the allowlist via `from_trusted`.
+        let mut name_str = extract_server_name(&url);
+        if name_str.contains('-') {
+            name_str = name_str.replace('-', "_");
+        }
+        let name = McpServerName::new(&name_str).unwrap_or_else(|e| {
+            tracing::debug!(
+                extracted = %name_str,
+                error = %e,
+                "McpClient::new: extracted server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)")
+        });
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
         Self {
@@ -138,9 +154,21 @@ impl McpClient {
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
         // Preserve historical hyphen-to-underscore folding so session
-        // keys match `create_client_from_config`'s canonicalization.
+        // keys match `create_client_from_config`'s canonicalization, then
+        // re-validate through `McpServerName::new`. Caller-provided input
+        // must never reach `from_trusted` — if validation fails we fall
+        // back to the canonical `"unknown"` value.
         let raw: String = server_name.into().replace('-', "_");
-        let name = McpServerName::from_trusted(raw);
+        let name = McpServerName::new(&raw).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %raw,
+                error = %e,
+                "McpClient::new_with_name: caller-provided name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)")
+        });
         let url: String = server_url.into();
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
@@ -959,6 +987,54 @@ mod tests {
         assert_eq!(client.user_id, "<unset>");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
+    }
+
+    /// Regression for review Fix 7/8: `McpClient::new` must not bypass the
+    /// `McpServerName` allowlist when `extract_server_name` produces a
+    /// value containing forbidden characters (e.g. the `:` in an IPv6
+    /// bracketed host such as `[::1]`). Historically we called
+    /// `McpServerName::from_trusted(...)` here, which silently accepted
+    /// whatever the heuristic parser returned.
+    ///
+    /// Behavior under the fix: invalid extracted names fall back to the
+    /// canonical `"unknown"` and a `tracing::debug!` records the failure.
+    /// Either outcome must still be a valid `McpServerName`.
+    #[test]
+    fn new_validates_server_name_for_ipv6_host() {
+        let client = McpClient::new("http://[::1]:8080/");
+        // The extracted name must round-trip through `McpServerName::new`
+        // without error — the contract of the fix is "allowlist or
+        // canonical fallback, never a raw un-checked string".
+        let name = McpServerName::new(client.server_name())
+            .expect("server_name must be a valid McpServerName (allowlist or fallback)");
+        // In this environment the extracted host `[::1]` contains the
+        // forbidden `:` and `[`/`]` characters, so the fallback fires.
+        // Document that explicitly — the point of the test is that we
+        // end up with `"unknown"` rather than a silently-accepted bogus
+        // value.
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "IPv6 bracketed host should fall back to canonical 'unknown'"
+        );
+    }
+
+    /// Regression for review Fix 8: `McpClient::new_with_name` must not
+    /// bypass the allowlist when the caller passes a name that contains
+    /// forbidden characters after the hyphen fold.
+    #[test]
+    fn new_with_name_falls_back_on_invalid_input() {
+        // Slashes are forbidden by the allowlist and are not touched by
+        // the hyphen fold, so the validation must fire and the fallback
+        // engage.
+        let client = McpClient::new_with_name("bad/name", "http://localhost:8080");
+        let name = McpServerName::new(client.server_name())
+            .expect("server_name must be a valid McpServerName (allowlist or fallback)");
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "invalid caller-supplied name should fall back to canonical 'unknown'"
+        );
     }
 
     #[test]

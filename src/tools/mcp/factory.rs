@@ -45,19 +45,26 @@ pub async fn create_client_from_config(
     // Re-validate through `McpServerName::new` so a malformed name (e.g.
     // a config row persisted before the #2400 allowlist tightened) fails
     // fast at factory time instead of silently producing an MCP session
-    // keyed by an un-checked string. The typed value is discarded for
-    // now — client / transport still carry `String` — but the validation
-    // still fires as a gate. The follow-up that threads `McpServerName`
-    // through `McpServerConfig.name` itself will remove this drop.
-    McpServerName::new(&server_name).map_err(|e| McpFactoryError::InvalidConfig {
-        name: server_name.clone(),
-        reason: e.to_string(),
-    })?;
+    // keyed by an un-checked string. Capture the validated value and
+    // thread it through the hottest internal uses (transport constructors,
+    // process spawn, client factories below). The remaining `String`
+    // uses (e.g. `McpServerConfig.name` inside the moved `server`) will
+    // be migrated in the follow-up that switches `McpServerConfig.name`
+    // to the typed newtype.
+    // TODO(type-safety PR 4 of 4): thread `validated_name` through
+    // `McpServerConfig.name`, `McpClient::new_with_transport`, and
+    // `McpClient::new_authenticated` so the String clones below can go
+    // away entirely.
+    let validated_name =
+        McpServerName::new(&server_name).map_err(|e| McpFactoryError::InvalidConfig {
+            name: server_name.clone(),
+            reason: e.to_string(),
+        })?;
 
     match server.effective_transport() {
         EffectiveTransport::Stdio { command, args, env } => {
             let transport = process_manager
-                .spawn_stdio(&server_name, command, args.to_vec(), env.clone())
+                .spawn_stdio(validated_name.as_str(), command, args.to_vec(), env.clone())
                 .await
                 .map_err(|e| McpFactoryError::StdioSpawn {
                     name: server_name.clone(),
@@ -65,7 +72,7 @@ pub async fn create_client_from_config(
                 })?;
 
             Ok(McpClient::new_with_transport(
-                &server_name,
+                validated_name.as_str(),
                 transport as Arc<dyn McpTransport>,
                 None,
                 secrets,
@@ -76,7 +83,7 @@ pub async fn create_client_from_config(
         #[cfg(unix)]
         EffectiveTransport::Unix { socket_path } => {
             let transport = crate::tools::mcp::unix_transport::UnixMcpTransport::connect(
-                &server_name,
+                validated_name.as_str(),
                 socket_path,
             )
             .await
@@ -86,7 +93,7 @@ pub async fn create_client_from_config(
             })?;
 
             Ok(McpClient::new_with_transport(
-                &server_name,
+                validated_name.as_str(),
                 Arc::new(transport) as Arc<dyn McpTransport>,
                 None,
                 secrets,
@@ -119,11 +126,11 @@ pub async fn create_client_from_config(
             // the client (via `with_session_manager`) is not enough — the
             // transport must know about it to read/write the header.
             let transport = Arc::new(
-                HttpMcpTransport::new(server.url.clone(), server_name.clone())
+                HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
                     .with_session_manager(Arc::clone(session_manager)),
             );
             Ok(McpClient::new_with_transport(
-                server_name,
+                validated_name.as_str(),
                 transport,
                 Some(Arc::clone(session_manager)),
                 secrets,

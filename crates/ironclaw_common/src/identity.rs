@@ -250,11 +250,11 @@ impl ExtensionName {
 
 /// Maximum length for an [`McpServerName`].
 ///
-/// MCP server names are used as tool-name prefixes in LLM providers (which
+/// Alias of [`MAX_NAME_LEN`] to prevent drift between the two limits. MCP
+/// server names are used as tool-name prefixes in LLM providers (which
 /// typically require `^[a-zA-Z0-9_-]+$`), as components of secret-store keys
 /// (e.g. `mcp_<name>_access_token`), and as filesystem-adjacent identifiers.
-/// 64 bytes matches the shared `MAX_NAME_LEN` used for other identity names.
-pub const MAX_MCP_SERVER_NAME_LEN: usize = 64;
+pub const MAX_MCP_SERVER_NAME_LEN: usize = MAX_NAME_LEN;
 
 /// Why a candidate string is not a valid MCP server name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -292,6 +292,29 @@ pub enum McpServerNameError {
 #[serde(transparent)]
 pub struct McpServerName(String);
 
+/// Validate `s` against the [`McpServerName`] allowlist without allocating.
+///
+/// Shared by [`McpServerName::new`] (which then clones the slice into an
+/// owned `String`) and by `TryFrom<String>` (which consumes the already-
+/// owned buffer). Keeping the check in one place avoids the double-
+/// allocation round-trip that a naive `TryFrom<String> -> new(&value)`
+/// would incur.
+fn validate_mcp_server_name(s: &str) -> Result<(), McpServerNameError> {
+    if s.is_empty() {
+        return Err(McpServerNameError::Empty);
+    }
+    if s.len() > MAX_MCP_SERVER_NAME_LEN {
+        return Err(McpServerNameError::TooLong);
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(McpServerNameError::InvalidChar(s.to_string()));
+    }
+    Ok(())
+}
+
 impl McpServerName {
     /// Construct from any string-like value, validating the allowlist.
     ///
@@ -302,18 +325,7 @@ impl McpServerName {
     /// invalid-character bucket.
     pub fn new(raw: impl AsRef<str>) -> Result<Self, McpServerNameError> {
         let s = raw.as_ref();
-        if s.is_empty() {
-            return Err(McpServerNameError::Empty);
-        }
-        if s.len() > MAX_MCP_SERVER_NAME_LEN {
-            return Err(McpServerNameError::TooLong);
-        }
-        if !s
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(McpServerNameError::InvalidChar(s.to_string()));
-        }
+        validate_mcp_server_name(s)?;
         Ok(Self(s.to_string()))
     }
 
@@ -366,7 +378,11 @@ impl TryFrom<&str> for McpServerName {
 impl TryFrom<String> for McpServerName {
     type Error = McpServerNameError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        // Validate borrowing the already-owned buffer, then consume it —
+        // avoids the `&String -> to_string()` round-trip that
+        // `Self::new(&value)` would perform.
+        validate_mcp_server_name(&value)?;
+        Ok(Self(value))
     }
 }
 
@@ -618,7 +634,10 @@ mod tests {
             "name with spaces",
         ] {
             assert!(
-                matches!(McpServerName::new(bad), Err(McpServerNameError::InvalidChar(_))),
+                matches!(
+                    McpServerName::new(bad),
+                    Err(McpServerNameError::InvalidChar(_))
+                ),
                 "expected {bad:?} to be rejected"
             );
         }
@@ -628,7 +647,10 @@ mod tests {
     fn mcp_server_name_rejects_path_separators() {
         for bad in ["../etc/passwd", "server/name", "server\\name"] {
             assert!(
-                matches!(McpServerName::new(bad), Err(McpServerNameError::InvalidChar(_))),
+                matches!(
+                    McpServerName::new(bad),
+                    Err(McpServerNameError::InvalidChar(_))
+                ),
                 "expected {bad:?} to be rejected"
             );
         }

@@ -97,11 +97,7 @@ impl McpSessionManager {
     }
 
     /// Get or create a session for a server.
-    pub async fn get_or_create(
-        &self,
-        server_name: &McpServerName,
-        server_url: &str,
-    ) -> McpSession {
+    pub async fn get_or_create(&self, server_name: &McpServerName, server_url: &str) -> McpSession {
         let mut sessions = self.sessions.write().await;
 
         if let Some(session) = sessions.get(server_name) {
@@ -128,11 +124,7 @@ impl McpSessionManager {
     }
 
     /// Update the session ID from a server response.
-    pub async fn update_session_id(
-        &self,
-        server_name: &McpServerName,
-        session_id: Option<String>,
-    ) {
+    pub async fn update_session_id(&self, server_name: &McpServerName, session_id: Option<String>) {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(server_name) {
             session.update_session_id(session_id);
