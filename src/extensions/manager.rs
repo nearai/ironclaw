@@ -36,7 +36,6 @@ use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
@@ -63,21 +62,6 @@ struct HostedOAuthFlowStart {
     flow: crate::auth::oauth::PendingOAuthFlow,
     instructions: Option<String>,
     setup_url: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct McpClientKey {
-    user_id: String,
-    server_name: String,
-}
-
-impl McpClientKey {
-    fn new(user_id: &str, server_name: &str) -> Self {
-        Self {
-            user_id: user_id.to_string(),
-            server_name: server_name.to_string(),
-        }
-    }
 }
 
 /// Key for the `pending_auth` map. Per-user because the same extension name
@@ -401,8 +385,12 @@ pub struct ExtensionManager {
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
     mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
-    /// Active MCP clients keyed by (user, server).
-    mcp_clients: RwLock<HashMap<McpClientKey, Arc<McpClient>>>,
+    /// Active MCP clients keyed by `(user, server)`. Shared as `Arc` with
+    /// every registered `McpToolWrapper` so tool dispatch can resolve the
+    /// caller's per-user client at execute time instead of embedding a
+    /// specific client in the globally-registered wrapper (which would
+    /// let the second activating user's credentials shadow the first).
+    mcp_clients: Arc<crate::tools::mcp::McpClientStore>,
 
     // WASM tool infrastructure
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -671,7 +659,7 @@ impl ExtensionManager {
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
             mcp_process_manager,
-            mcp_clients: RwLock::new(HashMap::new()),
+            mcp_clients: Arc::new(crate::tools::mcp::McpClientStore::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
@@ -1179,39 +1167,31 @@ impl ExtensionManager {
         &self.secrets
     }
 
-    fn mcp_client_key(user_id: &str, server_name: &str) -> McpClientKey {
-        McpClientKey::new(user_id, server_name)
+    /// Expose the per-user MCP client store. Tool wrappers registered in
+    /// the global `ToolRegistry` hold an `Arc<McpClientStore>` and resolve
+    /// the caller's client at dispatch time via
+    /// `store.get(ctx.user_id, server_name)`.
+    pub(crate) fn mcp_client_store(&self) -> Arc<crate::tools::mcp::McpClientStore> {
+        Arc::clone(&self.mcp_clients)
     }
 
-    fn has_active_mcp_client(
-        clients: &HashMap<McpClientKey, Arc<McpClient>>,
-        user_id: &str,
-        server_name: &str,
-    ) -> bool {
-        clients.contains_key(&Self::mcp_client_key(user_id, server_name))
-    }
-
-    fn any_active_mcp_client_for_server(
-        clients: &HashMap<McpClientKey, Arc<McpClient>>,
-        server_name: &str,
-    ) -> bool {
-        clients.keys().any(|key| key.server_name == server_name)
-    }
-
-    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    /// Inject a pre-created MCP client (from startup loading) into the
+    /// manager and register its tool wrappers with the global
+    /// `ToolRegistry`. Wrappers hold `mcp_client_store()` and resolve the
+    /// caller's client at dispatch time from `JobContext.user_id`, so the
+    /// client must be stored before any tool call arrives.
     ///
-    /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
-    /// otherwise dropped. This method stores the client so that `list()` reports
-    /// accurate "connected" status and reconnection/session management works.
+    /// Returns the normalized tool names that were registered (empty if
+    /// the name fails validation or tool listing fails).
     pub(crate) async fn inject_mcp_client(
         &self,
         name: String,
         user_id: &str,
         client: Arc<crate::tools::mcp::McpClient>,
-    ) {
+    ) -> Vec<String> {
         if name.is_empty() {
             tracing::warn!("inject_mcp_client called with empty name; ignoring");
-            return;
+            return Vec::new();
         }
         if let Err(e) = Self::validate_extension_name(&name) {
             tracing::warn!(
@@ -1219,12 +1199,32 @@ impl ExtensionManager {
                 name = %name,
                 "inject_mcp_client called with invalid name; ignoring"
             );
-            return;
+            return Vec::new();
         }
         self.mcp_clients
-            .write()
+            .insert(user_id, &name, client.clone())
+            .await;
+        match client
+            .create_tools_with_store(self.mcp_client_store())
             .await
-            .insert(Self::mcp_client_key(user_id, &name), client);
+        {
+            Ok(tool_impls) => {
+                let tool_names: Vec<String> =
+                    tool_impls.iter().map(|t| t.name().to_string()).collect();
+                for tool in tool_impls {
+                    self.tool_registry.register(tool).await;
+                }
+                tool_names
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    server = %name,
+                    "Failed to create tool wrappers for injected MCP client"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Register channel names that are already running in the current process.
@@ -2007,8 +2007,7 @@ impl ExtensionManager {
                 Ok(servers) => {
                     for server in &servers.servers {
                         let authenticated = self.mcp_has_configured_auth(server, user_id).await;
-                        let clients = self.mcp_clients.read().await;
-                        let active = Self::has_active_mcp_client(&clients, user_id, &server.name);
+                        let active = self.mcp_clients.contains(user_id, &server.name).await;
                         let has_auth = if authenticated {
                             true
                         } else {
@@ -2263,9 +2262,8 @@ impl ExtensionManager {
                     .await?;
 
                 let removed_last_active_client = {
-                    let mut clients = self.mcp_clients.write().await;
-                    clients.remove(&Self::mcp_client_key(user_id, &name));
-                    !Self::any_active_mcp_client_for_server(&clients, &name)
+                    self.mcp_clients.remove(user_id, &name).await;
+                    !self.mcp_clients.any_active_for_server(&name).await
                 };
 
                 let mut tool_names = Vec::new();
@@ -2763,11 +2761,10 @@ impl ExtensionManager {
                 Ok(info)
             }
             ExtensionKind::McpServer => {
-                let clients = self.mcp_clients.read().await;
                 let info = serde_json::json!({
                     "name": name,
                     "kind": "mcp_server",
-                    "connected": Self::has_active_mcp_client(&clients, user_id, name),
+                    "connected": self.mcp_clients.contains(user_id, name).await,
                 });
                 Ok(info)
             }
@@ -5225,10 +5222,7 @@ impl ExtensionManager {
 
     async fn is_extension_active(&self, name: &str, kind: ExtensionKind, user_id: &str) -> bool {
         match kind {
-            ExtensionKind::McpServer => {
-                let clients = self.mcp_clients.read().await;
-                Self::has_active_mcp_client(&clients, user_id, name)
-            }
+            ExtensionKind::McpServer => self.mcp_clients.contains(user_id, name).await,
             ExtensionKind::WasmTool => self.tool_registry.has(name).await,
             ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
                 self.active_channel_names.read().await.contains(name)
@@ -5433,32 +5427,34 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        // Check if already activated
-        {
-            let clients = self.mcp_clients.read().await;
-            if Self::has_active_mcp_client(&clients, user_id, name) {
-                // Already connected, just return the tool names
-                // Use the same normalization as `mcp_tool_id` for the
-                // prefix filter so hyphenated server names match the
-                // underscore-only keys in the registry. `mcp_tool_id(name, "")`
-                // produces `normalized_server_` which is exactly the prefix
-                // every tool registered by this server starts with.
-                let prefix = crate::tools::mcp::mcp_tool_id(name, "");
-                let tools: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&prefix))
-                    .collect();
+        // Check if already activated for this user. Note: another user may
+        // already have the same server active (their client sits in
+        // `mcp_clients` under a different key), in which case the global
+        // tool wrappers are already registered. We still need to insert
+        // *this* user's client below so per-user dispatch routes to the
+        // right credential.
+        if self.mcp_clients.contains(user_id, name).await {
+            // Already connected, just return the tool names
+            // Use the same normalization as `mcp_tool_id` for the
+            // prefix filter so hyphenated server names match the
+            // underscore-only keys in the registry. `mcp_tool_id(name, "")`
+            // produces `normalized_server_` which is exactly the prefix
+            // every tool registered by this server starts with.
+            let prefix = crate::tools::mcp::mcp_tool_id(name, "");
+            let tools: Vec<String> = self
+                .tool_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|t| t.starts_with(&prefix))
+                .collect();
 
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::McpServer,
-                    tools_loaded: tools,
-                    message: format!("MCP server '{}' already active", name),
-                });
-            }
+            return Ok(ActivateResult {
+                name: name.to_string(),
+                kind: ExtensionKind::McpServer,
+                tools_loaded: tools,
+                message: format!("MCP server '{}' already active", name),
+            });
         }
 
         let server = self
@@ -5503,8 +5499,15 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
+        // Store the client for this user first, then register the
+        // (user-agnostic) tool wrappers. The wrappers resolve the caller's
+        // client at dispatch time from the shared `McpClientStore`, so the
+        // client must be in the store before any tool call arrives.
+        let client = Arc::new(client);
+        self.mcp_clients.insert(user_id, name, client.clone()).await;
+
         let tool_impls = client
-            .create_tools()
+            .create_tools_with_store(self.mcp_client_store())
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
@@ -5518,12 +5521,6 @@ impl ExtensionManager {
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
         }
-
-        // Store the client
-        self.mcp_clients
-            .write()
-            .await
-            .insert(Self::mcp_client_key(user_id, name), Arc::new(client));
 
         tracing::info!(
             "Activated MCP server '{}' with {} tools",
@@ -8130,18 +8127,19 @@ mod tests {
             .inject_mcp_client("notion".to_string(), "user-b", Arc::clone(&client_b))
             .await;
 
-        let clients = manager.mcp_clients.read().await;
-        let stored_a = clients
-            .get(&super::McpClientKey::new("user-a", "notion"))
+        let stored_a = manager
+            .mcp_clients
+            .get("user-a", "notion")
+            .await
             .expect("user-a client");
-        let stored_b = clients
-            .get(&super::McpClientKey::new("user-b", "notion"))
+        let stored_b = manager
+            .mcp_clients
+            .get("user-b", "notion")
+            .await
             .expect("user-b client");
 
-        assert!(Arc::ptr_eq(stored_a, &client_a));
-        assert!(Arc::ptr_eq(stored_b, &client_b));
-        assert_eq!(clients.len(), 2);
-        drop(clients);
+        assert!(Arc::ptr_eq(&stored_a, &client_a));
+        assert!(Arc::ptr_eq(&stored_b, &client_b));
 
         assert!(
             manager

@@ -723,7 +723,18 @@ impl McpClient {
         *self.tools_cache.write().await = None;
     }
 
-    /// Create Tool implementations for all MCP tools.
+    /// Create Tool implementations for all MCP tools that resolve the
+    /// per-user `McpClient` through `store` at dispatch time.
+    ///
+    /// `ToolRegistry` is keyed by tool name only, shared across users. A
+    /// wrapper that embedded a specific `Arc<McpClient>` would be silently
+    /// overwritten by the next user's activation — both users would end up
+    /// dispatching through whichever client registered last, leaking
+    /// credentials across tenants. See
+    /// `.claude/rules/safety-and-sandbox.md` → "Cache Keys Must Be
+    /// Complete". Instead, each wrapper holds an `Arc<McpClientStore>` +
+    /// server_name and looks up the correct client from
+    /// `JobContext.user_id` on every `execute`.
     ///
     /// `mcp_tool_id` normalizes every non-`[A-Za-z0-9_]` character to `_`,
     /// which is necessary for the registry key to survive LLM tool-name
@@ -737,23 +748,26 @@ impl McpClient {
     /// `warn!` log so the shadowing is observable. Behaviour is unchanged —
     /// the second tool still wins on register, matching what the LLM would
     /// emit anyway since it normalizes both names to the same string.
-    pub async fn create_tools(&self) -> Result<Vec<Arc<dyn Tool>>, ToolError> {
+    pub async fn create_tools_with_store(
+        &self,
+        store: Arc<super::McpClientStore>,
+    ) -> Result<Vec<Arc<dyn Tool>>, ToolError> {
         let mcp_tools = self.list_tools().await?;
-        let client = Arc::new(self.clone());
+        let server_name = self.server_name.as_str().to_string();
 
         // Detect post-normalization collisions before registering. This is
         // a single linear pass; the n is small (a typical MCP server lists
         // a few dozen tools).
         let mut seen_ids: HashMap<String, String> = HashMap::new();
         for t in &mcp_tools {
-            let id = mcp_tool_id(self.server_name.as_str(), &t.name);
+            let id = mcp_tool_id(&server_name, &t.name);
             match seen_ids.get(&id) {
                 Some(prev) if prev != &t.name => {
                     tracing::warn!(
                         normalized_id = %id,
                         first_name = %prev,
                         colliding_name = %t.name,
-                        server = %self.server_name,
+                        server = %server_name,
                         "MCP tool name collision after normalization — second tool will shadow the first in the registry. Operators: rename one of the upstream tools to differ in more than just '-' vs '_' (or '.' vs '_')."
                     );
                     // Update so a 3rd collision reports against the most
@@ -769,12 +783,13 @@ impl McpClient {
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
-                let prefixed_name = mcp_tool_id(self.server_name.as_str(), &t.name);
+                let prefixed_name = mcp_tool_id(&server_name, &t.name);
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
-                    provider_extension: self.server_name.as_str().to_string(),
-                    client: client.clone(),
+                    provider_extension: server_name.clone(),
+                    server_name: server_name.clone(),
+                    client_store: store.clone(),
                 }) as Arc<dyn Tool>
             })
             .collect())
@@ -861,11 +876,21 @@ pub(crate) fn mcp_tool_id(server_name: &str, tool_name: &str) -> String {
 }
 
 /// Wrapper that implements Tool for an MCP tool.
+///
+/// Holds a reference to the shared `McpClientStore` instead of a specific
+/// `Arc<McpClient>` so the same registered wrapper serves every user: at
+/// `execute` time it resolves the caller's per-user client via
+/// `(ctx.user_id, server_name)`. Embedding a per-user client here would
+/// silently leak credentials across tenants, because the global
+/// `ToolRegistry` is keyed on tool name only and the second user's
+/// activation would overwrite the first. See the doc comment on
+/// `McpClient::create_tools_with_store`.
 struct McpToolWrapper {
     tool: McpTool,
     prefixed_name: String,
     provider_extension: String,
-    client: Arc<McpClient>,
+    server_name: String,
+    client_store: Arc<super::McpClientStore>,
 }
 
 #[async_trait]
@@ -887,7 +912,7 @@ impl Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -896,7 +921,17 @@ impl Tool for McpToolWrapper {
         // explicit nulls for fields that should simply be absent.
         let params = strip_top_level_nulls(params);
 
-        let result = self.client.call_tool(&self.tool.name, params).await?;
+        let client = self
+            .client_store
+            .get(&ctx.user_id, &self.server_name)
+            .await
+            .ok_or_else(|| {
+                ToolError::ExternalService(format!(
+                    "MCP server '{}' is not active for this user",
+                    self.server_name
+                ))
+            })?;
+        let result = client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
             .iter()
@@ -1658,39 +1693,32 @@ mod tests {
         }
     }
 
+    fn test_wrapper(tool: super::super::McpTool, server: &str) -> McpToolWrapper {
+        McpToolWrapper {
+            tool,
+            prefixed_name: format!("mcp__{server}__do_thing"),
+            provider_extension: server.to_string(),
+            server_name: server.to_string(),
+            client_store: Arc::new(crate::tools::mcp::McpClientStore::new()),
+        }
+    }
+
     #[test]
     fn test_mcp_tool_wrapper_name_is_prefixed() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "mcp__myserver__do_thing".to_string(),
-            provider_extension: "myserver".to_string(),
-            client,
-        };
+        let mut wrapper = test_wrapper(make_test_mcp_tool(false), "myserver");
+        wrapper.prefixed_name = "mcp__myserver__do_thing".to_string();
         assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
     }
 
     #[test]
     fn test_mcp_tool_wrapper_description() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "mcp__s__do_thing".to_string(),
-            provider_extension: "s".to_string(),
-            client,
-        };
+        let wrapper = test_wrapper(make_test_mcp_tool(false), "s");
         assert_eq!(wrapper.description(), "Does a thing");
     }
 
     #[test]
     fn test_mcp_tool_wrapper_parameters_schema() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "mcp__s__do_thing".to_string(),
-            provider_extension: "s".to_string(),
-            client,
-        };
+        let wrapper = test_wrapper(make_test_mcp_tool(false), "s");
         let schema = wrapper.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["input"].is_object());
@@ -1698,13 +1726,7 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_requires_sanitization() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "mcp__s__do_thing".to_string(),
-            provider_extension: "s".to_string(),
-            client,
-        };
+        let wrapper = test_wrapper(make_test_mcp_tool(false), "s");
         assert!(
             wrapper.requires_sanitization(),
             "MCP tools should always require sanitization"
@@ -1713,26 +1735,14 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_wrapper_approval_destructive() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(true),
-            prefixed_name: "mcp__s__do_thing".to_string(),
-            provider_extension: "s".to_string(),
-            client,
-        };
+        let wrapper = test_wrapper(make_test_mcp_tool(true), "s");
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::UnlessAutoApproved);
     }
 
     #[test]
     fn test_mcp_tool_wrapper_approval_non_destructive() {
-        let client = Arc::new(McpClient::new("http://localhost:8080"));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "mcp__s__do_thing".to_string(),
-            provider_extension: "s".to_string(),
-            client,
-        };
+        let wrapper = test_wrapper(make_test_mcp_tool(false), "s");
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::Never);
     }
@@ -1850,8 +1860,9 @@ mod tests {
         let client =
             McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
 
+        let store = Arc::new(crate::tools::mcp::McpClientStore::new());
         let tools = client
-            .create_tools()
+            .create_tools_with_store(store)
             .await
             .expect("create_tools should succeed");
 
@@ -1916,8 +1927,9 @@ mod tests {
         let client =
             McpClient::new_with_transport("demo", transport.clone(), None, None, "default", None);
 
+        let store = Arc::new(crate::tools::mcp::McpClientStore::new());
         let tools = client
-            .create_tools()
+            .create_tools_with_store(store)
             .await
             .expect("create_tools should succeed even with collisions");
 
@@ -1995,8 +2007,9 @@ mod tests {
             McpClient::new_with_transport("notion", transport.clone(), None, None, "default", None);
 
         let registry = ToolRegistry::new();
+        let store = Arc::new(crate::tools::mcp::McpClientStore::new());
         for tool in client
-            .create_tools()
+            .create_tools_with_store(store)
             .await
             .expect("create_tools should succeed")
         {

@@ -695,7 +695,6 @@ impl AppBuilder {
         let mcp_servers_future = {
             let secrets_store = self.secrets_store.clone();
             let db = self.db.clone();
-            let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
@@ -717,7 +716,6 @@ impl AppBuilder {
                         for server in enabled {
                             let mcp_sm = Arc::clone(&mcp_sm);
                             let secrets = secrets_store.clone();
-                            let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
                             let owner_id = owner_id.clone();
 
@@ -748,29 +746,18 @@ impl AppBuilder {
                                 match client.list_tools().await {
                                     Ok(mcp_tools) => {
                                         let tool_count = mcp_tools.len();
-                                        match client.create_tools().await {
-                                            Ok(tool_impls) => {
-                                                for tool in tool_impls {
-                                                    tools.register(tool).await;
-                                                }
-                                                tracing::debug!(
-                                                    "Loaded {} tools from MCP server '{}'",
-                                                    tool_count,
-                                                    server_name
-                                                );
-                                                return Some((
-                                                    server_name,
-                                                    Arc::new(client),
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to create tools from MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                            }
-                                        }
+                                        tracing::debug!(
+                                            "Connected to MCP server '{}' ({} tools); \
+                                             deferring wrapper registration until manager init",
+                                            server_name,
+                                            tool_count
+                                        );
+                                        // Tool wrappers need an `Arc<McpClientStore>` so
+                                        // dispatch can resolve the caller's client per user
+                                        // at execute time. The store is owned by the
+                                        // ExtensionManager, which isn't built yet — defer
+                                        // registration to `manager.inject_mcp_client` below.
+                                        return Some((server_name, Arc::new(client)));
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
@@ -925,9 +912,14 @@ impl AppBuilder {
                     "Injecting startup MCP clients into extension manager"
                 );
                 for (name, client) in startup_mcp_clients {
-                    manager
-                        .inject_mcp_client(name, &self.config.owner_id, client)
+                    let registered = manager
+                        .inject_mcp_client(name.clone(), &self.config.owner_id, client)
                         .await;
+                    tracing::debug!(
+                        server = %name,
+                        count = registered.len(),
+                        "Registered tools for startup MCP server"
+                    );
                 }
             }
 
