@@ -439,9 +439,6 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<LlmConfig, ConfigError> {
-        let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
-
         let mut settings = if let Some(store) = store {
             Self::load_db_backed_settings(store, user_id, toml_path, is_operator).await?
         } else {
