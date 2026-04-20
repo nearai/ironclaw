@@ -16,6 +16,7 @@ Start with these deeper docs as needed:
 - `src/NETWORK_SECURITY.md`
 - `tests/e2e/CLAUDE.md`
 - In this repo, `ic/` contains the core daemon; however, the product name is LunarWing.
+- In this repo, the path `ic/customic` is not used at all. It will be removed at some point.
 
 ## Architecture Mental Model
 
