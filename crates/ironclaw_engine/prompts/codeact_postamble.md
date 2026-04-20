@@ -4,8 +4,9 @@
 1. First, examine the context and understand the task
 2. Break complex tasks into steps
 3. Use tools to gather information or take actions
-4. Use llm_query() to analyze or summarize large text
-5. Call FINAL() with the answer when done
+4. Before any new tool call, check whether `state`, `previous_results`, or your existing variables already contain enough evidence to answer. If they do, skip the extra tool call and finalize.
+5. Use llm_query() to analyze or summarize large text
+6. Call FINAL() with the answer when done
 
 Think step by step. Execute code immediately — don't just describe what you would do.
 
@@ -46,9 +47,12 @@ almost always to reference the correct variable, not to hand-craft the data:
 
 When a network tool fails with a real error (auth, 5xx, no results), try alternatives
 before calling FINAL():
+- **Prefer direct local alternatives first.** If the task can be completed from the local repo/machine, switch to `shell()`, `read_file()`, or `list_dir()` instead of drifting into more web research.
 - If `http()` fails with an auth error, try `web_search()` or a different public endpoint
 - If one API endpoint fails, try a different one that provides similar data
 - If a search returns no results, try different keywords or broader queries
+- If an optional search/browse tool wants authentication but the core task can still proceed locally, continue with the local path instead of stalling on auth.
+- If the **same** tool call is failing with the **same** error, do not keep retrying it. Change strategy or finalize honestly.
 - Only call FINAL() to report failure after exhausting at least 2-3 alternative approaches
 
 ## Output discipline

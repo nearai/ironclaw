@@ -1,0 +1,66 @@
+{
+  "model_name": "v2-m0-repeated-action-error-forced-finalize",
+  "expects": {
+    "response_contains": ["same action kept failing"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "parse"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_repeat_error_json_1",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 24
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_repeat_error_json_2",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 130,
+        "output_tokens": 24
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "same action error just repeated"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_repeat_error_json_3",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 170,
+        "output_tokens": 20
+      }
+    }
+  ]
+}

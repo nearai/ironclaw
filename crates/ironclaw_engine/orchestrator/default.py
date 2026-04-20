@@ -685,6 +685,217 @@ def complete_result(state, outcome, response=None, error=None, extra=None):
     return result
 
 
+def normalize_signature_text(value, max_chars=240):
+    """Normalize free-form text into a stable signature fragment."""
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+
+def latest_non_system_user_message(messages):
+    """Return the latest user-authored task message, skipping orchestrator nudges."""
+    for msg in reversed(messages):
+        if msg.get("role") not in ("User", "user"):
+            continue
+        content = msg.get("content", "") or ""
+        if content.startswith("[SYSTEM]"):
+            continue
+        return content
+    return ""
+
+
+def request_looks_multi_step(text):
+    """Best-effort heuristic: detect requests that obviously need follow-up work."""
+    lower = normalize_signature_text(text, max_chars=500)
+    markers = [
+        " and then ", " then ", " after that ", " followed by ",
+        " also ", " plus ", " next ", " first ", " second ",
+    ]
+    return any(marker in lower for marker in markers)
+
+
+def action_name_matches(action_name, prefixes):
+    """Match a tool/action name against bare-name or display-name prefixes."""
+    normalized = normalize_signature_text(action_name, max_chars=160)
+    for prefix in prefixes:
+        if normalized == prefix or normalized.startswith(prefix + "("):
+            return True
+    return False
+
+
+def credential_name_from_resume_kind(resume_kind):
+    """Extract the credential name from a serialized ResumeKind payload."""
+    if not isinstance(resume_kind, dict):
+        return ""
+    auth = resume_kind.get("Authentication")
+    if not isinstance(auth, dict):
+        return ""
+    return normalize_signature_text(auth.get("credential_name", ""), max_chars=120)
+
+
+def request_prefers_local_execution(text):
+    """Detect requests that should prefer direct local execution over web detours."""
+    lower = normalize_signature_text(text, max_chars=500)
+    if not lower:
+        return False
+
+    execution_markers = [
+        "run ", "execute ", "install ", "test ", "scan ",
+        "audit ", "check ", "build ", "lint ", "debug ",
+        "fix ", "try ",
+    ]
+    local_context_markers = [
+        "github.com/", " repo", "repository", "workflow", ".github/",
+        "cli", "command", "locally", "local ",
+        "this machine", "this repo", "current repo", "directory", "file",
+    ]
+    research_markers = [
+        "latest", "news", "research", "look up", "search for",
+        "find information", "browse", "documentation", "docs",
+        "what is", "compare", "web search", "on the web",
+    ]
+
+    return (
+        any(marker in lower for marker in execution_markers)
+        and any(marker in lower for marker in local_context_markers)
+        and not any(marker in lower for marker in research_markers)
+    )
+
+
+def auth_gate_looks_optional_discovery(action_name, credential_name="", resume_kind=None):
+    """Heuristic: auth gate came from optional discovery/search, not core execution."""
+    normalized_credential = normalize_signature_text(credential_name, max_chars=120)
+    if not normalized_credential and resume_kind is not None:
+        normalized_credential = credential_name_from_resume_kind(resume_kind)
+
+    if normalized_credential in ["brave_api_key", "brave search api key"]:
+        return True
+
+    return action_name_matches(action_name, ["web_search", "llm_context"])
+
+
+def should_continue_after_optional_auth_gate(action_name, resume_kind, latest_user_request, credential_name=""):
+    """Prefer continuing with local execution when an optional auth-gated detour fires."""
+    return (
+        request_prefers_local_execution(latest_user_request)
+        and auth_gate_looks_optional_discovery(
+            action_name,
+            credential_name=credential_name,
+            resume_kind=resume_kind,
+        )
+    )
+
+
+def append_optional_auth_detour_hint(messages, action_name):
+    """Nudge the model away from optional auth-gated search detours."""
+    append_message(
+        messages,
+        "User",
+        "[SYSTEM] The auth-gated tool '" + (action_name or "unknown") + "' was an optional discovery step, not the core task. "
+        "Do NOT stall on optional web/search authentication when a direct local execution path exists. "
+        "Continue with local tools already available on this machine/repo (for example shell, read_file, list_dir) "
+        "and only request authentication if the task truly cannot proceed without it.",
+    )
+
+
+def action_params_signature(params):
+    """Render action params into a small deterministic signature."""
+    if isinstance(params, dict):
+        parts = []
+        for key in sorted(params.keys()):
+            parts.append(
+                str(key) + "=" + normalize_signature_text(params.get(key), max_chars=80)
+            )
+        return ",".join(parts)
+    if isinstance(params, list):
+        return ",".join(normalize_signature_text(v, max_chars=80) for v in params[:5])
+    return normalize_signature_text(params, max_chars=160)
+
+
+def summarize_action_batch(calls, results):
+    """Capture a small stable summary of an action batch for loop detection."""
+    signature_parts = []
+    success_summaries = []
+    error_summaries = []
+
+    for idx in range(len(calls)):
+        call = calls[idx]
+        action_name = call.get("name", "unknown")
+        params_sig = action_params_signature(call.get("params", {}))
+        r = results[idx] if idx < len(results) else None
+        if r is None:
+            signature_parts.append("skip:" + action_name + "(" + params_sig + ")")
+            error_summaries.append(action_name + ": execution skipped")
+            continue
+
+        output_text = normalize_signature_text(r.get("output", ""), max_chars=160)
+        if r.get("is_error"):
+            signature_parts.append("err:" + action_name + "(" + params_sig + ")=" + output_text)
+            error_summaries.append(action_name + ": " + output_text)
+        else:
+            signature_parts.append("ok:" + action_name + "(" + params_sig + ")=" + output_text)
+            success_summaries.append(action_name + ": " + output_text)
+
+    return {
+        "signature": " | ".join(signature_parts),
+        "success_summary": "; ".join(success_summaries[:3]),
+        "error_summary": "; ".join(error_summaries[:3]),
+    }
+
+
+def update_no_new_evidence_tracker(state, signature):
+    """Track repeated observations that add no new evidence."""
+    if not signature:
+        state["_no_new_evidence_streak"] = 0
+        state["_last_observation_signature"] = ""
+        return 0
+
+    if state.get("_last_observation_signature", "") == signature:
+        state["_no_new_evidence_streak"] = state.get("_no_new_evidence_streak", 0) + 1
+    else:
+        state["_no_new_evidence_streak"] = 0
+    state["_last_observation_signature"] = signature
+    return state.get("_no_new_evidence_streak", 0)
+
+
+def update_repeated_action_error_tracker(state, error_signature, error_summary):
+    """Track identical all-error action batches separately from generic error counts."""
+    if not error_signature:
+        state["_last_action_error_signature"] = ""
+        state["_same_action_error_streak"] = 0
+        state["_last_action_error_summary"] = ""
+        return 0
+
+    if state.get("_last_action_error_signature", "") == error_signature:
+        state["_same_action_error_streak"] = state.get("_same_action_error_streak", 0) + 1
+    else:
+        state["_same_action_error_streak"] = 1
+    state["_last_action_error_signature"] = error_signature
+    state["_last_action_error_summary"] = error_summary
+    return state.get("_same_action_error_streak", 0)
+
+
+def append_finalization_hint(messages, stronger=False):
+    """Tell the model to stop exploring and finalize from existing results."""
+    if stronger:
+        content = (
+            "[SYSTEM] Your most recent step did not add meaningful new evidence. "
+            "Reuse the tool results already in context and answer now. Do NOT repeat the same call. "
+            "If you cannot make further progress, call FINAL() with an honest explanation."
+        )
+    else:
+        content = (
+            "[SYSTEM] You already have the tool results you need in context. "
+            "Prefer answering from those results now instead of doing more exploration. "
+            "Reuse the existing outputs; do not repeat the same tool call unless you need genuinely new evidence."
+        )
+    append_message(messages, "User", content)
+
+
 # ── Main execution loop ─────────────────────────────────────
 
 
@@ -701,6 +912,9 @@ def run_loop(context, goal, actions, state, config):
         max_consecutive_errors = 10**9
     obligation_enabled = config.get("require_action_attempt", False)
     max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
+    no_new_evidence_threshold = config.get("no_new_evidence_threshold", 1)
+    repeated_action_error_nudge_at = config.get("repeated_action_error_nudge_at", 2)
+    repeated_action_error_finalize_at = config.get("repeated_action_error_finalize_at", 3)
 
     consecutive_nudges = 0
     consecutive_errors = 0
@@ -710,6 +924,13 @@ def run_loop(context, goal, actions, state, config):
         state = {}
     state.setdefault("history", [])
     state.setdefault("compaction_count", 0)
+    state.setdefault("_no_new_evidence_streak", 0)
+    state.setdefault("_last_observation_signature", "")
+    state.setdefault("_last_action_error_signature", "")
+    state.setdefault("_same_action_error_streak", 0)
+    state.setdefault("_last_action_error_summary", "")
+    state.setdefault("_last_successful_action_summary", "")
+    state.setdefault("_last_local_execution_bias_request", "")
 
     # Enable obligation from the latest user message in context, not just
     # thread config. This covers the resume path where a suspended thread is
@@ -728,6 +949,21 @@ def run_loop(context, goal, actions, state, config):
                     state["_obligation_nudge_count"] = 0
                 break
     working_messages = ensure_working_messages(state, context)
+    latest_user_request = latest_non_system_user_message(working_messages)
+    latest_user_request_sig = normalize_signature_text(latest_user_request, max_chars=240)
+    if (
+        request_prefers_local_execution(latest_user_request)
+        and state.get("_last_local_execution_bias_request", "") != latest_user_request_sig
+    ):
+        append_message(
+            working_messages,
+            "User",
+            "[SYSTEM] This task appears to have a direct local execution path. "
+            "Prefer local tools already available on this machine/repo (for example shell, read_file, list_dir) "
+            "before web research or auth-gated search/browse tools. "
+            "Only ask for authentication if the task truly cannot proceed without it.",
+        )
+        state["_last_local_execution_bias_request"] = latest_user_request_sig
 
     for step in range(step_count, max_iterations):
         # 1. Check signals
@@ -906,52 +1142,74 @@ def run_loop(context, goal, actions, state, config):
             if gate is None:
                 gate = result.get("need_approval")
             if gate is not None and isinstance(gate, dict) and gate.get("gate_paused"):
-                __save_checkpoint__(state, {
-                    "nudge_count": consecutive_nudges,
-                    "consecutive_errors": consecutive_errors,
-                    "consecutive_action_errors": consecutive_action_errors,
-                    "compaction_count": state.get("compaction_count", 0),
-                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
-                })
-                __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
-                return {
-                    "outcome": "gate_paused",
-                    "state": state,
-                    "gate_name": gate.get("gate_name", ""),
-                    "action_name": gate.get("action_name", ""),
-                    "call_id": gate.get("call_id", ""),
-                    "parameters": gate.get("parameters", {}),
-                    "resume_kind": gate.get("resume_kind", {}),
-                }
+                gate_action_name = gate.get("action_name", "")
+                gate_resume_kind = gate.get("resume_kind", {})
+                last_user_request = latest_non_system_user_message(working_messages)
+                if should_continue_after_optional_auth_gate(
+                    gate_action_name,
+                    gate_resume_kind,
+                    last_user_request,
+                ):
+                    append_optional_auth_detour_hint(working_messages, gate_action_name)
+                else:
+                    __save_checkpoint__(state, {
+                        "nudge_count": consecutive_nudges,
+                        "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
+                        "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
+                    })
+                    __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
+                    return {
+                        "outcome": "gate_paused",
+                        "state": state,
+                        "gate_name": gate.get("gate_name", ""),
+                        "action_name": gate_action_name,
+                        "call_id": gate.get("call_id", ""),
+                        "parameters": gate.get("parameters", {}),
+                        "resume_kind": gate_resume_kind,
+                    }
 
             # Check for approval or authentication needed (legacy path)
             if result.get("need_approval") is not None:
                 approval = result["need_approval"]
-                __save_checkpoint__(state, {
-                    "nudge_count": consecutive_nudges,
-                    "consecutive_errors": consecutive_errors,
-                    "consecutive_action_errors": consecutive_action_errors,
-                    "compaction_count": state.get("compaction_count", 0),
-                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
-                })
-                if approval.get("need_authentication"):
-                    __transition_to__("waiting", "authentication needed")
+                last_user_request = latest_non_system_user_message(working_messages)
+                if approval.get("need_authentication") and should_continue_after_optional_auth_gate(
+                    approval.get("action_name", ""),
+                    {},
+                    last_user_request,
+                    credential_name=approval.get("credential_name", ""),
+                ):
+                    append_optional_auth_detour_hint(
+                        working_messages,
+                        approval.get("action_name", ""),
+                    )
+                else:
+                    __save_checkpoint__(state, {
+                        "nudge_count": consecutive_nudges,
+                        "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
+                        "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
+                    })
+                    if approval.get("need_authentication"):
+                        __transition_to__("waiting", "authentication needed")
+                        return {
+                            "outcome": "need_authentication",
+                            "state": state,
+                            "credential_name": approval.get("credential_name", ""),
+                            "action_name": approval.get("action_name", ""),
+                            "call_id": approval.get("call_id", ""),
+                            "parameters": approval.get("parameters", {}),
+                        }
+                    __transition_to__("waiting", "approval needed")
                     return {
-                        "outcome": "need_authentication",
+                        "outcome": "need_approval",
                         "state": state,
-                        "credential_name": approval.get("credential_name", ""),
                         "action_name": approval.get("action_name", ""),
                         "call_id": approval.get("call_id", ""),
                         "parameters": approval.get("parameters", {}),
                     }
-                __transition_to__("waiting", "approval needed")
-                return {
-                    "outcome": "need_approval",
-                    "state": state,
-                    "action_name": approval.get("action_name", ""),
-                    "call_id": approval.get("call_id", ""),
-                    "parameters": approval.get("parameters", {}),
-                }
 
             # Track consecutive errors
             if result.get("had_error"):
@@ -1068,6 +1326,20 @@ def run_loop(context, goal, actions, state, config):
 
                 if r.get("gate_paused"):
                     # Unified gate pause (replaces separate need_approval/need_authentication)
+                    gate = r
+                    # Get action info from the original call or the result
+                    orig_call = executable_calls[r_idx] if r_idx < len(executable_calls) else {}
+                    gate_action_name = gate.get("action_name", orig_call.get("name", ""))
+                    gate_resume_kind = gate.get("resume_kind", {})
+                    last_user_request = latest_non_system_user_message(working_messages)
+                    if should_continue_after_optional_auth_gate(
+                        gate_action_name,
+                        gate_resume_kind,
+                        last_user_request,
+                    ):
+                        append_optional_auth_detour_hint(working_messages, gate_action_name)
+                        continue
+
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
@@ -1075,21 +1347,31 @@ def run_loop(context, goal, actions, state, config):
                         "compaction_count": state.get("compaction_count", 0),
                         "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
-                    gate = r
-                    # Get action info from the original call or the result
-                    orig_call = executable_calls[r_idx] if r_idx < len(executable_calls) else {}
                     __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                     return {
                         "outcome": "gate_paused",
                         "state": state,
                         "gate_name": gate.get("gate_name", ""),
-                        "action_name": gate.get("action_name", orig_call.get("name", "")),
+                        "action_name": gate_action_name,
                         "call_id": orig_call.get("call_id", ""),
                         "parameters": orig_call.get("params", {}),
-                        "resume_kind": gate.get("resume_kind", {}),
+                        "resume_kind": gate_resume_kind,
                     }
 
                 if r.get("need_authentication"):
+                    last_user_request = latest_non_system_user_message(working_messages)
+                    if should_continue_after_optional_auth_gate(
+                        r.get("action_name", ""),
+                        {},
+                        last_user_request,
+                        credential_name=r.get("credential_name", ""),
+                    ):
+                        append_optional_auth_detour_hint(
+                            working_messages,
+                            r.get("action_name", ""),
+                        )
+                        continue
+
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
@@ -1166,6 +1448,12 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL via tool_calls")
                 return complete_result(state, "completed", str(answer))
 
+            batch_summary = summarize_action_batch(executable_calls, results)
+            no_new_evidence_streak = update_no_new_evidence_tracker(
+                state,
+                batch_summary.get("signature", ""),
+            )
+
             # Track consecutive action errors (separate from code errors).
             # Partial batch failures: increment only if ALL actions failed,
             # reset if ANY succeeded.
@@ -1174,7 +1462,51 @@ def run_loop(context, goal, actions, state, config):
             elif batch_error_count > 0:
                 consecutive_action_errors += 1
 
-            if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+            if batch_success_count == 0 and batch_error_count > 0:
+                repeated_action_error_streak = update_repeated_action_error_tracker(
+                    state,
+                    batch_summary.get("signature", ""),
+                    batch_summary.get("error_summary", ""),
+                )
+            else:
+                repeated_action_error_streak = update_repeated_action_error_tracker(
+                    state,
+                    "",
+                    "",
+                )
+
+            if repeated_action_error_streak >= repeated_action_error_finalize_at:
+                __transition_to__("completed", "repeated identical action errors")
+                return complete_result(
+                    state,
+                    "completed",
+                    "I could not make further progress because the same action kept failing with the same error: "
+                    + (state.get("_last_action_error_summary", "unknown error") or "unknown error")
+                    + ". I stopped instead of retrying the same call again.",
+                )
+
+            if batch_success_count > 0:
+                state["_last_successful_action_summary"] = batch_summary.get("success_summary", "")
+                last_user_request = latest_non_system_user_message(working_messages)
+                if no_new_evidence_streak >= no_new_evidence_threshold:
+                    append_finalization_hint(working_messages, stronger=True)
+                elif (
+                    batch_error_count == 0
+                    and len(executable_calls) > 0
+                    and not request_looks_multi_step(last_user_request)
+                ):
+                    append_finalization_hint(working_messages, stronger=False)
+
+            if repeated_action_error_streak >= repeated_action_error_nudge_at:
+                if consecutive_action_errors < max_consecutive_errors:
+                    consecutive_action_errors = max_consecutive_errors
+                append_message(
+                    working_messages,
+                    "User",
+                    "[SYSTEM] The same action error just repeated. Do NOT retry the same tool call with the same parameters. "
+                    "Either change strategy completely or call FINAL() with an honest explanation of the blocker.",
+                )
+            elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
                 __transition_to__("failed", "too many consecutive action errors")
                 return complete_result(
                     state,
