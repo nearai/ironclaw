@@ -133,13 +133,16 @@ impl LlmBackend for LlmBridgeAdapter {
                     reason: e.to_string(),
                 })?;
 
+            let cleaned_text = clean_response(&response.content);
+
             // Check for code blocks in the response (CodeAct/RLM pattern)
-            let llm_response = match extract_code_block(&response.content) {
+            // after stripping provider-flattened internal markers from visible text.
+            let llm_response = match extract_code_block(&cleaned_text) {
                 Some(code) => LlmResponse::Code {
                     code,
-                    content: Some(response.content),
+                    content: Some(cleaned_text),
                 },
-                None => LlmResponse::Text(response.content),
+                None => LlmResponse::Text(cleaned_text),
             };
 
             return Ok(LlmOutput {
@@ -864,6 +867,66 @@ mod tests {
             .complete(
                 &[ThreadMessage::user("do it")],
                 &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, "Let me check.");
+            }
+            other => panic!("expected sanitized text response, got {other:?}"),
+        }
+    }
+
+    struct FlattenedPlainTextProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FlattenedPlainTextProvider {
+        fn model_name(&self) -> &str {
+            "flattened-plain-text-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            Ok(crate::llm::CompletionResponse {
+                content: self.content.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("test only uses plain completion")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_strips_flattened_bracket_markers_from_text() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
+            content: "Let me check.\n[Called tool `shell` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[],
                 &LlmCallConfig::default(),
             )
             .await
