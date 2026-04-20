@@ -49,11 +49,13 @@ impl JobState {
     pub fn can_transition_to(&self, target: JobState) -> bool {
         use JobState::*;
 
-        // Allow idempotent Completed -> Completed transition.
-        // Both the execution loop and the worker wrapper may race to mark a
-        // job complete; the second call should be a harmless no-op rather
-        // than an error that masks the successful completion.
-        if matches!((self, target), (Completed, Completed)) {
+        // Allow idempotent self-transitions for Completed and all terminal
+        // states. Multiple sources may race to mark a job finished (execution
+        // loop vs worker wrapper, post_event vs report_complete safety-net
+        // broadcast); the second call should be a harmless no-op rather than
+        // an error. Cross-terminal transitions (e.g. Failed -> Cancelled) are
+        // never allowed.
+        if *self == target && (self.is_terminal() || *self == Completed) {
             return true;
         }
 
@@ -327,8 +329,8 @@ impl JobContext {
         }
 
         // Idempotent: already in the target state, skip recording a duplicate
-        // transition. This handles the Completed -> Completed race between
-        // execution_loop and the worker wrapper.
+        // transition. Handles races between execution_loop/worker wrapper and
+        // between post_event/report_complete safety-net broadcasts.
         if self.state == new_state {
             tracing::debug!(
                 job_id = %self.job_id,
@@ -471,15 +473,56 @@ mod tests {
     }
 
     #[test]
-    fn test_other_self_transitions_still_rejected() {
-        // Ensure we only allow Completed -> Completed, not arbitrary X -> X.
+    fn test_non_terminal_self_transitions_rejected() {
+        // Only Completed and terminal states allow idempotent self-transitions.
         assert!(!JobState::Pending.can_transition_to(JobState::Pending));
         assert!(!JobState::InProgress.can_transition_to(JobState::InProgress));
-        assert!(!JobState::Failed.can_transition_to(JobState::Failed));
         assert!(!JobState::Stuck.can_transition_to(JobState::Stuck));
         assert!(!JobState::Submitted.can_transition_to(JobState::Submitted));
-        assert!(!JobState::Accepted.can_transition_to(JobState::Accepted));
-        assert!(!JobState::Cancelled.can_transition_to(JobState::Cancelled));
+    }
+
+    #[test]
+    fn test_terminal_self_transitions_are_idempotent() {
+        assert!(JobState::Accepted.can_transition_to(JobState::Accepted));
+        assert!(JobState::Failed.can_transition_to(JobState::Failed));
+        assert!(JobState::Cancelled.can_transition_to(JobState::Cancelled));
+    }
+
+    #[test]
+    fn test_cross_terminal_transitions_rejected() {
+        // No transition between distinct terminal states is allowed.
+        let terminals = [JobState::Failed, JobState::Accepted, JobState::Cancelled];
+        for &from in &terminals {
+            for &to in &terminals {
+                if from != to {
+                    assert!(
+                        !from.can_transition_to(to),
+                        "{} -> {} should be rejected",
+                        from,
+                        to,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_failed_to_failed_is_idempotent() {
+        let mut ctx = JobContext::new("Test", "Idempotent failure test");
+        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::Failed, Some("first".into()))
+            .unwrap();
+
+        let transitions_before = ctx.transitions.len();
+
+        let result = ctx.transition_to(JobState::Failed, Some("duplicate".into()));
+        assert!(result.is_ok(), "Failed -> Failed should be idempotent");
+        assert_eq!(ctx.state, JobState::Failed);
+        assert_eq!(
+            ctx.transitions.len(),
+            transitions_before,
+            "no new transition should be recorded"
+        );
     }
 
     #[test]

@@ -537,4 +537,120 @@ mod tests {
         let ctx = cm.get_context(job_id).await.unwrap();
         assert_eq!(ctx.state, JobState::Completed);
     }
+
+    // === Regression: report_complete safety-net broadcast frees max_jobs slot ===
+    // When the worker's fire-and-forget post_event("result") is lost, the
+    // orchestrator's report_complete handler now broadcasts a safety-net
+    // JobResult. This test proves that a JobResult with session_id: None
+    // (as emitted by report_complete, which lacks session context) still
+    // transitions the job and frees the slot.
+
+    #[tokio::test]
+    async fn completion_watcher_frees_slot_from_report_complete_broadcast() {
+        use crate::context::{ContextManager, JobState};
+
+        let max_jobs = 2;
+        let cm = Arc::new(ContextManager::new(max_jobs));
+
+        // Fill both slots.
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+        cm.register_sandbox_job(job_a, "user-1", "Job A", "desc")
+            .await
+            .unwrap();
+        cm.register_sandbox_job(job_b, "user-1", "Job B", "desc")
+            .await
+            .unwrap();
+
+        // A third job should be rejected (slots full).
+        let job_c = Uuid::new_v4();
+        assert!(
+            cm.register_sandbox_job(job_c, "user-1", "Job C", "desc")
+                .await
+                .is_err(),
+            "max_jobs should be exhausted"
+        );
+
+        // Wire a completion watcher for job_a.
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
+        let handle = spawn_completion_watcher(job_a, event_tx.subscribe(), Arc::clone(&cm));
+
+        // Simulate the safety-net broadcast from report_complete (no session_id).
+        event_tx
+            .send((
+                job_a,
+                "user-1".to_string(),
+                AppEvent::JobResult {
+                    job_id: job_a.to_string(),
+                    status: "completed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: None,
+                },
+            ))
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("watcher should exit")
+            .expect("watcher should not panic");
+
+        // Job A should be Completed → slot freed.
+        let ctx = cm.get_context(job_a).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+
+        // Now job C should succeed (slot available).
+        cm.register_sandbox_job(job_c, "user-1", "Job C", "desc")
+            .await
+            .expect("slot should be free after report_complete broadcast");
+    }
+
+    // === Idempotency: duplicate JobResult events are harmless ===
+    // Both post_event("result") and the report_complete safety-net may
+    // broadcast a JobResult. The completion watcher breaks on the first one,
+    // so the second is silently dropped with no extra state transition.
+
+    #[tokio::test]
+    async fn completion_watcher_ignores_duplicate_job_result() {
+        use crate::context::{ContextManager, JobState};
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = Uuid::new_v4();
+        cm.register_sandbox_job(job_id, "user-1", "Dup test", "desc")
+            .await
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
+        let handle = spawn_completion_watcher(job_id, event_tx.subscribe(), Arc::clone(&cm));
+
+        let make_result = || {
+            (
+                job_id,
+                "user-1".to_string(),
+                AppEvent::JobResult {
+                    job_id: job_id.to_string(),
+                    status: "completed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: None,
+                },
+            )
+        };
+
+        // Send two JobResult events back-to-back (simulates post_event +
+        // safety-net both arriving).
+        event_tx.send(make_result()).unwrap();
+        event_tx.send(make_result()).unwrap();
+
+        // The watcher should still exit cleanly after the first event.
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("watcher should exit")
+            .expect("watcher should not panic");
+
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+        // register_sandbox_job starts at InProgress, so a real
+        // InProgress -> Completed transition is recorded; the duplicate
+        // Completed -> Completed from the second event is the idempotent
+        // no-op. The key assertion is that the watcher exited without error.
+    }
 }

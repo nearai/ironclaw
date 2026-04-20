@@ -313,7 +313,21 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
-                self.mark_failed(&e.to_string()).await?;
+                // Only mark failed if not already in a terminal state.
+                // A race (e.g. safety-net broadcast) may have already
+                // transitioned the job; re-running mark_failed would
+                // overwrite the fallback and emit a duplicate "result" event.
+                let current_state = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .map(|ctx| ctx.state);
+                match current_state {
+                    Ok(state) if state.is_terminal() || state == JobState::Completed => {}
+                    _ => {
+                        self.mark_failed(&e.to_string()).await?;
+                    }
+                }
             }
             Err(_) => {
                 tracing::warn!("Worker for job {} timed out", self.job_id);
