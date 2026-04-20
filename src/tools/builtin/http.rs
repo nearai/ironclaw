@@ -11,9 +11,11 @@ use reqwest::Client;
 
 use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
-use crate::db::UserStore;
-use crate::secrets::SecretsStore;
+use crate::db::{Database, UserStore};
+use crate::secrets::binding_approvals::{SECRET_BINDING_APPROVAL_ERROR, binding_approval_exists};
+use crate::secrets::{CredentialArtifactKind, SecretBindingApproval, SecretsStore};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::wasm::credential_injector::host_matches_pattern;
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 use ironclaw_safety::LeakDetector;
 
@@ -60,6 +62,7 @@ pub struct HttpTool {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     role_lookup: Option<Arc<dyn UserStore>>,
+    database: Option<Arc<dyn Database>>,
 }
 
 impl HttpTool {
@@ -69,6 +72,7 @@ impl HttpTool {
             credential_registry: None,
             secrets_store: None,
             role_lookup: None,
+            database: None,
         }
     }
 
@@ -85,6 +89,11 @@ impl HttpTool {
 
     pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
         self.role_lookup = Some(role_lookup);
+        self
+    }
+
+    pub fn with_database(mut self, database: Arc<dyn Database>) -> Self {
+        self.database = Some(database);
         self
     }
 }
@@ -427,6 +436,78 @@ pub(crate) fn dedup_credential_mappings(
         .collect()
 }
 
+fn active_skill_names_from_ctx(ctx: &JobContext) -> Vec<String> {
+    ctx.metadata
+        .get("active_skill_names")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(|value| value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn mapping_applies_to_http_call(
+    mapping: &crate::secrets::CredentialMapping,
+    active_skill_names: &[String],
+) -> bool {
+    match mapping.provenance.as_ref() {
+        Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::WasmTool => false,
+        Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
+            active_skill_names
+                .iter()
+                .any(|name| name == &provenance.artifact_name)
+        }
+        _ => true,
+    }
+}
+
+fn binding_configuration_error(
+    mapping: &crate::secrets::CredentialMapping,
+    host: &str,
+) -> Option<String> {
+    let provenance = mapping.provenance.as_ref()?;
+    if provenance.binding_policy != crate::secrets::CredentialBindingPolicy::RequireApproval {
+        return None;
+    }
+    if mapping.approval_candidate_for_host(host).is_some() {
+        return None;
+    }
+    if mapping
+        .host_patterns
+        .iter()
+        .any(|pattern| host_matches_pattern(host, pattern))
+    {
+        return Some(format!(
+            "{} '{}' must declare exact hosts before it can use secret '{}' for '{}'.",
+            provenance.artifact_kind.as_str(),
+            provenance.artifact_name,
+            mapping.secret_name,
+            host,
+        ));
+    }
+    None
+}
+
+fn approval_required_error(approval: &SecretBindingApproval) -> ToolError {
+    ToolError::ExecutionFailed(
+        serde_json::json!({
+            "error": SECRET_BINDING_APPROVAL_ERROR,
+            "message": format!(
+                "Secret '{}' is configured, but {} '{}' is not approved for '{}' yet.",
+                approval.secret_name,
+                approval.artifact_kind.as_str(),
+                approval.artifact_name,
+                approval.host,
+            ),
+            "approval": approval,
+        })
+        .to_string(),
+    )
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -639,11 +720,16 @@ impl Tool for HttpTool {
             self.secrets_store.as_ref(),
         ) {
             let cred_host = parsed_url.host_str().unwrap_or("").to_string();
-            let matched: Vec<crate::secrets::CredentialMapping> =
-                registry.find_for_host(&cred_host);
+            let active_skill_names = active_skill_names_from_ctx(ctx);
+            let matched: Vec<crate::secrets::CredentialMapping> = registry
+                .find_for_host(&cred_host)
+                .into_iter()
+                .filter(|mapping| mapping_applies_to_http_call(mapping, &active_skill_names))
+                .collect();
             tracing::debug!(
                 host = %cred_host,
                 matched_count = matched.len(),
+                active_skill_count = active_skill_names.len(),
                 url = %parsed_url,
                 "HTTP tool credential lookup"
             );
@@ -651,6 +737,10 @@ impl Tool for HttpTool {
             // `dedup_credential_mappings` doc comment for rationale.
             let dedup_matched = dedup_credential_mappings(matched);
             for mapping in &dedup_matched {
+                if let Some(message) = binding_configuration_error(mapping, &cred_host) {
+                    return Err(ToolError::ExecutionFailed(message));
+                }
+
                 let oauth_refresh = registry.oauth_refresh_for_secret(&mapping.secret_name);
                 match resolve_secret_for_runtime(
                     store.as_ref(),
@@ -663,6 +753,26 @@ impl Tool for HttpTool {
                 .await
                 {
                     Ok(secret) => {
+                        if let Some(approval) = mapping.approval_candidate_for_host(&cred_host) {
+                            let approved = binding_approval_exists(
+                                self.database.as_ref().map(|db| {
+                                    db.as_ref() as &(dyn crate::db::SettingsStore + Send + Sync)
+                                }),
+                                &ctx.user_id,
+                                &approval,
+                            )
+                            .await
+                            .map_err(|e| {
+                                ToolError::ExecutionFailed(format!(
+                                    "failed to verify secret binding approval: {}",
+                                    e
+                                ))
+                            })?;
+                            if !approved {
+                                return Err(approval_required_error(&approval));
+                            }
+                        }
+
                         injected_any_credential = true;
                         missing_credential = None;
                         // Redacted preview for triage: first and last 4 chars
@@ -1866,6 +1976,7 @@ mod tests {
             },
             host_patterns: vec!["api.github.com".to_string()],
             optional: false,
+            provenance: None,
         }]);
 
         let store = Arc::new(test_secrets_store());

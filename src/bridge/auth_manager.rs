@@ -16,12 +16,17 @@ use crate::auth::{
     PendingOAuthLaunchParams, build_pending_oauth_launch, resolve_secret_for_runtime,
     upsert_auth_descriptor,
 };
+use crate::db::SettingsStore;
 use crate::extensions::naming::canonicalize_extension_name;
 use crate::extensions::{ConfigureResult, ExtensionError};
-use crate::secrets::SecretsStore;
+use crate::secrets::binding_approvals::binding_approval_exists;
+use crate::secrets::{
+    CredentialArtifactKind, CredentialBindingPolicy, SecretBindingApproval, SecretsStore,
+};
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
 use crate::tools::wasm::SharedCredentialRegistry;
+use crate::tools::wasm::credential_injector::host_matches_pattern;
 use ironclaw_common::{CredentialName, ExtensionName as CommonExtensionName};
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
@@ -34,6 +39,10 @@ pub enum AuthCheckResult {
     NoAuthRequired,
     /// One or more credentials are missing — pause and prompt.
     MissingCredentials(Vec<MissingCredential>),
+    /// A credential exists, but the declared host binding needs explicit approval.
+    BindingApprovalRequired(SecretBindingApproval),
+    /// The artifact declared a binding shape we intentionally reject.
+    BindingConfigurationError { message: String },
 }
 
 /// A single missing credential identified during pre-flight check.
@@ -98,6 +107,7 @@ pub struct AuthManager {
     skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     tools: Option<Arc<ToolRegistry>>,
+    settings_store_override: Option<Arc<dyn SettingsStore + Send + Sync>>,
 }
 
 /// Canonical four-branch auth-flow extension-name resolver, extracted to a
@@ -173,6 +183,13 @@ pub(crate) async fn resolve_auth_flow_extension_name(
     CommonExtensionName::from_trusted(credential_fallback.to_string())
 }
 
+pub fn default_secret_setup_instructions(credential_name: &str) -> String {
+    format!(
+        "Open Settings → Secrets and add your {} secret.",
+        credential_name
+    )
+}
+
 impl AuthManager {
     pub fn new(
         secrets_store: Arc<dyn SecretsStore + Send + Sync>,
@@ -185,7 +202,16 @@ impl AuthManager {
             skill_registry,
             extension_manager,
             tools,
+            settings_store_override: None,
         }
+    }
+
+    pub fn with_settings_store_override(
+        mut self,
+        store: Arc<dyn SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_store_override = Some(store);
+        self
     }
 
     async fn ensure_extension_ready_for_execution(
@@ -220,18 +246,81 @@ impl AuthManager {
     }
 
     fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
-        self.tools
+        self.settings_store_override
             .as_ref()
-            .and_then(|tools| {
-                tools
-                    .database()
-                    .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
-            })
+            .map(|store| store.as_ref() as &dyn crate::db::SettingsStore)
             .or_else(|| {
-                self.extension_manager
+                self.tools
                     .as_ref()
-                    .and_then(|manager| manager.settings_store())
+                    .and_then(|tools| {
+                        tools
+                            .database()
+                            .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+                    })
+                    .or_else(|| {
+                        self.extension_manager
+                            .as_ref()
+                            .and_then(|manager| manager.settings_store())
+                    })
             })
+    }
+
+    fn dedup_http_mappings(
+        &self,
+        mappings: Vec<crate::secrets::CredentialMapping>,
+    ) -> Vec<crate::secrets::CredentialMapping> {
+        let mut seen: std::collections::HashSet<(String, crate::secrets::CredentialLocation)> =
+            std::collections::HashSet::new();
+        mappings
+            .into_iter()
+            .filter(|mapping| seen.insert((mapping.secret_name.clone(), mapping.location.clone())))
+            .collect()
+    }
+
+    fn mapping_applies_to_http_call(
+        &self,
+        mapping: &crate::secrets::CredentialMapping,
+        active_skill_names: &[String],
+    ) -> bool {
+        match mapping.provenance.as_ref() {
+            Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::WasmTool => {
+                false
+            }
+            Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
+                active_skill_names
+                    .iter()
+                    .any(|name| name == &provenance.artifact_name)
+            }
+            _ => true,
+        }
+    }
+
+    fn binding_configuration_error(
+        &self,
+        mapping: &crate::secrets::CredentialMapping,
+        host: &str,
+    ) -> Option<String> {
+        let provenance = mapping.provenance.as_ref()?;
+        if provenance.binding_policy != CredentialBindingPolicy::RequireApproval {
+            return None;
+        }
+        if mapping.approval_candidate_for_host(host).is_some() {
+            return None;
+        }
+        if mapping
+            .host_patterns
+            .iter()
+            .any(|pattern| host_matches_pattern(host, pattern))
+        {
+            return Some(format!(
+                "{} '{}' must declare exact hosts before it can use secret '{}' for '{}'.",
+                provenance.artifact_kind.as_str(),
+                provenance.artifact_name,
+                mapping.secret_name,
+                host,
+            ));
+        }
+        None
     }
 
     /// Pre-flight credential check for a tool call.
@@ -246,12 +335,13 @@ impl AuthManager {
         parameters: &serde_json::Value,
         user_id: &str,
         credential_registry: &SharedCredentialRegistry,
+        active_skill_names: &[String],
     ) -> AuthCheckResult {
         let is_http = action_name == "http" || action_name == "http_request";
 
         if is_http {
             return self
-                .check_http_auth(parameters, user_id, credential_registry)
+                .check_http_auth(parameters, user_id, credential_registry, active_skill_names)
                 .await;
         }
 
@@ -269,6 +359,7 @@ impl AuthManager {
         parameters: &serde_json::Value,
         user_id: &str,
         credential_registry: &SharedCredentialRegistry,
+        active_skill_names: &[String],
     ) -> AuthCheckResult {
         let host = match extract_host_from_params(parameters) {
             Some(h) => h,
@@ -278,10 +369,17 @@ impl AuthManager {
             }
         };
 
-        let matched = credential_registry.find_for_host(&host);
+        let matched = self.dedup_http_mappings(
+            credential_registry
+                .find_for_host(&host)
+                .into_iter()
+                .filter(|mapping| self.mapping_applies_to_http_call(mapping, active_skill_names))
+                .collect(),
+        );
         tracing::debug!(
             host = %host,
             matched_count = matched.len(),
+            active_skill_count = active_skill_names.len(),
             "Pre-flight auth: credential registry lookup"
         );
         if matched.is_empty() {
@@ -289,7 +387,12 @@ impl AuthManager {
         }
 
         let mut missing = Vec::new();
+        let mut ready = false;
         for mapping in &matched {
+            if let Some(message) = self.binding_configuration_error(mapping, &host) {
+                return AuthCheckResult::BindingConfigurationError { message };
+            }
+
             let oauth_refresh = credential_registry.oauth_refresh_for_secret(&mapping.secret_name);
             let role_lookup = self
                 .tools
@@ -306,11 +409,34 @@ impl AuthManager {
             .await
             {
                 Ok(_) => {
-                    // At least one credential is configured — tool can proceed.
-                    // (Multiple mappings for the same host is normal, e.g.,
-                    // Bearer token + org header. If any is present, we allow
-                    // execution and let the HTTP tool handle partial injection.)
-                    return AuthCheckResult::Ready;
+                    if let Some(approval) = mapping.approval_candidate_for_host(&host) {
+                        match binding_approval_exists(
+                            self.settings_store().map(|store| {
+                                store as &(dyn crate::db::SettingsStore + Send + Sync)
+                            }),
+                            user_id,
+                            &approval,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                ready = true;
+                            }
+                            Ok(false) => {
+                                return AuthCheckResult::BindingApprovalRequired(approval);
+                            }
+                            Err(error) => {
+                                return AuthCheckResult::BindingConfigurationError {
+                                    message: format!(
+                                        "Failed to verify secret binding approval: {}",
+                                        error
+                                    ),
+                                };
+                            }
+                        }
+                    } else {
+                        ready = true;
+                    }
                 }
                 Err(error) if error.requires_authentication() => {
                     missing.push(
@@ -333,11 +459,27 @@ impl AuthManager {
             }
         }
 
-        if missing.is_empty() {
+        if ready {
             AuthCheckResult::Ready
+        } else if missing.is_empty() {
+            AuthCheckResult::NoAuthRequired
         } else {
             AuthCheckResult::MissingCredentials(missing)
         }
+    }
+
+    pub async fn grant_secret_binding_approval(
+        &self,
+        user_id: &str,
+        approval: SecretBindingApproval,
+    ) -> Result<(), crate::error::DatabaseError> {
+        crate::secrets::binding_approvals::grant_binding_approval(
+            self.settings_store()
+                .map(|store| store as &(dyn crate::db::SettingsStore + Send + Sync)),
+            user_id,
+            approval,
+        )
+        .await
     }
 
     /// Check whether a tool (by name) is ready to use, needs auth, or
@@ -900,22 +1042,158 @@ impl AuthManager {
     /// Get setup instructions with a fallback default message.
     pub fn get_setup_instructions_or_default(&self, credential_name: &str) -> String {
         self.get_setup_instructions(credential_name)
-            .unwrap_or_else(|| format!("Provide your {} token", credential_name))
+            .unwrap_or_else(|| default_secret_setup_instructions(credential_name))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
     use super::*;
+    use crate::db::SettingsStore;
+    use crate::history::SettingRow;
     use crate::testing::credentials::test_secrets_store;
     use crate::tools::ToolRegistry;
-    use std::path::Path;
 
     fn make_registry_with_mapping(secret_name: &str, host: &str) -> SharedCredentialRegistry {
         use crate::secrets::CredentialMapping;
         let registry = SharedCredentialRegistry::new();
         registry.add_mappings(vec![CredentialMapping::bearer(secret_name, host)]);
         registry
+    }
+
+    fn make_registry_with_approval_mapping(
+        secret_name: &str,
+        host: &str,
+        skill_name: &str,
+    ) -> SharedCredentialRegistry {
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialMapping,
+        };
+
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer(secret_name, host).with_provenance(
+                CredentialBindingProvenance {
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: skill_name.to_string(),
+                    artifact_fingerprint: "skill-hash-v1".to_string(),
+                    binding_policy: CredentialBindingPolicy::RequireApproval,
+                },
+            ),
+        ]);
+        registry
+    }
+
+    struct MemorySettingsStore {
+        values: tokio::sync::RwLock<HashMap<(String, String), serde_json::Value>>,
+    }
+
+    impl MemorySettingsStore {
+        fn new() -> Self {
+            Self {
+                values: tokio::sync::RwLock::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SettingsStore for MemorySettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(&(user_id.to_string(), key.to_string()))
+                .cloned())
+        }
+
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<SettingRow>, crate::error::DatabaseError> {
+            Ok(None)
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.values
+                .write()
+                .await
+                .insert((user_id.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .write()
+                .await
+                .remove(&(user_id.to_string(), key.to_string()))
+                .is_some())
+        }
+
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<SettingRow>, crate::error::DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .iter()
+                .filter(|((stored_user_id, _), _)| stored_user_id == user_id)
+                .map(|((_, key), value)| (key.clone(), value.clone()))
+                .collect())
+        }
+
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            let mut values = self.values.write().await;
+            values.retain(|(stored_user_id, _), _| stored_user_id != user_id);
+            for (key, value) in settings {
+                values.insert((user_id.to_string(), key.clone()), value.clone());
+            }
+            Ok(())
+        }
+
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .values
+                .read()
+                .await
+                .keys()
+                .any(|(stored_user_id, _)| stored_user_id == user_id))
+        }
     }
 
     fn make_auth_manager(secrets_store: Arc<dyn SecretsStore + Send + Sync>) -> AuthManager {
@@ -1068,7 +1346,7 @@ Test skill
 
         let params = serde_json::json!({"url": "https://api.github.com/repos"});
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1110,7 +1388,7 @@ Test skill
             serde_json::json!({"url": "https://gmail.googleapis.com/gmail/v1/users/me/profile"});
 
         let first = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
         let AuthCheckResult::MissingCredentials(first_missing) = first else {
             panic!("expected missing credential");
@@ -1132,7 +1410,7 @@ Test skill
         drop(flows);
 
         let second = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
         let AuthCheckResult::MissingCredentials(second_missing) = second else {
             panic!("expected missing credential on retry");
@@ -1271,7 +1549,7 @@ Test skill
         let params = serde_json::json!({"url": "https://api.custom.test/v1/me"});
 
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
         let AuthCheckResult::MissingCredentials(missing) = result else {
             panic!("expected missing credential");
@@ -1464,12 +1742,69 @@ Test skill
 
         let params = serde_json::json!({"url": "https://api.github.com/repos"});
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
 
         assert!(
             matches!(result, AuthCheckResult::Ready),
             "Expected Ready, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_http_requires_binding_approval_for_active_skill_mapping() {
+        let store = test_store();
+        store
+            .create(
+                "user1",
+                crate::secrets::CreateSecretParams::new("github_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+        let settings_store: Arc<dyn SettingsStore + Send + Sync> =
+            Arc::new(MemorySettingsStore::new());
+        let mgr =
+            make_auth_manager(store).with_settings_store_override(Arc::clone(&settings_store));
+        let registry = make_registry_with_approval_mapping(
+            "github_token",
+            "api.github.com",
+            "github-workflow",
+        );
+
+        let params = serde_json::json!({"url": "https://api.github.com/repos"});
+        let result = mgr
+            .check_action_auth(
+                "http",
+                &params,
+                "user1",
+                &registry,
+                &["github-workflow".to_string()],
+            )
+            .await;
+
+        let approval = match result {
+            AuthCheckResult::BindingApprovalRequired(approval) => approval,
+            other => panic!("expected BindingApprovalRequired, got {other:?}"),
+        };
+        assert_eq!(approval.secret_name, "github_token");
+        assert_eq!(approval.host, "api.github.com");
+
+        mgr.grant_secret_binding_approval("user1", approval)
+            .await
+            .expect("grant approval");
+
+        let approved = mgr
+            .check_action_auth(
+                "http",
+                &params,
+                "user1",
+                &registry,
+                &["github-workflow".to_string()],
+            )
+            .await;
+        assert!(
+            matches!(approved, AuthCheckResult::Ready),
+            "Expected Ready after granting approval, got {approved:?}"
         );
     }
 
@@ -1485,7 +1820,7 @@ Test skill
 
         let params = serde_json::json!({"url": "https://api.github.com/repos"});
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1502,7 +1837,7 @@ Test skill
 
         let params = serde_json::json!({"url": "https://httpbin.org/get"});
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1519,7 +1854,7 @@ Test skill
 
         let params = serde_json::json!({"method": "GET"});
         let result = mgr
-            .check_action_auth("http", &params, "user1", &registry)
+            .check_action_auth("http", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1536,7 +1871,7 @@ Test skill
 
         let params = serde_json::json!({"query": "test"});
         let result = mgr
-            .check_action_auth("echo", &params, "user1", &registry)
+            .check_action_auth("echo", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1553,7 +1888,7 @@ Test skill
 
         let params = serde_json::json!({"url": "https://api.openai.com/v1/chat"});
         let result = mgr
-            .check_action_auth("http_request", &params, "user1", &registry)
+            .check_action_auth("http_request", &params, "user1", &registry, &[])
             .await;
 
         assert!(
@@ -1576,6 +1911,9 @@ Test skill
         let mgr = make_auth_manager(store);
 
         let result = mgr.get_setup_instructions_or_default("github_token");
-        assert_eq!(result, "Provide your github_token token");
+        assert_eq!(
+            result,
+            "Open Settings → Secrets and add your github_token secret."
+        );
     }
 }

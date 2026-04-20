@@ -49,6 +49,12 @@ function switchLanguage(lang) {
         loadInferenceSettings();
       }
     }
+    if (typeof loadSecretsSettings === 'function') {
+      var secretsPanel = document.getElementById('settings-secrets');
+      if (secretsPanel && secretsPanel.classList.contains('active')) {
+        loadSecretsSettings();
+      }
+    }
     // Refresh debug panel dynamic content (stats, SSE health)
     if (window.DebugPanel && typeof window.DebugPanel.onLanguageChange === 'function') {
       window.DebugPanel.onLanguageChange();

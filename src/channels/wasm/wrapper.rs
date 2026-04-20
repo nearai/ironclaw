@@ -5267,6 +5267,7 @@ mod tests {
                 },
                 host_patterns: vec!["discord.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
         tool_capabilities.http = Some(http);

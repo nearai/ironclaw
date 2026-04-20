@@ -27,6 +27,8 @@ use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::secrets::SecretBindingApproval;
+use crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_GATE_NAME;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
@@ -134,6 +136,28 @@ impl EffectBridgeAdapter {
     /// installed skills into the v2 doc space.
     pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
         *self.engine_store.write().await = Some(store);
+    }
+
+    async fn active_skill_names(&self, thread_id: ironclaw_engine::ThreadId) -> Vec<String> {
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Vec::new();
+        };
+        match store.load_thread(thread_id).await {
+            Ok(Some(thread)) => thread
+                .active_skills()
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                debug!(thread_id = %thread_id, error = %error, "failed to load active skills");
+                Vec::new()
+            }
+        }
+    }
+
+    fn secret_binding_resume_output(approval: &SecretBindingApproval) -> serde_json::Value {
+        serde_json::json!({ "secret_binding_approval": approval })
     }
 
     /// Provide the v1 skill registry so `skill_install` can resolve the
@@ -980,6 +1004,8 @@ impl EffectBridgeAdapter {
             }
         }
 
+        let active_skill_names = self.active_skill_names(context.thread_id).await;
+
         {
             let has_mgr = self.auth_manager.read().await.is_some();
             let has_reg = self.tools.credential_registry().is_some();
@@ -996,7 +1022,13 @@ impl EffectBridgeAdapter {
             && let Some(registry) = self.tools.credential_registry()
         {
             match auth_mgr
-                .check_action_auth(&lookup_name, &parameters, &context.user_id, registry)
+                .check_action_auth(
+                    &lookup_name,
+                    &parameters,
+                    &context.user_id,
+                    registry,
+                    &active_skill_names,
+                )
                 .await
             {
                 AuthCheckResult::MissingCredentials(missing) => {
@@ -1015,13 +1047,38 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Authentication {
                             credential_name: cred.credential_name.clone(),
                             instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
-                                format!("Provide your {} token", cred.credential_name)
+                                crate::bridge::auth_manager::default_secret_setup_instructions(
+                                    cred.credential_name.as_ref(),
+                                )
                             }),
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
                         Some(lease.clone()),
                     ));
+                }
+                AuthCheckResult::BindingApprovalRequired(approval) => {
+                    debug!(
+                        secret_name = %approval.secret_name,
+                        host = %approval.host,
+                        tool = %lookup_name,
+                        user = %context.user_id,
+                        "Pre-flight secret binding approval required"
+                    );
+                    return Err(Self::gate_paused(
+                        SECRET_BINDING_APPROVAL_GATE_NAME,
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        Some(Self::secret_binding_resume_output(&approval)),
+                        Some(lease.clone()),
+                    ));
+                }
+                AuthCheckResult::BindingConfigurationError { message } => {
+                    return Err(EngineError::Effect { reason: message });
                 }
                 AuthCheckResult::Ready => {
                     debug!(tool = %lookup_name, "Pre-flight auth: credentials present");
@@ -1179,6 +1236,11 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
+        if !active_skill_names.is_empty() {
+            job_ctx.metadata = serde_json::json!({
+                "active_skill_names": active_skill_names.clone(),
+            });
+        }
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.
@@ -1406,6 +1468,30 @@ impl EffectBridgeAdapter {
             }
             Err(e) => {
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
+                if error_msg
+                    .contains(crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_ERROR)
+                    && let Some(approval) = extract_secret_binding_approval(&error_msg)
+                    && self.is_known_secret_binding_approval(&approval)
+                {
+                    tracing::warn!(
+                        secret_name = %approval.secret_name,
+                        host = %approval.host,
+                        tool = %lookup_name,
+                        user = %context.user_id,
+                        "Secret binding approval required — returning GatePaused(approval)"
+                    );
+                    return Err(Self::gate_paused(
+                        SECRET_BINDING_APPROVAL_GATE_NAME,
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        Some(Self::secret_binding_resume_output(&approval)),
+                        Some(lease.clone()),
+                    ));
+                }
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
                     && self.is_known_credential(&cred_name)
@@ -1425,7 +1511,10 @@ impl EffectBridgeAdapter {
                             credential_name: ironclaw_common::CredentialName::from_trusted(
                                 cred_name.clone(),
                             ),
-                            instructions: format!("Provide your {} token", cred_name),
+                            instructions:
+                                crate::bridge::auth_manager::default_secret_setup_instructions(
+                                    &cred_name,
+                                ),
                             auth_url: None,
                         },
                         None,
@@ -1465,6 +1554,25 @@ impl EffectBridgeAdapter {
             Some(registry) => registry.has_secret(credential_name),
             None => false,
         }
+    }
+
+    fn is_known_secret_binding_approval(&self, approval: &SecretBindingApproval) -> bool {
+        let Some(registry) = self.tools.credential_registry() else {
+            return false;
+        };
+
+        registry
+            .find_for_host(&approval.host)
+            .into_iter()
+            .any(|mapping| {
+                mapping.secret_name == approval.secret_name
+                    && mapping.location == approval.location
+                    && mapping.provenance.as_ref().is_some_and(|provenance| {
+                        provenance.artifact_kind == approval.artifact_kind
+                            && provenance.artifact_name == approval.artifact_name
+                            && provenance.artifact_fingerprint == approval.artifact_fingerprint
+                    })
+            })
     }
 }
 
@@ -2260,6 +2368,18 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
             .get("credential_name")
             .and_then(|v| v.as_str())
             .map(String::from);
+    }
+    None
+}
+
+fn extract_secret_binding_approval(error_msg: &str) -> Option<SecretBindingApproval> {
+    if let Some(json_start) = error_msg.find('{')
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start..])
+    {
+        return parsed
+            .get("approval")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
     }
     None
 }

@@ -195,6 +195,7 @@ impl WasmToolLoader {
                 secrets_store: self.secrets_store.clone(),
                 role_lookup: self.role_lookup.clone(),
                 oauth_refresh,
+                credential_provenance: None,
             })
             .await?;
 

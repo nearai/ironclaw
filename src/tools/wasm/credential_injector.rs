@@ -501,6 +501,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -535,6 +536,7 @@ mod tests {
                 },
                 host_patterns: vec!["*.example.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -568,6 +570,7 @@ mod tests {
                 },
                 host_patterns: vec!["api.service.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -611,6 +614,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 

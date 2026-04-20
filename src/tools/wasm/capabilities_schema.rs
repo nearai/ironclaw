@@ -383,6 +383,7 @@ impl CredentialMappingSchema {
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
             optional: self.optional,
+            provenance: None,
         }
     }
 }

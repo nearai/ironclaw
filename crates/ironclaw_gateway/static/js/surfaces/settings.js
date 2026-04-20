@@ -1,3 +1,15 @@
+var currentSecretEditName = null;
+
+function updateSettingsToolbarForSubtab(subtab) {
+  var exportBtn = document.getElementById('settings-export-btn');
+  var importBtn = document.getElementById('settings-import-btn');
+  var searchWrap = document.querySelector('.settings-search');
+  var isSecrets = subtab === 'secrets';
+  if (exportBtn) exportBtn.style.display = isSecrets ? 'none' : '';
+  if (importBtn) importBtn.style.display = isSecrets ? 'none' : '';
+  if (searchWrap) searchWrap.style.display = isSecrets ? 'none' : '';
+}
+
 function switchSettingsSubtab(subtab) {
   currentSettingsSubtab = subtab;
   document.querySelectorAll('.settings-subtab').forEach(function(b) {
@@ -16,6 +28,7 @@ function switchSettingsSubtab(subtab) {
   if (window.innerWidth <= 768) {
     document.querySelector('.settings-layout').classList.add('settings-detail-active');
   }
+  updateSettingsToolbarForSubtab(subtab);
   loadSettingsSubtab(subtab);
   updateHash();
 }
@@ -32,6 +45,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
+  else if (subtab === 'secrets') loadSecretsSettings();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
@@ -700,6 +714,310 @@ function renderBuiltinChannelCard(name, description, active, detail) {
   card.appendChild(actions);
 
   return card;
+}
+
+// --- Secrets Settings ---
+
+function resetSecretForm() {
+  currentSecretEditName = null;
+  var nameInput = document.getElementById('secret-name-input');
+  var valueInput = document.getElementById('secret-value-input');
+  var providerInput = document.getElementById('secret-provider-input');
+  var expiryInput = document.getElementById('secret-expiry-input');
+  var note = document.getElementById('secret-editing-note');
+  var saveBtn = document.getElementById('secret-save-btn');
+
+  if (nameInput) {
+    nameInput.disabled = false;
+    nameInput.value = '';
+  }
+  if (valueInput) valueInput.value = '';
+  if (providerInput) providerInput.value = '';
+  if (expiryInput) expiryInput.value = '';
+  if (note) note.style.display = 'none';
+  if (saveBtn) saveBtn.textContent = I18n.t('secrets.save');
+}
+
+function beginSecretEdit(secret) {
+  currentSecretEditName = secret.name;
+  var nameInput = document.getElementById('secret-name-input');
+  var valueInput = document.getElementById('secret-value-input');
+  var providerInput = document.getElementById('secret-provider-input');
+  var expiryInput = document.getElementById('secret-expiry-input');
+  var note = document.getElementById('secret-editing-note');
+  var saveBtn = document.getElementById('secret-save-btn');
+
+  if (nameInput) {
+    nameInput.value = secret.name || '';
+    nameInput.disabled = true;
+  }
+  if (valueInput) {
+    valueInput.value = '';
+    valueInput.focus();
+  }
+  if (providerInput) providerInput.value = secret.provider || '';
+  if (expiryInput) expiryInput.value = '';
+  if (note) note.style.display = '';
+  if (saveBtn) saveBtn.textContent = I18n.t('secrets.update');
+}
+
+function readSecretForm() {
+  var name = currentSecretEditName || (document.getElementById('secret-name-input') || {}).value || '';
+  var value = (document.getElementById('secret-value-input') || {}).value || '';
+  var provider = (document.getElementById('secret-provider-input') || {}).value || '';
+  var expiryRaw = (document.getElementById('secret-expiry-input') || {}).value || '';
+  name = name.trim().toLowerCase();
+  provider = provider.trim();
+  expiryRaw = expiryRaw.trim();
+
+  if (!name) throw new Error(I18n.t('secrets.nameRequired'));
+  if (!value.trim()) throw new Error(I18n.t('secrets.valueRequired'));
+
+  var payload = { value: value };
+  if (provider) payload.provider = provider;
+  if (expiryRaw) {
+    var parsed = Number(expiryRaw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(I18n.t('secrets.expiryInvalid'));
+    }
+    payload.expires_in_days = Math.floor(parsed);
+  }
+
+  return { name: name, body: payload };
+}
+
+function formatSecretApprovalLocation(location) {
+  if (!location || typeof location !== 'object') return '—';
+  if (location.AuthorizationBearer !== undefined) return 'bearer';
+  if (location.AuthorizationBasic) return 'basic_auth';
+  if (location.Header) return 'header:' + (location.Header.name || '');
+  if (location.QueryParam) return 'query_param:' + (location.QueryParam.name || '');
+  if (location.UrlPath) return 'url_path:' + (location.UrlPath.placeholder || '');
+  return '—';
+}
+
+function revokeSecretApproval(secretName, approval) {
+  showConfirmModal(
+    I18n.t('secrets.confirmRevokeTitle', { name: secretName }),
+    I18n.t('secrets.confirmRevokeMessage', {
+      artifact: approval.artifact_name || 'artifact',
+      host: approval.host || 'host'
+    }),
+    function() {
+      apiFetch('/api/secrets/' + encodeURIComponent(secretName) + '/approvals/revoke', {
+        method: 'POST',
+        body: { approval_id: approval.approval_id }
+      }).then(function() {
+        showToast(I18n.t('secrets.revokeSuccess'), 'success');
+        loadSecretsSettings();
+      }).catch(function(err) {
+        showToast(I18n.t('secrets.revokeFailed', { message: err.message }), 'error');
+      });
+    },
+    I18n.t('secrets.revoke')
+  );
+}
+
+function appendSecretApprovalsRow(tbody, secret) {
+  var approvals = Array.isArray(secret.approvals) ? secret.approvals : [];
+  if (approvals.length === 0) return;
+
+  var detailsTr = document.createElement('tr');
+  var detailsTd = document.createElement('td');
+  detailsTd.colSpan = 6;
+  detailsTd.style.paddingTop = '0';
+
+  var wrap = document.createElement('div');
+  wrap.className = 'settings-description';
+
+  var heading = document.createElement('div');
+  heading.style.fontWeight = '600';
+  heading.style.marginBottom = '8px';
+  heading.textContent = I18n.t('secrets.approvalsHeading');
+  wrap.appendChild(heading);
+
+  approvals.forEach(function(approval) {
+    var row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.justifyContent = 'space-between';
+    row.style.gap = '12px';
+    row.style.padding = '8px 0';
+    row.style.borderTop = '1px solid var(--border-color, rgba(255,255,255,0.08))';
+
+    var info = document.createElement('div');
+    info.textContent = I18n.t('secrets.approvalDetails', {
+      kind: approval.artifact_kind || 'artifact',
+      artifact: approval.artifact_name || 'artifact',
+      host: approval.host || 'host',
+      location: formatSecretApprovalLocation(approval.location),
+      approvedAt: approval.approved_at ? formatDate(approval.approved_at) : '—',
+      risk: approval.risk === 'high' ? I18n.t('secrets.riskHigh') : I18n.t('secrets.riskNormal')
+    });
+    info.style.flex = '1';
+    info.style.minWidth = '0';
+    wrap.appendChild(row);
+    row.appendChild(info);
+
+    var revokeBtn = document.createElement('button');
+    revokeBtn.className = 'btn-secondary';
+    revokeBtn.textContent = I18n.t('secrets.revoke');
+    revokeBtn.addEventListener('click', function() {
+      revokeSecretApproval(secret.name, approval);
+    });
+    row.appendChild(revokeBtn);
+  });
+
+  detailsTd.appendChild(wrap);
+  detailsTr.appendChild(detailsTd);
+  tbody.appendChild(detailsTr);
+}
+
+function renderSecretsTable(secrets) {
+  var tbody = document.getElementById('secrets-tbody');
+  var empty = document.getElementById('secrets-empty');
+  if (!tbody || !empty) return;
+
+  tbody.innerHTML = '';
+  if (!secrets || secrets.length === 0) {
+    empty.style.display = '';
+    return;
+  }
+
+  empty.style.display = 'none';
+  secrets.forEach(function(secret) {
+    var tr = document.createElement('tr');
+
+    var nameTd = document.createElement('td');
+    nameTd.textContent = secret.name || '—';
+    tr.appendChild(nameTd);
+
+    var providerTd = document.createElement('td');
+    providerTd.textContent = secret.provider || '—';
+    tr.appendChild(providerTd);
+
+    var updatedTd = document.createElement('td');
+    updatedTd.textContent = secret.updated_at ? formatDate(secret.updated_at) : '—';
+    tr.appendChild(updatedTd);
+
+    var expiresTd = document.createElement('td');
+    expiresTd.textContent = secret.expires_at ? formatDate(secret.expires_at) : '—';
+    tr.appendChild(expiresTd);
+
+    var approvalsTd = document.createElement('td');
+    var approvalCount = Array.isArray(secret.approvals) ? secret.approvals.length : 0;
+    approvalsTd.textContent = approvalCount === 0
+      ? I18n.t('secrets.noApprovals')
+      : I18n.t('secrets.approvalCount', { count: approvalCount });
+    tr.appendChild(approvalsTd);
+
+    var actionsTd = document.createElement('td');
+    var editBtn = document.createElement('button');
+    editBtn.className = 'btn-secondary';
+    editBtn.textContent = I18n.t('secrets.edit');
+    editBtn.addEventListener('click', function() { beginSecretEdit(secret); });
+    actionsTd.appendChild(editBtn);
+
+    var deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn-danger';
+    deleteBtn.style.marginLeft = '8px';
+    deleteBtn.textContent = I18n.t('secrets.delete');
+    deleteBtn.addEventListener('click', function() { deleteSecret(secret.name); });
+    actionsTd.appendChild(deleteBtn);
+
+    tr.appendChild(actionsTd);
+    tbody.appendChild(tr);
+    appendSecretApprovalsRow(tbody, secret);
+  });
+}
+
+function loadSecretsSettings() {
+  var tbody = document.getElementById('secrets-tbody');
+  var empty = document.getElementById('secrets-empty');
+  if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' + escapeHtml(I18n.t('common.loading')) + '</td></tr>';
+  }
+  if (empty) empty.style.display = 'none';
+
+  apiFetch('/api/secrets').then(function(data) {
+    renderSecretsTable(data.secrets || []);
+  }).catch(function(err) {
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' + escapeHtml(I18n.t('common.loadFailed')) + ': ' + escapeHtml(err.message) + '</td></tr>';
+    }
+  });
+}
+
+function saveSecretFromForm() {
+  var parsed;
+  try {
+    parsed = readSecretForm();
+  } catch (err) {
+    showToast(err.message, 'error');
+    return;
+  }
+
+  apiFetch('/api/secrets/' + encodeURIComponent(parsed.name), {
+    method: 'PUT',
+    body: parsed.body,
+  }).then(function(res) {
+    showToast(I18n.t('secrets.saveSuccess', { name: res.name || parsed.name }), 'success');
+    resetSecretForm();
+    loadSecretsSettings();
+  }).catch(function(err) {
+    showToast(I18n.t('secrets.saveFailed', { message: err.message }), 'error');
+  });
+}
+
+function deleteSecret(name) {
+  showConfirmModal(
+    I18n.t('secrets.confirmDeleteTitle', { name: name }),
+    I18n.t('secrets.confirmDeleteMessage', { name: name }),
+    function() {
+      apiFetch('/api/secrets/' + encodeURIComponent(name), {
+        method: 'DELETE',
+      }).then(function() {
+        if (currentSecretEditName === name) resetSecretForm();
+        showToast(I18n.t('secrets.deleteSuccess', { name: name }), 'success');
+        loadSecretsSettings();
+      }).catch(function(err) {
+        showToast(I18n.t('secrets.deleteFailed', { message: err.message }), 'error');
+      });
+    },
+    I18n.t('secrets.delete')
+  );
+}
+
+function importSecrets() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) return;
+    var reader = new FileReader();
+    reader.onload = function() {
+      try {
+        var parsed = JSON.parse(reader.result);
+        if (Array.isArray(parsed)) parsed = { secrets: parsed };
+        if (!parsed || !Array.isArray(parsed.secrets)) {
+          throw new Error(I18n.t('secrets.importFormatError'));
+        }
+        apiFetch('/api/secrets/import', {
+          method: 'POST',
+          body: parsed,
+        }).then(function() {
+          showToast(I18n.t('secrets.importSuccess'), 'success');
+          loadSecretsSettings();
+        }).catch(function(err) {
+          showToast(I18n.t('secrets.importFailed', { message: err.message }), 'error');
+        });
+      } catch (err) {
+        showToast(I18n.t('secrets.importFailed', { message: err.message }), 'error');
+      }
+    };
+    reader.readAsText(input.files[0]);
+  });
+  input.click();
 }
 
 // --- Networking Settings ---

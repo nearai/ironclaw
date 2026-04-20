@@ -428,6 +428,7 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-subtab" data-settings-subtab="secrets" data-i18n="settings.secrets">Secrets</button>
           <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
           <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
@@ -539,6 +540,43 @@
                   <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
                   <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
                 </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-secrets">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <div class="config-section-header">
+                  <h3 data-i18n="secrets.heading">Secrets</h3>
+                  <button id="secrets-import-btn" class="btn-secondary" data-i18n="secrets.import">Import secrets</button>
+                </div>
+                <div class="settings-description" data-i18n="secrets.description">Store per-user API tokens here. Secret values stay out of chat and are never shown again after saving.</div>
+                <div class="ext-install-form">
+                  <input type="text" id="secret-name-input" data-i18n-placeholder="secrets.namePlaceholder" placeholder="Secret name (e.g. github_token)" />
+                  <input type="password" id="secret-value-input" data-i18n-placeholder="secrets.valuePlaceholder" placeholder="Secret value" />
+                  <input type="text" id="secret-provider-input" data-i18n-placeholder="secrets.providerPlaceholder" placeholder="Provider hint (optional)" />
+                  <input type="number" id="secret-expiry-input" data-i18n-placeholder="secrets.expiryPlaceholder" placeholder="Expires in days (optional)" min="1" max="36500" />
+                  <button id="secret-save-btn" class="btn-primary" data-i18n="secrets.save">Save secret</button>
+                  <button id="secret-clear-btn" class="btn-secondary" data-i18n="common.clear">Clear</button>
+                </div>
+                <div class="config-notice" id="secret-editing-note" style="display:none">
+                  <span>⚠</span>
+                  <span data-i18n="secrets.editingNote">Updating a secret requires entering the replacement value.</span>
+                </div>
+                <table class="routines-table" id="secrets-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="secrets.columns.name">Name</th>
+                      <th data-i18n="secrets.columns.provider">Provider</th>
+                      <th data-i18n="secrets.columns.updated">Updated</th>
+                      <th data-i18n="secrets.columns.expires">Expires</th>
+                      <th data-i18n="secrets.columns.approvals">Approvals</th>
+                      <th data-i18n="secrets.columns.actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="secrets-tbody"></tbody>
+                </table>
+                <div id="secrets-empty" class="empty-state" style="display:none" data-i18n="secrets.emptyState">No secrets configured yet.</div>
               </div>
             </div>
           </div>
