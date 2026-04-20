@@ -6,10 +6,9 @@
 //! and the type aliases (`PromptQueue`, `RoutineEngineSlot`) that are too
 //! noisy to spell inline.
 //!
-//! Handlers should depend on this module instead of the older
-//! `crate::channels::web::server::*` path; the re-exports in `server.rs`
-//! exist only for backward compatibility during the ironclaw#2599 migration
-//! and will be removed once all call sites are updated.
+//! Handlers depend on this module directly. The older
+//! `crate::channels::web::server::*` path — and its back-compat shim in
+//! `src/channels/web/server.rs` — was removed in ironclaw#2599 stage 6.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -146,6 +145,7 @@ pub struct ActiveConfigSnapshot {
     pub llm_backend: String,
     pub llm_model: String,
     pub enabled_channels: Vec<String>,
+    pub default_timezone: String,
 }
 
 /// Per-user rate limiter that maintains a separate sliding window per user_id.
@@ -372,6 +372,18 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Hot-reload controller for the LLM provider chain. Populated at
+    /// startup when the chain is built from config (not in test harnesses
+    /// that inject a provider directly).
+    pub llm_reload: Option<Arc<crate::llm::LlmReloadHandle>>,
+    /// LLM session manager handed through to `LlmReloadHandle::reload` so
+    /// the rebuilt chain keeps using the same (potentially authenticated)
+    /// NEAR AI / OAuth session without forcing a re-login.
+    pub llm_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    /// Optional TOML config path that produced the current `LlmConfig`.
+    /// Needed so a hot-reload reads the same precedence layers
+    /// (TOML → DB overlay) as startup.
+    pub config_toml_path: Option<std::path::PathBuf>,
     /// Skill registry for skill management API.
     pub skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
@@ -396,7 +408,7 @@ pub struct GatewayState {
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
-    pub active_config: ActiveConfigSnapshot,
+    pub active_config: Arc<tokio::sync::RwLock<ActiveConfigSnapshot>>,
     /// Secrets store for admin secret provisioning.
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
@@ -467,4 +479,31 @@ pub struct FrontendCacheKey {
     /// Signature for `.system/gateway/widgets/` (max child mtime), or `None`
     /// if the directory is empty or absent.
     pub widgets: Option<(i64, u32)>,
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::WorkspacePool;
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_pool_resolve_seeds_new_user_workspace() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+
+        let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
+
+        let readme = ws.read(crate::workspace::paths::README).await.unwrap();
+        let identity = ws.read(crate::workspace::paths::IDENTITY).await.unwrap();
+
+        assert!(!readme.content.trim().is_empty());
+        assert!(!identity.content.trim().is_empty());
+    }
 }

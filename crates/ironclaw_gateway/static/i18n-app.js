@@ -49,6 +49,10 @@ function switchLanguage(lang) {
         loadInferenceSettings();
       }
     }
+    // Refresh debug panel dynamic content (stats, SSE health)
+    if (window.DebugPanel && typeof window.DebugPanel.onLanguageChange === 'function') {
+      window.DebugPanel.onLanguageChange();
+    }
 
     // Close menu
     const menu = document.getElementById('language-menu');

@@ -257,7 +257,7 @@ class TestAuthenticationRequiredFlow:
             ironclaw_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "create an issue in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -274,6 +274,8 @@ class TestAuthenticationRequiredFlow:
             "github_token",
             "paste your token",
             "token below",
+            "requires authentication",
+            '"status": "401"',
         ]
         has_auth_indicator = any(
             indicator in last_response.lower() for indicator in auth_indicators
@@ -411,24 +413,42 @@ class TestSSEAuthEvents:
         except asyncio.CancelledError:
             pass
 
-        # Check if any auth-related events were emitted
+        # Check if any auth-related events were emitted. The credential gate
+        # fires via one of three SSE surfaces depending on whether the engine
+        # hit the preflight path or the reactive 401 path:
+        # - `onboarding_state` with state `auth_required` (preflight auth gate)
+        # - `gate_required` whose `resume_kind` is `Authentication` (v2 path)
+        # - `approval_needed` for the blocked tool call (preflight approval path)
         event_types = [e.get("type", "") for e in events_received]
-        has_onboarding_event = any(
-            e.get("type") == "onboarding_state" and e.get("state") == "auth_required"
-            for e in events_received
-        )
 
-        # We should see skill_activated and/or onboarding auth events
+        def _is_auth_gate(e: dict) -> bool:
+            if e.get("type") == "onboarding_state" and e.get("state") == "auth_required":
+                return True
+            if e.get("type") == "gate_required":
+                rk = e.get("resume_kind") or {}
+                return isinstance(rk, dict) and "Authentication" in rk
+            return False
+
+        has_auth_event = any(_is_auth_gate(e) for e in events_received)
+        has_approval_event = "approval_needed" in event_types
         has_skill_event = "skill_activated" in event_types
         has_tool_event = any(
             t in event_types for t in ["tool_started", "tool_completed"]
         )
 
-        assert has_onboarding_event, (
-            f"Expected onboarding_state/auth_required in SSE stream, got: {events_received}"
+        assert has_auth_event or has_approval_event, (
+            f"Expected an auth or approval gate event in SSE stream, got: {events_received}"
         )
-        # At minimum, tool events should fire (the http call was attempted)
-        assert has_tool_event or has_skill_event, (
+        # At minimum, tool events should fire (the http call was attempted).
+        # Engine v2 emits only `thinking` status updates between approval gates
+        # and the actual tool start, so tolerate either the explicit tool
+        # event or a thinking update that mentions the tool.
+        has_running_tool_status = any(
+            e.get("type") == "thinking"
+            and "running" in (e.get("message") or "").lower()
+            for e in events_received
+        )
+        assert has_tool_event or has_skill_event or has_running_tool_status, (
             f"Expected tool/skill events in SSE stream, got types: {event_types}"
         )
 

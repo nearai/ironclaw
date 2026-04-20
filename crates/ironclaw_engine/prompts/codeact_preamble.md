@@ -60,6 +60,18 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 7. For large data, process it in chunks using llm_query() on subsets rather than loading everything into context.
 8. Outputs are truncated to 8000 chars — use variables to store large intermediate results.
 9. Include the actual content in your FINAL() answer, not just a count or summary. Users want to see the details.
+10. **Never reconstruct tool results manually.** Prior tool outputs are already Python objects — reference them via `state['<tool_name>']` or `state['last_return']` or by the variable name you stored them in. Writing `positions = [{"address": "...", ...}, ...]` with hardcoded data from a previous step is wrong — use the variable.
+11. **Do not paste Python code into prose.** When you need to run code, put it in a ```repl block. When you need to explain something to the user, that explanation goes inside `FINAL(answer)` — NOT as free-form text followed by code. Mixing prose and code without a fence is the #1 source of bad responses.
+12. **Chain tool calls in a single block.** If the task is scan → propose → build_intent, write one `repl` block that awaits all three in sequence, using the result of each as input to the next. Don't split across turns.
+13. **Pass Python objects, NOT JSON strings.** Tool parameters accept native Python lists and dicts. NEVER call `json.dumps()` before passing a value. The tool harness serializes for you.
+
+    ```python
+    # CORRECT — pass the list directly
+    await portfolio(action="propose", positions=scan["positions"])
+
+    # WRONG — passes a string literal; tool rejects with "expected a sequence"
+    await portfolio(action="propose", positions=json.dumps(scan["positions"]))
+    ```
 
 ## Runtime environment
 
