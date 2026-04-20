@@ -1271,11 +1271,11 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        let credential_user_id = &ctx.user_id;
+        let credential_user_id = ctx.user_id.clone();
         let resolution = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
-            credential_user_id,
+            &credential_user_id,
             self.role_lookup.as_deref(),
             self.oauth_refresh.as_ref(),
         )
@@ -1290,9 +1290,10 @@ impl Tool for WasmToolWrapper {
         // mapping `optional = true` in their capabilities manifest.
         if !resolution.missing_required.is_empty() {
             return Err(ToolError::ExecutionFailed(format!(
-                "WASM tool '{}' requires credentials that are not configured: {}. \
-                 Configure the missing credentials before re-running the tool.",
+                "WASM tool '{}' requires credentials that are not configured for user '{}': {}. \
+                 Configure the missing credentials with `ironclaw secrets set` and re-run the tool.",
                 self.name(),
+                credential_user_id,
                 resolution.missing_required.join(", ")
             )));
         }
@@ -1391,16 +1392,14 @@ impl std::fmt::Debug for WasmToolWrapper {
 /// so that the synchronous WASM host function can inject credentials
 /// without needing async access to the secrets store.
 ///
-/// Silently skips credentials that can't be resolved (e.g., missing secrets).
-/// The tool will get a 401/403 from the API, which is the expected UX when
-/// auth hasn't been configured yet.
-/// Outcome of pre-resolving WASM tool host credentials. Carries both the
-/// successfully-resolved set and any *required* credentials that could not
-/// be resolved. The caller is responsible for refusing to execute the tool
-/// when `missing_required` is non-empty — proceeding would let the tool
-/// issue requests without the credentials it declared, which a malicious
-/// or misconfigured tool can use to exfiltrate user context to an
-/// unauthenticated endpoint.
+/// Resolves the host credentials declared by a WASM tool for the current user.
+///
+/// Optional mappings may be skipped when unavailable. Required mappings are
+/// tracked in `missing_required` so the caller can fail closed before
+/// execution instead of letting the tool run without the credentials it
+/// declared. That prevents a malicious or misconfigured tool from issuing
+/// requests that silently borrow another scope's secrets or exfiltrate user
+/// context to an unauthenticated endpoint.
 struct HostCredentialsResolution {
     resolved: Vec<ResolvedHostCredential>,
     missing_required: Vec<String>,
@@ -1495,7 +1494,7 @@ async fn resolve_host_credentials(
             &mapping.secret_name,
             role_lookup,
             oauth_refresh.filter(|config| config.secret_name == mapping.secret_name),
-            crate::auth::DefaultFallback::AdminOnly,
+            crate::auth::DefaultFallback::Denied,
         )
         .await
         {
@@ -1885,6 +1884,10 @@ mod tests {
 
         async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
             self.inner.exists(user_id, name).await
+        }
+
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            self.inner.any_exist().await
         }
 
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
@@ -3480,7 +3483,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_resolve_host_credentials_fallback_to_default_for_admin_user() {
+    async fn test_resolve_host_credentials_denies_default_fallback_for_admin_user() {
         use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
@@ -3520,8 +3523,9 @@ mod tests {
             ..Default::default()
         };
 
-        // Resolve credentials for a different user (routine context)
-        // Should fallback to "default" and find the token
+        // Resolve credentials for a different user (routine context).
+        // The WASM tool path must fail closed and refuse to borrow the
+        // admin-only default scope.
         let result = resolve_host_credentials(
             &caps,
             Some(&store),
@@ -3531,8 +3535,15 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
-        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+        assert!(
+            result.is_empty(),
+            "WASM tool credential resolution must not borrow the default scope"
+        );
+        assert_eq!(
+            result.missing_required,
+            vec!["google_oauth_token".to_string()],
+            "missing required credential should still be reported"
+        );
     }
 
     #[cfg(feature = "libsql")]

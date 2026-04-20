@@ -265,6 +265,19 @@ impl Store for TestStore {
             .cloned()
             .collect())
     }
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        Ok(self
+            .docs
+            .read()
+            .await
+            .iter()
+            .filter(|d| d.user_id == user_id)
+            .cloned()
+            .collect())
+    }
     async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
         self.leases.write().await.push(lease.clone());
         Ok(())
@@ -336,6 +349,7 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         },
         source: V2SkillSource::Authored,
         trust: ironclaw_skills::SkillTrust::Trusted,
+        requires: Default::default(),
         code_snippets: vec![CodeSnippet {
             name: "list_github_issues".into(),
             code: r#"def list_github_issues(owner, repo, state="open"):
@@ -349,6 +363,8 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         revisions: vec![],
         repairs: vec![],
         content_hash: String::new(),
+        bundle_path: None,
+        source_url: None,
     };
 
     let prompt = "\

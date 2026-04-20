@@ -42,6 +42,11 @@ pub enum ThreadOutcome {
         /// Completed action output that should be injected on resume instead
         /// of re-running the action.
         resume_output: Option<serde_json::Value>,
+        /// Lease snapshot captured when the gate paused the action.
+        /// Boxed to keep `ThreadOutcome::GatePaused` under clippy's
+        /// `large_enum_variant` threshold — `CapabilityLease` is ~360
+        /// bytes and would otherwise dominate the whole enum's size.
+        paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
     },
 }
 

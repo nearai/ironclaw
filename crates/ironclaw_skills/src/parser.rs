@@ -62,6 +62,7 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
 /// This is intentionally crate-private and should remain limited to the
 /// install-recovery path. Normal discovery/loading must keep using
 /// [`parse_skill_md`] so invalid names are rejected.
+#[cfg(feature = "registry")]
 pub(crate) fn parse_skill_md_for_install_recovery(
     content: &str,
 ) -> Result<ParsedSkill, SkillParseError> {
@@ -73,6 +74,7 @@ pub(crate) fn parse_skill_md_for_install_recovery(
 ///
 /// Used by install recovery to mutate a single field (`name`) while preserving
 /// any unknown YAML keys that the typed `SkillManifest` would otherwise drop.
+#[cfg(feature = "registry")]
 pub(crate) fn split_skill_md_frontmatter(
     content: &str,
 ) -> Result<(String, String), SkillParseError> {
