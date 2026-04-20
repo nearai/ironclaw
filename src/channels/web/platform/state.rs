@@ -144,6 +144,8 @@ impl RateLimiter {
 pub struct ActiveConfigSnapshot {
     pub llm_backend: String,
     pub llm_model: String,
+    pub cheap_model: Option<String>,
+    pub smart_routing_cascade: bool,
     pub enabled_channels: Vec<String>,
     pub default_timezone: String,
 }

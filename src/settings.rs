@@ -150,6 +150,17 @@ pub struct Settings {
     #[serde(default)]
     pub selected_model: Option<String>,
 
+    /// Cheap/fast model for smart routing (lightweight tasks like heartbeat,
+    /// classification, and routing).
+    #[serde(default)]
+    pub cheap_model: Option<String>,
+
+    /// Enable cascade mode for smart routing (retry with the primary model if
+    /// the cheap model response seems uncertain). `None` means "inherit the
+    /// env/default behavior".
+    #[serde(default)]
+    pub smart_routing_cascade: Option<bool>,
+
     /// Default sampling temperature for LLM requests (0.0–2.0).
     /// When set, used as the default for conversational turns.
     /// Per-request temperature (e.g. from the API) takes precedence.

@@ -521,6 +521,8 @@ I18n.register('zh-CN', {
   'settings.envValue': '环境变量: {value}',
   'settings.envDefault': '使用环境变量默认值',
   'settings.useEnvDefault': '使用环境变量默认值',
+  'settings.enabledOption': '启用',
+  'settings.disabledOption': '禁用',
 
   // 设置分组
   'cfg.group.llm': 'LLM 提供商',
@@ -540,6 +542,10 @@ I18n.register('zh-CN', {
   'cfg.llm_backend.desc': 'LLM 推理提供商',
   'cfg.selected_model.label': '模型',
   'cfg.selected_model.desc': '所选后端的模型名称或 ID',
+  'cfg.cheap_model.label': '廉价模型',
+  'cfg.cheap_model.desc': '用于智能路由和其他轻量任务的廉价/快速模型',
+  'cfg.smart_routing_cascade.label': '智能路由级联',
+  'cfg.smart_routing_cascade.desc': '当廉价模型回答显得不确定时，回退到主模型重试',
   'cfg.temperature.label': '温度',
   'cfg.temperature.desc': '默认采样温度（0.0–2.0）。越低越确定性，越高越有创意',
   'cfg.group.inference': '推理',

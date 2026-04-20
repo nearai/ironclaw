@@ -969,6 +969,8 @@ async fn async_main() -> anyhow::Result<()> {
                 ironclaw::channels::web::platform::state::ActiveConfigSnapshot {
                     llm_backend: config.llm.backend.to_string(),
                     llm_model: active_model,
+                    cheap_model: config.llm.cheap_model_name().map(str::to_string),
+                    smart_routing_cascade: config.llm.smart_routing_cascade,
                     enabled_channels: enabled,
                     default_timezone: config.agent.default_timezone.clone(),
                 },

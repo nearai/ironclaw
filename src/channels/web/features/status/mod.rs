@@ -42,6 +42,9 @@ pub(crate) struct GatewayStatusResponse {
     model_usage: Option<Vec<ModelUsageEntry>>,
     llm_backend: String,
     llm_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cheap_model: Option<String>,
+    smart_routing_cascade: bool,
     enabled_channels: Vec<String>,
     engine_v2_enabled: bool,
 }
@@ -112,6 +115,8 @@ pub(crate) async fn gateway_status_handler(
         model_usage,
         llm_backend: active_config.llm_backend,
         llm_model: active_config.llm_model,
+        cheap_model: active_config.cheap_model,
+        smart_routing_cascade: active_config.smart_routing_cascade,
         enabled_channels: active_config.enabled_channels,
         engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
     })

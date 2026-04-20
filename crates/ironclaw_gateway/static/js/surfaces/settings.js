@@ -39,22 +39,30 @@ function loadSettingsSubtab(subtab) {
 
 // --- Structured Settings Definitions ---
 
-var INFERENCE_SETTINGS = [
+var INFERENCE_USER_SETTINGS = [
+  { key: 'temperature', label: 'cfg.temperature.label', description: 'cfg.temperature.desc', type: 'float', min: 0, max: 2, step: 0.1 },
+];
+
+var INFERENCE_ADMIN_SETTINGS = [
+  { key: 'cheap_model', label: 'cfg.cheap_model.label', description: 'cfg.cheap_model.desc', type: 'text', scope: 'admin' },
   {
-    group: 'cfg.group.inference',
-    settings: [
-      { key: 'temperature', label: 'cfg.temperature.label', description: 'cfg.temperature.desc', type: 'float', min: 0, max: 2, step: 0.1 },
+    key: 'smart_routing_cascade',
+    label: 'cfg.smart_routing_cascade.label',
+    description: 'cfg.smart_routing_cascade.desc',
+    type: 'select',
+    scope: 'admin',
+    options: [
+      { value: 'true', label: 'settings.enabledOption' },
+      { value: 'false', label: 'settings.disabledOption' }
     ]
   },
-  {
-    group: 'cfg.group.embeddings',
-    settings: [
-      { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
-      { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
-        type: 'select', options: ['openai', 'nearai'] },
-      { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
-    ]
-  },
+];
+
+var INFERENCE_EMBEDDING_SETTINGS = [
+  { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
+  { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
+    type: 'select', options: ['openai', 'nearai'] },
+  { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
 ];
 
 var AGENT_SETTINGS = [
@@ -167,19 +175,23 @@ function loadInferenceSettings() {
 
   Promise.all([
     apiFetch('/api/settings/export'),
+    apiFetch('/api/settings/export?scope=admin').catch(function() { return null; }),
     apiFetch('/api/gateway/status').catch(function() { return {}; }),
   ]).then(function(results) {
-    var settings = results[0].settings || {};
-    var status = results[1];
+    var userSettings = results[0].settings || {};
+    var adminExport = results[1];
+    var adminSettings = adminExport && adminExport.settings ? adminExport.settings : {};
+    var status = results[2];
+    var settings = Object.assign({}, userSettings, adminSettings);
     container.innerHTML = '';
 
     // LLM Provider display — derived from active Model Provider
-    var activeBackend = settings['llm_backend'] || status.llm_backend || 'nearai';
-    var activeModel = settings['selected_model'] || status.llm_model || '';
+    var activeBackend = status.llm_backend || adminSettings['llm_backend'] || userSettings['llm_backend'] || 'nearai';
+    var activeModel = status.llm_model || userSettings['selected_model'] || '';
     var allP = _builtinProviders;
     var customP = [];
     try {
-      var cpVal = settings['llm_custom_providers'];
+      var cpVal = adminSettings['llm_custom_providers'] || userSettings['llm_custom_providers'];
       customP = Array.isArray(cpVal) ? cpVal : (cpVal ? JSON.parse(cpVal) : []);
     } catch (e) { customP = []; }
     var provider = allP.concat(customP).find(function(p) { return p.id === activeBackend; });
@@ -219,8 +231,19 @@ function loadInferenceSettings() {
 
     container.appendChild(group);
 
-    // Remaining editable settings (embeddings, etc.)
-    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, {});
+    var inferenceSettings = [{
+      group: 'cfg.group.inference',
+      settings: INFERENCE_USER_SETTINGS.concat(adminExport ? INFERENCE_ADMIN_SETTINGS : [])
+    }, {
+      group: 'cfg.group.embeddings',
+      settings: INFERENCE_EMBEDDING_SETTINGS
+    }];
+    var activeValues = {
+      cheap_model: status.cheap_model,
+      smart_routing_cascade: status.smart_routing_cascade
+    };
+
+    renderStructuredSettingsInto(container, inferenceSettings, settings, activeValues);
     loadConfig();
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
@@ -360,7 +383,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     toggle.addEventListener('click', function() {
       var isOn = this.classList.toggle('on');
       this.setAttribute('aria-checked', isOn ? 'true' : 'false');
-      saveSetting(def.key, isOn ? 'true' : 'false', savedIndicator);
+      saveSetting(def.key, isOn ? 'true' : 'false', def.scope);
     });
     toggle.addEventListener('keydown', function(e) {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -377,19 +400,22 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     sel.setAttribute('aria-label', ariaLabel);
     var emptyOpt = document.createElement('option');
     emptyOpt.value = '';
-    emptyOpt.textContent = activeValue ? '\u2014 ' + I18n.t('settings.envValue', { value: activeValue }) + ' \u2014' : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
+    emptyOpt.textContent = activeValueText ? '\u2014 ' + I18n.t('settings.envValue', { value: activeValueText }) + ' \u2014' : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
     if (!value && value !== false && value !== 0) emptyOpt.selected = true;
     sel.appendChild(emptyOpt);
     for (var oi = 0; oi < def.options.length; oi++) {
+      var optionDef = def.options[oi];
+      var optionValue = (optionDef && typeof optionDef === 'object') ? optionDef.value : optionDef;
+      var optionLabel = (optionDef && typeof optionDef === 'object') ? I18n.t(optionDef.label) : optionDef;
       var opt = document.createElement('option');
-      opt.value = def.options[oi];
-      opt.textContent = def.options[oi];
-      if (String(value) === def.options[oi]) opt.selected = true;
+      opt.value = optionValue;
+      opt.textContent = optionLabel;
+      if (String(value) === String(optionValue)) opt.selected = true;
       sel.appendChild(opt);
     }
-    sel.addEventListener('change', (function(k, el) {
-      return function() { saveSetting(k, el.value === '' ? null : el.value); };
-    })(def.key, sel));
+    sel.addEventListener('change', (function(k, el, scope) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value, scope); };
+    })(def.key, sel, def.scope));
     inputWrap.appendChild(sel);
   } else if (def.type === 'number' || def.type === 'float') {
     var numInp = document.createElement('input');
@@ -401,15 +427,15 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     if (!value && value !== 0) numInp.placeholder = placeholderText;
     if (def.min !== undefined) numInp.min = def.min;
     if (def.max !== undefined) numInp.max = def.max;
-    numInp.addEventListener('change', (function(k, el, isFloat) {
+    numInp.addEventListener('change', (function(k, el, isFloat, scope) {
       return function() {
-        if (el.value === '') return saveSetting(k, null);
+        if (el.value === '') return saveSetting(k, null, scope);
         var parsed = isFloat ? parseFloat(el.value) : parseInt(el.value, 10);
         if (isNaN(parsed)) return;
         el.value = parsed;
-        saveSetting(k, parsed);
+        saveSetting(k, parsed, scope);
       };
-    })(def.key, numInp, def.type === 'float'));
+    })(def.key, numInp, def.type === 'float', def.scope));
     inputWrap.appendChild(numInp);
   } else if (def.type === 'list') {
     var listInp = document.createElement('input');
@@ -421,15 +447,15 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     else if (typeof value === 'string') listValue = value;
     listInp.value = listValue;
     if (!listValue) listInp.placeholder = placeholderText;
-    listInp.addEventListener('change', (function(k, el) {
+    listInp.addEventListener('change', (function(k, el, scope) {
       return function() {
-        if (el.value.trim() === '') return saveSetting(k, null);
+        if (el.value.trim() === '') return saveSetting(k, null, scope);
         var items = el.value.split(/[\n,]/).map(function(item) {
           return item.trim();
         }).filter(Boolean);
-        saveSetting(k, items);
+        saveSetting(k, items, scope);
       };
-    })(def.key, listInp));
+    })(def.key, listInp, def.scope));
     inputWrap.appendChild(listInp);
   } else {
     var textInp = document.createElement('input');
@@ -451,9 +477,9 @@ function renderStructuredSettingsRow(def, value, activeValue) {
       textInp.setAttribute('list', dlId);
       inputWrap.appendChild(dl);
     }
-    textInp.addEventListener('change', (function(k, el) {
-      return function() { saveSetting(k, el.value === '' ? null : el.value); };
-    })(def.key, textInp));
+    textInp.addEventListener('change', (function(k, el, scope) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value, scope); };
+    })(def.key, textInp, def.scope));
     inputWrap.appendChild(textInp);
   }
 
@@ -474,11 +500,13 @@ var RESTART_REQUIRED_KEYS = ['embeddings.enabled', 'embeddings.provider', 'embed
 
 var _settingsSavedTimers = {};
 
-function saveSetting(key, value) {
+function saveSetting(key, value, scope) {
   var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
   var opts = { method: method };
   if (method === 'PUT') opts.body = { value: value };
-  apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
+  var url = '/api/settings/' + encodeURIComponent(key);
+  if (scope) url += '?scope=' + encodeURIComponent(scope);
+  apiFetch(url, opts).then(function() {
     var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
     if (indicator) {
       if (_settingsSavedTimers[key]) clearTimeout(_settingsSavedTimers[key]);

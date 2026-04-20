@@ -60,7 +60,7 @@ fn resolve_settings_scope(
     query: &SettingScopeQuery,
 ) -> Result<String, StatusCode> {
     if query.scope.as_deref() == Some("admin") {
-        if user.role != "admin" {
+        if !user.is_admin() {
             tracing::warn!(
                 user_id = %user.user_id,
                 role = %user.role,
@@ -254,6 +254,8 @@ fn llm_setting_requires_reload(key: &str) -> bool {
         key,
         "llm_backend"
             | "selected_model"
+            | "cheap_model"
+            | "smart_routing_cascade"
             | "llm_custom_providers"
             | "llm_builtin_overrides"
             | "ollama_base_url"
@@ -378,10 +380,10 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         return ReloadOutcome::BuildFailed(e.to_string());
     }
 
-    // Refresh the active-config snapshot the status handler reads. Only
-    // llm_backend / llm_model are touched — `enabled_channels` is
-    // intentionally left alone because channel enablement is a
-    // channels-manager concern and is not affected by LLM config changes.
+    // Refresh the active-config snapshot the status handler reads. Only the
+    // LLM-related fields are touched — `enabled_channels` is intentionally
+    // left alone because channel enablement is a channels-manager concern and
+    // is not affected by LLM config changes.
     let active_model = state
         .llm_provider
         .as_ref()
@@ -391,6 +393,8 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         let mut active = state.active_config.write().await;
         active.llm_backend = config.llm.backend.clone();
         active.llm_model = active_model;
+        active.cheap_model = config.llm.cheap_model_name().map(str::to_string);
+        active.smart_routing_cascade = config.llm.smart_routing_cascade;
     }
 
     tracing::info!(
@@ -594,15 +598,21 @@ pub async fn settings_delete_handler(
 pub async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
+
     let store = resolve_settings_store(&state)?;
-    let mut settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let mut settings = store
+        .get_all_settings(&effective_user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to export settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Indicate key presence from secrets store without exposing values.
-    annotate_secret_key_presence(&state, &user.user_id, &mut settings).await;
+    annotate_secret_key_presence(&state, &effective_user_id, &mut settings).await;
 
     mask_settings_api_keys(&mut settings);
 
@@ -709,7 +719,7 @@ fn ensure_setting_write_allowed(
     user: &crate::channels::web::auth::UserIdentity,
     key: &str,
 ) -> Result<(), StatusCode> {
-    if is_admin_only_setting_key(key) && user.role != "admin" {
+    if is_admin_only_setting_key(key) && !user.is_admin() {
         tracing::warn!(
             user_id = %user.user_id,
             role = %user.role,
@@ -726,7 +736,7 @@ fn ensure_settings_import_allowed(
     user: &crate::channels::web::auth::UserIdentity,
     settings: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), StatusCode> {
-    if user.role == "admin" {
+    if user.is_admin() {
         return Ok(());
     }
 
@@ -1585,6 +1595,8 @@ mod tests {
     fn test_admin_only_setting_keys_include_network_destinations() {
         assert!(is_admin_only_setting_key("llm_builtin_overrides"));
         assert!(is_admin_only_setting_key("llm_custom_providers"));
+        assert!(is_admin_only_setting_key("cheap_model"));
+        assert!(is_admin_only_setting_key("smart_routing_cascade"));
         assert!(is_admin_only_setting_key("ollama_base_url"));
         assert!(is_admin_only_setting_key("openai_compatible_base_url"));
         assert!(!is_admin_only_setting_key("selected_model"));
@@ -1612,6 +1624,43 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(status.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_settings_export_owner_can_read_admin_scope() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        state
+            .store
+            .as_ref()
+            .expect("store")
+            .set_setting(
+                admin_scope,
+                "cheap_model",
+                &serde_json::json!("gpt-4o-mini"),
+            )
+            .await
+            .expect("seed cheap_model");
+
+        let Json(response) = settings_export_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "owner".to_string(),
+                role: "owner".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+        )
+        .await
+        .expect("owner should be allowed to export admin scope");
+
+        assert_eq!(
+            response.settings.get("cheap_model"),
+            Some(&serde_json::json!("gpt-4o-mini"))
+        );
     }
 
     #[tokio::test]

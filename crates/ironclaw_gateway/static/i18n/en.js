@@ -522,6 +522,8 @@ I18n.register('en', {
   'settings.envValue': 'env: {value}',
   'settings.envDefault': 'env default',
   'settings.useEnvDefault': 'use env default',
+  'settings.enabledOption': 'enabled',
+  'settings.disabledOption': 'disabled',
 
   // Settings groups
   'cfg.group.llm': 'LLM Provider',
@@ -541,6 +543,10 @@ I18n.register('en', {
   'cfg.llm_backend.desc': 'LLM inference provider',
   'cfg.selected_model.label': 'Model',
   'cfg.selected_model.desc': 'Model name or ID for the selected backend',
+  'cfg.cheap_model.label': 'Cheap Model',
+  'cfg.cheap_model.desc': 'Cheap/fast model used for smart routing and other lightweight tasks',
+  'cfg.smart_routing_cascade.label': 'Smart Routing Cascade',
+  'cfg.smart_routing_cascade.desc': 'Retry with the primary model when the cheap model response seems uncertain',
   'cfg.temperature.label': 'Temperature',
   'cfg.temperature.desc': 'Default sampling temperature (0.0–2.0). Lower = more deterministic, higher = more creative',
   'cfg.group.inference': 'Inference',
