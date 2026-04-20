@@ -442,9 +442,11 @@ mod live_tests {
         // The agent must NOT have run a tool_install / tool_activate
         // recovery loop — that's the bad behaviour the post-flight
         // detector eliminates.
-        let bad_recovery = phase_a_tools
-            .iter()
-            .any(|t| t == "tool_install" || t == "tool_activate" || t == "tool-install");
+        let bad_recovery = phase_a_tools.iter().any(|t| {
+            tool_name_matches(t, "tool_install")
+                || tool_name_matches(t, "tool_activate")
+                || tool_name_matches(t, "tool-install")
+        });
         assert!(
             !bad_recovery,
             "Phase A: agent ran a tool_install/tool_activate recovery loop instead \
@@ -550,11 +552,11 @@ mod live_tests {
             phase_b_tools.len()
         );
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
-            t == "tool_install"
-                || t == "tool-install"
-                || t == "tool_activate"
-                || t == "secret_list"
-                || t.starts_with("tool_search")
+            tool_name_matches(t, "tool_install")
+                || tool_name_matches(t, "tool-install")
+                || tool_name_matches(t, "tool_activate")
+                || tool_name_matches(t, "secret_list")
+                || tool_name_matches(t, "tool_search")
         });
         assert!(
             !phase_b_recovery,
