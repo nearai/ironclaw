@@ -5816,7 +5816,9 @@ mod tests {
             )
         };
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use test");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
