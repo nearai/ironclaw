@@ -96,8 +96,13 @@ pub async fn migrate_v1_skill_list(
     Ok(migrated)
 }
 
-/// Sync a single v1 skill into the v2 store, updating an existing `skill:<name>`
-/// doc in place when present.
+/// Sync a single just-installed v1 skill into the v2 store, updating an
+/// existing `skill:<name>` doc in place when present.
+///
+/// Called by the `skill_install` post-hook in `EffectBridgeAdapter` so that
+/// a skill installed at runtime is immediately visible to the v2 engine.
+/// Idempotent: if a doc with the same content_hash already exists, it is
+/// returned unchanged.
 ///
 /// Shared skill docs live under a shared owner and are visible to every project
 /// via `list_skills_global()`; scoping the lookup to `project_id` would create
@@ -125,6 +130,7 @@ pub async fn sync_v1_skill_to_store(
         return Ok(existing.clone());
     }
 
+    // Use shared_owner_id for live-installed skills — they're registry-sourced.
     let mut doc = v1_skill_to_memory_doc(skill, project_id, shared_owner_id()).await;
     if let Some(existing) = existing {
         doc.id = existing.id;

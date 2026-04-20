@@ -223,6 +223,10 @@ pub struct Settings {
     #[serde(default)]
     pub search: SearchSettings,
 
+    /// Mission configuration.
+    #[serde(default)]
+    pub missions: MissionSettings,
+
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
@@ -1006,6 +1010,11 @@ pub struct SearchSettings {
     /// Vector weight for fusion. `None` = use per-strategy default.
     #[serde(default)]
     pub vector_weight: Option<f32>,
+
+    /// Whether reasoning-augmented recall is enabled for memory search.
+    /// `None` = use env/default (false).
+    #[serde(default)]
+    pub reasoning_enabled: Option<bool>,
 }
 
 fn default_search_fusion_strategy() -> String {
@@ -1023,8 +1032,18 @@ impl Default for SearchSettings {
             rrf_k: default_search_rrf_k(),
             fts_weight: None,
             vector_weight: None,
+            reasoning_enabled: None,
         }
     }
+}
+
+/// Mission-related settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MissionSettings {
+    /// Conversation insights extraction interval (every N completed threads).
+    /// `None` = use env/default (5). Minimum: 1.
+    #[serde(default)]
+    pub insights_interval: Option<u32>,
 }
 
 /// Transcription pipeline settings.
@@ -2022,6 +2041,15 @@ mod tests {
                 max_parallel_jobs: 10,
                 ..Default::default()
             },
+            search: SearchSettings {
+                reasoning_enabled: Some(true),
+                fts_weight: Some(0.4),
+                vector_weight: Some(0.6),
+                ..Default::default()
+            },
+            missions: MissionSettings {
+                insights_interval: Some(7),
+            },
             ..Default::default()
         };
 
@@ -2089,6 +2117,26 @@ mod tests {
         assert_eq!(
             restored.agent.max_parallel_jobs, 10,
             "agent.max_parallel_jobs lost"
+        );
+        assert_eq!(
+            restored.search.reasoning_enabled,
+            Some(true),
+            "search.reasoning_enabled lost"
+        );
+        assert_eq!(
+            restored.search.fts_weight,
+            Some(0.4),
+            "search.fts_weight lost"
+        );
+        assert_eq!(
+            restored.search.vector_weight,
+            Some(0.6),
+            "search.vector_weight lost"
+        );
+        assert_eq!(
+            restored.missions.insights_interval,
+            Some(7),
+            "missions.insights_interval lost"
         );
     }
 

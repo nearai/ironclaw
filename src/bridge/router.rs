@@ -949,6 +949,41 @@ async fn resume_lease_for_pending_gate(
         .await
 }
 
+/// Broadcast a `GateResolved { resolution: "expired" }` event and return the
+/// dismissal outcome. Used when the target thread has been deleted between
+/// `take_verified` and resume, so there's no live thread to execute against.
+///
+/// Callers that persist side effects (e.g. `Approved { always }` writing
+/// `AlwaysAllow` to settings) MUST pre-flight with `state.store.load_thread`
+/// and call this helper *before* persisting, so a missing thread doesn't
+/// silently commit a long-lived preference for a tool that never ran (#2347).
+fn emit_gate_expired_dismissal(
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+) -> BridgeOutcome {
+    tracing::debug!(
+        thread_id = %pending.thread_id,
+        gate = %pending.gate_name,
+        action = %pending.action_name,
+        "thread not found for pending gate; emitting expired resolution"
+    );
+    if let Some(ref sse) = state.sse {
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateResolved {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                resolution: "expired".into(),
+                message: "Thread no longer exists.".into(),
+                thread_id: Some(pending.effective_wire_thread_id()),
+            },
+        );
+    }
+    BridgeOutcome::Respond("Thread no longer exists. Approval dismissed.".into())
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -957,12 +992,15 @@ async fn execute_pending_gate_action(
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
 ) -> Result<BridgeOutcome, Error> {
-    let thread = state
-        .store
-        .load_thread(pending.thread_id)
-        .await
-        .map_err(|e| engine_err("load thread", e))?
-        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+    let thread = match state.store.load_thread(pending.thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return Ok(emit_gate_expired_dismissal(state, message, pending)),
+        Err(e) => {
+            // Transient DB failure -- propagate so the caller can retry
+            // rather than permanently discarding the gate.
+            return Err(engine_err("load thread", e));
+        }
+    };
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
@@ -987,6 +1025,7 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1507,7 +1546,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1705,6 +1744,29 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    // Use the DB-first config system instead of raw std::env::var reads.
+    // Resolve MissionsConfig from DB-backed settings when available, falling
+    // back to local settings.json + env vars.
+    let missions_settings = if let Some(ref store) = agent.deps.store {
+        match store.get_all_settings(&agent.deps.owner_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::load(),
+        }
+    } else {
+        crate::settings::Settings::load()
+    };
+    let missions_config = match crate::config::MissionsConfig::resolve(&missions_settings) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "MissionsConfig::resolve failed; falling back to defaults"
+            );
+            crate::config::MissionsConfig::default()
+        }
+    };
+    mission_manager_inner =
+        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
@@ -2388,6 +2450,22 @@ pub async fn resolve_gate(
             // auto-approval that bypasses every subsequent gate. The gate's
             // own `allow_always` is the authoritative server-side policy.
             let always = clamp_always_to_resume_kind(always, &pending.resume_kind);
+
+            // Pre-flight thread check before committing `AlwaysAllow`
+            // persistence (#2347): if the thread was deleted between
+            // `take_verified` and now, persisting auto-approve would leave
+            // a permanent preference behind for a tool that never ran. The
+            // rollback at the bottom of this branch only fires on `Err`, so
+            // execute_pending_gate_action's graceful `Ok(Respond)` on
+            // missing-thread would bypass it. Short-circuit here instead.
+            match state.store.load_thread(pending.thread_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Ok(emit_gate_expired_dismissal(state, message, &pending));
+                }
+                Err(e) => return Err(engine_err("load thread", e)),
+            }
+
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -3077,13 +3155,9 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
                     .stop_thread(*tid, &message.user_id)
                     .await;
             }
-            let _ = state
-                .pending_gates
-                .discard(&PendingGateKey {
-                    user_id: message.user_id.clone(),
-                    thread_id: *tid,
-                })
-                .await;
+            // Discard all pending gates for this thread regardless of user,
+            // preventing orphaned gates that can never be resolved (#2323).
+            state.pending_gates.discard_for_thread(*tid).await;
         }
     }
 
@@ -4592,7 +4666,12 @@ pub struct ProjectsOverviewResponse {
 /// Mission summary for list views.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineMissionInfo {
-    pub id: String,
+    /// Typed mission identifier, carried through from the engine rather
+    /// than round-tripped to `String` at the adapter boundary. Serializes
+    /// transparently as a UUID string (via `MissionId`'s derived
+    /// `Serialize`), so the wire shape stays identical to the pre-newtype
+    /// DTO.
+    pub id: ironclaw_engine::MissionId,
     pub name: String,
     pub goal: String,
     pub status: String,
@@ -5196,7 +5275,7 @@ pub async fn list_engine_missions(
     Ok(missions
         .iter()
         .map(|m| EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5251,7 +5330,7 @@ pub async fn get_engine_mission(
 
     Ok(Some(EngineMissionDetail {
         info: EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -7984,6 +8063,90 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router no-auth-backend failure test");
+    }
+
+    /// Regression for #2323: when the target thread is deleted between
+    /// `take_verified` and resume, an `Approved` resolution must emit
+    /// `GateResolved { resolution: "expired" }` (not just generic error) and
+    /// must *not* persist `AlwaysAllow` — otherwise the caller's rollback
+    /// (`result.is_err()` branch) would be skipped, leaving a permanent
+    /// auto-approve preference behind for a tool that never ran. Covers
+    /// both the `always: false` SSE contract and the pre-flight thread
+    /// check that gates `persist_always_allow`.
+    #[tokio::test]
+    async fn resolve_gate_approved_with_missing_thread_emits_expired_and_skips_persist() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let sse = Arc::new(SseManager::new());
+            let mut event_stream = Box::pin(
+                sse.subscribe_raw(Some("alice".to_string()), false)
+                    .expect("subscribe raw"),
+            );
+
+            let mut state = make_expected_test_state(store);
+            state.sse = Some(Arc::clone(&sse));
+
+            // Thread deleted / never saved — `state.store.load_thread(tid)`
+            // returns `Ok(None)`, mimicking the #2323 race.
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+            let message =
+                IncomingMessage::new("web", "alice", "approve").with_thread(thread_id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread_id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::Approved { always: true },
+            )
+            .await
+            .expect("resolve gate");
+
+            // Graceful dismissal, not an error.
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text)
+                    if text == "Thread no longer exists. Approval dismissed."
+            ));
+
+            // The first (and only) SSE event on this subscription must be
+            // `expired`. Critically it must NOT be `approved_always` — a
+            // prior implementation emitted that first, then discovered the
+            // missing thread and committed AlwaysAllow before anyone could
+            // roll it back.
+            let event = event_stream.next().await.expect("gate event");
+            assert!(
+                matches!(
+                    &event,
+                    AppEvent::GateResolved { resolution, .. } if resolution == "expired"
+                ),
+                "expected expired gate resolution (pre-flight short-circuit), got: {event:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router orphaned-approved-gate expired test");
     }
 
     /// Unit test for the extension-manager branch of
