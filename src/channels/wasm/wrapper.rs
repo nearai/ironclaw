@@ -1438,6 +1438,16 @@ impl WasmChannel {
                 &owner_scope_id,
             )
             .await;
+            // Defense in depth: if a required secret disappeared between
+            // preflight (in `Channel::start`) and here, do not enter the
+            // reconnect loop — peer will reject with an auth close code.
+            if config.identify_secret_name.is_some() && identify_payload.is_none() {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "Websocket runtime exiting: required auth secret unavailable at runtime start"
+                );
+                return;
+            }
             let mut session_state = WebsocketSessionState::new(identify_payload.as_deref());
 
             'reconnect: loop {
@@ -1587,6 +1597,23 @@ impl WasmChannel {
                                 }
                                 Some(Ok(other)) => {
                                     log_websocket_diagnostic(&channel_name, &other);
+                                    if let WebsocketMessage::Close(frame) = &other
+                                        && let Some(frame) = frame.as_ref()
+                                    {
+                                        let code = u16::from(frame.code);
+                                        if let WebsocketCloseDisposition::Terminal { reason } =
+                                            classify_websocket_close_code(code)
+                                        {
+                                            tracing::warn!(
+                                                channel = %channel_name,
+                                                code,
+                                                disposition = reason,
+                                                reason_from_peer = %frame.reason,
+                                                "Websocket runtime received terminal close frame; stopping reconnect loop"
+                                            );
+                                            break 'reconnect;
+                                        }
+                                    }
                                 }
                                 Some(Err(error)) => {
                                     tracing::warn!(
@@ -3385,17 +3412,34 @@ impl Channel for WasmChannel {
             *self.poll_task.write().await = Some(handle);
         }
 
-        if let Some(websocket_config) =
-            WebsocketRuntimeConfig::from_capabilities(&self.capabilities)
-            && websocket_config.connect_on_start
+        match websocket_start_decision(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await
         {
-            let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
-            *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            self.start_websocket_runtime(
-                websocket_config,
-                websocket_shutdown_rx,
-                Arc::clone(&self.owner_actor_id),
-            );
+            WebsocketStartDecision::NotConfigured => {}
+            WebsocketStartDecision::Spawn(websocket_config) => {
+                let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
+                *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
+                self.start_websocket_runtime(
+                    websocket_config,
+                    websocket_shutdown_rx,
+                    Arc::clone(&self.owner_actor_id),
+                );
+            }
+            WebsocketStartDecision::MissingAuth { secret_name } => {
+                // Skip the spawn entirely: the runtime would connect, be
+                // rejected (e.g. Discord 4003), and retry forever (#2557).
+                // Recovery happens through the normal activation/restart
+                // path once the credential is written.
+                tracing::warn!(
+                    channel = %self.name,
+                    secret_name = %secret_name,
+                    "Skipping websocket runtime start: required auth secret is not present"
+                );
+            }
         }
 
         tracing::info!(
@@ -3604,6 +3648,118 @@ async fn resolve_websocket_identify_message(
         .await
         .ok()?;
     build_websocket_identify_message(&identify, secret.expose())
+}
+
+/// Result of the websocket auth preflight performed before spawning the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WebsocketAuthPreflight {
+    /// No auth required, or the required secret is present.
+    Ready,
+    /// The capability declares a required secret that is not present in the store.
+    MissingSecret { secret_name: String },
+}
+
+/// Full decision for whether to spawn the websocket runtime at channel start.
+///
+/// Composes capability parsing, the `connect_on_start` flag, and the auth
+/// preflight into one testable outcome so the callsite in `Channel::start`
+/// is a plain `match` without any computed inputs that a refactor could
+/// silently drop.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WebsocketStartDecision {
+    /// No websocket capability, or `connect_on_start` is false.
+    NotConfigured,
+    /// Websocket is configured but the required auth secret is not present.
+    MissingAuth { secret_name: String },
+    /// All gates pass; the runtime should be spawned with this config.
+    Spawn(WebsocketRuntimeConfig),
+}
+
+/// Disposition for a websocket close frame: reconnect, or stop the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebsocketCloseDisposition {
+    Reconnect,
+    Terminal { reason: &'static str },
+}
+
+/// Check whether the websocket runtime can start.
+///
+/// If `config.identify_secret_name` is set, the referenced secret must exist
+/// under `owner_scope_id` or the caller must skip the spawn — otherwise the
+/// runtime connects, is rejected (e.g. Discord close code 4003), and the
+/// reconnect loop retries forever (issue #2557).
+async fn websocket_auth_preflight(
+    config: &WebsocketRuntimeConfig,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+) -> WebsocketAuthPreflight {
+    let Some(secret_name) = config.identify_secret_name.as_ref() else {
+        return WebsocketAuthPreflight::Ready;
+    };
+    let Some(store) = store else {
+        return WebsocketAuthPreflight::MissingSecret {
+            secret_name: secret_name.clone(),
+        };
+    };
+    match store.exists(owner_scope_id, secret_name).await {
+        Ok(true) => WebsocketAuthPreflight::Ready,
+        _ => WebsocketAuthPreflight::MissingSecret {
+            secret_name: secret_name.clone(),
+        },
+    }
+}
+
+/// Compose the websocket start decision from capabilities + auth state.
+async fn websocket_start_decision(
+    capabilities: &ChannelCapabilities,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
+) -> WebsocketStartDecision {
+    let Some(config) = WebsocketRuntimeConfig::from_capabilities(capabilities) else {
+        return WebsocketStartDecision::NotConfigured;
+    };
+    if !config.connect_on_start {
+        return WebsocketStartDecision::NotConfigured;
+    }
+    match websocket_auth_preflight(&config, store, owner_scope_id).await {
+        WebsocketAuthPreflight::Ready => WebsocketStartDecision::Spawn(config),
+        WebsocketAuthPreflight::MissingSecret { secret_name } => {
+            WebsocketStartDecision::MissingAuth { secret_name }
+        }
+    }
+}
+
+/// Classify a websocket close code to decide whether to reconnect or stop.
+///
+/// Fatal Discord gateway codes (per the Discord opcodes/close-code
+/// documentation) always indicate a configuration problem the runtime cannot
+/// recover from on its own — more reconnects will produce the same rejection.
+/// Everything else is treated as potentially transient.
+fn classify_websocket_close_code(code: u16) -> WebsocketCloseDisposition {
+    match code {
+        4003 => WebsocketCloseDisposition::Terminal {
+            reason: "not_authenticated",
+        },
+        4004 => WebsocketCloseDisposition::Terminal {
+            reason: "authentication_failed",
+        },
+        4010 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_shard",
+        },
+        4011 => WebsocketCloseDisposition::Terminal {
+            reason: "sharding_required",
+        },
+        4012 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_api_version",
+        },
+        4013 => WebsocketCloseDisposition::Terminal {
+            reason: "invalid_intents",
+        },
+        4014 => WebsocketCloseDisposition::Terminal {
+            reason: "disallowed_intents",
+        },
+        _ => WebsocketCloseDisposition::Reconnect,
+    }
 }
 
 fn build_websocket_identify_message(identify: &serde_json::Value, token: &str) -> Option<String> {
@@ -4774,13 +4930,14 @@ mod tests {
     };
     use crate::channels::wasm::wrapper::{
         EmitDispatchContext, HttpResponse, TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV,
-        WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
+        WasmChannel, WebsocketAuthPreflight, WebsocketCloseDisposition, WebsocketRuntimeConfig,
+        WebsocketStartDecision, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
-        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, resolve_websocket_identify_message,
-        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
-        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
-        websocket_reconnect_backoff,
+        classify_websocket_close_code, discord_gateway_presence_status, drain_guest_logs,
+        parse_websocket_invalid_session, parse_websocket_ready_session,
+        resolve_websocket_identify_message, rewrite_http_url_for_testing,
+        should_warn_on_heartbeat_interval, uses_owner_broadcast_target, websocket_auth_preflight,
+        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff, websocket_start_decision,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
@@ -5179,6 +5336,181 @@ mod tests {
         check(5, 32);
         check(6, 64);
         check(10, 64); // capped at 2^6
+    }
+
+    /// Build a Discord-like channel capability set with `connect_on_start=true`
+    /// and an `identify_secret_name` — shared fixture for auth-gating tests.
+    fn discord_websocket_capabilities() -> ChannelCapabilities {
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord_bot_token",
+                "identify": {
+                    "intents": 513,
+                    "properties": { "os": "linux", "browser": "ironclaw", "device": "ironclaw" }
+                }
+            })),
+            ..Default::default()
+        };
+        ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities)
+    }
+
+    fn empty_secrets_store() -> Arc<dyn SecretsStore + Send + Sync> {
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        Arc::new(InMemorySecretsStore::new(crypto))
+    }
+
+    /// Regression test for #2557: websocket preflight must report MissingSecret
+    /// when the capability declares an `identify_secret_name` but the store
+    /// does not contain the secret under the owner scope.
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_missing_when_secret_absent() {
+        let store = empty_secrets_store();
+        let config = WebsocketRuntimeConfig {
+            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
+            connect_on_start: true,
+            identify: Some(serde_json::json!({ "intents": 513 })),
+            identify_secret_name: Some("discord_bot_token".to_string()),
+        };
+
+        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(
+            result,
+            WebsocketAuthPreflight::MissingSecret {
+                secret_name: "discord_bot_token".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_ready_when_secret_present() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let config = WebsocketRuntimeConfig {
+            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
+            connect_on_start: true,
+            identify: Some(serde_json::json!({ "intents": 513 })),
+            identify_secret_name: Some("discord_bot_token".to_string()),
+        };
+
+        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(result, WebsocketAuthPreflight::Ready);
+    }
+
+    /// A websocket with no `identify_secret_name` (unauthenticated gateway) must
+    /// still be allowed to start.
+    #[tokio::test]
+    async fn test_websocket_auth_preflight_ready_when_no_secret_required() {
+        let store = empty_secrets_store();
+        let config = WebsocketRuntimeConfig {
+            url: "wss://example.test/".to_string(),
+            connect_on_start: true,
+            identify: None,
+            identify_secret_name: None,
+        };
+
+        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(result, WebsocketAuthPreflight::Ready);
+    }
+
+    /// Caller-level regression test for #2557: the decision function that
+    /// `Channel::start` delegates to must report MissingAuth (not Spawn) when
+    /// the declared identify secret is absent. A future refactor that dropped
+    /// the preflight call would flip this to `Spawn`, which this test rejects.
+    #[tokio::test]
+    async fn test_websocket_start_decision_missing_auth_when_secret_absent() {
+        let store = empty_secrets_store();
+        let capabilities = discord_websocket_capabilities();
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(
+            decision,
+            WebsocketStartDecision::MissingAuth {
+                secret_name: "discord_bot_token".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_start_decision_spawn_when_secret_present() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(),
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let capabilities = discord_websocket_capabilities();
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
+    }
+
+    #[tokio::test]
+    async fn test_websocket_start_decision_not_configured_without_websocket() {
+        let store = empty_secrets_store();
+        let capabilities = ChannelCapabilities::for_channel("plain").with_path("/webhook/plain");
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        assert_eq!(decision, WebsocketStartDecision::NotConfigured);
+    }
+
+    /// Regression test for #2557: fatal Discord gateway auth codes must be
+    /// terminal so the reconnect loop stops instead of spinning forever.
+    #[test]
+    fn test_classify_websocket_close_code_terminal_for_auth_failures() {
+        for code in [4003u16, 4004, 4010, 4011, 4012, 4013, 4014] {
+            assert!(
+                matches!(
+                    classify_websocket_close_code(code),
+                    WebsocketCloseDisposition::Terminal { .. }
+                ),
+                "code {code} should be terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_websocket_close_code_reconnect_for_transient() {
+        for code in [1000u16, 1001, 1006, 4000, 4007, 4008, 4009] {
+            assert_eq!(
+                classify_websocket_close_code(code),
+                WebsocketCloseDisposition::Reconnect,
+                "code {code} should be reconnectable"
+            );
+        }
     }
 
     #[test]
