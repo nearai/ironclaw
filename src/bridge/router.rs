@@ -1042,12 +1042,12 @@ async fn fail_waiting_thread(
 
     thread
         .transition_to(ironclaw_engine::ThreadState::Failed, Some(reason.into()))
-        .map_err(|e| engine_err("reconcile waiting thread", e))?;
+        .map_err(|e| engine_err("fail waiting thread", e))?;
     state
         .store
         .save_thread(&thread)
         .await
-        .map_err(|e| engine_err("save reconciled thread", e))?;
+        .map_err(|e| engine_err("save failed thread", e))?;
     Ok(true)
 }
 
@@ -1064,17 +1064,50 @@ enum PendingAuthCredentialSubmission {
 /// Try to persist a user-supplied auth credential, falling back across the
 /// three backends in priority order:
 ///
-/// 1. `AuthManager::submit_auth_token` — the canonical path (runs the
-///    extension's `configure_token`, validates, and emits a
+/// 1. `AuthManager::submit_auth_token(submit_target, ...)` — the canonical
+///    path (runs the extension's `configure_token`, validates, and emits a
 ///    `ConfigureResult`). Requires a secrets-backed auth manager.
-/// 2. `ExtensionManager::configure_token` — used on hosted instances that
-///    run without `SECRETS_MASTER_KEY`, so no persistent auth manager
-///    exists but the extension manager's in-memory secrets store can still
-///    accept the credential. `NotInstalled` / `NotFound` fall through so
-///    non-extension credentials (plain secrets) are stored in step 3.
-/// 3. Plain `SecretsStore::create` — stores the credential verbatim for
-///    non-extension actions (HTTP tool, skill credentials) when no
-///    extension owns the action.
+/// 2. `ExtensionManager::configure_token(submit_target, ...)` — used on
+///    hosted instances that run without `SECRETS_MASTER_KEY`, so no
+///    persistent auth manager exists but the extension manager's in-memory
+///    secrets store can still accept the credential. `NotInstalled` /
+///    `NotFound` fall through so non-extension credentials (plain secrets)
+///    are stored in step 3.
+/// 3. Plain `SecretsStore::create(credential_name, ...)` — stores the
+///    credential verbatim for non-extension actions (HTTP tool, skill
+///    credentials) when no extension owns the action.
+///
+/// # Why two keys (`submit_target` + `credential_name`)
+///
+/// Steps 1–2 take the **extension** identity (`submit_target`, e.g.
+/// `"telegram"`). They resolve the actual secret key by walking the
+/// extension's capabilities file — that's the whole point of routing
+/// through `configure_token`, which validates the extension is installed
+/// and picks the correct required-secret slot.
+///
+/// Step 3 takes the **credential** identity (`credential_name`, e.g.
+/// `"telegram_bot_token"` or `"github_token"`) because the secrets store
+/// has no concept of extensions — it stores raw secrets keyed by name.
+/// For flows that reach step 3, there is no extension to resolve against
+/// (builtin HTTP tool, skill credentials), so the credential name *is*
+/// the storage key.
+///
+/// The asymmetry is intentional: the engine's `ResumeKind::Authentication`
+/// only carries `credential_name`, so the caller passes both identities
+/// through and each backend picks the one it operates on.
+///
+/// # Credential-name validation on the step-3 fallback
+///
+/// Steps 1–2 reject unknown credentials via their capabilities lookup
+/// (`auth_manager` through `get_credential_spec`; `extension_manager`
+/// through `determine_installed_kind`). Step 3 is the non-extension
+/// path, so the only validation is the upstream trust chain: the pending
+/// gate's `ResumeKind::Authentication.credential_name` is a typed
+/// `CredentialName` (newtype validated at construction), and the pending
+/// gate itself was inserted by the engine for a specific tool-call whose
+/// auth descriptor produced that credential. The caller here receives
+/// the value as `&str` because `CreateSecretParams` is string-typed at
+/// the boundary, but it originates from a validated newtype upstream.
 ///
 /// Returns `SkippedNoBackend` when none of the three is available (bare
 /// test harness with `resume_output` already staged).
@@ -1104,6 +1137,9 @@ async fn submit_pending_auth_credential(
     }
 
     if let Some(ss) = state.secrets_store.as_ref() {
+        // Non-extension path (builtin HTTP, skill credentials): store under
+        // the raw credential name. See function docs for why steps 1–2
+        // take `submit_target` but step 3 takes `credential_name`.
         let params = crate::secrets::CreateSecretParams::new(credential_name, token);
         ss.create(user_id, params).await.map_err(|e| {
             crate::extensions::ExtensionError::Other(format!("Failed to store credential: {e}"))
@@ -2299,6 +2335,14 @@ pub async fn resolve_gate(
                             crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
                         ) =>
                     {
+                        // `result.message` may already end with a period
+                        // (e.g. `ExtensionManager::configure_token` returns
+                        // "Configuration saved for 'telegram'."), so strip
+                        // trailing punctuation + whitespace before
+                        // concatenation to avoid "...foo.. Resuming...".
+                        let trimmed = result
+                            .message
+                            .trim_end_matches(|c: char| c == '.' || c.is_whitespace());
                         let _ = agent
                             .channels
                             .send_status(
@@ -2306,7 +2350,7 @@ pub async fn resolve_gate(
                                 StatusUpdate::AuthCompleted {
                                     extension_name: display_name.clone(),
                                     success: true,
-                                    message: format!("{}. Resuming...", result.message),
+                                    message: format!("{}. Resuming...", trimmed),
                                 },
                                 &message.metadata,
                             )
@@ -2357,11 +2401,23 @@ pub async fn resolve_gate(
                     // Bare test-harness path: no backend exists, but the
                     // gate carries a staged `resume_output` (set when the
                     // gate was created with a synthetic output), so we can
-                    // proceed with the resume below. Production flows
-                    // always come through the auth-manager or extension-
-                    // manager branch above.
+                    // proceed with the resume below. The caller's token
+                    // is intentionally dropped here — the resume_output
+                    // already carries whatever the resumed action needs;
+                    // production flows always come through the
+                    // auth-manager or extension-manager branch above.
+                    // `debug!` (not `info!` — would corrupt the REPL/TUI)
+                    // so operators can still see the drop when tracing.
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
-                        if pending.resume_output.is_some() => {}
+                        if pending.resume_output.is_some() =>
+                    {
+                        tracing::debug!(
+                            user_id = %message.user_id,
+                            thread_id = %pending.thread_id,
+                            request_id = %pending.request_id,
+                            "auth gate resume: no backend, token dropped because resume_output is staged",
+                        );
+                    }
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend) => {
                         let msg =
                             "No auth manager, extension manager, or secrets store available to store credential.".to_string();
