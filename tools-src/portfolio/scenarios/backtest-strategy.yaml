@@ -1,0 +1,72 @@
+id: backtest-strategy
+description: |
+  Tool-side half of the `backtest_strategy.py` Monty starter: feed
+  two synthetic history snapshots into `progress` and assert the
+  realized APY weighted average matches what we expect. Doesn't run
+  Python (Monty isn't available in cargo test) — it exercises the
+  exact same tool path the script calls via tool_invoke.
+steps:
+  - name: progress
+    action: progress
+    params:
+      history:
+        - date: "2026-04-01"
+          positions:
+            - protocol: {id: aave-v3, name: Aave v3}
+              category: stablecoin-idle
+              chain: base
+              address: "0x0"
+              principal_usd: "5000.00"
+              debt_usd: "0"
+              net_yield_apy: 0.03
+              unrealized_pnl_usd: "0"
+              risk_score: 2
+              exit_cost_estimate_usd: "0"
+              withdrawal_delay_seconds: 0
+              liquidity_tier: instant
+              tags: []
+              raw_position:
+                chain: base
+                protocol_id: aave_v3
+                position_type: supply
+                address: "0x0"
+                token_balances: []
+                debt_balances: []
+                reward_balances: []
+                raw_metadata: {}
+                block_number: 1
+                fetched_at: 0
+        - date: "2026-04-02"
+          positions:
+            - protocol: {id: morpho-blue, name: Morpho Blue}
+              category: stablecoin-idle
+              chain: base
+              address: "0x0"
+              principal_usd: "5000.00"
+              debt_usd: "0"
+              net_yield_apy: 0.05
+              unrealized_pnl_usd: "0"
+              risk_score: 2
+              exit_cost_estimate_usd: "0"
+              withdrawal_delay_seconds: 0
+              liquidity_tier: instant
+              tags: []
+              raw_position:
+                chain: base
+                protocol_id: morpho_blue
+                position_type: supply
+                address: "0x0"
+                token_balances: []
+                debt_balances: []
+                reward_balances: []
+                raw_metadata: {}
+                block_number: 2
+                fetched_at: 0
+      config:
+        floor_apy: 0.035
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      realized_apy_ge: 0.04

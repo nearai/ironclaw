@@ -14,8 +14,9 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::gating;
@@ -200,6 +201,56 @@ pub struct SkillRegistry {
     bundled_content: &'static [(String, String)],
     /// Maximum recursion depth for bundle directory scanning (default: 3).
     max_scan_depth: usize,
+}
+
+/// Additional bundle file to materialize alongside `SKILL.md` during install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallFile {
+    pub relative_path: PathBuf,
+    pub contents: Vec<u8>,
+}
+
+/// Persisted metadata about how a skill bundle was installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledSkillMetadata {
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub source_subdir: Option<String>,
+}
+
+const INSTALL_METADATA_FILE: &str = ".ironclaw-install.json";
+
+fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(SkillRegistryError::WriteError {
+            path: path.display().to_string(),
+            reason: "install bundle path must be a non-empty relative path".to_string(),
+        });
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SkillRegistryError::WriteError {
+                    path: path.display().to_string(),
+                    reason: "install bundle path may not escape the skill directory".to_string(),
+                });
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(SkillRegistryError::WriteError {
+            path: path.display().to_string(),
+            reason: "install bundle path normalized to empty".to_string(),
+        });
+    }
+
+    Ok(normalized)
 }
 
 impl SkillRegistry {
@@ -573,11 +624,23 @@ impl SkillRegistry {
     /// This is a static method so it doesn't borrow `&self`, allowing callers
     /// to drop their registry lock before awaiting.
     pub async fn prepare_install_to_disk(
-        user_dir: &Path,
+        install_dir: &Path,
         skill_name: &str,
         normalized_content: &str,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
-        let skill_dir = user_dir.join(skill_name);
+        Self::prepare_install_bundle_to_disk(install_dir, skill_name, normalized_content, &[], None)
+            .await
+    }
+
+    /// Perform the disk I/O and loading for a skill bundle install.
+    pub async fn prepare_install_bundle_to_disk(
+        install_dir: &Path,
+        skill_name: &str,
+        normalized_content: &str,
+        extra_files: &[InstallFile],
+        install_metadata: Option<&InstalledSkillMetadata>,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        let skill_dir = install_dir.join(skill_name);
         tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
             SkillRegistryError::WriteError {
                 path: skill_dir.display().to_string(),
@@ -593,8 +656,43 @@ impl SkillRegistry {
                 reason: e.to_string(),
             })?;
 
+        for file in extra_files {
+            let relative_path = validate_install_relative_path(&file.relative_path)?;
+            let absolute_path = skill_dir.join(&relative_path);
+            if let Some(parent) = absolute_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    SkillRegistryError::WriteError {
+                        path: parent.display().to_string(),
+                        reason: e.to_string(),
+                    }
+                })?;
+            }
+            tokio::fs::write(&absolute_path, &file.contents)
+                .await
+                .map_err(|e| SkillRegistryError::WriteError {
+                    path: absolute_path.display().to_string(),
+                    reason: e.to_string(),
+                })?;
+        }
+
+        if let Some(metadata) = install_metadata {
+            let meta_path = skill_dir.join(INSTALL_METADATA_FILE);
+            let meta_json = serde_json::to_vec_pretty(metadata).map_err(|e| {
+                SkillRegistryError::WriteError {
+                    path: meta_path.display().to_string(),
+                    reason: format!("failed to serialize install metadata: {e}"),
+                }
+            })?;
+            tokio::fs::write(&meta_path, meta_json).await.map_err(|e| {
+                SkillRegistryError::WriteError {
+                    path: meta_path.display().to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+        }
+
         // Load by re-reading from disk (validates round-trip)
-        let source = SkillSource::User(skill_dir);
+        let source = SkillSource::Installed(skill_dir);
         load_and_validate_skill(&skill_path, SkillTrust::Installed, source).await
     }
 
@@ -670,16 +768,13 @@ impl SkillRegistry {
     ///
     /// Call after `validate_remove` and before `commit_remove`.
     pub async fn delete_skill_files(path: &Path) -> Result<(), SkillRegistryError> {
-        let skill_md = path.join("SKILL.md");
-        if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
-            tokio::fs::remove_file(&skill_md).await.map_err(|e| {
-                SkillRegistryError::WriteError {
-                    path: skill_md.display().to_string(),
+        if tokio::fs::try_exists(path).await.unwrap_or(false) {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(|e| SkillRegistryError::WriteError {
+                    path: path.display().to_string(),
                     reason: e.to_string(),
-                }
-            })?;
-            // Remove the directory if empty
-            let _ = tokio::fs::remove_dir(path).await;
+                })?;
         }
         Ok(())
     }
@@ -733,6 +828,13 @@ impl SkillRegistry {
     /// the app is running; the fallback exists for test registries.
     pub fn install_target_dir(&self) -> &Path {
         self.installed_dir.as_deref().unwrap_or(&self.user_dir)
+    }
+
+    /// Load persisted install metadata for a skill directory, if present.
+    pub async fn read_install_metadata(path: &Path) -> Option<InstalledSkillMetadata> {
+        let meta_path = path.join(INSTALL_METADATA_FILE);
+        let bytes = tokio::fs::read(&meta_path).await.ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 }
 
@@ -1108,6 +1210,74 @@ mod tests {
         // Verify file was written to disk
         let skill_path = dir.path().join("test-install").join("SKILL.md");
         assert!(skill_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_install_bundle_to_disk_writes_extra_files_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let content =
+            "---\nname: bundle-install\ndescription: Installed skill\n---\n\nInstalled prompt.\n";
+        let extra_files = vec![
+            InstallFile {
+                relative_path: PathBuf::from("requirements.txt"),
+                contents: b"requests>=2.32.5\n".to_vec(),
+            },
+            InstallFile {
+                relative_path: PathBuf::from("scripts/run.py"),
+                contents: b"print('ok')\n".to_vec(),
+            },
+        ];
+        let metadata = InstalledSkillMetadata {
+            source_url: Some("https://github.com/Pika-Labs/Pika-Skills".to_string()),
+            source_subdir: Some("pikastream-video-meeting".to_string()),
+        };
+
+        let (name, loaded) = SkillRegistry::prepare_install_bundle_to_disk(
+            dir.path(),
+            "bundle-install",
+            content,
+            &extra_files,
+            Some(&metadata),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(name, "bundle-install");
+        assert_eq!(loaded.manifest.name, "bundle-install");
+        assert!(matches!(loaded.source, SkillSource::Installed(_)));
+        assert!(dir.path().join("bundle-install/requirements.txt").exists());
+        assert!(dir.path().join("bundle-install/scripts/run.py").exists());
+
+        let stored = SkillRegistry::read_install_metadata(&dir.path().join("bundle-install"))
+            .await
+            .expect("install metadata");
+        assert_eq!(stored, metadata);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_install_bundle_to_disk_rejects_path_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "---\nname: bundle-install\n---\n\nInstalled prompt.\n";
+        let extra_files = vec![InstallFile {
+            relative_path: PathBuf::from("../escape.sh"),
+            contents: b"echo no\n".to_vec(),
+        }];
+
+        let err = SkillRegistry::prepare_install_bundle_to_disk(
+            dir.path(),
+            "bundle-install",
+            content,
+            &extra_files,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("may not escape the skill directory"),
+            "{err}"
+        );
     }
 
     #[test]

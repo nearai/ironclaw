@@ -726,6 +726,7 @@ async fn handle_execute_code_step(
         current_call_id: None,
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -830,7 +831,7 @@ async fn handle_execute_code_step(
                 "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease } => serde_json::json!({
                             "gate_paused": true,
                             "gate_name": gate_name,
                             "action_name": action_name,
@@ -838,6 +839,7 @@ async fn handle_execute_code_step(
                             "parameters": parameters,
                             "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
                             "resume_output": resume_output,
+                            "paused_lease": paused_lease,
                         }),
                         _ => serde_json::Value::Null,
                     }
@@ -899,6 +901,7 @@ async fn handle_execute_action(
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1117,6 +1120,7 @@ async fn handle_execute_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -1147,6 +1151,7 @@ async fn handle_execute_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1460,6 +1465,7 @@ async fn handle_execute_actions_parallel(
             // through the parallel batch path.
             source_channel: thread_source_channel(thread),
             user_timezone: thread_user_timezone(thread),
+            thread_goal: Some(thread.goal.clone()),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1503,6 +1509,7 @@ async fn handle_execute_actions_parallel(
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,
+                thread_goal: Some(thread.goal.clone()),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1624,6 +1631,7 @@ async fn execute_single_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
@@ -1646,6 +1654,7 @@ async fn execute_single_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             (result_json, event, output)
         }
@@ -2541,6 +2550,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
                 resume_output: result.get("resume_output").cloned(),
+                paused_lease: result
+                    .get("paused_lease")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -2845,6 +2858,65 @@ mod tests {
         ));
     }
 
+    // ── Skill activation: smart-quote / autocorrect resilience ───
+    //
+    // Regression for the ceo-setup non-activation report. iOS / macOS / most
+    // rich text inputs autocorrect `I'm` (ASCII U+0027) to `I'm` (curly
+    // U+2019). Authored regex patterns use ASCII punctuation, so without
+    // boundary normalization the curly form silently fails to match and
+    // the skill scores 0. `normalize_punctuation` in `default.py` folds
+    // curly quotes/dashes to ASCII before scoring.
+
+    #[test]
+    fn normalize_punctuation_folds_curly_quotes_and_dashes() {
+        // The input contains every typographic variant we fold. The
+        // expected output uses only ASCII punctuation, so a Rust-side
+        // regex that authors typed naturally still hits.
+        let raw =
+            "\u{2018}\u{2019}\u{201A}\u{201B}\u{201C}\u{201D}\u{201E}\u{201F}\u{2013}\u{2014}";
+        let expected = "''''\"\"\"\"--";
+        let program = format!("FINAL(normalize_punctuation({raw:?}) == {expected:?})");
+        // Run the helper-only slice of default.py with the assertion appended.
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Bool(true) => {}
+            other => panic!("normalize_punctuation did not produce ASCII fold: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_skills_matches_curly_apostrophe_input() {
+        // The ceo-setup skill's first pattern uses ASCII `'`. A user
+        // typing on iOS sends U+2019. With normalization, select_skills
+        // must still pick the skill; without it, the regex misses and
+        // the skill scores 0.
+        let pattern = r"(?i)I'm a (CEO|manager|executive|director|VP|founder)";
+        // Build a single-skill list as a Python literal — metadata shape
+        // matches what handle_list_skills emits at runtime.
+        let skill_literal = format!(
+            r#"[{{"doc_id": "test", "title": "ceo-setup", "content": "body", "metadata": {{"name": "ceo-setup", "activation": {{"patterns": [{pattern:?}], "max_context_tokens": 2500, "keywords": [], "tags": []}}}}}}]"#
+        );
+        let curly_goal = "I\u{2019}m Illia Polosukhin. I\u{2019}m a CEO of NEAR Foundation";
+        let program = format!(
+            "selected = select_skills({skill_literal}, {curly_goal:?}); FINAL(len(selected))"
+        );
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(1) => {}
+            other => {
+                panic!("select_skills should pick ceo-setup for curly-quoted input, got: {other:?}")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {
         let (code, version) = load_orchestrator(None, ProjectId::new(), true).await;
@@ -3053,6 +3125,7 @@ mod tests {
             parameters: serde_json::json!({"cmd":"ls"}),
             resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
             resume_output: None,
+            paused_lease: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);
@@ -3074,18 +3147,38 @@ mod tests {
 
     #[test]
     fn parse_outcome_gate_paused() {
+        let lease = crate::types::capability::CapabilityLease {
+            id: crate::types::capability::LeaseId::new(),
+            thread_id: crate::types::thread::ThreadId::new(),
+            capability_name: "test-capability".into(),
+            granted_actions: crate::types::capability::GrantedActions::Specific(vec![
+                "shell".into(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: Some(1),
+            uses_remaining: Some(1),
+            revoked: false,
+            revoked_reason: None,
+        };
         let result = serde_json::json!({
             "outcome": "gate_paused",
             "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
             "parameters": {"cmd": "rm -rf /"},
-            "resume_kind": {"Approval": {"allow_always": true}}
+            "resume_kind": {"Approval": {"allow_always": true}},
+            "paused_lease": lease,
         });
         let outcome = parse_outcome(&result);
-        assert!(
-            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
-        );
+        assert!(matches!(
+            outcome,
+            ThreadOutcome::GatePaused {
+                action_name,
+                paused_lease: Some(_),
+                ..
+            } if action_name == "shell"
+        ));
     }
 
     #[test]
@@ -3780,6 +3873,41 @@ FINAL(consecutive_action_errors)
 "#,
         );
         assert_eq!(count, 0);
+    }
+
+    /// Regression: `max_consecutive_errors` arrives as `null` when the Rust
+    /// caller passes `Option::None`. Python's `dict.get(key, default)` returns
+    /// the explicit `None`, not the default, so `None + 2` used to blow up in
+    /// the error-gating branch on the very first failed action call. The
+    /// orchestrator now coalesces `None` to a sentinel; this test pins that
+    /// behavior.
+    #[test]
+    fn action_errors_tolerate_null_max_consecutive_errors() {
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+if max_consecutive_errors is None:
+    max_consecutive_errors = 10**9
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# 0 = no nudge / no failure (expected with None = no-limit sentinel)
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None max_consecutive_errors must behave as no-limit, not crash"
+        );
     }
 
     #[test]

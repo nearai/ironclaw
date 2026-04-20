@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use monty::{
-    ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    NameLookupResult, PrintWriter, ResourceLimits, RunProgress,
+    ExcType, ExtFunctionResult, LimitedTracker, MontyDate, MontyDateTime, MontyException,
+    MontyObject, MontyRun, NameLookupResult, OsFunction, PrintWriter, ResourceLimits, RunProgress,
 };
 use tracing::debug;
 
@@ -45,6 +45,79 @@ const OUTPUT_TRUNCATE_LEN: usize = 8_000;
 
 /// Maximum characters for a preview prefix in compact metadata.
 const OUTPUT_PREVIEW_LEN: usize = 200;
+
+/// Build a `MontyObject::DateTime` for the current instant.
+///
+/// Honors `args[0]` when it is a `MontyTimeZone` (aware datetime with that
+/// fixed offset) or `MontyObject::None` (naive datetime in UTC, matching
+/// CPython's `datetime.datetime.now()` behavior without a tz). Anything
+/// else is treated as "no tz" rather than raising — we prefer the LLM get
+/// a usable clock read even if it passes a weird argument.
+fn build_datetime_now(args: &[MontyObject]) -> MontyObject {
+    use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc};
+
+    let utc_now: DateTime<Utc> = Utc::now();
+
+    let (offset_seconds, timezone_name) = match args.first() {
+        Some(MontyObject::TimeZone(tz)) => (Some(tz.offset_seconds), tz.name.clone()),
+        _ => (None, None),
+    };
+
+    let aware = offset_seconds
+        .and_then(FixedOffset::east_opt)
+        .map(|offset| utc_now.with_timezone(&offset));
+
+    let (year, month, day, hour, minute, second, microsecond) = if let Some(dt) = aware {
+        (
+            dt.year(),
+            dt.month() as u8,
+            dt.day() as u8,
+            dt.hour() as u8,
+            dt.minute() as u8,
+            dt.second() as u8,
+            dt.timestamp_subsec_micros(),
+        )
+    } else {
+        (
+            utc_now.year(),
+            utc_now.month() as u8,
+            utc_now.day() as u8,
+            utc_now.hour() as u8,
+            utc_now.minute() as u8,
+            utc_now.second() as u8,
+            utc_now.timestamp_subsec_micros(),
+        )
+    };
+
+    MontyObject::DateTime(MontyDateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        microsecond,
+        offset_seconds,
+        timezone_name,
+    })
+}
+
+/// Build a `MontyObject::Date` for today's UTC date.
+///
+/// Python's `date.today()` is timezone-naive (local date on CPython); we
+/// return UTC to avoid host-clock timezone surprises inside the sandbox.
+/// Agents that need a local date should call the `time` tool with an
+/// explicit timezone.
+fn build_date_today() -> MontyObject {
+    use chrono::{Datelike, Utc};
+
+    let today = Utc::now().date_naive();
+    MontyObject::Date(MontyDate {
+        year: today.year(),
+        month: today.month() as u8,
+        day: today.day() as u8,
+    })
+}
 
 /// Default resource limits for Monty execution.
 fn default_limits() -> ResourceLimits {
@@ -473,11 +546,20 @@ pub async fn execute_code_with_skills(
                 debug!(action = %action_name, call_id = %str_call_id, monty_id = monty_call_id, "Monty: function call");
 
                 // Builtins that need synchronous results — resume with value.
+                //
+                // FINAL / FINAL_VAR set `final_answer` synchronously but also
+                // install a trivially-resolving pending future. That way both
+                // `FINAL(x)` and `await FINAL(x)` are valid: the sync call
+                // just discards the coroutine object, while `await` resolves
+                // it to None. LLMs frequently emit `await FINAL(...)` by
+                // analogy with tool calls, so supporting both avoids a whole
+                // class of "NoneType can't be awaited" failures.
                 let sync_result = match action_name.as_str() {
                     "FINAL" => {
                         let answer = call.args.first().map(monty_to_string).unwrap_or_default();
                         final_answer = Some(answer);
-                        Some(ExtFunctionResult::Return(MontyObject::None))
+                        pending_futures.insert(monty_call_id, PendingFuture::ready_none());
+                        None
                     }
                     "FINAL_VAR" => {
                         let var_name = call
@@ -486,7 +568,8 @@ pub async fn execute_code_with_skills(
                             .map(monty_to_string)
                             .unwrap_or_else(|| "result".into());
                         final_answer = Some(format!("[FINAL_VAR: {var_name}]"));
-                        Some(ExtFunctionResult::Return(MontyObject::None))
+                        pending_futures.insert(monty_call_id, PendingFuture::ready_none());
+                        None
                     }
                     // LLM calls are async — spawn tokio task, resume_pending.
                     // This allows asyncio.gather(llm_query(...), tool(...))
@@ -885,13 +968,28 @@ pub async fn execute_code_with_skills(
             }
 
             RunProgress::OsCall(os_call) => {
-                debug!(function = ?os_call.function, "Monty: OS call denied");
-                let err = ExtFunctionResult::Error(MontyException::new(
-                    ExcType::OSError,
-                    Some("OS operations are not permitted in CodeAct scripts".into()),
-                ));
+                // Clock reads (`datetime.now()`, `date.today()`) are not a
+                // security concern — they don't touch the network, filesystem,
+                // or environment. Monty surfaces them as dedicated OsFunction
+                // variants rather than opaque syscalls, so we can answer them
+                // directly instead of returning the blanket OSError. Anything
+                // else still gets denied.
+                let clock_reply: Option<ExtFunctionResult> = match os_call.function {
+                    OsFunction::DateTimeNow => {
+                        Some(ExtFunctionResult::Return(build_datetime_now(&os_call.args)))
+                    }
+                    OsFunction::DateToday => Some(ExtFunctionResult::Return(build_date_today())),
+                    _ => None,
+                };
+                let reply = clock_reply.unwrap_or_else(|| {
+                    debug!(function = ?os_call.function, "Monty: OS call denied");
+                    ExtFunctionResult::Error(MontyException::new(
+                        ExcType::OSError,
+                        Some("OS operations are not permitted in CodeAct scripts".into()),
+                    ))
+                });
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    os_call.resume(err, PrintWriter::Collect(&mut stdout))
+                    os_call.resume(reply, PrintWriter::Collect(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -991,6 +1089,21 @@ enum PendingFuture {
     },
 }
 
+impl PendingFuture {
+    /// Pending future that resolves immediately to `None` with no token
+    /// usage. Used for `FINAL` / `FINAL_VAR` so they can be `await`ed
+    /// without raising "NoneType can't be awaited".
+    fn ready_none() -> Self {
+        let handle = tokio::spawn(async {
+            (
+                ExtFunctionResult::Return(MontyObject::None),
+                TokenUsage::default(),
+            )
+        });
+        PendingFuture::Llm { handle }
+    }
+}
+
 /// Result of preflight checks (lease + policy) for a tool call.
 enum PreflightResult {
     /// Tool approved — lease is consumed, ready to execute.
@@ -1073,6 +1186,7 @@ async fn preflight_action(
                         parameters: params.clone(),
                         resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
                         resume_output: None,
+                        paused_lease: None,
                     },
                 );
             }
@@ -1901,6 +2015,7 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            thread_goal: Some(thread.goal.clone()),
         }
     }
 
@@ -2206,6 +2321,52 @@ FINAL("hello from sync")
         let result = run_code(code, effects, &thread).await.unwrap();
         assert_eq!(result.final_answer.as_deref(), Some("hello from sync"));
         assert!(result.failure.is_none());
+    }
+
+    // ── `await FINAL(...)` is tolerated ────────────────────
+    //
+    // LLMs frequently emit `await FINAL(answer)` by analogy with
+    // async tool calls. Prior to the `ready_none` pending future,
+    // this raised "TypeError: 'NoneType' object can't be awaited"
+    // and the answer was lost. Both forms must now succeed.
+
+    #[tokio::test]
+    async fn final_supports_await() {
+        let thread = make_test_thread();
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+
+        let code = r#"
+await FINAL("hello from await")
+"#;
+
+        let result = run_code(code, effects, &thread).await.unwrap();
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("hello from await"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+    }
+
+    #[tokio::test]
+    async fn final_var_supports_await() {
+        let thread = make_test_thread();
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+
+        let code = r#"
+summary = "computed answer"
+await FINAL_VAR("summary")
+"#;
+
+        let result = run_code(code, effects, &thread).await.unwrap();
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("[FINAL_VAR: summary]"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
     }
 
     // ── globals() still works ───────────────────────────────

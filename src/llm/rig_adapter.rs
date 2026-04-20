@@ -11,7 +11,7 @@ use rig::completion::{
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
-    DocumentSourceKind, Image, ImageMediaType, Message as RigMessage, MimeType,
+    DocumentSourceKind, Image, ImageDetail, ImageMediaType, Message as RigMessage, MimeType,
     ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
     UserContent,
 };
@@ -23,6 +23,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use crate::llm::costs;
 use crate::llm::error::LlmError;
@@ -654,6 +655,9 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     let mut contents: Vec<UserContent> = vec![UserContent::text(&msg.content)];
                     for part in &msg.content_parts {
                         if let crate::llm::ContentPart::ImageUrl { image_url } = part {
+                            let detail =
+                                ImageDetail::from_str(&image_url.normalized_openai_detail())
+                                    .unwrap_or_default();
                             // Parse data: URL for base64 images, or use raw URL
                             let image = if let Some(rest) = image_url.url.strip_prefix("data:") {
                                 // Format: data:<mime>;base64,<data>
@@ -662,14 +666,14 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                                 Image {
                                     data: DocumentSourceKind::base64(b64),
                                     media_type: ImageMediaType::from_mime_type(mime),
-                                    detail: None,
+                                    detail: Some(detail.clone()),
                                     additional_params: None,
                                 }
                             } else {
                                 Image {
                                     data: DocumentSourceKind::url(&image_url.url),
                                     media_type: None,
-                                    detail: None,
+                                    detail: Some(detail),
                                     additional_params: None,
                                 }
                             };
@@ -2021,6 +2025,78 @@ mod tests {
                 other => panic!("Expected tool result content, got: {:?}", other),
             },
             other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_data_url_without_detail_defaults_to_auto() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/jpeg;base64,Zm9v".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+
+        let (_preamble, history) = convert_messages(&messages);
+        match &history[0] {
+            RigMessage::User { content } => {
+                let image = content
+                    .iter()
+                    .find_map(|item| match item {
+                        UserContent::Image(image) => Some(image),
+                        _ => None,
+                    })
+                    .expect("expected image content");
+                assert_eq!(image.detail, Some(ImageDetail::Auto));
+            }
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_image_detail_preserves_explicit_values() {
+        let low_messages = vec![ChatMessage::user_with_parts(
+            "low detail",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "https://example.com/image-low.png".to_string(),
+                    detail: Some("low".to_string()),
+                },
+            }],
+        )];
+        let high_messages = vec![ChatMessage::user_with_parts(
+            "high detail",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "https://example.com/image-high.png".to_string(),
+                    detail: Some("high".to_string()),
+                },
+            }],
+        )];
+
+        let (_, low_history) = convert_messages(&low_messages);
+        let (_, high_history) = convert_messages(&high_messages);
+
+        for (history, expected) in [
+            (&low_history, ImageDetail::Low),
+            (&high_history, ImageDetail::High),
+        ] {
+            match &history[0] {
+                RigMessage::User { content } => {
+                    let image = content
+                        .iter()
+                        .find_map(|item| match item {
+                            UserContent::Image(image) => Some(image),
+                            _ => None,
+                        })
+                        .expect("expected image content");
+                    assert_eq!(image.detail, Some(expected.clone()));
+                }
+                other => panic!("Expected User message, got: {:?}", other),
+            }
         }
     }
 

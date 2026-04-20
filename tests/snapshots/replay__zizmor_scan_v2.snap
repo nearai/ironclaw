@@ -1,0 +1,120 @@
+---
+source: tests/e2e_engine_v2.rs
+assertion_line: 580
+---
+response_count: 1
+has_final_response: true
+tool_calls:
+  - name: tool_search
+    success: true
+  - name: http
+    success: true
+  - name: tool_search
+    success: true
+  - name: tool_list
+    success: true
+  - name: tool_search
+    success: true
+  - name: shell
+    success: true
+events:
+  - kind: thinking
+    message: processing...
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 9624 in / 118 out tokens
+  - kind: tool_started
+    name: tool_search
+  - kind: tool_completed
+    name: tool_search
+    success: true
+    error: ~
+  - kind: tool_started
+    name: http
+  - kind: tool_completed
+    name: http
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 10895 in / 125 out token
+  - kind: tool_started
+    name: tool_search
+  - kind: tool_completed
+    name: tool_search
+    success: true
+    error: ~
+  - kind: tool_started
+    name: tool_list
+  - kind: tool_completed
+    name: tool_list
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 15823 in / 65 out tokens
+  - kind: tool_started
+    name: tool_search
+  - kind: tool_completed
+    name: tool_search
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 15858 in / 169 out token
+  - kind: tool_started
+    name: shell
+  - kind: tool_completed
+    name: shell
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: status
+    message: done
+  - kind: other
+    variant: Other
+event_kind_counts:
+  Other: 1
+  Status: 1
+  Thinking: 10
+  ToolCompleted: 6
+  ToolStarted: 6
+llm_call_count: 4
+safety_warning_count: 0
+engine_threads:
+  - final_state: Failed
+    step_count: 4
+    message_roles:
+      - System
+      - User
+    event_kinds:
+      - MessageAdded
+      - StateChanged
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StateChanged
+    issues:
+      - severity: error
+        category: thread_failure
+      - severity: warning
+        category: no_response
+      - severity: error
+        category: llm_error

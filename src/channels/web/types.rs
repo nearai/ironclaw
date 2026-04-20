@@ -14,14 +14,29 @@ pub struct ImageData {
     pub data: String,
 }
 
+/// Base64-encoded file attachment sent from the web frontend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttachmentData {
+    /// MIME type (e.g., "image/png", "application/pdf").
+    pub mime_type: String,
+    /// Optional original filename.
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Base64-encoded file data (without data: URL prefix).
+    pub data_base64: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
     pub thread_id: Option<String>,
     pub timezone: Option<String>,
-    /// Optional images attached to the message.
+    /// Optional legacy images attached to the message.
     #[serde(default)]
     pub images: Vec<ImageData>,
+    /// Optional files attached to the message.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,7 +146,7 @@ pub struct PendingGateInfo {
     pub description: String,
     pub parameters: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_name: Option<String>,
+    pub extension_name: Option<ironclaw_common::ExtensionName>,
     pub resume_kind: serde_json::Value,
 }
 
@@ -792,6 +807,18 @@ pub struct SkillInfo {
     pub trust: String,
     pub source: String,
     pub keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_source_url: Option<String>,
+    #[serde(default)]
+    pub has_requirements: bool,
+    #[serde(default)]
+    pub has_scripts: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -837,9 +864,12 @@ pub enum WsClientMessage {
         content: String,
         thread_id: Option<String>,
         timezone: Option<String>,
-        /// Optional images attached to the message.
+        /// Optional legacy images attached to the message.
         #[serde(default)]
         images: Vec<ImageData>,
+        /// Optional files attached to the message.
+        #[serde(default)]
+        attachments: Vec<AttachmentData>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]
@@ -1259,10 +1289,44 @@ mod tests {
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
             WsClientMessage::Message {
-                content, thread_id, ..
+                content,
+                thread_id,
+                attachments,
+                ..
             } => {
                 assert_eq!(content, "hi");
                 assert!(thread_id.is_none());
+                assert!(attachments.is_empty());
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_message_with_attachments() {
+        let json = r#"{
+            "type":"message",
+            "content":"review these",
+            "attachments":[
+                {
+                    "mime_type":"application/pdf",
+                    "filename":"deck.pdf",
+                    "data_base64":"aGVsbG8="
+                }
+            ]
+        }"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Message {
+                content,
+                attachments,
+                ..
+            } => {
+                assert_eq!(content, "review these");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].mime_type, "application/pdf");
+                assert_eq!(attachments[0].filename.as_deref(), Some("deck.pdf"));
+                assert_eq!(attachments[0].data_base64, "aGVsbG8=");
             }
             _ => panic!("Expected Message variant"),
         }
@@ -1444,7 +1508,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_auth_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: Some("req-123".to_string()),
             message: None,
@@ -1469,7 +1533,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_ready_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::Ready,
             request_id: None,
             message: Some("notion authenticated (3 tools loaded)".to_string()),
@@ -1491,7 +1555,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_auth_required() {
         let event = AppEvent::OnboardingState {
-            extension_name: "openai".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("openai").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: None,
             message: None,
@@ -1515,7 +1579,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_pairing_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "telegram".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
             state: OnboardingStateDto::PairingRequired,
             request_id: None,
             message: None,
@@ -1540,7 +1604,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_failed() {
         let event = AppEvent::OnboardingState {
-            extension_name: "slack".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("slack").unwrap(),
             state: OnboardingStateDto::Failed,
             request_id: None,
             message: Some("Invalid token".to_string()),

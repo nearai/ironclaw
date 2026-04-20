@@ -75,8 +75,14 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v1 (default agentic loop).
+    ///
+    /// Marked `#[ignore]` by default because the `IRONCLAW_LIVE_TEST=1`
+    /// recording path needs real LLM credentials. The `replay` feature flag
+    /// promotes this test out of `--ignored` so CI can run the committed
+    /// fixture without extra `-- --ignored` gymnastics; see
+    /// `.github/workflows/replay-gate.yml`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
@@ -96,7 +102,7 @@ mod live_tests {
     /// mentions zizmor in its response (even if it can't execute shell).
     /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)
@@ -376,7 +382,7 @@ mod live_tests {
             .collect();
         let drive_gate = auth_required_events
             .iter()
-            .find(|(ext, _, _)| ext.contains("google") || ext.contains("drive"));
+            .find(|(ext, _, _)| ext.as_str().contains("google") || ext.as_str().contains("drive"));
         assert!(
             drive_gate.is_some(),
             "Phase A: expected an AuthRequired event for the Google Drive extension, \
@@ -704,7 +710,8 @@ mod live_tests {
             matches!(
                 s,
                 StatusUpdate::AuthRequired { extension_name, .. }
-                    if extension_name.contains("google") || extension_name.contains("drive")
+                    if extension_name.as_str().contains("google")
+                        || extension_name.as_str().contains("drive")
             )
         });
         assert!(

@@ -33,6 +33,32 @@ pub struct ScoredSkill<'a> {
     pub score: u32,
 }
 
+/// Outcome of a single selection pass with human-readable notes about
+/// non-obvious decisions.
+///
+/// `notes` is intended for surfacing to the user — e.g. explaining why
+/// a companion was chain-loaded or why a skill was dropped by the
+/// budget. Not every selection decision is noted; we aim for signal
+/// over noise, so routine outcomes like "didn't score" produce no
+/// note.
+#[derive(Debug, Default)]
+pub struct SelectionOutcome<'a> {
+    pub selected: Vec<&'a LoadedSkill>,
+    pub notes: Vec<String>,
+}
+
+/// Reason a `try_select` call didn't add a skill. Callers use this to
+/// render distinct notes (budget vs. marker vs. duplicate) rather than
+/// lumping them into one opaque "skipped".
+#[derive(Debug)]
+enum TrySelectOutcome {
+    Selected,
+    AlreadySelected,
+    CandidateLimit,
+    MarkerSatisfied,
+    BudgetFull,
+}
+
 /// Estimate the token cost of loading a skill's prompt into the LLM
 /// context. Prefers the declared `max_context_tokens` but falls back
 /// to the actual length-based estimate (and warns) if the declaration
@@ -57,9 +83,8 @@ fn skill_token_cost(skill: &LoadedSkill) -> usize {
     raw_cost.max(1)
 }
 
-/// Try to add a skill to the selected set. Returns `true` if the skill
-/// was added, `false` if it was already present, excluded by marker,
-/// over the candidate limit, or didn't fit in the remaining budget.
+/// Try to add a skill to the selected set, returning the specific
+/// reason it wasn't added when it fails.
 ///
 /// Shared between the scored-selection loop and the chain-loading loop.
 fn try_select<'a>(
@@ -69,13 +94,13 @@ fn try_select<'a>(
     budget_remaining: &mut usize,
     max_candidates: usize,
     satisfied_setup_markers: &std::collections::HashSet<String>,
-) -> bool {
+) -> TrySelectOutcome {
     if result.len() >= max_candidates {
-        return false;
+        return TrySelectOutcome::CandidateLimit;
     }
     let name = skill.manifest.name.as_str();
     if selected_names.contains(name) {
-        return false;
+        return TrySelectOutcome::AlreadySelected;
     }
     // Respect marker exclusion even for chain-loaded companions: if a
     // companion's setup is already done, there's nothing for it to
@@ -83,16 +108,16 @@ fn try_select<'a>(
     if let Some(marker) = &skill.manifest.activation.setup_marker
         && satisfied_setup_markers.contains(marker)
     {
-        return false;
+        return TrySelectOutcome::MarkerSatisfied;
     }
     let cost = skill_token_cost(skill);
     if cost > *budget_remaining {
-        return false;
+        return TrySelectOutcome::BudgetFull;
     }
     *budget_remaining -= cost;
     selected_names.insert(name);
     result.push(skill);
-    true
+    TrySelectOutcome::Selected
 }
 
 /// Select candidate skills for a given message using deterministic scoring.
@@ -135,9 +160,9 @@ pub fn prefilter_skills<'a>(
     max_candidates: usize,
     max_context_tokens: usize,
     satisfied_setup_markers: &std::collections::HashSet<String>,
-) -> Vec<&'a LoadedSkill> {
+) -> SelectionOutcome<'a> {
     if available_skills.is_empty() || message.is_empty() {
-        return vec![];
+        return SelectionOutcome::default();
     }
 
     let message_lower = message.to_lowercase();
@@ -175,20 +200,37 @@ pub fn prefilter_skills<'a>(
     let mut result: Vec<&'a LoadedSkill> = Vec::new();
     let mut selected_names: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
     let mut budget_remaining = max_context_tokens;
+    let mut notes: Vec<String> = Vec::new();
 
     for entry in scored {
         // Try to select the parent first.
-        if !try_select(
+        let parent_outcome = try_select(
             entry.skill,
             &mut result,
             &mut selected_names,
             &mut budget_remaining,
             max_candidates,
             satisfied_setup_markers,
-        ) {
-            // Parent didn't fit or was already selected — don't try to
-            // chain-load companions for a parent that isn't in the set.
-            continue;
+        );
+        match parent_outcome {
+            TrySelectOutcome::Selected => {}
+            TrySelectOutcome::BudgetFull => {
+                notes.push(format!(
+                    "{}: skipped (skill context budget exhausted)",
+                    entry.skill.name()
+                ));
+                // Parent didn't fit — don't chain-load companions.
+                continue;
+            }
+            TrySelectOutcome::CandidateLimit => {
+                // Budget / slot exhausted; stop considering further
+                // candidates entirely (they won't fit either).
+                break;
+            }
+            // Already-selected / marker-satisfied are silent here:
+            // the scored loop shouldn't see dup names, and marker
+            // filtering already happened at scoring time. No note.
+            TrySelectOutcome::AlreadySelected | TrySelectOutcome::MarkerSatisfied => continue,
         }
 
         // Chain-load companions declared in requires.skills.
@@ -199,25 +241,50 @@ pub fn prefilter_skills<'a>(
                 // bundles declare optional companions.
                 continue;
             };
-            if !try_select(
+            let outcome = try_select(
                 companion,
                 &mut result,
                 &mut selected_names,
                 &mut budget_remaining,
                 max_candidates,
                 satisfied_setup_markers,
-            ) {
-                tracing::debug!(
-                    parent = %entry.skill.name(),
-                    companion = %companion_name,
-                    budget_remaining,
-                    "chain-load skipped (already selected, budget full, or marker satisfied)"
-                );
+            );
+            match outcome {
+                TrySelectOutcome::Selected => {
+                    notes.push(format!(
+                        "{}: chain-loaded from {}",
+                        companion_name,
+                        entry.skill.name()
+                    ));
+                }
+                TrySelectOutcome::BudgetFull => {
+                    notes.push(format!(
+                        "{}: chain-load skipped (budget full)",
+                        companion_name
+                    ));
+                }
+                TrySelectOutcome::CandidateLimit => {
+                    notes.push(format!(
+                        "{}: chain-load skipped (max active skills reached)",
+                        companion_name
+                    ));
+                }
+                TrySelectOutcome::MarkerSatisfied => {
+                    notes.push(format!(
+                        "{}: chain-load skipped (setup already complete)",
+                        companion_name
+                    ));
+                }
+                // Duplicate companion across parents is fine — no note.
+                TrySelectOutcome::AlreadySelected => {}
             }
         }
     }
 
-    result
+    SelectionOutcome {
+        selected: result,
+        notes,
+    }
 }
 
 /// Score a skill against a user message.
@@ -396,6 +463,7 @@ mod tests {
             max_context_tokens,
             &HashSet::new(),
         )
+        .selected
     }
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -883,7 +951,8 @@ mod tests {
             5,
             MAX_SKILL_CONTEXT_TOKENS,
             &markers,
-        );
+        )
+        .selected;
         // developer-setup should be filtered out — its marker exists.
         // github-workflow has no marker so it's still selected.
         assert_eq!(result.len(), 1);
@@ -903,7 +972,8 @@ mod tests {
             5,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-        );
+        )
+        .selected;
         // Both should be selected — both match keywords and neither
         // has a satisfied marker.
         assert_eq!(result.len(), 2);
@@ -918,7 +988,8 @@ mod tests {
         markers.insert("projects/foo/project.md".to_string());
         markers.insert("commitments/calibration.md".to_string());
 
-        let result = prefilter_skills("setup", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers);
+        let result =
+            prefilter_skills("setup", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers).selected;
         assert_eq!(result.len(), 1, "marker mismatch should not exclude");
     }
 
@@ -930,7 +1001,8 @@ mod tests {
         let mut markers = HashSet::new();
         markers.insert("anything".to_string());
 
-        let result = prefilter_skills("test", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers);
+        let result =
+            prefilter_skills("test", &skills, 5, MAX_SKILL_CONTEXT_TOKENS, &markers).selected;
         assert_eq!(result.len(), 1);
     }
 
@@ -967,7 +1039,7 @@ mod tests {
 
         let skills = vec![parent, companion1, companion2, bystander];
 
-        let result = prefilter_skills(
+        let outcome = prefilter_skills(
             "setup my dev workflow",
             &skills,
             10,
@@ -975,7 +1047,7 @@ mod tests {
             &HashSet::new(),
         );
 
-        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
         assert!(
             names.contains(&"developer-setup"),
             "parent must be selected (it scored), got: {names:?}"
@@ -1013,7 +1085,8 @@ mod tests {
             10,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-        );
+        )
+        .selected;
 
         assert!(
             result.is_empty(),
@@ -1033,8 +1106,8 @@ mod tests {
         companion.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![parent, companion];
-        let result = prefilter_skills("setup", &skills, 10, 4000, &HashSet::new());
-        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        let outcome = prefilter_skills("setup", &skills, 10, 4000, &HashSet::new());
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
         assert!(
             names.contains(&"big-setup"),
             "parent must still be selected"
@@ -1042,6 +1115,14 @@ mod tests {
         assert!(
             !names.contains(&"heavy-companion"),
             "companion must be budget-skipped when it doesn't fit"
+        );
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("heavy-companion") && n.contains("budget")),
+            "budget-skipped companion must surface a feedback note, got: {:?}",
+            outcome.notes
         );
     }
 
@@ -1058,12 +1139,20 @@ mod tests {
         let mut markers = HashSet::new();
         markers.insert("marker/already-done".to_string());
 
-        let result = prefilter_skills("setup", &skills, 10, MAX_SKILL_CONTEXT_TOKENS, &markers);
-        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        let outcome = prefilter_skills("setup", &skills, 10, MAX_SKILL_CONTEXT_TOKENS, &markers);
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"parent-setup"), "parent must be selected");
         assert!(
             !names.contains(&"nested-setup"),
             "companion with satisfied marker must be skipped even via chain-load"
+        );
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("nested-setup") && n.contains("setup already complete")),
+            "marker-skipped companion must surface a feedback note, got: {:?}",
+            outcome.notes
         );
     }
 
@@ -1078,15 +1167,23 @@ mod tests {
         let c = make_skill("deep-companion", &["deep"], &[], &[]);
 
         let skills = vec![a, b, c];
-        let result = prefilter_skills(
+        let outcome = prefilter_skills(
             "setup",
             &skills,
             10,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
         );
-        let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
+        let names: Vec<&str> = outcome.selected.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"top-setup"));
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("mid-companion") && n.contains("chain-loaded")),
+            "chain-loaded companion must surface a feedback note, got: {:?}",
+            outcome.notes
+        );
         assert!(
             names.contains(&"mid-companion"),
             "direct companion (depth 1) must be chain-loaded, got: {names:?}"
@@ -1111,7 +1208,8 @@ mod tests {
             10,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-        );
+        )
+        .selected;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name(), "parent");
     }
@@ -1131,7 +1229,8 @@ mod tests {
             10,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-        );
+        )
+        .selected;
         let names: Vec<&str> = result.iter().map(|s| s.name()).collect();
         assert_eq!(
             names.iter().filter(|n| **n == "shared").count(),
