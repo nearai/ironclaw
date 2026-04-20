@@ -928,3 +928,467 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
 // `src/channels/web/server.rs` (for now), where the full `GatewayState`
 // fixture is already in scope. They will migrate here once `server.rs` is
 // further trimmed in the next ironclaw#2599 increment.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{Router, http::StatusCode, http::header, routing::get};
+
+    use crate::channels::web::auth::CombinedAuthState;
+
+    use crate::channels::web::platform::router::start_server;
+    use crate::channels::web::platform::state::WorkspacePool;
+    use crate::channels::web::platform::static_files::{
+        BASE_CSP_HEADER, build_csp, build_csp_with_nonce, build_frontend_html, css_etag,
+        css_handler, generate_csp_nonce, stamp_nonce_into_html,
+    };
+
+    use crate::channels::web::test_helpers::test_gateway_state;
+
+    use crate::db::Database;
+
+    use crate::workspace::Workspace;
+    use ironclaw_gateway::{NONCE_PLACEHOLDER, assets};
+
+    #[tokio::test]
+    async fn test_csp_header_present_on_responses() {
+        use std::net::SocketAddr;
+
+        let state = test_gateway_state(None);
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
+            "test-token".to_string(),
+            "test".to_string(),
+        ));
+        let bound = start_server(addr, state.clone(), auth)
+            .await
+            .expect("server should start");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header must be present");
+
+        let csp_str = csp.to_str().expect("CSP header should be valid UTF-8");
+        assert!(
+            csp_str.contains("default-src 'self'"),
+            "CSP must contain default-src"
+        );
+        assert!(
+            csp_str.contains(
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh"
+            ),
+            "CSP must allow the explicit script CDNs without unsafe-inline"
+        );
+        assert!(
+            csp_str.contains("object-src 'none'"),
+            "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("frame-ancestors 'none'"),
+            "CSP must contain frame-ancestors 'none'"
+        );
+
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    #[test]
+    fn test_base_and_nonce_csp_agree_outside_script_src() {
+        // Regression for the drift risk flagged in PR #1725 review: the
+        // static header and the per-response nonce header must share every
+        // directive except `script-src`. Build both, strip `script-src …;`
+        // from each, and assert the remaining policy is byte-identical.
+        let base = build_csp(None);
+        let nonce = build_csp(Some("feedc0de"));
+
+        fn strip_script_src(csp: &str) -> String {
+            // Directives are separated by `; `. Drop the one that starts
+            // with `script-src` and rejoin the rest.
+            csp.split("; ")
+                .filter(|d| !d.trim_start().starts_with("script-src"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+
+        assert_eq!(
+            strip_script_src(&base),
+            strip_script_src(&nonce),
+            "base CSP and nonce CSP must agree on every directive except script-src\n\
+             base:  {base}\n\
+             nonce: {nonce}"
+        );
+    }
+
+    #[test]
+    fn test_base_csp_header_matches_build_csp_none() {
+        // The lazy static header used by the response-header layer must be
+        // byte-identical to `build_csp(None)`. If the fallback branch of
+        // the LazyLock ever fires, the header would regress to
+        // `default-src 'self'` and this test would catch it.
+        let lazy = BASE_CSP_HEADER.to_str().expect("static CSP is ASCII");
+        assert_eq!(lazy, build_csp(None));
+    }
+
+    #[test]
+    fn test_build_csp_with_nonce_includes_nonce_source() {
+        // Per-response CSP must add `'nonce-…'` to script-src so a single
+        // inline `<script nonce="…">` block is authorized for that response.
+        let csp = build_csp_with_nonce("deadbeefcafebabe");
+        assert!(
+            csp.contains("script-src 'self' 'nonce-deadbeefcafebabe' https://cdn.jsdelivr.net"),
+            "nonce source must appear immediately after 'self' in script-src; got: {csp}"
+        );
+        // The other directives must match the static BASE_CSP so the
+        // per-response value never accidentally relaxes anything else.
+        for needle in [
+            "default-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+        ] {
+            assert!(csp.contains(needle), "missing directive: {needle}");
+        }
+        // And it must NOT contain `'unsafe-inline'` for scripts.
+        assert!(
+            !csp.contains("script-src 'self' 'unsafe-inline'"),
+            "script-src must not allow 'unsafe-inline'"
+        );
+    }
+
+    #[test]
+    fn test_generate_csp_nonce_is_unique_and_hex() {
+        let a = generate_csp_nonce();
+        let b = generate_csp_nonce();
+        assert_eq!(a.len(), 32, "16 bytes hex-encoded should be 32 chars");
+        assert_ne!(a, b, "nonces must be unique per call");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "nonce must be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn test_css_etag_is_strong_validator_format() {
+        // Strong validators are double-quoted (no `W/` prefix). The
+        // sha-prefix lets future readers identify the digest function at a
+        // glance, and 16 hex chars (64 bits) is plenty for content-address
+        // collision avoidance on a single-tenant CSS payload.
+        let etag = css_etag("body { color: red; }");
+        assert!(etag.starts_with("\"sha256-"));
+        assert!(etag.ends_with('"'));
+        assert!(!etag.starts_with("W/"));
+        // Header value must be ASCII so it can land in a `HeaderValue`.
+        assert!(etag.is_ascii());
+    }
+
+    #[test]
+    fn test_css_etag_changes_when_body_changes() {
+        // The whole point of the ETag: editing `custom.css` must produce
+        // a new validator so the browser fetches the updated body.
+        let base = css_etag("body { color: red; }");
+        let edited = css_etag("body { color: blue; }");
+        assert_ne!(base, edited);
+        // Adding even a single byte must invalidate.
+        let appended = css_etag("body { color: red; } ");
+        assert_ne!(base, appended);
+    }
+
+    #[test]
+    fn test_css_etag_stable_for_identical_body() {
+        // Two requests against the same assembled body must produce the
+        // same validator — otherwise every request misses the cache.
+        let body = "body { color: red; }";
+        assert_eq!(css_etag(body), css_etag(body));
+    }
+
+    #[tokio::test]
+    async fn test_css_handler_returns_etag_and_serves_304_on_match() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Pure-static path: no workspace overlay, so the body is exactly
+        // the embedded `STYLE_CSS`. Cheap and deterministic.
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        // First request: 200 with ETag header.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .expect("ETag header must be present on 200")
+            .to_str()
+            .expect("ETag is ASCII")
+            .to_string();
+        assert!(etag.starts_with("\"sha256-"));
+
+        // Second request with `If-None-Match` matching the validator: 304
+        // and an empty body. The browser keeps its cached copy.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert!(body.is_empty(), "304 must have an empty body");
+
+        // Third request with a stale validator: 200 again. Operators
+        // expect this when `custom.css` changes underneath them — the
+        // browser revalidates, sees the body shifted, and fetches anew.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, "\"sha256-0000000000000000\"")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_css_handler_returns_base_in_multi_tenant_mode() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_css.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a global workspace with a hostile-looking custom.css.
+        // If css_handler ever reads state.workspace in multi-tenant
+        // mode, the marker would leak into the response body and this
+        // test would fail with an actionable diagnostic.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/custom.css",
+                "body { background: #ff0000; } /* TENANT-LEAK-BAIT */",
+            )
+            .await
+            .expect("seed bait custom.css");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Contract 1: the bait marker is absent. If a future regression
+        // re-reads state.workspace in multi-tenant mode, the marker
+        // would land here and this assertion fails with the leaked
+        // content visible in the diagnostic.
+        assert!(
+            !body_str.contains("TENANT-LEAK-BAIT"),
+            "custom.css from global workspace leaked into multi-tenant /style.css \
+             response — css_handler is missing its workspace_pool guard"
+        );
+
+        // Contract 2: the response is exactly the embedded base
+        // stylesheet, byte-for-byte. This catches a subtler regression
+        // where the leak content is dropped but the multi-tenant path
+        // still does the owned `format!` (turning what should be a
+        // borrowed hot-path response into an allocation).
+        assert_eq!(
+            body_str.as_ref(),
+            assets::STYLE_CSS,
+            "multi-tenant /style.css must serve the embedded base stylesheet \
+             unchanged — no overlay, no allocation"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_replaces_attribute() {
+        // Vanilla case: a placeholder inside a `nonce="…"` attribute on
+        // a script tag must be substituted with the real nonce. Both
+        // the layout-config script and any widget script tags emitted
+        // by `assemble_index` carry the same attribute shape, so a
+        // single test covers every emission point.
+        let html = format!("<script nonce=\"{NONCE_PLACEHOLDER}\">window.X = 1;</script>");
+        let stamped = stamp_nonce_into_html(&html, "deadbeef");
+        assert!(
+            stamped.contains("nonce=\"deadbeef\""),
+            "real nonce attribute must be present after substitution: {stamped}"
+        );
+        assert!(
+            !stamped.contains(NONCE_PLACEHOLDER),
+            "placeholder must be gone after substitution: {stamped}"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_does_not_mutate_widget_body() {
+        // Regression for the PR #1725 Copilot finding: a bare-string
+        // replace would also rewrite any *body content* that happens to
+        // contain the literal sentinel — e.g. a widget JS module that
+        // mentions `__IRONCLAW_CSP_NONCE__` in a comment, log line, or
+        // string constant. The attribute-targeted replace must leave
+        // those untouched.
+        //
+        // Build a fragment with TWO sentinels: one inside the
+        // legitimate `nonce="…"` attribute (must be replaced) and one
+        // inside the script body as a string constant (must NOT be
+        // replaced).
+        let html = format!(
+            "<script type=\"module\" nonce=\"{NONCE_PLACEHOLDER}\">\n\
+             // hostile widget body — author writes the sentinel as a constant\n\
+             const SENTINEL = \"{NONCE_PLACEHOLDER}\";\n\
+             console.log(SENTINEL);\n\
+             </script>"
+        );
+        let stamped = stamp_nonce_into_html(&html, "cafebabe");
+
+        // Contract 1: the attribute was rewritten.
+        assert!(
+            stamped.contains("nonce=\"cafebabe\""),
+            "attribute must carry the per-response nonce: {stamped}"
+        );
+
+        // Contract 2: the body sentinel survived intact. The widget
+        // author's source must round-trip byte-for-byte.
+        assert!(
+            stamped.contains(&format!("const SENTINEL = \"{NONCE_PLACEHOLDER}\"")),
+            "widget body sentinel must NOT be rewritten: {stamped}"
+        );
+
+        // Contract 3: exactly one occurrence of the placeholder remains
+        // (the one in the body). If a future regression switches to a
+        // bare-string replace, this count would drop to 0 and the test
+        // would fail loudly with the diff.
+        assert_eq!(
+            stamped.matches(NONCE_PLACEHOLDER).count(),
+            1,
+            "exactly one placeholder occurrence (in widget body) must \
+             survive; the attribute one must be replaced. Got: {stamped}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_build_frontend_html_returns_none_in_multi_tenant_mode() {
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_index.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a *global* workspace with customizations. If
+        // build_frontend_html ever read state.workspace in multi-tenant
+        // mode, the title "TENANT-LEAK-BAIT" would appear in the
+        // assembled HTML for every user. The assertions below pin the
+        // refusal contract — both the return value AND the cache slot.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/layout.json",
+                r#"{"branding":{"title":"TENANT-LEAK-BAIT"}}"#,
+            )
+            .await
+            .expect("seed bait layout");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        // Build state via the standard test helper, then mutate the
+        // workspace + workspace_pool fields. `Arc::get_mut` succeeds here
+        // because no other strong reference exists yet — the helper just
+        // returned the freshly-constructed Arc.
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        // Contract 1: build_frontend_html refuses to assemble.
+        let html = build_frontend_html(&state).await;
+        assert!(
+            html.is_none(),
+            "build_frontend_html must return None in multi-tenant mode \
+             (got Some HTML — bait layout may have leaked across tenants)"
+        );
+
+        // Contract 2: the cache slot is still empty. The early return
+        // above MUST short-circuit before the cache write at the bottom
+        // of the function — otherwise a poisoned cache entry would serve
+        // the leaked HTML to subsequent requests even after the bug is
+        // fixed.
+        let cache = state.frontend_html_cache.read().await;
+        assert!(
+            cache.is_none(),
+            "frontend_html_cache must remain empty in multi-tenant mode"
+        );
+    }
+}

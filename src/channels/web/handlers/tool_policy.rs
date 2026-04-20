@@ -16,7 +16,7 @@ use axum::{Json, extract::State, http::StatusCode};
 
 use crate::channels::web::auth::AdminUser;
 use crate::channels::web::features::settings::resolve_settings_store;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::tools::permissions::{
     ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY, AdminToolPolicy, parse_admin_tool_policy,
     validate_admin_tool_policy,

@@ -26,7 +26,7 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::AppEvent;
 
-use super::server::GatewayState;
+use super::platform::state::GatewayState;
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -645,9 +645,32 @@ pub(crate) async fn extensions_setup_submit_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_activation_status, derive_onboarding};
-    use crate::channels::web::types::{ChannelOnboardingState, ExtensionActivationStatus};
+
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
+
+    use crate::channels::web::auth::UserIdentity;
+
+    use crate::channels::web::features::extensions::{
+        apply_extension_readiness_to_response, extension_phase_for_web,
+        extensions_activate_handler, extensions_list_handler, extensions_readiness_handler,
+        extensions_remove_handler, extensions_setup_handler, extensions_setup_submit_handler,
+    };
+
+    use crate::channels::web::test_helpers::{
+        test_ext_mgr, test_ext_mgr_with_db, test_gateway_state, test_secrets_store,
+    };
+    use crate::channels::web::types::*;
+    use crate::channels::web::types::{
+        ExtensionActivationStatus, classify_wasm_channel_activation,
+    };
     use crate::extensions::{ExtensionKind, InstalledExtension};
+
+    use super::{derive_activation_status, derive_onboarding};
+    use crate::channels::web::types::ChannelOnboardingState;
 
     fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
         InstalledExtension {
@@ -731,5 +754,564 @@ mod tests {
         let (state, info) = derive_onboarding("telegram", None);
         assert!(state.is_none());
         assert!(info.is_none());
+    }
+
+    #[test]
+    fn test_wasm_channel_activation_status_owner_bound_counts_as_active() -> Result<(), String> {
+        let ext = InstalledExtension {
+            name: "telegram".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: Some("Telegram".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        if owner_bound != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "owner-bound channel should be active, got {:?}",
+                owner_bound
+            ));
+        }
+
+        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        if unbound != Some(ExtensionActivationStatus::Pairing) {
+            return Err(format!(
+                "unbound channel should be pairing, got {:?}",
+                unbound
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_channel_relay_activation_status_is_preserved() -> Result<(), String> {
+        let relay = InstalledExtension {
+            name: "signal".to_string(),
+            kind: ExtensionKind::ChannelRelay,
+            display_name: Some("Signal".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
+            classify_wasm_channel_activation(&relay, false, false)
+        } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
+            Some(if relay.active {
+                ExtensionActivationStatus::Active
+            } else if relay.authenticated {
+                ExtensionActivationStatus::Configured
+            } else {
+                ExtensionActivationStatus::Installed
+            })
+        } else {
+            None
+        };
+
+        if status != Some(ExtensionActivationStatus::Configured) {
+            return Err(format!(
+                "channel relay should retain configured status, got {:?}",
+                status
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_submit_rejects_path_traversal_name() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        // Each of these slugs would have silently reached extension lookup
+        // under the old `from_trusted(name)` wrap. All must reject at 400.
+        // We use axum::http::uri::PathAndQuery-safe escape where needed so
+        // the path extractor still decodes into a valid `String`.
+        for bad in [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ] {
+            let req_body = serde_json::json!({"secrets": {}});
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/extensions/{bad}/setup"))
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .expect("request");
+            req.extensions_mut().insert(UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            });
+
+            let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                .await
+                .expect("response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for malformed extension name {bad:?}, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_sibling_handlers_reject_path_traversal_name() {
+        use axum::body::Body;
+        use axum::routing::{get, post};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/activate",
+                post(extensions_activate_handler),
+            )
+            .route(
+                "/api/extensions/{name}/remove",
+                post(extensions_remove_handler),
+            )
+            .route(
+                "/api/extensions/{name}/setup",
+                get(extensions_setup_handler),
+            )
+            .with_state(state);
+
+        let bad_names = [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ];
+        let routes = [("POST", "activate"), ("POST", "remove"), ("GET", "setup")];
+
+        for bad in bad_names {
+            for (method, suffix) in routes {
+                let mut builder = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/api/extensions/{bad}/{suffix}"));
+                if method == "POST" {
+                    builder = builder.header("content-type", "application/json");
+                }
+                let body = if method == "POST" {
+                    Body::from("{}")
+                } else {
+                    Body::empty()
+                };
+                let mut req = builder.body(body).expect("request");
+                req.extensions_mut().insert(UserIdentity {
+                    user_id: "test".to_string(),
+                    role: "admin".to_string(),
+                    workspace_read_scopes: Vec::new(),
+                });
+
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "expected 400 for {method} {suffix} with malformed name {bad:?}, got {:?}",
+                    resp.status()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_submit_returns_failure_when_not_activated() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        // Use underscore-only name: `canonicalize_extension_name` rewrites
+        // hyphens to underscores, but `configure`'s capabilities-file lookup
+        // does not fall back to the legacy hyphen form, so a hyphenated test
+        // channel name causes `Capabilities file not found` and the handler
+        // takes the `Err` branch (no `activated` field) instead of the
+        // intended "saved but activation failed" branch.
+        let channel_name = "test_failing_channel";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "secrets": {
+                "BOT_TOKEN": "dummy-token"
+            }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/extensions/{channel_name}/setup"))
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        // Inject AuthenticatedUser so the handler's extractor succeeds
+        // without needing the full auth middleware layer.
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(false));
+        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Activation failed"),
+            "expected activation failure in message: {:?}",
+            parsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_reports_installed_inactive_wasm_channel_as_inactive() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+        let channel_name = "telegram";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram extension entry");
+        assert_eq!(telegram["kind"], "wasm_channel");
+        assert_eq!(telegram["active"], false);
+        assert_eq!(telegram["authenticated"], false);
+        assert_eq!(telegram["activation_status"], "installed");
+    }
+
+    #[test]
+    fn test_extension_phase_for_web_prefers_error_then_readiness() {
+        let mut ext = crate::extensions::InstalledExtension {
+            name: "notion".to_string(),
+            kind: crate::extensions::ExtensionKind::McpServer,
+            display_name: None,
+            description: None,
+            url: None,
+            authenticated: false,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: Some("boom".to_string()),
+            version: None,
+        };
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Error
+        );
+
+        ext.activation_error = None;
+        ext.needs_setup = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsSetup
+        );
+
+        ext.needs_setup = false;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsAuth
+        );
+
+        ext.authenticated = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::NeedsActivation
+        );
+
+        ext.active = true;
+        assert_eq!(
+            extension_phase_for_web(&ext),
+            crate::extensions::ExtensionPhase::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_readiness_handler_reports_phase_summary() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // DB-backed manager so the install path does not fall back to the
+        // developer's real `~/.ironclaw/mcp-servers.json` (which would
+        // panic with `AlreadyInstalled("notion")` on dev machines that
+        // already have a notion entry configured).
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
+        let mut server =
+            crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
+        server.description = Some("Notion".to_string());
+        ext_mgr
+            .install(
+                "notion",
+                Some(&server.url),
+                Some(crate::extensions::ExtensionKind::McpServer),
+                "test",
+            )
+            .await
+            .expect("install notion mcp");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/readiness",
+                get(extensions_readiness_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions/readiness")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let notion = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "notion"))
+            .expect("notion readiness entry");
+        assert_eq!(notion["kind"], "mcp_server");
+        assert_eq!(notion["phase"], "needs_auth");
+        assert_eq!(notion["authenticated"], false);
+        assert_eq!(notion["active"], false);
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_handler_reports_installed_inactive_wasm_channel_as_inactive() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+        std::fs::write(wasm_channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("telegram extensions entry");
+
+        assert_eq!(telegram["kind"], "wasm_channel");
+        assert_eq!(telegram["active"], false);
+        assert_eq!(telegram["activation_status"], "installed");
+    }
+
+    #[test]
+    fn apply_extension_readiness_preserves_install_success_for_auth_followup() {
+        let mut resp = ActionResponse::ok("Installed notion");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_authorization(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "https://example.com/oauth".to_string(),
+                    "gateway".to_string(),
+                ),
+            },
+            true,
+        );
+
+        assert!(resp.success);
+        assert_eq!(resp.auth_url.as_deref(), Some("https://example.com/oauth"));
+        assert_eq!(resp.awaiting_token, Some(false));
+    }
+
+    #[test]
+    fn apply_extension_readiness_fails_activate_when_auth_is_required() {
+        let mut resp = ActionResponse::ok("placeholder");
+        apply_extension_readiness_to_response(
+            &mut resp,
+            crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                name: "notion".to_string(),
+                kind: crate::extensions::ExtensionKind::McpServer,
+                phase: crate::extensions::ExtensionPhase::NeedsAuth,
+                credential_name: Some("notion_api_token".to_string()),
+                auth: crate::extensions::AuthResult::awaiting_token(
+                    "notion",
+                    crate::extensions::ExtensionKind::McpServer,
+                    "Paste your Notion token".to_string(),
+                    None,
+                ),
+            },
+            false,
+        );
+
+        assert!(!resp.success);
+        assert_eq!(resp.awaiting_token, Some(true));
+        assert_eq!(
+            resp.instructions.as_deref(),
+            Some("Paste your Notion token")
+        );
+        assert_eq!(resp.message, "Paste your Notion token");
     }
 }

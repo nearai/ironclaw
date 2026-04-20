@@ -6,10 +6,9 @@
 //! and the type aliases (`PromptQueue`, `RoutineEngineSlot`) that are too
 //! noisy to spell inline.
 //!
-//! Handlers should depend on this module instead of the older
-//! `crate::channels::web::server::*` path; the re-exports in `server.rs`
-//! exist only for backward compatibility during the ironclaw#2599 migration
-//! and will be removed once all call sites are updated.
+//! Handlers depend on this module directly. The older
+//! `crate::channels::web::server::*` path — and its back-compat shim in
+//! `src/channels/web/server.rs` — was removed in ironclaw#2599 stage 6.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -479,4 +478,31 @@ pub struct FrontendCacheKey {
     /// Signature for `.system/gateway/widgets/` (max child mtime), or `None`
     /// if the directory is empty or absent.
     pub widgets: Option<(i64, u32)>,
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::WorkspacePool;
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_pool_resolve_seeds_new_user_workspace() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+
+        let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
+
+        let readme = ws.read(crate::workspace::paths::README).await.unwrap();
+        let identity = ws.read(crate::workspace::paths::IDENTITY).await.unwrap();
+
+        assert!(!readme.content.trim().is_empty());
+        assert!(!identity.content.trim().is_empty());
+    }
 }

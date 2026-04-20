@@ -19,9 +19,11 @@ Forbidden patterns (matched inside `use ...` statements or fully-qualified
 type paths — comments and string literals are stripped first):
 
 - `crate::channels::web::handlers::` and `crate::channels::web::features::`
-- `crate::channels::web::server::` (the `server.rs` compatibility shim —
-  routing through it re-creates the same platform → feature back-edge the
-  shim is meant to be migrated away from)
+- `crate::channels::web::server::` (retained as a defense-in-depth guard
+  after the `server.rs` shim was deleted in ironclaw#2599 stage 6, so any
+  accidental re-introduction of that path — whether a literal new
+  `server.rs` or a stray import — gets rejected at CI rather than
+  reviving the platform → feature back-edge)
 - `super::handlers::`, `super::features::`, and `super::server::`
 - `super::super::handlers::`, `super::super::features::`, and
   `super::super::server::`
@@ -72,10 +74,9 @@ EXEMPT_RELATIVE_PATHS = {"router.rs"}
 FORBIDDEN_PATTERNS = [
     re.compile(r"\bcrate::channels::web::handlers::"),
     re.compile(r"\bcrate::channels::web::features::"),
-    # The `server.rs` compatibility shim hides platform → feature back-edges
-    # behind a re-export, so rejecting it is what the reviewer requested
-    # while the shim still exists. The allowlist below carries the specific
-    # pre-existing call sites that are tracked for follow-up migration.
+    # The `server.rs` shim was deleted in ironclaw#2599 stage 6; this
+    # pattern stays as a defense-in-depth guard against any accidental
+    # re-introduction of the platform → feature back-edge it used to hide.
     re.compile(r"\bcrate::channels::web::server::"),
     # `super::` and `super::super::` resolve differently depending on the
     # file's depth, but any path through them that lands on a handler,
@@ -579,10 +580,13 @@ class _Tests(unittest.TestCase):
             p.unlink()
 
     def test_detects_server_shim_back_edge(self) -> None:
-        # Regression for serrrfirat's review on PR #2647: the `server.rs`
-        # compatibility shim still creates a platform → feature dependency,
-        # so routing through it must be rejected from non-router platform
-        # modules.
+        # Defense-in-depth: the `server.rs` shim was deleted in
+        # ironclaw#2599 stage 6, but this test stays as a guard. If a
+        # future change accidentally reintroduces `channels::web::server::`
+        # — literally, or by re-creating a module by that name — the
+        # platform → feature back-edge the shim used to hide comes back
+        # with it. The serrrfirat review on PR #2647 asked for this
+        # rejection originally; we're keeping it enforceable.
         src = "use crate::channels::web::server::chat_send_handler;\n"
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:

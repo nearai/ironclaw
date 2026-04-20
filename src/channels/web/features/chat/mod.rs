@@ -1057,6 +1057,32 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
+    use uuid::Uuid;
+
+    use crate::agent::SessionManager;
+
+    use crate::channels::web::auth::UserIdentity;
+    use crate::channels::web::features::chat::{
+        IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler, chat_auth_cancel_handler,
+        chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
+        pending_gate_extension_name,
+    };
+
+    use crate::channels::web::test_helpers::{
+        test_gateway_state, test_gateway_state_with_store_and_session_manager,
+    };
+    use crate::channels::web::types::*;
+
+    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
+    use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
+
     use super::*;
 
     #[test]
@@ -1347,5 +1373,675 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_for_completed_turn() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        let user_message_id = db
+            .add_conversation_message(thread_id, "user", "What is 2+2?")
+            .await
+            .expect("add user message");
+        db.add_conversation_message(thread_id, "assistant", "4")
+            .await
+            .expect("add assistant message");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": user_message_id,
+                "state": "Processing",
+                "user_input": "What is 2+2?",
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["state"], "Completed");
+        assert_eq!(turns[0]["user_input"], "What is 2+2?");
+        assert_eq!(turns[0]["response"], "4");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_when_history_is_windowed() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let mut last_user_message_id = None;
+        for turn_number in 0..8 {
+            let user_message_id = db
+                .add_conversation_message(thread_id, "user", &format!("Question {turn_number}"))
+                .await
+                .expect("add user message");
+            db.add_conversation_message(thread_id, "assistant", &format!("Answer {turn_number}"))
+                .await
+                .expect("add assistant message");
+            last_user_message_id = Some((turn_number, user_message_id));
+        }
+
+        let (last_turn_number, last_user_message_id) =
+            last_user_message_id.expect("final turn metadata");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": last_turn_number,
+                "user_message_id": last_user_message_id,
+                "state": "Processing",
+                "user_input": format!("Question {last_turn_number}"),
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}&limit=10"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 5);
+        assert_eq!(turns.last().expect("last turn")["user_input"], "Question 7");
+        assert_eq!(turns.last().expect("last turn")["response"], "Answer 7");
+        assert_eq!(turns.last().expect("last turn")["state"], "Completed");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_empty_thread_drops_stale_in_progress() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": serde_json::Value::Null,
+                "state": "Processing",
+                "user_input": "Question",
+                "started_at": (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
+    }
+
+    fn test_auth_manager(
+        tool_registry: Option<Arc<ToolRegistry>>,
+    ) -> Arc<crate::bridge::auth_manager::AuthManager> {
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            secrets,
+            None,
+            None,
+            tool_registry,
+        ))
+    }
+
+    #[tokio::test]
+    async fn pending_gate_extension_name_uses_install_parameters_for_post_install_auth() {
+        let registry = Arc::new(ToolRegistry::new());
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
+
+        let extension_name = pending_gate_extension_name(
+            state_mut,
+            "test-user",
+            "tool_install",
+            r#"{"name":"telegram"}"#,
+            &ironclaw_engine::ResumeKind::Authentication {
+                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                    .unwrap(),
+                instructions: "paste token".to_string(),
+                auth_url: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_activate_tool() {
+        let state = test_gateway_state(None);
+
+        let extension_name = pending_gate_extension_name(
+            &state,
+            "test-user",
+            "tool-activate",
+            r#"{"name":"telegram"}"#,
+            &ironclaw_engine::ResumeKind::Authentication {
+                credential_name: ironclaw_common::CredentialName::from_trusted(
+                    "telegram_bot_token".into(),
+                ),
+                instructions: "paste token".to_string(),
+                auth_url: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_gate_extension_name_falls_back_to_provider_extension() {
+        struct ProviderTool;
+
+        #[async_trait::async_trait]
+        impl Tool for ProviderTool {
+            fn name(&self) -> &str {
+                "notion_search"
+            }
+
+            fn description(&self) -> &str {
+                "provider tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("notion")
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(ProviderTool)).await;
+
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
+
+        let extension_name = pending_gate_extension_name(
+            state_mut,
+            "test-user",
+            "notion_search",
+            "{}",
+            &ironclaw_engine::ResumeKind::Authentication {
+                credential_name: ironclaw_common::CredentialName::new("notion_token").unwrap(),
+                instructions: "paste token".to_string(),
+                auth_url: None,
+            },
+        )
+        .await;
+
+        assert_eq!(extension_name.as_ref().map(|n| n.as_str()), Some("notion"));
+    }
+
+    #[tokio::test]
+    async fn test_chat_approval_handler_preserves_user_scoped_metadata() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route("/api/chat/approval", post(chat_approval_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/approval")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "action": "approve",
+                    "thread_id": "gateway-thread-approval",
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let incoming = rx.recv().await.expect("forwarded approval message");
+        assert_eq!(incoming.channel, "gateway");
+        assert_eq!(incoming.user_id, "member-1");
+        assert_eq!(
+            incoming.thread_id.as_deref(),
+            Some("gateway-thread-approval")
+        );
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("member-1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("gateway-thread-approval")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_auth_token_handler_does_not_forward_secret_through_msg_tx() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let mut state = test_gateway_state(None);
+        {
+            let state_mut = Arc::get_mut(&mut state).expect("test state uniquely owned");
+            state_mut.session_manager = Some(Arc::clone(&session_manager));
+        }
+        *state.msg_tx.write().await = Some(tx);
+        let thread_id = {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let mut sess = session.lock().await;
+            let thread_id = {
+                let thread = sess.create_thread(Some("gateway"));
+                let thread_id = thread.id;
+                thread.enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
+                thread_id
+            };
+            sess.switch_thread(thread_id);
+            thread_id
+        };
+
+        let app = Router::new()
+            .route("/api/chat/auth-token", post(chat_auth_token_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/auth-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "token": "secret-token",
+                    "thread_id": thread_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(incoming)) => {
+                assert_ne!(incoming.content, "secret-token");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_auth_cancel_handler_clears_requested_thread_auth_mode() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let mut state = test_gateway_state(None);
+        Arc::get_mut(&mut state)
+            .expect("test state uniquely owned")
+            .session_manager = Some(Arc::clone(&session_manager));
+        {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let mut sess = session.lock().await;
+            let target_thread_id = Uuid::new_v4();
+            let other_thread_id = Uuid::new_v4();
+            sess.create_thread_with_id(target_thread_id, Some("gateway"))
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
+            sess.create_thread_with_id(other_thread_id, Some("gateway"))
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("notion").unwrap());
+            sess.switch_thread(other_thread_id);
+        }
+
+        let app = Router::new()
+            .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
+            .with_state(state);
+
+        let target_thread_id = {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let sess = session.lock().await;
+            sess.threads
+                .iter()
+                .find_map(|(id, thread)| {
+                    (thread
+                        .pending_auth
+                        .as_ref()
+                        .map(|p| p.extension_name.as_str())
+                        == Some("telegram"))
+                    .then_some(*id)
+                })
+                .expect("telegram pending auth thread")
+        };
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/auth-cancel")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": target_thread_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let session = session_manager.get_or_create_session("member-1").await;
+        let sess = session.lock().await;
+        assert!(
+            sess.threads
+                .get(&target_thread_id)
+                .and_then(|thread| thread.pending_auth.as_ref())
+                .is_none(),
+            "requested thread auth mode should be cleared"
+        );
+        assert!(
+            sess.threads.values().any(|thread| {
+                thread
+                    .pending_auth
+                    .as_ref()
+                    .map(|p| p.extension_name.as_str())
+                    == Some("notion")
+            }),
+            "other thread auth mode should remain intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_gate_resolve_handler_credential_submission_uses_structured_gate_resolution()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/gate/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "thread_id": "gateway-thread-auth",
+                    "resolution": "credential_provided",
+                    "token": "secret-token",
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let incoming = rx.recv().await.expect("forwarded gate resolution");
+        let submission = incoming
+            .structured_submission
+            .clone()
+            .expect("structured submission sideband");
+        assert!(matches!(
+            submission,
+            crate::agent::submission::Submission::GateAuthResolution {
+                request_id: rid,
+                resolution: crate::agent::submission::AuthGateResolution::CredentialProvided { token }
+            } if rid == request_id && token == "secret-token"
+        ));
+        assert_eq!(incoming.content, "[structured auth gate resolution]");
+        assert_ne!(incoming.content, "secret-token");
+        assert_eq!(incoming.thread_id.as_deref(), Some("gateway-thread-auth"));
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("gateway-thread-auth")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_auth_token_handler_expired_auth_broadcasts_failed_onboarding_state() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let mut state = test_gateway_state(None);
+        {
+            let state_mut = Arc::get_mut(&mut state).expect("test state uniquely owned");
+            state_mut.session_manager = Some(Arc::clone(&session_manager));
+        }
+        let mut receiver = state.sse.sender().subscribe();
+
+        let expected_thread_id = {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            let thread_id = thread.id;
+            thread.pending_auth = Some(crate::agent::session::PendingAuth {
+                extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
+                created_at: chrono::Utc::now() - chrono::Duration::minutes(16),
+            });
+            sess.switch_thread(thread_id);
+            thread_id
+        };
+        let expected_thread_id_str = expected_thread_id.to_string();
+
+        let app = Router::new()
+            .route("/api/chat/auth-token", post(chat_auth_token_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/auth-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "token": "secret-token",
+                    "thread_id": expected_thread_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("onboarding_state event").event {
+            crate::channels::web::types::AppEvent::OnboardingState {
+                extension_name,
+                state,
+                message,
+                thread_id,
+                ..
+            } => {
+                assert_eq!(extension_name, "telegram");
+                assert_eq!(
+                    state,
+                    crate::channels::web::types::OnboardingStateDto::Failed
+                );
+                assert_eq!(
+                    message.as_deref(),
+                    Some("Authentication for 'telegram' expired. Please try again.")
+                );
+                assert_eq!(thread_id.as_deref(), Some(expected_thread_id_str.as_str()));
+            }
+            event => panic!("expected OnboardingState event, got {event:?}"),
+        }
     }
 }

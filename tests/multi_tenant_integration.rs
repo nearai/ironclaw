@@ -23,9 +23,8 @@ use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use ironclaw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
@@ -1075,9 +1074,10 @@ async fn start_multi_user_server_with_db() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("Failed to start server with DB");
+    let bound =
+        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
+            .await
+            .expect("Failed to start server with DB");
 
     (bound, state, db, temp_dir)
 }

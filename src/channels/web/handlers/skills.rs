@@ -10,7 +10,7 @@ use axum::{
 use futures::future::join_all;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 
 fn install_requested_identifier<'a>(
