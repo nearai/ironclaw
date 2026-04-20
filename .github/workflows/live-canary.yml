@@ -168,9 +168,7 @@ jobs:
 
   auth-live-seeded:
     name: Auth Live Seeded
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '15 * * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
     runs-on: ubuntu-latest
@@ -326,11 +324,7 @@ jobs:
 
   public-smoke:
     name: Public Live Smoke
-    # Temporarily enabled on pull_request for testing (remove after verification).
-    # Normally NOT triggered by pull_request: hits real Anthropic API on every
-    # push, which is slow (~15 min), costly, and flakes on upstream outages.
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: ubuntu-latest
@@ -391,9 +385,7 @@ jobs:
 
   persona-rotating:
     name: Rotating Persona Live
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: ubuntu-latest
@@ -506,9 +498,7 @@ jobs:
 
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 5 * * 0') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
@@ -595,9 +585,7 @@ jobs:
 
   release-public-full:
     name: Release Public Full Live
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'release-public-full'))
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -641,9 +629,7 @@ jobs:
 
   upgrade-canary:
     name: Upgrade Canary
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
