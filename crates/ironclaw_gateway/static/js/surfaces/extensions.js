@@ -331,7 +331,7 @@ function renderExtensionCard(ext) {
       var fallbackStatus = ext.onboarding_state || ext.activation_status || 'installed';
       var inlineSetupCoversIt = fallbackStatus === 'setup_required' || fallbackStatus === 'installed';
       if (inlineSetupCoversIt) {
-        reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+        reconfigureBtn.textContent = I18n.t('ext.reconfigure');
       } else {
         reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');
       }
