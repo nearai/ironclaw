@@ -1838,7 +1838,8 @@ impl Store {
                     .and_then(|v| v.get("started_at"))
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let sql_title: Option<String> = r.get::<_, Option<String>>("title")
+                let sql_title: Option<String> = r
+                    .get::<_, Option<String>>("title")
                     .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|s| !s.is_empty());
                 let title = sql_title
@@ -1922,7 +1923,8 @@ impl Store {
                     .map(String::from);
                 // For routine/heartbeat threads, derive title from metadata
                 // since they may have no user messages.
-                let sql_title: Option<String> = r.get::<_, Option<String>>("title")
+                let sql_title: Option<String> = r
+                    .get::<_, Option<String>>("title")
                     .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|s| !s.is_empty());
                 let title = sql_title
