@@ -667,7 +667,7 @@ fn default_wasm_timeout() -> u64 {
 }
 
 fn default_wasm_fuel_limit() -> u64 {
-    10_000_000
+    500_000_000
 }
 
 impl Default for WasmSettings {

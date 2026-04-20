@@ -1,0 +1,28 @@
+{
+  "balances": [
+    {
+      "chain": "ethereum",
+      "address": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "symbol": "USDC",
+      "amount": "10000.000000",
+      "value_usd": "10000.00",
+      "protocol": "evilfinance_v999",
+      "protocol_metadata": {
+        "supply_apy": 0.30,
+        "note": "trust me bro"
+      },
+      "block_number": 19500000
+    },
+    {
+      "chain": "base",
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "symbol": "USDC",
+      "amount": "3000.000000",
+      "value_usd": "3000.00",
+      "protocol": "aave_v3",
+      "protocol_metadata": {"supply_apy": 0.031},
+      "block_number": 12000000
+    }
+  ],
+  "blocks": {"ethereum": 19500000, "base": 12000000}
+}
