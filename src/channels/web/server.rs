@@ -18,18 +18,22 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use axum::{Json, extract::State, http::StatusCode};
+    use axum::{
+        Json,
+        extract::{Query, State},
+        http::StatusCode,
+    };
 
     use uuid::Uuid;
 
     use crate::agent::SessionManager;
     use crate::auth::oauth;
     use crate::channels::relay::DEFAULT_RELAY_NAME;
-    use crate::channels::web::auth::{CombinedAuthState, UserIdentity};
+    use crate::channels::web::auth::{AuthenticatedUser, CombinedAuthState, UserIdentity};
     use crate::channels::web::features::chat::{
-        IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler, chat_auth_cancel_handler,
-        chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
-        pending_gate_extension_name,
+        HistoryQuery, IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler,
+        chat_auth_cancel_handler, chat_auth_token_handler, chat_gate_resolve_handler,
+        chat_history_handler, pending_gate_extension_name,
     };
     use crate::channels::web::features::extensions::{
         apply_extension_readiness_to_response, extension_phase_for_web,
@@ -49,6 +53,10 @@ mod tests {
         css_handler, generate_csp_nonce, stamp_nonce_into_html,
     };
     use crate::channels::web::sse::SseManager;
+    use crate::channels::web::test_helpers::{
+        test_gateway_state, test_gateway_state_with_dependencies,
+        test_gateway_state_with_store_and_session_manager,
+    };
     use crate::channels::web::types::*;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
@@ -164,119 +172,6 @@ mod tests {
     }
 
     // --- OAuth callback handler tests ---
-
-    /// Build a minimal `GatewayState` for handler tests.
-    fn test_gateway_state_with_dependencies(
-        ext_mgr: Option<Arc<ExtensionManager>>,
-        store: Option<Arc<dyn Database>>,
-        db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
-        pairing_store: Option<Arc<crate::pairing::PairingStore>>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: ext_mgr,
-            tool_registry: None,
-            store,
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth,
-            pairing_store,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
-
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
-        test_gateway_state_with_dependencies(ext_mgr, None, None, None)
-    }
-
-    fn test_gateway_state_with_store_and_session_manager(
-        store: Arc<dyn Database>,
-        session_manager: Arc<SessionManager>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: Some(session_manager),
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: Some(store),
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth: None,
-            pairing_store: None,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
@@ -482,6 +377,206 @@ mod tests {
 
         assert!(payload.get("in_progress").is_none());
         assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_returns_500_when_ownership_lookup_errors() {
+        use crate::db::libsql::LibSqlBackend;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("broken.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create backend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrate backend");
+        let conn = backend.connect().await.expect("connect backend");
+        conn.execute(
+            "ALTER TABLE conversations RENAME TO conversations_broken",
+            (),
+        )
+        .await
+        .expect("break ownership lookup");
+
+        let store: Arc<dyn Database> = Arc::new(backend);
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&store), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={}", Uuid::new_v4()))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(std::str::from_utf8(&body).unwrap_or(""), "Database error");
+    }
+
+    fn history_request(
+        state: Arc<GatewayState>,
+        user_id: &str,
+        thread_id: Uuid,
+    ) -> (
+        State<Arc<GatewayState>>,
+        AuthenticatedUser,
+        Query<HistoryQuery>,
+    ) {
+        (
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: user_id.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Query(HistoryQuery {
+                thread_id: Some(thread_id.to_string()),
+                limit: None,
+                before: None,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_engine_v2_messages_for_owner() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "demo goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::user("hello engine"));
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("hi back"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(
+            response.turns.len(),
+            1,
+            "one user+assistant pair collapses into a single turn"
+        );
+        let turn = &response.turns[0];
+        assert_eq!(turn.user_input, "hello engine");
+        assert_eq!(turn.response.as_deref(), Some("hi back"));
+        assert!(!response.has_more);
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_404_for_cross_user_engine_thread() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "bob's secret",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "bob",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("private reply"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let result = chat_history_handler(s, u, q).await;
+
+        match result {
+            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Ok(resp) => panic!(
+                "alice must not see bob's engine thread but got {} turns",
+                resp.turns.len()
+            ),
+        }
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_accepts_session_owned_thread_without_db() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        // Ensure neither engine state nor v1 DB can claim ownership — the
+        // only remaining source must be the in-memory v1 session, which
+        // this test exercises.
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let session_manager = Arc::new(SessionManager::new());
+        let thread_uuid = Uuid::new_v4();
+        {
+            let session = session_manager.get_or_create_session("alice").await;
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread_with_id(thread_uuid, Some("web"));
+            thread.start_turn("from session");
+            thread.conclude_turn(crate::agent::session::TurnOutcome::Completed(
+                "session reply".to_string(),
+            ));
+        }
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(session_manager);
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(response.turns.len(), 1);
+        assert_eq!(response.turns[0].user_input, "from session");
+        assert_eq!(response.turns[0].response.as_deref(), Some("session reply"));
     }
 
     /// Build a minimal `AuthManager` backed by an in-memory secrets store.

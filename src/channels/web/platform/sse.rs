@@ -44,6 +44,11 @@ pub(crate) struct ScopedEvent {
 pub struct SseManager {
     tx: broadcast::Sender<ScopedEvent>,
     connection_count: Arc<AtomicU64>,
+    /// Subset of `connection_count` that opted in to verbose/debug events.
+    /// Tracked separately so verbose-only `AppEvent` variants can be skipped
+    /// at broadcast time when no debug subscriber is connected — even if
+    /// other (non-debug) subscribers are.
+    verbose_count: Arc<AtomicU64>,
     boot_id: Arc<str>,
     next_event_id: Arc<AtomicU64>,
     max_connections: u64,
@@ -64,6 +69,7 @@ impl SseManager {
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
+            verbose_count: Arc::new(AtomicU64::new(0)),
             boot_id: Arc::<str>::from(Uuid::new_v4().to_string()),
             next_event_id: Arc::new(AtomicU64::new(1)),
             max_connections,
@@ -85,6 +91,7 @@ impl SseManager {
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
+            verbose_count: Arc::new(AtomicU64::new(0)),
             boot_id: Arc::<str>::from(Uuid::new_v4().to_string()),
             next_event_id: Arc::new(AtomicU64::new(1)),
             max_connections,
@@ -108,6 +115,21 @@ impl SseManager {
             user_id,
             event,
         }
+    }
+
+    /// Returns `true` when at least one SSE/WebSocket subscriber is connected.
+    pub fn has_receivers(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
+    /// Returns `true` when at least one verbose/debug subscriber is connected.
+    /// Used to short-circuit cloning of `ToolResultFull` / `TurnMetrics`
+    /// payloads (up to 50 KB) when no admin tab has the debug panel open.
+    /// `has_receivers()` alone is not enough: a single non-debug user keeps
+    /// the broadcast path active even though no one would consume the
+    /// verbose events.
+    pub fn has_verbose_receivers(&self) -> bool {
+        self.verbose_count.load(Ordering::Relaxed) > 0
     }
 
     /// Broadcast an event to all connected clients (global/unscoped).
@@ -140,6 +162,7 @@ impl SseManager {
     pub fn subscribe_raw(
         &self,
         user_id: Option<String>,
+        verbose: bool,
     ) -> Option<impl Stream<Item = AppEvent> + Send + 'static + use<>> {
         // Atomically increment only if below the limit. This prevents
         // concurrent callers from overshooting max_connections.
@@ -154,18 +177,26 @@ impl SseManager {
                 }
             })
             .ok()?;
+        let verbose_counter = if verbose {
+            self.verbose_count.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::clone(&self.verbose_count))
+        } else {
+            None
+        };
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
             Ok(scoped) => {
                 // Global events (user_id=None) always pass through.
                 // Scoped events only pass if the subscriber matches (or subscriber is unscoped).
-                match (&user_id, &scoped.user_id) {
+                let event = match (&user_id, &scoped.user_id) {
                     (_, None) => Some(scoped.event), // global -> all
                     (None, _) => Some(scoped.event), // unscoped subscriber -> all
                     (Some(sub), Some(ev)) if sub == ev => Some(scoped.event), // match
                     _ => None,                       // different user -> skip
-                }
+                };
+                // Filter verbose-only events for non-verbose subscribers.
+                event.filter(|e| verbose || !e.is_verbose_only())
             }
             Err(_) => None,
         });
@@ -173,6 +204,7 @@ impl SseManager {
         Some(CountedStream {
             inner: stream,
             counter,
+            verbose_counter,
         })
     }
 
@@ -185,6 +217,7 @@ impl SseManager {
     pub fn subscribe(
         &self,
         user_id: Option<String>,
+        verbose: bool,
         last_event_id: Option<String>,
     ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
         // Atomically increment only if below the limit.
@@ -199,16 +232,29 @@ impl SseManager {
                 }
             })
             .ok()?;
+        let verbose_counter = if verbose {
+            self.verbose_count.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::clone(&self.verbose_count))
+        } else {
+            None
+        };
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx)
             .filter_map(move |result| match result {
-                Ok(scoped) => match (&user_id, &scoped.user_id) {
-                    (_, None) => Some(scoped),
-                    (None, _) => Some(scoped),
-                    (Some(sub), Some(ev)) if sub == ev => Some(scoped),
-                    _ => None,
-                },
+                Ok(scoped) => {
+                    let user_match = match (&user_id, &scoped.user_id) {
+                        (_, None) => true,
+                        (None, _) => true,
+                        (Some(sub), Some(ev)) if sub == ev => true,
+                        _ => false,
+                    };
+                    if user_match && (verbose || !scoped.event.is_verbose_only()) {
+                        Some(scoped)
+                    } else {
+                        None
+                    }
+                }
                 Err(_) => None,
             })
             .filter_map(move |scoped| {
@@ -229,10 +275,11 @@ impl SseManager {
                     .data(data)))
             });
 
-        // Wrap in a stream that decrements on drop
+        // Wrap in a stream that decrements both counters on drop.
         let counted_stream = CountedStream {
             inner: stream,
             counter,
+            verbose_counter,
         };
 
         Some(
@@ -269,13 +316,18 @@ impl Default for SseManager {
     }
 }
 
-/// Stream wrapper that decrements connection count on drop.
+/// Stream wrapper that decrements connection counters on drop.
 ///
-/// When the SSE client disconnects, this stream is dropped
-/// and the counter is decremented.
+/// When the SSE client disconnects, this stream is dropped and
+/// `counter` is decremented. `verbose_counter` is also decremented when
+/// the dropped subscriber had subscribed in verbose/debug mode — this
+/// lets the manager track verbose subscribers separately from the
+/// total so that verbose-only events can be short-circuited at
+/// broadcast time when no debug client is connected.
 struct CountedStream<S> {
     inner: S,
     counter: Arc<AtomicU64>,
+    verbose_counter: Option<Arc<AtomicU64>>,
 }
 
 impl<S: Stream + Unpin> Stream for CountedStream<S> {
@@ -292,6 +344,9 @@ impl<S: Stream + Unpin> Stream for CountedStream<S> {
 impl<S> Drop for CountedStream<S> {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::Relaxed);
+        if let Some(v) = &self.verbose_counter {
+            v.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -316,7 +371,11 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_to_receiver() {
         let manager = SseManager::new();
-        let mut stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
+        let mut stream = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("should subscribe"),
+        );
 
         manager.broadcast(AppEvent::Status {
             message: "test".to_string(),
@@ -333,7 +392,11 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_receives_events() {
         let manager = SseManager::new();
-        let mut stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
+        let mut stream = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("should subscribe"),
+        );
 
         assert_eq!(manager.connection_count(), 1);
 
@@ -353,7 +416,11 @@ mod tests {
     async fn test_subscribe_raw_decrements_on_drop() {
         let manager = SseManager::new();
         {
-            let _stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
+            let _stream = Box::pin(
+                manager
+                    .subscribe_raw(None, false)
+                    .expect("should subscribe"),
+            );
             assert_eq!(manager.connection_count(), 1);
         }
         // Stream dropped, counter should decrement
@@ -363,8 +430,16 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_multiple_subscribers() {
         let manager = SseManager::new();
-        let mut s1 = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
-        let mut s2 = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
+        let mut s1 = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("should subscribe"),
+        );
+        let mut s2 = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("should subscribe"),
+        );
         assert_eq!(manager.connection_count(), 2);
 
         manager.broadcast(AppEvent::Heartbeat);
@@ -385,13 +460,21 @@ mod tests {
         let mut manager = SseManager::new();
         manager.max_connections = 2; // Low limit for testing
 
-        let _s1 = Box::pin(manager.subscribe_raw(None).expect("first should succeed"));
-        let _s2 = Box::pin(manager.subscribe_raw(None).expect("second should succeed"));
+        let _s1 = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("first should succeed"),
+        );
+        let _s2 = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("second should succeed"),
+        );
         assert_eq!(manager.connection_count(), 2);
 
         // Third should be rejected
-        assert!(manager.subscribe_raw(None).is_none());
-        assert!(manager.subscribe(None, None).is_none());
+        assert!(manager.subscribe_raw(None, false).is_none());
+        assert!(manager.subscribe(None, false, None).is_none());
     }
 
     #[tokio::test]
@@ -399,12 +482,12 @@ mod tests {
         let manager = SseManager::new();
         let mut alice = Box::pin(
             manager
-                .subscribe_raw(Some("alice".to_string()))
+                .subscribe_raw(Some("alice".to_string()), false)
                 .expect("subscribe"),
         );
         let mut bob = Box::pin(
             manager
-                .subscribe_raw(Some("bob".to_string()))
+                .subscribe_raw(Some("bob".to_string()), false)
                 .expect("subscribe"),
         );
 
@@ -433,6 +516,45 @@ mod tests {
         assert!(matches!(e, AppEvent::Heartbeat)); // safety: test assertion
     }
 
+    #[tokio::test]
+    async fn test_verbose_filtering() {
+        let manager = SseManager::new();
+        let mut verbose = Box::pin(
+            manager
+                .subscribe_raw(None, true)
+                .expect("verbose subscribe"),
+        );
+        let mut normal = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("normal subscribe"),
+        );
+
+        // Broadcast a verbose-only event
+        manager.broadcast(AppEvent::TurnMetrics {
+            thread_id: None,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            model: "test-model".to_string(),
+            duration_ms: 200,
+            iteration: 0,
+        });
+
+        // Broadcast a normal event
+        manager.broadcast(AppEvent::Heartbeat);
+
+        // Verbose subscriber gets both events
+        let e = verbose.next().await.unwrap();
+        assert!(matches!(e, AppEvent::TurnMetrics { .. }));
+        let e = verbose.next().await.unwrap();
+        assert!(matches!(e, AppEvent::Heartbeat));
+
+        // Normal subscriber only gets the heartbeat (TurnMetrics filtered)
+        let e = normal.next().await.unwrap();
+        assert!(matches!(e, AppEvent::Heartbeat));
+    }
+
     #[test]
     fn test_is_event_after_filters_same_boot_duplicates() {
         assert!(is_event_after(Some("boot:4"), "boot:5"));
@@ -451,7 +573,8 @@ mod tests {
     async fn test_buffer_size_honored() {
         // A buffer of 4 should hold all events without lag.
         let large = SseManager::with_max_connections_and_buffer(10, 4);
-        let mut large_stream = Box::pin(large.subscribe_raw(None).expect("should subscribe"));
+        let mut large_stream =
+            Box::pin(large.subscribe_raw(None, false).expect("should subscribe"));
 
         for _ in 0..3 {
             large.broadcast(AppEvent::Heartbeat);
@@ -474,7 +597,8 @@ mod tests {
 
         // A buffer of 2 causes lag when sending 4 events before reading.
         let small = SseManager::with_max_connections_and_buffer(10, 2);
-        let mut small_stream = Box::pin(small.subscribe_raw(None).expect("should subscribe"));
+        let mut small_stream =
+            Box::pin(small.subscribe_raw(None, false).expect("should subscribe"));
 
         for _ in 0..3 {
             small.broadcast(AppEvent::Heartbeat);

@@ -110,7 +110,7 @@ async fn gateway_broadcast_without_thread_id_falls_back_to_assistant_thread() {
     let mut stream = gw
         .state
         .sse
-        .subscribe_raw(Some("test-user".to_string()))
+        .subscribe_raw(Some("test-user".to_string()), false)
         .expect("subscribe should succeed");
 
     let response = OutgoingResponse::text("mission notification");
@@ -194,7 +194,7 @@ async fn mission_notification_cross_user_does_not_leak_owner_thread_id() {
 
     // Subscribe as the recipient ("other-user") to capture what they receive
     let mut stream = sse
-        .subscribe_raw(Some("other-user".to_string()))
+        .subscribe_raw(Some("other-user".to_string()), false)
         .expect("subscribe should succeed");
 
     // Register the gateway channel with the channel manager
@@ -270,7 +270,7 @@ async fn mission_notification_same_user_attaches_owner_thread_id() {
 
     // Subscribe as the owner to capture channel broadcast events
     let mut stream = sse
-        .subscribe_raw(Some("test-user".to_string()))
+        .subscribe_raw(Some("test-user".to_string()), false)
         .expect("subscribe should succeed");
 
     let mgr = ChannelManager::new();
@@ -337,7 +337,7 @@ async fn mission_notification_explicit_same_user_attaches_owner_thread_id() {
     let sse = Arc::clone(&gw.state.sse);
 
     let mut stream = sse
-        .subscribe_raw(Some("test-user".to_string()))
+        .subscribe_raw(Some("test-user".to_string()), false)
         .expect("subscribe should succeed");
 
     let mgr = ChannelManager::new();

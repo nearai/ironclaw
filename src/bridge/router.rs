@@ -5332,6 +5332,263 @@ pub async fn engine_retrospectives_for_test()
     out
 }
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Cross-module test helpers for installing a minimal engine state.
+    //!
+    //! `src/channels/web/server.rs` and other callers need to exercise the
+    //! engine-thread ownership and history paths without standing up a full
+    //! `Agent`. This module exposes a shared lock plus a lightweight
+    //! `Thread`-seeding store so caller-level tests can drive
+    //! `get_engine_thread` / `list_engine_threads` deterministically.
+    //!
+    //! The in-file `mod tests` block has its own richer `TestStore` for the
+    //! router's own tests; the two are deliberately kept separate so the
+    //! helper surface exposed here stays minimal.
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock};
+
+    use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+
+    use ironclaw_engine::{
+        CapabilityLease, CapabilityRegistry, ConversationManager, EngineError, LeaseId,
+        LeaseManager, MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project,
+        ProjectId, Step, Store, Thread, ThreadEvent, ThreadId, ThreadManager, ThreadState,
+    };
+
+    use super::{ENGINE_STATE, EngineState};
+
+    /// Shared lock serializing all cross-module engine-state tests.
+    ///
+    /// Every test that mutates `ENGINE_STATE` — regardless of which module it
+    /// lives in — must acquire this before calling `install_engine_state_*`
+    /// so tests don't race on the global `OnceLock`.
+    pub(crate) static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> =
+        LazyLock::new(|| TokioMutex::new(()));
+
+    /// Minimal in-memory `Store` used by caller-level tests.
+    ///
+    /// Only the thread-related methods are meaningfully implemented; every
+    /// other method returns an empty default. That's intentional — these
+    /// tests only ever drive `get_engine_thread` / `list_engine_threads`,
+    /// which touch `load_thread` and `list_threads`.
+    pub(crate) struct ThreadTestStore {
+        threads: TokioRwLock<HashMap<ThreadId, Thread>>,
+    }
+
+    impl ThreadTestStore {
+        pub(crate) fn new() -> Self {
+            Self {
+                threads: TokioRwLock::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Store for ThreadTestStore {
+        async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+            self.threads.write().await.insert(thread.id, thread.clone());
+            Ok(())
+        }
+        async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+            Ok(self.threads.read().await.get(&id).cloned())
+        }
+        async fn list_threads(
+            &self,
+            project_id: ProjectId,
+            user_id: &str,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|t| t.project_id == project_id && t.is_owned_by(user_id))
+                .cloned()
+                .collect())
+        }
+        async fn update_thread_state(
+            &self,
+            _id: ThreadId,
+            _state: ThreadState,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
+            Ok(vec![])
+        }
+        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
+            Ok(vec![])
+        }
+        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
+            Ok(None)
+        }
+        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_memory_doc(
+            &self,
+            _: ironclaw_engine::DocId,
+        ) -> Result<Option<MemoryDoc>, EngineError> {
+            Ok(None)
+        }
+        async fn list_memory_docs(
+            &self,
+            _: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
+        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_active_leases(
+            &self,
+            _: ThreadId,
+        ) -> Result<Vec<CapabilityLease>, EngineError> {
+            Ok(vec![])
+        }
+        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_mission(&self, _: &Mission) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_mission(&self, _: MissionId) -> Result<Option<Mission>, EngineError> {
+            Ok(None)
+        }
+        async fn list_missions(
+            &self,
+            _: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<Mission>, EngineError> {
+            Ok(vec![])
+        }
+        async fn update_mission_status(
+            &self,
+            _: MissionId,
+            _: MissionStatus,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    /// Build an `EngineState` backed by a `ThreadTestStore` and install it
+    /// into the global `ENGINE_STATE`, overwriting any prior state.
+    ///
+    /// Callers must already hold `ENGINE_STATE_TEST_LOCK`. The returned
+    /// project id matches the default project used by
+    /// `list_engine_threads(None, ...)`, so seeded threads are visible
+    /// through the default-project lookup path.
+    pub(crate) async fn install_engine_state_with_threads(threads: Vec<Thread>) -> ProjectId {
+        // The seeded store is sufficient for read-only engine lookups; the
+        // thread_manager/conversation_manager are wired only so the
+        // EngineState is structurally valid — no test here drives execution.
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unreachable!("test engine state is read-only")
+            }
+            async fn available_actions(
+                &self,
+                _: &[CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store = Arc::new(ThreadTestStore::new());
+        for thread in threads {
+            store.save_thread(&thread).await.expect("seed thread");
+        }
+        let store_dyn: Arc<dyn Store> = store;
+
+        let effect_adapter = Arc::new(crate::bridge::EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
+
+        let project_id = ProjectId::new();
+        let state = EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: project_id,
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+            extension_manager: None,
+            project_root: super::resolve_project_root(),
+        };
+
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        project_id
+    }
+
+    /// Clear `ENGINE_STATE` after a test so later tests see an empty engine.
+    pub(crate) async fn clear_engine_state() {
+        if let Some(lock) = ENGINE_STATE.get() {
+            *lock.write().await = None;
+        }
+    }
+}
+
 /// Resolve the effective user_id for mission management operations.
 ///
 /// If the mission is shared-owned, requires admin role and returns the shared owner id
@@ -6017,7 +6274,7 @@ mod tests {
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
         let mut event_stream = Box::pin(
-            sse.subscribe_raw(Some("alice".to_string()))
+            sse.subscribe_raw(Some("alice".to_string()), false)
                 .expect("subscribe raw"),
         );
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
@@ -6089,7 +6346,7 @@ mod tests {
         write_fake_wasm_channel(&wasm_channels_dir, channel_name);
 
         let mut event_stream = Box::pin(
-            sse.subscribe_raw(Some("alice".to_string()))
+            sse.subscribe_raw(Some("alice".to_string()), false)
                 .expect("subscribe raw"),
         );
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;

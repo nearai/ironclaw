@@ -707,6 +707,36 @@ pub(crate) async fn theme_init_handler() -> impl IntoResponse {
     )
 }
 
+pub(crate) async fn debug_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_INIT_JS,
+    )
+}
+
+pub(crate) async fn debug_panel_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_PANEL_JS,
+    )
+}
+
+pub(crate) async fn debug_panel_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_PANEL_CSS,
+    )
+}
+
 pub(crate) async fn favicon_handler() -> impl IntoResponse {
     (
         [

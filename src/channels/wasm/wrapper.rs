@@ -4356,10 +4356,12 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and richer UI/runtime telemetry are handled by the web/TUI surfaces.
+        // Suggestions and richer UI/runtime telemetry are handled by the web/TUI surfaces; skip for WASM channels.
         StatusUpdate::Suggestions { .. }
         | StatusUpdate::TurnCost { .. }
         | StatusUpdate::SkillActivated { .. }
+        | StatusUpdate::ToolResultFull { .. }
+        | StatusUpdate::TurnMetrics { .. }
         | StatusUpdate::JobStatus { .. }
         | StatusUpdate::JobResult { .. }
         | StatusUpdate::RoutineUpdate { .. }
