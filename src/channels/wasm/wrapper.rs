@@ -60,6 +60,7 @@ use crate::tools::wasm::credential_injector::{
 use crate::tools::wasm::{
     LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };
+use ironclaw_common::CredentialName;
 use ironclaw_safety::LeakDetector;
 
 #[cfg(any(test, debug_assertions))]
@@ -3433,15 +3434,15 @@ impl Channel for WasmChannel {
                     Arc::clone(&self.owner_actor_id),
                 );
             }
-            WebsocketStartDecision::MissingAuth { secret_name } => {
+            WebsocketStartDecision::MissingAuth { credential_name } => {
                 // Skip the spawn entirely: the runtime would connect, be
                 // rejected (e.g. Discord 4003), and retry forever (#2557).
                 // Recovery happens through the normal activation/restart
                 // path once the credential is written.
                 tracing::warn!(
                     channel = %self.name,
-                    secret_name = %secret_name,
-                    "Skipping websocket runtime start: required auth secret is not present"
+                    credential_name = %credential_name,
+                    "Skipping websocket runtime start: required credential is not present"
                 );
             }
             WebsocketStartDecision::MalformedConfig { reason } => {
@@ -3664,10 +3665,11 @@ async fn resolve_websocket_identify_message(
 /// Result of the websocket auth preflight performed before spawning the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WebsocketAuthPreflight {
-    /// No auth required, or the required secret is present.
+    /// No auth required, or the required credential is present.
     Ready,
-    /// The capability declares a required secret that is not present in the store.
-    MissingSecret { secret_name: String },
+    /// The capability declares a required credential that is not present
+    /// in the secrets store.
+    MissingCredential { credential_name: CredentialName },
 }
 
 /// Full decision for whether to spawn the websocket runtime at channel start.
@@ -3682,11 +3684,11 @@ pub(crate) enum WebsocketStartDecision {
     NotConfigured,
     /// The capability is internally inconsistent and the runtime cannot build
     /// a valid connection — e.g. `identify_secret_name` is declared but the
-    /// `identify` template is missing, so no identify payload could ever be
-    /// built even with a valid secret.
-    MalformedConfig { reason: &'static str },
-    /// Websocket is configured but the required auth secret is not present.
-    MissingAuth { secret_name: String },
+    /// `identify` template is missing, or the declared credential name does
+    /// not validate as a [`CredentialName`].
+    MalformedConfig { reason: String },
+    /// Websocket is configured but the required credential is not present.
+    MissingAuth { credential_name: CredentialName },
     /// All gates pass; the runtime should be spawned with this config.
     Spawn(WebsocketRuntimeConfig),
 }
@@ -3700,37 +3702,41 @@ pub(crate) enum WebsocketCloseDisposition {
 
 /// Check whether the websocket runtime can start.
 ///
-/// If `config.identify_secret_name` is set, the referenced secret must exist
-/// under `owner_scope_id` or the caller must skip the spawn — otherwise the
-/// runtime connects, is rejected (e.g. Discord close code 4003), and the
-/// reconnect loop retries forever (issue #2557).
+/// If a credential is required, it must exist under `owner_scope_id` or the
+/// caller must skip the spawn — otherwise the runtime connects, is rejected
+/// (e.g. Discord close code 4003), and the reconnect loop retries forever
+/// (issue #2557).
+///
+/// `credential_name` is `Some` only when the capability declared one and it
+/// validated as a [`CredentialName`]; the caller performs that validation
+/// so this function handles only presence-in-store, not name syntax.
 ///
 /// Transient errors from the secrets store (e.g. a dropped DB connection)
 /// are logged and treated as `Ready` so a store blip does not permanently
-/// block channel activation. If the secret is genuinely missing, the
+/// block channel activation. If the credential is genuinely missing, the
 /// runtime-entry guard in `start_websocket_runtime` still catches it.
 async fn websocket_auth_preflight(
-    config: &WebsocketRuntimeConfig,
+    credential_name: Option<&CredentialName>,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     owner_scope_id: &str,
 ) -> WebsocketAuthPreflight {
-    let Some(secret_name) = config.identify_secret_name.as_ref() else {
+    let Some(credential_name) = credential_name else {
         return WebsocketAuthPreflight::Ready;
     };
     let Some(store) = store else {
-        return WebsocketAuthPreflight::MissingSecret {
-            secret_name: secret_name.clone(),
+        return WebsocketAuthPreflight::MissingCredential {
+            credential_name: credential_name.clone(),
         };
     };
-    match store.exists(owner_scope_id, secret_name).await {
+    match store.exists(owner_scope_id, credential_name.as_str()).await {
         Ok(true) => WebsocketAuthPreflight::Ready,
-        Ok(false) => WebsocketAuthPreflight::MissingSecret {
-            secret_name: secret_name.clone(),
+        Ok(false) => WebsocketAuthPreflight::MissingCredential {
+            credential_name: credential_name.clone(),
         },
         Err(error) => {
             tracing::warn!(
                 owner_scope_id = %owner_scope_id,
-                secret_name = %secret_name,
+                credential_name = %credential_name,
                 error = %error,
                 "Websocket auth preflight store lookup failed; proceeding to spawn and deferring to runtime-entry guard"
             );
@@ -3740,6 +3746,11 @@ async fn websocket_auth_preflight(
 }
 
 /// Compose the websocket start decision from capabilities + auth state.
+///
+/// Validates `config.identify_secret_name` (a raw string on the capability
+/// wire contract) into a [`CredentialName`] at this boundary so that all
+/// internal flow below uses the typed identity. Validation failure surfaces
+/// as [`WebsocketStartDecision::MalformedConfig`].
 async fn websocket_start_decision(
     capabilities: &ChannelCapabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
@@ -3751,18 +3762,32 @@ async fn websocket_start_decision(
     if !config.connect_on_start {
         return WebsocketStartDecision::NotConfigured;
     }
-    // Declaring a secret without an identify template means the runtime could
-    // never build an identify payload even with a valid secret. Catch it here
-    // so the log message is accurate instead of the generic "secret missing".
-    if config.identify_secret_name.is_some() && config.identify.is_none() {
+    // Validate the declared credential name once, at the boundary between the
+    // capability JSON (raw string) and internal flow (typed `CredentialName`).
+    let credential_name = match config.identify_secret_name.as_deref() {
+        None => None,
+        Some(raw) => match CredentialName::new(raw) {
+            Ok(name) => Some(name),
+            Err(err) => {
+                return WebsocketStartDecision::MalformedConfig {
+                    reason: format!("invalid identify_secret_name {raw:?}: {err}"),
+                };
+            }
+        },
+    };
+    // Declaring a credential without an identify template means the runtime
+    // could never build an identify payload even with a valid value. Catch
+    // it here so the log message is accurate instead of the generic
+    // "credential missing".
+    if credential_name.is_some() && config.identify.is_none() {
         return WebsocketStartDecision::MalformedConfig {
-            reason: "identify_secret_name declared without identify template",
+            reason: "identify_secret_name declared without identify template".to_string(),
         };
     }
-    match websocket_auth_preflight(&config, store, owner_scope_id).await {
+    match websocket_auth_preflight(credential_name.as_ref(), store, owner_scope_id).await {
         WebsocketAuthPreflight::Ready => WebsocketStartDecision::Spawn(config),
-        WebsocketAuthPreflight::MissingSecret { secret_name } => {
-            WebsocketStartDecision::MissingAuth { secret_name }
+        WebsocketAuthPreflight::MissingCredential { credential_name } => {
+            WebsocketStartDecision::MissingAuth { credential_name }
         }
     }
 }
@@ -4977,6 +5002,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use ironclaw_common::CredentialName;
     use secrecy::SecretString;
 
     use crate::channels::Channel;
@@ -5423,25 +5449,25 @@ mod tests {
         Arc::new(InMemorySecretsStore::new(crypto))
     }
 
-    /// Regression test for #2557: websocket preflight must report MissingSecret
-    /// when the capability declares an `identify_secret_name` but the store
-    /// does not contain the secret under the owner scope.
+    fn discord_credential_name() -> CredentialName {
+        CredentialName::new("discord_bot_token").expect("valid credential name")
+    }
+
+    /// Regression test for #2557: websocket preflight must report
+    /// MissingCredential when a required credential is absent under the
+    /// owner scope.
     #[tokio::test]
     async fn test_websocket_auth_preflight_missing_when_secret_absent() {
         let store = empty_secrets_store();
-        let config = WebsocketRuntimeConfig {
-            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
-            connect_on_start: true,
-            identify: Some(serde_json::json!({ "intents": 513 })),
-            identify_secret_name: Some("discord_bot_token".to_string()),
-        };
+        let credential = discord_credential_name();
 
-        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+        let result =
+            websocket_auth_preflight(Some(&credential), Some(store.as_ref()), "owner_42").await;
 
         assert_eq!(
             result,
-            WebsocketAuthPreflight::MissingSecret {
-                secret_name: "discord_bot_token".to_string(),
+            WebsocketAuthPreflight::MissingCredential {
+                credential_name: credential,
             }
         );
     }
@@ -5461,40 +5487,30 @@ mod tests {
             )
             .await
             .unwrap();
+        let credential = discord_credential_name();
 
-        let config = WebsocketRuntimeConfig {
-            url: "wss://gateway.discord.gg/?v=10&encoding=json".to_string(),
-            connect_on_start: true,
-            identify: Some(serde_json::json!({ "intents": 513 })),
-            identify_secret_name: Some("discord_bot_token".to_string()),
-        };
-
-        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+        let result =
+            websocket_auth_preflight(Some(&credential), Some(store.as_ref()), "owner_42").await;
 
         assert_eq!(result, WebsocketAuthPreflight::Ready);
     }
 
-    /// A websocket with no `identify_secret_name` (unauthenticated gateway) must
+    /// A websocket with no declared credential (unauthenticated gateway) must
     /// still be allowed to start.
     #[tokio::test]
     async fn test_websocket_auth_preflight_ready_when_no_secret_required() {
         let store = empty_secrets_store();
-        let config = WebsocketRuntimeConfig {
-            url: "wss://example.test/".to_string(),
-            connect_on_start: true,
-            identify: None,
-            identify_secret_name: None,
-        };
 
-        let result = websocket_auth_preflight(&config, Some(store.as_ref()), "owner_42").await;
+        let result = websocket_auth_preflight(None, Some(store.as_ref()), "owner_42").await;
 
         assert_eq!(result, WebsocketAuthPreflight::Ready);
     }
 
     /// Caller-level regression test for #2557: the decision function that
     /// `Channel::start` delegates to must report MissingAuth (not Spawn) when
-    /// the declared identify secret is absent. A future refactor that dropped
-    /// the preflight call would flip this to `Spawn`, which this test rejects.
+    /// the declared identify credential is absent. A future refactor that
+    /// dropped the preflight call would flip this to `Spawn`, which this test
+    /// rejects.
     #[tokio::test]
     async fn test_websocket_start_decision_missing_auth_when_secret_absent() {
         let store = empty_secrets_store();
@@ -5506,8 +5522,41 @@ mod tests {
         assert_eq!(
             decision,
             WebsocketStartDecision::MissingAuth {
-                secret_name: "discord_bot_token".to_string(),
+                credential_name: discord_credential_name(),
             }
+        );
+    }
+
+    /// If `identify_secret_name` on the capability JSON fails
+    /// [`CredentialName`] validation, the decision must surface that as
+    /// MalformedConfig rather than proceeding to preflight.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_with_invalid_credential_name() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "Bad Name With Spaces",
+                "identify": { "intents": 513 }
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::MalformedConfig { reason } = decision else {
+            panic!("expected MalformedConfig, got {decision:?}");
+        };
+        assert!(
+            reason.contains("invalid identify_secret_name"),
+            "reason should name the failing field, got: {reason}"
         );
     }
 
