@@ -9,6 +9,10 @@ permissions:
   pull-requests: write
   issues: read           # needed for search/issues API (contributor count)
 
+concurrency:
+  group: pr-classify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   classify:
     runs-on: ubuntu-latest

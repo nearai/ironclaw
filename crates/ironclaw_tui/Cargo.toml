@@ -15,7 +15,7 @@ default = ["clipboard"]
 clipboard = ["dep:arboard", "dep:image"]
 
 [dependencies]
-ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.2.0" }
 ratatui = { version = "0.29", features = ["crossterm"] }
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }

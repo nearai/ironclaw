@@ -1281,6 +1281,7 @@ pub async fn get_response_handler(
                     }],
                 });
             }
+            "assistant" => {}
             "tool_calls" => {
                 // Tool calls may be stored as a plain JSON array (legacy) or
                 // as an object wrapper: `{ "calls": [...], "narrative": "..." }`.
@@ -1523,13 +1524,13 @@ mod tests {
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
             detail: None,
-            call_id: None,
+            call_id: Some("call_memory_search".to_string()),
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
             preview: "found 3 results".to_string(),
-            call_id: None,
+            call_id: Some("call_memory_search".to_string()),
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {
@@ -1653,6 +1654,7 @@ mod tests {
             error: Some("boom".to_string()),
             parameters: Some("{\"query\":\"rust\"}".to_string()),
             call_id: Some("unexpected_call_id".to_string()),
+            duration_ms: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {
@@ -1754,7 +1756,7 @@ mod tests {
             tool_name: "tool_install".to_string(),
             description: "Need auth".to_string(),
             parameters: "{\"name\":\"notion\"}".to_string(),
-            extension_name: Some("notion".to_string()),
+            extension_name: Some(ironclaw_common::ExtensionName::new("notion").unwrap()),
             resume_kind: serde_json::json!({
                 "Authentication": {
                     "credential_name": "notion_api_token",

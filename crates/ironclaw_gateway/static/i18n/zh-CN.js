@@ -39,6 +39,7 @@ I18n.register('zh-CN', {
   'tab.chat': '聊天',
   'tab.memory': '记忆',
   'tab.jobs': '任务',
+  'tab.projects': '项目',
   'tab.missions': '使命',
   'tab.routines': '定时任务',
   'tab.settings': '设置',

@@ -215,10 +215,11 @@ impl EffectExecutor for InstallThenAliasEffects {
                 call_id: "call_install_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "github".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
                     instructions: "Authenticate GitHub".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -283,6 +284,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -294,10 +296,11 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_2".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Authentication {
-                        credential_name: "notion".into(),
+                        credential_name: ironclaw_common::CredentialName::new("notion").unwrap(),
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -311,6 +314,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -323,10 +327,11 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_2".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "test_api_key".into(),
+                    credential_name: ironclaw_common::CredentialName::new("test_api_key").unwrap(),
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -660,6 +665,7 @@ fn sample_pending_gate(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
+        paused_lease: None,
         resume_output: None,
         approval_already_granted: false,
     }

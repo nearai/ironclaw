@@ -18,6 +18,7 @@ use crate::channels::ChannelManager;
 use crate::channels::wasm::{
     LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
+    owner_id_from_capabilities,
 };
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
@@ -395,10 +396,11 @@ pub struct ExtensionManager {
     /// When set, settings reads/writes go through this cache-backed store
     /// instead of the raw `Database`. Populated via `with_settings_store()`.
     settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
-    /// Names of channels that are currently running in the process.
+    /// Names of WASM/relay channels that are actively running in this process.
     ///
-    /// For WASM channels this is no longer seeded from on-disk discovery at
-    /// boot; startup only records channels that were actually restored.
+    /// This is runtime state, not install/discovery state. Installed WASM
+    /// channels are still discovered from disk in `list()`, but only channels
+    /// present in this set are reported as active.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
     installed_relay_extensions: RwLock<HashSet<String>>,
@@ -466,6 +468,101 @@ fn sanitize_url_for_logging(url: &str) -> String {
         // Fallback: strip after ? or #
         url.split(['?', '#']).next().unwrap_or(url).to_string()
     }
+}
+
+/// Whether the install-time `kind_hint` permits falling back to local tool
+/// source discovery. Only WASM kinds are buildable from a local Cargo source;
+/// MCP servers, channel relays, and ACP agents must come from the registry or
+/// an explicit URL.
+fn kind_allows_local_discovery(kind_hint: Option<ExtensionKind>) -> bool {
+    matches!(
+        kind_hint,
+        None | Some(ExtensionKind::WasmTool) | Some(ExtensionKind::WasmChannel)
+    )
+}
+
+/// Search common directories relative to the current working directory for a
+/// tool source directory matching `name`.
+///
+/// Checks these patterns (both hyphen and underscore variants):
+/// - `tools-src/<name>/`
+/// - `tool-src/<name>/`
+/// - `<name>/` (direct subdirectory)
+///
+/// A directory is considered a match if it contains a `Cargo.toml`.
+fn find_local_tool_source(name: &str) -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_local_tool_source_in(name, &cwd)
+}
+
+/// Inner implementation that accepts an explicit search root (for testability).
+fn find_local_tool_source_in(
+    name: &str,
+    search_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    // Build a stable, priority-ordered list of name variants. Order matters:
+    // when multiple variants exist in the same search directory, the first
+    // match wins. Prefer the exact/underscore form over hyphen and
+    // suffix-stripped/added variants so behavior is reproducible across runs.
+    let underscore_name = name.replace('-', "_");
+    let hyphen_name = name.replace('_', "-");
+
+    let mut candidates: Vec<String> = Vec::with_capacity(4);
+    candidates.push(underscore_name.clone());
+    candidates.push(hyphen_name.clone());
+
+    // If the name ends with a tool suffix, also try stripped variants.
+    // Otherwise, try suffixed variants. `underscore_name` has all `-`
+    // replaced with `_`, so checking `_tool` covers both `name_tool` and
+    // `name-tool` inputs.
+    if let Some(base) = underscore_name.strip_suffix("_tool") {
+        candidates.push(base.to_string());
+        candidates.push(base.replace('_', "-"));
+    } else {
+        candidates.push(format!("{}_tool", underscore_name));
+        candidates.push(format!("{}-tool", hyphen_name));
+    }
+
+    // Remove duplicates while preserving priority order (e.g. when
+    // underscore_name == hyphen_name).
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.clone()));
+
+    let search_dirs = ["tools-src", "tool-src", "."];
+
+    for dir_prefix in &search_dirs {
+        let base = if *dir_prefix == "." {
+            search_root.to_path_buf()
+        } else {
+            search_root.join(dir_prefix)
+        };
+
+        if !base.is_dir() {
+            continue;
+        }
+
+        for candidate_name in &candidates {
+            let candidate = base.join(candidate_name);
+            if candidate.is_dir() && candidate.join("Cargo.toml").is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+/// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
+/// `None` if the file is missing, unparseable, or lacks a package name —
+/// callers fall back to the extension name in that case.
+fn read_crate_name_from_cargo_toml(source_dir: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(source_dir.join("Cargo.toml")).ok()?;
+    let value: toml::Value = contents.parse().ok()?;
+    value
+        .get("package")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 impl ExtensionManager {
@@ -1066,10 +1163,10 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
-    /// Register channels that are already running.
+    /// Register channel names that are already running in the current process.
     ///
-    /// Called after startup restore so `list()` reports actual active status
-    /// rather than mere on-disk installation.
+    /// Startup uses this after restoring persisted active channels; hot
+    /// activation updates the same set after a channel is successfully started.
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
@@ -1341,7 +1438,7 @@ impl ExtensionManager {
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
         if let Some(ref sse) = *self.sse_manager.read().await {
             sse.broadcast(ironclaw_common::AppEvent::ExtensionStatus {
-                extension_name: name.to_string(),
+                extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
             });
@@ -1425,11 +1522,24 @@ impl ExtensionManager {
             });
         }
 
+        // Try to discover a local tool source directory in the working directory.
+        // Only applies to WASM kinds — MCP servers, channel relays, and ACP agents
+        // can't be built from a local Cargo-based source.
+        if kind_allows_local_discovery(kind_hint)
+            && let Some(source_dir) = find_local_tool_source(&name)
+        {
+            return self
+                .install_from_local_source(&name, &source_dir, kind_hint)
+                .await;
+        }
+
         let err = ExtensionError::NotFound(format!(
-            "'{}' not found in registry. Try searching with discover:true or provide a URL.",
+            "'{}' not found in registry or local directories. \
+             Try searching with discover:true, provide a URL, \
+             or ensure tool source exists in tools-src/{0}/, tool-src/{0}/, or ./{0}/.",
             name
         ));
-        tracing::warn!(extension = %name, "Extension not found in registry");
+        tracing::warn!(extension = %name, "Extension not found in registry or locally");
         Err(err)
     }
 
@@ -2069,7 +2179,7 @@ impl ExtensionManager {
         self.pending_oauth_flows
             .write()
             .await
-            .retain(|_, flow| flow.extension_name != name);
+            .retain(|_, flow| flow.extension_name.as_str() != name);
 
         match kind {
             ExtensionKind::McpServer => {
@@ -3369,6 +3479,63 @@ impl ExtensionManager {
         Ok(())
     }
 
+    /// Install a WASM extension from a locally-discovered source directory.
+    ///
+    /// Used when `tool_install` is called with a name that isn't in the registry
+    /// but matches a local source directory found by `find_local_tool_source`.
+    /// Annotates the install message with the source path so the caller can
+    /// verify provenance (the tool came from the local filesystem, not the
+    /// verified registry).
+    async fn install_from_local_source(
+        &self,
+        name: &str,
+        source_dir: &std::path::Path,
+        kind_hint: Option<ExtensionKind>,
+    ) -> Result<InstallResult, ExtensionError> {
+        tracing::debug!(
+            extension = %name,
+            source_dir = %source_dir.display(),
+            "Found local tool source directory"
+        );
+        let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
+        let target_dir = match kind {
+            ExtensionKind::WasmChannel => &self.wasm_channels_dir,
+            _ => &self.wasm_tools_dir,
+        };
+        // Convert the discovered source path to UTF-8. A lossy conversion
+        // would silently substitute replacement chars and the downstream
+        // build-dir resolution would point at a non-existent path, so reject
+        // non-UTF-8 paths with a clear error instead.
+        let source_str = source_dir.to_str().ok_or_else(|| {
+            ExtensionError::InstallFailed(format!(
+                "local source path '{}' is not valid UTF-8",
+                source_dir.display(),
+            ))
+        })?;
+        // Parse the discovered Cargo.toml to learn the actual crate name. The
+        // installed extension name may differ from the crate name when suffix
+        // stripping/adding matched a directory (e.g. input `portfolio_tool`
+        // matching `tools-src/portfolio/` whose crate is `portfolio`). The
+        // compiled artifact is `<crate_name>.wasm`, so we must pass the real
+        // crate name to the artifact lookup.
+        let crate_name = read_crate_name_from_cargo_toml(source_dir);
+        let mut result = self
+            .install_wasm_from_buildable(
+                name,
+                Some(source_str),
+                crate_name.as_deref(),
+                target_dir,
+                kind,
+            )
+            .await?;
+        result.message = format!(
+            "{} (installed from LOCAL source at {})",
+            result.message,
+            source_dir.display(),
+        );
+        Ok(result)
+    }
+
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
     ///
     /// Resolves the build directory (relative to `CARGO_MANIFEST_DIR` or absolute),
@@ -3673,7 +3840,7 @@ impl ExtensionManager {
         extra_params.insert("resource".to_string(), resource.clone());
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
             display_name: server.name.clone(),
             authorization_url,
             token_url: token_url.clone(),
@@ -4048,7 +4215,9 @@ impl ExtensionManager {
             .await
             .unwrap_or(ExtensionKind::WasmChannel);
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: extension_name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                extension_name.to_string(),
+            ),
             display_name: display_name.to_string(),
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
@@ -4643,7 +4812,7 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
             display_name: display_name.clone(),
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
@@ -4780,7 +4949,7 @@ impl ExtensionManager {
 
                 if let Some(ref sse) = sse_manager {
                     sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
-                        extension_name: ext_name,
+                        extension_name: ironclaw_common::ExtensionName::from_trusted(ext_name),
                         state: if success {
                             ironclaw_common::OnboardingStateDto::Ready
                         } else {
@@ -5523,11 +5692,16 @@ impl ExtensionManager {
             )));
         }
 
+        // Resolve owner with full fallback: explicit arg -> runtime HashMap -> settings store
+        // -> pairing_store external id -> capabilities file.
         let owner_actor_id = if let Some(owner_id) = owner_id {
             Some(owner_id.to_string())
+        } else if let Some(id) = self.current_channel_owner_actor_id(&channel_name).await {
+            Some(id)
         } else {
-            self.current_channel_owner_actor_id(&channel_name).await
+            owner_id_from_capabilities(loaded.capabilities_file.as_ref(), &channel_name)
         };
+
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
@@ -5768,7 +5942,10 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
-        let owner_actor_id = self.current_channel_owner_actor_id(name).await;
+        let owner_actor_id = self
+            .current_channel_owner_actor_id(name)
+            .await
+            .or_else(|| owner_id_from_capabilities(capabilities_file.as_ref(), name));
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
             None,
@@ -7062,23 +7239,20 @@ impl ExtensionManager {
                     );
                     sse.broadcast_for_user(
                         user_id,
-                        ironclaw_common::AppEvent::OnboardingState {
-                            extension_name: name.clone(),
-                            state: ironclaw_common::OnboardingStateDto::PairingRequired,
-                            request_id: None,
-                            message: None,
-                            instructions: Some(format!(
+                        ironclaw_common::OnboardingStateDto::pairing_required(
+                            ironclaw_common::ExtensionName::from_trusted(name.clone()),
+                            None,
+                            None,
+                            None,
+                            Some(format!(
                                 "Send a message to your {} bot, then paste the pairing code here.",
                                 name
                             )),
-                            auth_url: None,
-                            setup_url: None,
-                            onboarding: onboarding
+                            onboarding
                                 .1
                                 .as_ref()
                                 .and_then(|o| serde_json::to_value(o).ok()),
-                            thread_id: None,
-                        },
+                        ),
                     );
                 }
 
@@ -7496,14 +7670,15 @@ mod tests {
 
     use crate::channels::ChannelManager;
     use crate::channels::wasm::{
-        ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
-        WasmChannelRuntime, WasmChannelRuntimeConfig,
+        ChannelCapabilities, ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
         FallbackDecision, TELEGRAM_TEST_API_BASE_ENV, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, infer_kind_from_url,
-        normalize_hosted_callback_url, send_telegram_text_message, telegram_bot_api_url,
+        combine_install_errors, fallback_decision, find_local_tool_source_in, infer_kind_from_url,
+        kind_allows_local_discovery, normalize_hosted_callback_url,
+        read_crate_name_from_cargo_toml, send_telegram_text_message, telegram_bot_api_url,
     };
     use crate::extensions::{
         AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult, RegistryEntry,
@@ -8524,6 +8699,7 @@ mod tests {
     /// no real `cargo` invocation are needed.
     #[tokio::test]
     async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_explicit_activate() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -8627,6 +8803,7 @@ mod tests {
     /// downloading and activating arbitrary code on the LLM's behalf.
     #[tokio::test]
     async fn ensure_extension_ready_use_capability_does_not_auto_install() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -9343,6 +9520,42 @@ mod tests {
         }
     }
 
+    fn make_test_loaded_channel_with_capabilities(
+        runtime: Arc<WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<PairingStore>,
+        config_json: serde_json::Value,
+    ) -> LoadedChannel {
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {}", name),
+        ));
+        let capabilities =
+            ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));
+
+        let cap_file_json = serde_json::json!({
+            "type": "channel",
+            "name": name,
+            "setup": { "required_secrets": [] },
+            "capabilities": { "channel": { "allowed_paths": [format!("/webhook/{}", name)] } },
+            "config": config_json
+        });
+        let cap_file = ChannelCapabilitiesFile::from_json(&cap_file_json.to_string()).unwrap();
+
+        LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: Some(cap_file),
+        }
+    }
+
     #[test]
     fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
         let updates = build_wasm_channel_runtime_config_updates(
@@ -9363,8 +9576,76 @@ mod tests {
         )?;
         require_eq(
             updates.get("owner_id"),
-            Some(&serde_json::json!(424242)),
-            "owner_id",
+            Some(&serde_json::json!(424242_i64)),
+            "integer-compatible owner_id is injected as a JSON number",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_hot_activation_uses_capabilities_owner_id_fallback() -> Result<(), String> {
+        let manager = make_manager_with_temp_dirs();
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        // LoadedChannel with capabilities config containing owner_id
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "telegram",
+            Arc::clone(&pairing_store),
+            serde_json::json!({ "owner_id": 99887766 }),
+        );
+
+        // Activate with no runtime owner_id — should fall back to capabilities
+        let result = manager
+            .complete_loaded_wasm_channel_activation(
+                "telegram",
+                loaded,
+                &channel_manager,
+                &router,
+                None,
+            )
+            .await
+            .map_err(|e| format!("activation failed: {e}"))?;
+
+        require_eq(
+            result.name,
+            "telegram".to_string(),
+            "activation result name",
+        )?;
+
+        // Verify the channel got the capabilities-derived owner_actor_id
+        let channel = router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .ok_or_else(|| "telegram channel not registered".to_string())?;
+        require_eq(
+            channel.owner_actor_id_for_test().await,
+            Some("99887766".to_string()),
+            "owner_actor_id should come from capabilities fallback",
+        )?;
+
+        // Verify config was injected. The shared `build_runtime_config_updates`
+        // helper parses integer-compatible owner ids back to a JSON number, so
+        // assert the numeric representation the helper produces today.
+        let config = channel.get_config().await;
+        require_eq(
+            config.get("owner_id"),
+            Some(&serde_json::json!(99887766_i64)),
+            "config owner_id should be restored from capabilities fallback",
         )
     }
 
@@ -9994,7 +10275,7 @@ mod tests {
         mgr.pending_oauth_flows().write().await.insert(
             "gmail-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: "gmail".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
                 display_name: "Gmail".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client123".to_string(),
@@ -10021,7 +10302,7 @@ mod tests {
         mgr.pending_oauth_flows().write().await.insert(
             "other-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: "web-search".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("web-search").unwrap(),
                 display_name: "Web Search".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client456".to_string(),
@@ -10737,6 +11018,20 @@ mod tests {
             // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
                 std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var(key);
             }
             Self {
                 key,
@@ -11839,5 +12134,389 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // ── find_local_tool_source_in ──────────────────────────────────────
+
+    #[test]
+    fn find_local_tool_source_finds_tools_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_tool_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tool-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_hyphenated_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("my-portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_portfolio\"",
+        )
+        .unwrap();
+
+        // Search with underscored name should find hyphenated directory
+        let result = find_local_tool_source_in("my_portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_direct_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_without_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        // No Cargo.toml
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_ignores_cargo_toml_directory() {
+        // Regression: a directory named `Cargo.toml` must not satisfy the
+        // manifest check — only a real file should qualify the candidate.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(tool_dir.join("Cargo.toml")).unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_when_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = find_local_tool_source_in("nonexistent", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_tool_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        // Name is "portfolio_tool" but directory is just "portfolio"
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio_tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_hyphen_tool_suffix() {
+        // Regression: input `portfolio-tool` (hyphen form) must still match
+        // `tools-src/portfolio/` after suffix stripping. Internally the
+        // candidate list is built from the underscore-normalized name, so a
+        // single `_tool` strip must cover both `_tool` and `-tool` inputs.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio-tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_tools_src_over_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools_src_dir = dir.path().join("tools-src").join("portfolio");
+        let direct_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tools_src_dir).unwrap();
+        std::fs::create_dir_all(&direct_dir).unwrap();
+        std::fs::write(
+            tools_src_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+        std::fs::write(
+            direct_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        // tools-src/ should be preferred since it's checked first
+        assert_eq!(result, Some(tools_src_dir));
+    }
+
+    // ── kind_allows_local_discovery ────────────────────────────────────
+
+    #[test]
+    fn kind_allows_local_discovery_accepts_wasm_kinds() {
+        assert!(kind_allows_local_discovery(None));
+        assert!(kind_allows_local_discovery(Some(ExtensionKind::WasmTool)));
+        assert!(kind_allows_local_discovery(Some(
+            ExtensionKind::WasmChannel
+        )));
+    }
+
+    #[test]
+    fn kind_allows_local_discovery_rejects_non_wasm_kinds() {
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::McpServer)));
+        assert!(!kind_allows_local_discovery(Some(
+            ExtensionKind::ChannelRelay
+        )));
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::AcpAgent)));
+    }
+
+    // ── install_from_local_source (caller-level) ───────────────────────
+
+    /// Stage a buildable WASM source layout and return (source_dir, tools_dir).
+    fn stage_buildable_source(dir: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
+        stage_buildable_source_at(dir, "portfolio", crate_name)
+    }
+
+    /// Stage a buildable WASM source layout under `<dir>/<source_subdir>/`
+    /// with a `Cargo.toml` declaring `[package] name = <crate_name>` and a
+    /// `<crate_name>.wasm` artifact. Returns the source directory.
+    fn stage_buildable_source_at(
+        dir: &std::path::Path,
+        source_subdir: &str,
+        crate_name: &str,
+    ) -> std::path::PathBuf {
+        let source_dir = dir.join(source_subdir);
+        let artifact_dir = source_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join(format!("{}.wasm", crate_name));
+        // Minimal valid wasm header (`\x00asm` + version 1).
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+        let caps_path = source_dir.join(format!("{}.capabilities.json", crate_name));
+        std::fs::write(&caps_path, "{}").expect("write capabilities");
+        std::fs::write(
+            source_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{}\"\n", crate_name),
+        )
+        .expect("write Cargo.toml");
+        source_dir
+    }
+
+    /// Caller-level test: driving `install_from_local_source` end-to-end
+    /// verifies the wrapper logic (kind defaulting, target_dir selection,
+    /// source_str conversion, message annotation) — none of which is
+    /// exercised by unit tests on `find_local_tool_source_in`.
+    #[tokio::test]
+    async fn install_from_local_source_installs_wasm_tool_with_provenance_message() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, None)
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.name, "portfolio");
+        assert_eq!(result.kind, ExtensionKind::WasmTool);
+        // Message must include "LOCAL" and the source path so provenance is visible.
+        assert!(
+            result.message.contains("LOCAL"),
+            "message should mark source as LOCAL: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains(&source_dir.display().to_string()),
+            "message should include source path: {}",
+            result.message
+        );
+        // Wasm artifact must have been copied to the tools dir.
+        assert!(
+            tools_dir.join("portfolio.wasm").exists(),
+            "install should copy wasm to tools dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_from_local_source_routes_wasm_channel_to_channels_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir.clone(), None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, Some(ExtensionKind::WasmChannel))
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.kind, ExtensionKind::WasmChannel);
+        // Channel kind must install into the channels dir, not the tools dir.
+        assert!(
+            channels_dir.join("portfolio.wasm").exists(),
+            "wasm channel should land in channels dir"
+        );
+        assert!(
+            !tools_dir.join("portfolio.wasm").exists(),
+            "wasm channel should NOT land in tools dir"
+        );
+    }
+
+    /// Regression test for the suffix-stripping name-mismatch bug: when
+    /// `find_local_tool_source` matches a directory via suffix stripping
+    /// (input `portfolio_tool` -> dir `portfolio/`), the compiled binary
+    /// on disk is named after the Cargo crate (`portfolio.wasm`), not the
+    /// extension name (`portfolio_tool.wasm`). `install_from_local_source`
+    /// must parse `Cargo.toml` and pass the real crate name to the artifact
+    /// lookup, otherwise every suffix-matched install fails.
+    #[tokio::test]
+    async fn install_from_local_source_resolves_artifact_via_crate_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // Crate name differs from the requested install name: crate is
+        // `portfolio`, install is requested as `portfolio_tool`.
+        let source_dir = stage_buildable_source_at(dir.path(), "portfolio", "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio_tool", &source_dir, None)
+            .await
+            .expect("install should resolve artifact via Cargo.toml crate name");
+
+        assert_eq!(result.name, "portfolio_tool");
+        // The installed wasm is named after the install name, not the crate.
+        assert!(
+            tools_dir.join("portfolio_tool.wasm").exists(),
+            "install should copy wasm under the requested extension name"
+        );
+    }
+
+    /// Regression test: a non-UTF-8 source path must produce a clear
+    /// `InstallFailed` error rather than being silently lossy-converted into
+    /// a build dir that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_from_local_source_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // 0x80 is an invalid UTF-8 start byte.
+        let bad: &OsStr = OsStr::from_bytes(b"/tmp/\x80not-utf8");
+        let bad_path = std::path::Path::new(bad);
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install_from_local_source("portfolio", bad_path, None)
+            .await
+            .expect_err("non-UTF-8 source path must be rejected");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("UTF-8"),
+                    "error message should mention UTF-8: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_crate_name_from_cargo_toml(dir.path()),
+            Some("my_crate".to_string())
+        );
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_crate_name_from_cargo_toml(dir.path()), None);
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_underscore_over_hyphen() {
+        // Determinism regression: when both underscore and hyphen variants
+        // exist as real directories in the same search dir, the underscore
+        // (canonical) form must win on every run.
+        let dir = tempfile::tempdir().unwrap();
+        let underscore_dir = dir.path().join("tools-src").join("my_tool");
+        let hyphen_dir = dir.path().join("tools-src").join("my-tool");
+        std::fs::create_dir_all(&underscore_dir).unwrap();
+        std::fs::create_dir_all(&hyphen_dir).unwrap();
+        std::fs::write(
+            underscore_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_tool\"",
+        )
+        .unwrap();
+        std::fs::write(
+            hyphen_dir.join("Cargo.toml"),
+            "[package]\nname = \"my-tool\"",
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            let result = find_local_tool_source_in("my_tool", dir.path());
+            assert_eq!(
+                result,
+                Some(underscore_dir.clone()),
+                "underscore variant must win deterministically"
+            );
+        }
     }
 }
