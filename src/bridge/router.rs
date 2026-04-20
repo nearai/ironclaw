@@ -1051,6 +1051,20 @@ async fn fail_waiting_thread(
     Ok(true)
 }
 
+/// Build the user-facing "<message>. Resuming..." status text for the
+/// auth-completed Ready arm.
+///
+/// `result.message` from `ExtensionManager::configure_token` already ends
+/// with a period (e.g. `"Configuration saved for 'telegram'."`), so a
+/// naive `format!("{}. Resuming...", msg)` produces `"...telegram'.. Resuming..."`
+/// — double period. Strip trailing periods and whitespace from the raw
+/// message before formatting. Other punctuation is intentionally left
+/// alone (no real-world backend message ends in `!`/`?`/etc.).
+fn format_auth_completed_resuming(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    format!("{}. Resuming...", trimmed)
+}
+
 /// Outcome of `submit_pending_auth_credential` — distinguishes "a backend
 /// stored the credential" from "no backend is configured to store it." The
 /// caller maps the latter to either thread-fail (prod) or silent continue
@@ -2335,14 +2349,6 @@ pub async fn resolve_gate(
                             crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
                         ) =>
                     {
-                        // `result.message` may already end with a period
-                        // (e.g. `ExtensionManager::configure_token` returns
-                        // "Configuration saved for 'telegram'."), so strip
-                        // trailing punctuation + whitespace before
-                        // concatenation to avoid "...foo.. Resuming...".
-                        let trimmed = result
-                            .message
-                            .trim_end_matches(|c: char| c == '.' || c.is_whitespace());
                         let _ = agent
                             .channels
                             .send_status(
@@ -2350,7 +2356,7 @@ pub async fn resolve_gate(
                                 StatusUpdate::AuthCompleted {
                                     extension_name: display_name.clone(),
                                     success: true,
-                                    message: format!("{}. Resuming...", trimmed),
+                                    message: format_auth_completed_resuming(&result.message),
                                 },
                                 &message.metadata,
                             )
@@ -7379,6 +7385,34 @@ mod tests {
         assert!(
             matches!(err, crate::extensions::ExtensionError::ValidationFailed(_)),
             "expected ValidationFailed, got: {err:?}"
+        );
+    }
+
+    /// `format_auth_completed_resuming` strips trailing periods and
+    /// whitespace from the upstream backend message before appending
+    /// ". Resuming...". Regression coverage for the double-period bug
+    /// flagged on PR #2622 — `ExtensionManager::configure_token` returns
+    /// "Configuration saved for 'X'." which used to render as
+    /// "...'X'.. Resuming...".
+    #[test]
+    fn format_auth_completed_resuming_strips_trailing_period() {
+        // The motivating case: extension-manager backend message.
+        assert_eq!(
+            format_auth_completed_resuming("Configuration saved for 'telegram'."),
+            "Configuration saved for 'telegram'. Resuming..."
+        );
+        // Multiple trailing periods + whitespace collapse cleanly.
+        assert_eq!(
+            format_auth_completed_resuming("done...  \n"),
+            "done. Resuming..."
+        );
+        // A message with no trailing punctuation gets exactly one period.
+        assert_eq!(format_auth_completed_resuming("ok"), "ok. Resuming...");
+        // Non-period punctuation is intentionally left intact (no backend
+        // currently produces these, but the spec is "trim periods only").
+        assert_eq!(
+            format_auth_completed_resuming("ready!"),
+            "ready!. Resuming..."
         );
     }
 
