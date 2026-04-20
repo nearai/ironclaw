@@ -322,9 +322,20 @@ function renderExtensionCard(ext) {
     } else if (status === 'failed') {
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
+      // Only `setup_required` has an inline setup form below (see the
+      // `loadInlineChannelSetup` branch), so keep the legacy label there
+      // to avoid a duplicate setup action. Every other fallback state —
+      // including the default `installed` when no `onboarding_state` is
+      // set — renders no inline form, so pick the label from
+      // `authenticated`: "Setup" before credentials are on file,
+      // "Reconfigure" after. Closes #2235.
       var reconfigureBtn = document.createElement('button');
       reconfigureBtn.className = 'btn-ext configure';
-      reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      if (status === 'setup_required') {
+        reconfigureBtn.textContent = I18n.t('ext.reconfigure');
+      } else {
+        reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');
+      }
       reconfigureBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(reconfigureBtn);
     }

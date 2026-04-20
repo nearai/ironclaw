@@ -163,6 +163,8 @@ pub struct MissionManager {
     rate_limit: FireRateLimit,
     /// Optional budget gate consulted before each fire.
     budget_gate: Option<Arc<dyn BudgetGate>>,
+    /// Conversation insights extraction interval (every N completed threads).
+    insights_interval: u32,
 }
 
 /// Minimum gap between successive `fire_mission` attempts for the same
@@ -187,6 +189,7 @@ impl MissionManager {
             user_fire_log: RwLock::new(HashMap::new()),
             rate_limit: FireRateLimit::default(),
             budget_gate: None,
+            insights_interval: 5,
         }
     }
 
@@ -223,6 +226,13 @@ impl MissionManager {
     /// Override the per-user fire-rate limit. Defaults to 100 fires/hour.
     pub fn with_rate_limit(mut self, limit: FireRateLimit) -> Self {
         self.rate_limit = limit;
+        self
+    }
+
+    /// Override the conversation insights extraction interval.
+    /// Every N completed threads, insights are extracted from conversations.
+    pub fn with_insights_interval(mut self, interval: u32) -> Self {
+        self.insights_interval = interval.max(1);
         self
     }
 
@@ -1157,8 +1167,8 @@ impl MissionManager {
         const SKILL_EXTRACTION_MIN_STEPS: usize = 5;
         /// Minimum distinct action executions for skill extraction.
         const SKILL_EXTRACTION_MIN_ACTIONS: usize = 3;
-        /// Completed thread interval for conversation insights.
-        const CONVERSATION_INSIGHTS_INTERVAL: u32 = 5;
+
+        let insights_interval = mgr.insights_interval;
 
         tokio::spawn(async move {
             // Track completed thread count per conversation for insights trigger.
@@ -1326,7 +1336,7 @@ impl MissionManager {
                             let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
                             *count += 1;
 
-                            if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
+                            if (*count).is_multiple_of(insights_interval) {
                                 // Collect recent thread goals for context
                                 let thread_goals: Vec<String> = match mgr
                                     .store
@@ -1336,7 +1346,7 @@ impl MissionManager {
                                     Ok(threads) => threads
                                         .iter()
                                         .rev()
-                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .take(insights_interval as usize)
                                         .map(|t| t.goal.clone())
                                         .collect(),
                                     Err(_) => vec![thread.goal.clone()],
@@ -2544,6 +2554,7 @@ async fn dispatch_protected_write(
         current_call_id: None,
         source_channel: None,
         user_timezone: None,
+        thread_goal: None,
     };
 
     effects

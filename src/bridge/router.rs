@@ -649,10 +649,7 @@ async fn notify_pending_gate(
                     .unwrap_or_else(|_| display_parameters.to_string()),
                 extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: pending
-                    .scope_thread_id
-                    .clone()
-                    .or_else(|| Some(pending.thread_id.to_string())),
+                thread_id: Some(pending.effective_wire_thread_id()),
             },
         );
     }
@@ -990,6 +987,7 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1510,7 +1508,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1708,6 +1706,29 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    // Use the DB-first config system instead of raw std::env::var reads.
+    // Resolve MissionsConfig from DB-backed settings when available, falling
+    // back to local settings.json + env vars.
+    let missions_settings = if let Some(ref store) = agent.deps.store {
+        match store.get_all_settings(&agent.deps.owner_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::load(),
+        }
+    } else {
+        crate::settings::Settings::load()
+    };
+    let missions_config = match crate::config::MissionsConfig::resolve(&missions_settings) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "MissionsConfig::resolve failed; falling back to defaults"
+            );
+            crate::config::MissionsConfig::default()
+        }
+    };
+    mission_manager_inner =
+        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
@@ -1907,7 +1928,7 @@ async fn resolve_pending_gate_for_user(
         .into_iter()
         .filter(|gate| {
             hinted_scope.is_none_or(|hint| {
-                gate.scope_thread_id.as_deref() == Some(hint)
+                gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                     || hinted_uuid.is_none_or(|uuid| {
                         gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                     })
@@ -2025,7 +2046,7 @@ pub async fn resolve_engine_auth_callback(
             let _ = state.pending_gates.discard(&key).await;
             return Ok(AuthCallbackContinuation::ReplayMessage {
                 channel: pending.source_channel,
-                thread_scope: pending.scope_thread_id,
+                thread_scope: pending.scope_thread_id.map(String::from),
                 content,
             });
         }
@@ -2040,7 +2061,7 @@ pub async fn resolve_engine_auth_callback(
 
     Ok(AuthCallbackContinuation::ResolveGateExternal {
         channel: pending.source_channel,
-        thread_scope: pending.scope_thread_id,
+        thread_scope: pending.scope_thread_id.map(String::from),
         request_id: pending.request_id,
     })
 }
@@ -2405,10 +2426,7 @@ pub async fn resolve_gate(
                         }
                         .into(),
                         message: "Gate approved. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2466,10 +2484,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "denied".into(),
                         message: "Gate denied.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2515,10 +2530,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "cancelled".into(),
                         message: "Gate cancelled.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2569,10 +2581,7 @@ pub async fn resolve_gate(
                             tool_name: pending.action_name.clone(),
                             resolution: "credential_provided".into(),
                             message: "Credential received. Resuming execution.".into(),
-                            thread_id: pending
-                                .scope_thread_id
-                                .clone()
-                                .or_else(|| Some(pending.thread_id.to_string())),
+                            thread_id: Some(pending.effective_wire_thread_id()),
                         },
                     );
                 }
@@ -2620,10 +2629,7 @@ pub async fn resolve_gate(
                                     ironclaw_common::OnboardingStateDto::pairing_required(
                                         display_name.clone(),
                                         Some(next_pending.request_id.to_string()),
-                                        pending
-                                            .scope_thread_id
-                                            .clone()
-                                            .or_else(|| Some(pending.thread_id.to_string())),
+                                        Some(pending.effective_wire_thread_id()),
                                         Some(result.message.clone()),
                                         instructions,
                                         onboarding,
@@ -2776,10 +2782,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "external_callback".into(),
                         message: "External callback received. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -3211,7 +3214,7 @@ pub async fn discard_engine_pending_auth_request(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3253,7 +3256,7 @@ pub async fn transition_engine_pending_auth_request_to_pairing(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3815,7 +3818,19 @@ async fn await_thread_outcome(
                     gate_name: "authentication".into(),
                     user_id: message.user_id.clone(),
                     thread_id,
-                    scope_thread_id: message.conversation_scope().map(str::to_string),
+                    scope_thread_id: message.conversation_scope().and_then(|s| {
+                        match ironclaw_common::ExternalThreadId::new(s) {
+                            Ok(tid) => Some(tid),
+                            Err(e) => {
+                                tracing::debug!(
+                                    candidate = %s,
+                                    error = %e,
+                                    "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                                );
+                                None
+                            }
+                        }
+                    }),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
                     action_name: "authentication_fallback".into(),
@@ -3904,7 +3919,19 @@ async fn await_thread_outcome(
                 gate_name: gate_name.clone(),
                 user_id: message.user_id.clone(),
                 thread_id,
-                scope_thread_id: message.conversation_scope().map(str::to_string),
+                scope_thread_id: message.conversation_scope().and_then(|s| {
+                    match ironclaw_common::ExternalThreadId::new(s) {
+                        Ok(tid) => Some(tid),
+                        Err(e) => {
+                            tracing::debug!(
+                                candidate = %s,
+                                error = %e,
+                                "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                            );
+                            None
+                        }
+                    }
+                }),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
@@ -6373,7 +6400,9 @@ mod tests {
             },
         );
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6451,7 +6480,9 @@ mod tests {
             )
         };
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use test");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6506,7 +6537,9 @@ mod tests {
 
         let mut message =
             crate::channels::IncomingMessage::new("web", "alice", "what's happening?");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let response = handle_with_engine(&agent, &message, &message.content)
             .await
@@ -7086,7 +7119,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7124,7 +7159,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7149,7 +7186,7 @@ mod tests {
         assert_eq!(replacement.request_id.to_string(), next_request_id);
         assert_eq!(replacement.gate_name, "pairing");
         assert_eq!(
-            replacement.scope_thread_id.as_deref(),
+            replacement.scope_thread_id.as_ref().map(|t| t.as_str()),
             Some("gateway-thread-123")
         );
         assert_eq!(replacement.thread_id, thread_id);

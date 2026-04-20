@@ -1180,7 +1180,7 @@ impl Agent {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         content: response.clone(),
-                        thread_id: message.thread_id.clone(),
+                        thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
                     };
                     match self.hooks().run(&event).await {
                         Err(err) => {
@@ -1446,7 +1446,7 @@ impl Agent {
                 user_id: message.user_id.clone(),
                 channel: message.channel.clone(),
                 content: content.clone(),
-                thread_id: message.thread_id.clone(),
+                thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
@@ -1988,7 +1988,7 @@ impl Agent {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         content: content.clone(),
-                        thread_id: message.thread_id.clone(),
+                        thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
                     };
                     let content = match self.hooks().run(&hook_event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {

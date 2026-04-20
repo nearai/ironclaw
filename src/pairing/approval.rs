@@ -184,6 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires prebuilt telegram WASM binary (not checked in, *.wasm is gitignored)
     async fn propagate_approval_restores_runtime_state_when_on_start_fails() {
         let original =
             crate::config::helpers::env_or_override("IRONCLAW_TEST_TELEGRAM_API_BASE_URL");
