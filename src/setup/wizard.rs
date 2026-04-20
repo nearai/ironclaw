@@ -1066,41 +1066,24 @@ impl SetupWizard {
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
         // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
         #[cfg(feature = "postgres")]
-        let env_backend = std::env::var("DATABASE_BACKEND").ok();
-
-        #[cfg(feature = "postgres")]
-        if let Some(ref backend) = env_backend
-            && (backend.eq_ignore_ascii_case("postgres")
-                || backend.eq_ignore_ascii_case("postgresql"))
         {
-            if let Ok(url) = std::env::var("DATABASE_URL") {
-                print_info("Using existing PostgreSQL configuration");
-                self.test_database_connection_postgres(&url).await?;
-                debug_assert!(
-                    self.db_pool.is_some(),
-                    "test_database_connection_postgres must set db_pool"
-                );
-                self.run_migrations_postgres().await?;
-                self.settings.database_backend = Some("postgres".to_string());
-                self.settings.database_url = Some(url);
-                return Ok(());
-            }
-            // Postgres configured but no URL — fall through to interactive
-            return self.step_database().await;
-        }
+            use crate::config::DatabaseBackend;
 
-        #[cfg(feature = "postgres")]
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            print_info("Using existing PostgreSQL configuration");
-            self.test_database_connection_postgres(&url).await?;
-            debug_assert!(
-                self.db_pool.is_some(),
-                "test_database_connection_postgres must set db_pool"
-            );
-            self.run_migrations_postgres().await?;
-            self.settings.database_backend = Some("postgres".to_string());
-            self.settings.database_url = Some(url);
-            return Ok(());
+            let env_backend = std::env::var("DATABASE_BACKEND")
+                .ok()
+                .and_then(|b| b.parse::<DatabaseBackend>().ok());
+
+            if matches!(env_backend, Some(DatabaseBackend::Postgres)) {
+                if let Ok(url) = std::env::var("DATABASE_URL") {
+                    return self.finish_postgres_auto_setup(url).await;
+                }
+                // Postgres configured but no URL — fall through to interactive
+                return self.step_database().await;
+            }
+
+            if let Ok(url) = std::env::var("DATABASE_URL") {
+                return self.finish_postgres_auto_setup(url).await;
+            }
         }
 
         // Auto-default to libsql if the feature is compiled
@@ -1144,6 +1127,23 @@ impl SetupWizard {
         {
             self.step_database().await
         }
+    }
+
+    /// Establish the PostgreSQL pool, run migrations, and record the backend in
+    /// settings. Shared by both `auto_setup_database` early-return branches so
+    /// they cannot drift (see issue #846).
+    #[cfg(feature = "postgres")]
+    async fn finish_postgres_auto_setup(&mut self, url: String) -> Result<(), SetupError> {
+        self.test_database_connection_postgres(&url).await?;
+        debug_assert!(
+            self.db_pool.is_some(),
+            "test_database_connection_postgres must set db_pool"
+        );
+        self.run_migrations_postgres().await?;
+        print_info("Using existing PostgreSQL configuration");
+        self.settings.database_backend = Some("postgres".to_string());
+        self.settings.database_url = Some(url);
+        Ok(())
     }
 
     /// Auto-setup security with zero prompts (quick mode).
@@ -4559,31 +4559,18 @@ mod tests {
         assert!(saved, "persist_settings must save to the database");
     }
 
-    /// Regression test for #846, PostgreSQL branch.
-    ///
-    /// The original bug lived in the postgres early-return paths of
-    /// `auto_setup_database()` — when `DATABASE_URL` was preset, both
-    /// `test_database_connection_postgres()` and `run_migrations_postgres()`
-    /// were skipped, leaving `self.db_pool = None` so `persist_settings()`
-    /// silently returned `Ok(false)` and the wizard crashed later trying
-    /// to save. The sibling libSQL test above only exercises the libsql
-    /// auto-default branch, so this test drives the actual postgres
-    /// early-return code path end-to-end.
-    ///
-    /// Gated behind `integration` (requires Docker + testcontainers) so
-    /// it runs in the dedicated integration-test job. Skips gracefully
-    /// if Docker is unavailable, matching `tests/workspace_integration.rs`.
+    /// Start a pgvector-enabled Postgres container for integration tests,
+    /// returning `(container, database_url)`. Returns `None` if Docker is
+    /// unreachable, matching `tests/workspace_integration.rs`.
     #[cfg(all(feature = "postgres", feature = "integration"))]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn test_auto_setup_database_runs_migrations_postgres_branch() {
+    async fn start_pg_container() -> Option<(
+        testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
+        String,
+    )> {
         use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
 
-        let _lock = lock_env();
-
-        // Try to start a pgvector-enabled Postgres container. Skip
-        // gracefully if Docker is unreachable (same pattern as
-        // workspace_integration.rs `try_connect`).
         let image = testcontainers_modules::postgres::Postgres::default()
             .with_db_name("ironclaw_test")
             .with_user("postgres")
@@ -4595,47 +4582,33 @@ mod tests {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("skipping: docker/testcontainers unavailable ({e})");
-                return;
+                return None;
             }
         };
-
         let host = match container.get_host().await {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("skipping: could not resolve container host ({e})");
-                return;
+                return None;
             }
         };
         let port = match container.get_host_port_ipv4(5432).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("skipping: could not resolve container port ({e})");
-                return;
+                return None;
             }
         };
-        let database_url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
+        let url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
+        Some((container, url))
+    }
 
-        // Preset env so auto_setup_database() takes the postgres
-        // early-return branch. DATABASE_BACKEND is deliberately unset to
-        // exercise the *second* early-return (DATABASE_URL alone) — the
-        // DATABASE_BACKEND=postgres path runs the same two calls, so a
-        // single test covers both by asserting the observable outcome.
-        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
-        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
-        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
-        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
-
-        let mut wizard = SetupWizard::new();
-        wizard.config.quick = true;
-
-        // Drive the caller, not the helpers. This is the exact function
-        // the onboard flow invokes and the one that regressed.
-        wizard
-            .auto_setup_database()
-            .await
-            .expect("auto_setup_database must succeed on preset postgres URL");
-
-        // Live DB handle: the early-return path must have populated db_pool.
+    /// Assert that an `auto_setup_database()` run against a preset
+    /// `DATABASE_URL` left the wizard in the correct state: live pool,
+    /// recorded settings, migrations applied (proven by a round-trip
+    /// write+read through the `settings` table).
+    #[cfg(all(feature = "postgres", feature = "integration"))]
+    async fn assert_auto_setup_postgres_persisted(wizard: &SetupWizard, database_url: &str) {
         assert!(
             wizard.db_pool.is_some(),
             "auto_setup_database must establish db_pool on the postgres early-return path"
@@ -4647,7 +4620,7 @@ mod tests {
         );
         assert_eq!(
             wizard.settings.database_url.as_deref(),
-            Some(database_url.as_str()),
+            Some(database_url),
             "settings.database_url must be recorded"
         );
 
@@ -4680,51 +4653,66 @@ mod tests {
         );
     }
 
+    /// Regression test for #846, PostgreSQL branch.
+    ///
+    /// The original bug lived in the postgres early-return paths of
+    /// `auto_setup_database()` — when `DATABASE_URL` was preset, both
+    /// `test_database_connection_postgres()` and `run_migrations_postgres()`
+    /// were skipped, leaving `self.db_pool = None` so `persist_settings()`
+    /// silently returned `Ok(false)` and the wizard crashed later trying
+    /// to save. The sibling libSQL test above only exercises the libsql
+    /// auto-default branch, so this test drives the actual postgres
+    /// early-return code path end-to-end.
+    ///
+    /// Gated behind `integration` (requires Docker + testcontainers) so
+    /// it runs in the dedicated integration-test job. Skips gracefully
+    /// if Docker is unavailable, matching `tests/workspace_integration.rs`.
+    ///
+    /// This test clears `DATABASE_BACKEND` to exercise the fall-through
+    /// postgres branch (DATABASE_URL alone). The companion test below
+    /// covers the `DATABASE_BACKEND=postgres` guard.
+    #[cfg(all(feature = "postgres", feature = "integration"))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_auto_setup_database_runs_migrations_postgres_branch() {
+        let _lock = lock_env();
+
+        let Some((_container, database_url)) = start_pg_container().await else {
+            return;
+        };
+
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+
+        let mut wizard = SetupWizard::new();
+        wizard.config.quick = true;
+
+        // Drive the caller, not the helpers. This is the exact function
+        // the onboard flow invokes and the one that regressed.
+        wizard
+            .auto_setup_database()
+            .await
+            .expect("auto_setup_database must succeed on preset postgres URL");
+
+        assert_auto_setup_postgres_persisted(&wizard, &database_url).await;
+    }
+
     /// Companion to `test_auto_setup_database_runs_migrations_postgres_branch`:
-    /// exercises the *first* early-return guard where `DATABASE_BACKEND=postgres`
-    /// is set alongside `DATABASE_URL`. The sibling test deliberately clears
-    /// `DATABASE_BACKEND` to hit the second guard; this one covers the first.
+    /// exercises the guard where `DATABASE_BACKEND=postgres` is set
+    /// alongside `DATABASE_URL`. The sibling test clears `DATABASE_BACKEND`
+    /// to hit the fall-through branch; this one covers the explicit guard.
     #[cfg(all(feature = "postgres", feature = "integration"))]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_auto_setup_database_runs_migrations_postgres_backend_env() {
-        use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
-
         let _lock = lock_env();
 
-        let image = testcontainers_modules::postgres::Postgres::default()
-            .with_db_name("ironclaw_test")
-            .with_user("postgres")
-            .with_password("postgres")
-            .with_name("pgvector/pgvector")
-            .with_tag("pg16");
-
-        let container = match image.start().await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("skipping: docker/testcontainers unavailable ({e})");
-                return;
-            }
+        let Some((_container, database_url)) = start_pg_container().await else {
+            return;
         };
 
-        let host = match container.get_host().await {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("skipping: could not resolve container host ({e})");
-                return;
-            }
-        };
-        let port = match container.get_host_port_ipv4(5432).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("skipping: could not resolve container port ({e})");
-                return;
-            }
-        };
-        let database_url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
-
-        // Set BOTH DATABASE_BACKEND and DATABASE_URL to exercise the first
-        // early-return guard in auto_setup_database().
         let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
         let _backend_guard = EnvGuard::set("DATABASE_BACKEND", "postgres");
         let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
@@ -4738,43 +4726,6 @@ mod tests {
             .await
             .expect("auto_setup_database must succeed with DATABASE_BACKEND=postgres");
 
-        assert!(
-            wizard.db_pool.is_some(),
-            "auto_setup_database must establish db_pool on the DATABASE_BACKEND=postgres path"
-        );
-        assert_eq!(
-            wizard.settings.database_backend.as_deref(),
-            Some("postgres"),
-            "settings.database_backend must be recorded as postgres"
-        );
-        assert_eq!(
-            wizard.settings.database_url.as_deref(),
-            Some(database_url.as_str()),
-            "settings.database_url must be recorded"
-        );
-
-        let saved = wizard
-            .persist_settings()
-            .await
-            .expect("persist_settings must succeed with a migrated postgres db");
-        assert!(
-            saved,
-            "persist_settings must report a successful write (db_pool was Some)"
-        );
-
-        let pool = wizard
-            .db_pool
-            .clone()
-            .expect("db_pool must still be populated after persist_settings");
-        let store = crate::history::Store::from_pool(pool);
-        let value = store
-            .get_setting(wizard.owner_id(), "database_backend")
-            .await
-            .expect("get_setting must succeed against migrated postgres");
-        assert_eq!(
-            value.as_ref().and_then(|v| v.as_str()),
-            Some("postgres"),
-            "round-trip read-back must return the value persist_settings wrote"
-        );
+        assert_auto_setup_postgres_persisted(&wizard, &database_url).await;
     }
 }
