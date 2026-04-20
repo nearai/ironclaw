@@ -81,11 +81,20 @@
 }
 
 .tree-icon {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 18px;
-  text-align: center;
   flex-shrink: 0;
-  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.tree-icon--dir {
+  color: var(--accent);
+}
+
+.tree-row:hover .tree-icon--file {
+  color: var(--accent);
 }
 
 .tree-label {

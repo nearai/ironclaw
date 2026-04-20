@@ -5,24 +5,46 @@ let currentMemoryContent = null;
 // { name, path, is_dir, children: [] | null, expanded: bool, loaded: bool }
 let memoryTreeState = null;
 
+var _lucideIcons = {
+  folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  folderOpen: '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
+  file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  fileText: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 17H8"/><path d="M16 13h-2"/>',
+  fileCode: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m10 13-2 2 2 2"/><path d="m14 17 2-2-2-2"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+  image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+  lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  key: '<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>',
+  package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  scroll: '<path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 0 0 2 2Z"/><path d="M6 21a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2"/><path d="M6 3h1"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
+};
+
+function _lucide(name) {
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (_lucideIcons[name] || _lucideIcons.file) + '</svg>';
+}
+
 function _fileIcon(name) {
   var ext = (name.lastIndexOf('.') !== -1) ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
   switch (ext) {
-    case 'md': return '\uD83D\uDCDD';  // memo
-    case 'txt': return '\uD83D\uDCC4';  // page facing up
-    case 'json': return '\uD83D\uDD27'; // wrench
-    case 'toml': case 'yaml': case 'yml': case 'ini': case 'cfg': return '\u2699\uFE0F'; // gear
-    case 'rs': case 'py': case 'js': case 'ts': case 'go': case 'rb': case 'java': case 'c': case 'cpp': case 'h': return '\uD83D\uDCBB'; // laptop
-    case 'sh': case 'bash': case 'zsh': return '\uD83D\uDCDF'; // pager
-    case 'sql': return '\uD83D\uDDC3\uFE0F'; // card file box
-    case 'html': case 'css': case 'scss': return '\uD83C\uDF10'; // globe
-    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': case 'webp': return '\uD83D\uDDBC\uFE0F'; // framed picture
-    case 'pdf': return '\uD83D\uDCD5'; // closed book
-    case 'zip': case 'tar': case 'gz': case 'bz2': return '\uD83D\uDCE6'; // package
-    case 'log': return '\uD83D\uDCDC'; // scroll
-    case 'lock': return '\uD83D\uDD12'; // lock
-    case 'env': return '\uD83D\uDD11'; // key
-    default: return '\uD83D\uDCC4'; // page facing up
+    case 'md': case 'txt': return 'fileText';
+    case 'json': return 'wrench';
+    case 'toml': case 'yaml': case 'yml': case 'ini': case 'cfg': return 'settings';
+    case 'rs': case 'py': case 'js': case 'ts': case 'go': case 'rb': case 'java': case 'c': case 'cpp': case 'h': return 'fileCode';
+    case 'sh': case 'bash': case 'zsh': return 'terminal';
+    case 'sql': return 'database';
+    case 'html': case 'css': case 'scss': return 'globe';
+    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': case 'webp': return 'image';
+    case 'pdf': return 'book';
+    case 'zip': case 'tar': case 'gz': case 'bz2': return 'package';
+    case 'log': return 'scroll';
+    case 'lock': return 'lock';
+    case 'env': return 'key';
+    default: return 'file';
   }
 }
 
@@ -78,7 +100,7 @@ function renderNodes(nodes, container, depth) {
 
       const icon = document.createElement('span');
       icon.className = 'tree-icon tree-icon--dir';
-      icon.textContent = node.expanded ? '\uD83D\uDCC2' : '\uD83D\uDCC1';
+      icon.innerHTML = _lucide(node.expanded ? 'folderOpen' : 'folder');
       row.appendChild(icon);
 
       const label = document.createElement('span');
@@ -97,7 +119,7 @@ function renderNodes(nodes, container, depth) {
 
       const icon = document.createElement('span');
       icon.className = 'tree-icon tree-icon--file';
-      icon.textContent = _fileIcon(node.name);
+      icon.innerHTML = _lucide(_fileIcon(node.name));
       row.appendChild(icon);
 
       const label = document.createElement('span');
