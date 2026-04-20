@@ -217,12 +217,13 @@ jobs:
 
   auth-browser-consent:
     name: Auth Browser Consent
+    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '30 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    environment: auth-browser-canary
     env:
       LANE: auth-browser-consent
       PROVIDER: browser
@@ -390,9 +391,9 @@ jobs:
 
   persona-rotating:
     name: Rotating Persona Live
-    # Intentionally NOT triggered by pull_request: hits real Anthropic API for
-    # long persona workflows (timeout 180m). Scheduled + manual coverage only.
+    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: ubuntu-latest
@@ -451,7 +452,9 @@ jobs:
 
   private-oauth:
     name: Private OAuth Live
+    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
     runs-on: [self-hosted, ironclaw-live]
@@ -505,10 +508,9 @@ jobs:
 
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
-    # Intentionally NOT triggered by pull_request: hits real Anthropic AND
-    # OpenAI-compatible APIs; the weekly Sunday cron is the authoritative
-    # coverage, PR feedback stays mock-backed.
+    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '0 5 * * 0') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
@@ -595,7 +597,10 @@ jobs:
 
   release-public-full:
     name: Release Public Full Live
-    if: github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'release-public-full')
+    # Temporarily enabled on pull_request for testing (remove after verification).
+    if: >
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'release-public-full'))
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -636,7 +641,10 @@ jobs:
 
   upgrade-canary:
     name: Upgrade Canary
-    if: github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary')
+    # Temporarily enabled on pull_request for testing (remove after verification).
+    if: >
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
