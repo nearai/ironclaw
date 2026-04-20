@@ -11,11 +11,16 @@ pub const DEFAULT_MEMORY_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// Default fuel limit: 500 million instructions.
 ///
-/// 10M was too low for WASM tools that make HTTP requests then parse/serialize
-/// JSON responses with serde_json. A single 30KB JSON round-trip can burn 20-50M
-/// instructions between the recursive-descent parser and the Value tree builder.
-/// Tools like `portfolio` parse ~235KB token price maps, which at ~1.5M
-/// instructions per KB needs 350M+. 500M provides headroom for growth.
+/// Prior values in this file: 10M (pre-#2054), 100M (#2054). Config-path
+/// default (`src/config/wasm.rs`) was stuck at 10M in parallel — the
+/// divergence masked real fuel exhaustion in production. Both paths now
+/// agree at 500M.
+///
+/// Why 500M: WASM tools that make HTTP requests then parse/serialize
+/// JSON responses with serde_json burn 20-50M instructions per 30KB
+/// round-trip between the recursive-descent parser and the Value tree
+/// builder. Tools like `portfolio` parse ~235KB token price maps, which
+/// at ~1.5M instructions per KB needs 350M+. 500M provides headroom.
 ///
 /// TODO(#2368): the 500M value is driven by a single tool (portfolio/near),
 /// but sets the ceiling for every WASM tool in the sandbox. A per-tool

@@ -16,7 +16,8 @@ pub struct WasmConfig {
     pub default_memory_limit: u64,
     /// Default execution timeout in seconds (default: 60).
     pub default_timeout_secs: u64,
-    /// Default fuel limit for CPU metering (default: 10M).
+    /// Default fuel limit for CPU metering (default: 500M —
+    /// see `src/tools/wasm/limits.rs` for the rationale).
     pub default_fuel_limit: u64,
     /// Whether to cache compiled modules.
     pub cache_compiled: bool,

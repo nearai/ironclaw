@@ -95,7 +95,7 @@ enum PortfolioAction {
         #[serde(default)]
         config: ProjectConfig,
         /// Solver source. M1: only "fixture". M4: "near-intents".
-        #[serde(default = "default_source")]
+        #[serde(default = "default_solver")]
         solver: String,
     },
 
@@ -121,6 +121,13 @@ fn default_chains() -> ChainSelector {
 
 fn default_source() -> String {
     "auto".to_string()
+}
+
+/// Default solver for `build_intent`. Must match a value `intents::build`
+/// understands — "auto" is not a valid solver name, so `BuildIntent`
+/// can't reuse `default_source()`.
+fn default_solver() -> String {
+    "fixture".to_string()
 }
 
 /// Bundled default strategy docs used when `propose` is called without

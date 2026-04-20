@@ -8,8 +8,8 @@
     ],
     "conditional_requirements": [
       "`scan` requires `addresses` (list of wallet addresses).",
-      "`propose` requires `positions` (output of `scan`) and `strategies` (list of strategy doc bodies).",
-      "`build_intent` requires `plan` (a MovementPlan from a Proposal)."
+      "`propose` requires `positions` (output of `scan`). `strategies` is optional — defaults to the bundled strategies (stablecoin-yield-floor, lending-health-guard, lp-impermanent-loss-watch, near-staking-yield, near-lending-yield, near-lp-yield) when omitted or empty. `config` is optional.",
+      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
