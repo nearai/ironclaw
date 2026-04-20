@@ -18,14 +18,18 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use axum::{Json, extract::State, http::StatusCode};
+    use axum::{
+        Json,
+        extract::{Query, State},
+        http::StatusCode,
+    };
 
     use uuid::Uuid;
 
     use crate::agent::SessionManager;
     use crate::auth::oauth;
     use crate::channels::relay::DEFAULT_RELAY_NAME;
-    use crate::channels::web::auth::{CombinedAuthState, UserIdentity};
+    use crate::channels::web::auth::{AuthenticatedUser, CombinedAuthState, UserIdentity};
     use crate::channels::web::features::chat::{
         HistoryQuery, IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler,
         chat_auth_cancel_handler, chat_auth_token_handler, chat_gate_resolve_handler,
@@ -509,10 +513,8 @@ mod tests {
 
         let store: Arc<dyn Database> = Arc::new(backend);
         let session_manager = Arc::new(SessionManager::new());
-        let state = test_gateway_state_with_store_and_session_manager(
-            Arc::clone(&store),
-            session_manager,
-        );
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&store), session_manager);
         let app = Router::new()
             .route("/api/chat/history", get(chat_history_handler))
             .with_state(state);

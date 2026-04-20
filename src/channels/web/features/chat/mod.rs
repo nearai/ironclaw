@@ -936,9 +936,7 @@ fn engine_history_entry_to_message(
     index: usize,
     entry: &serde_json::Value,
 ) -> Option<crate::history::ConversationMessage> {
-    let Some(role_raw) = entry.get("role").and_then(|v| v.as_str()) else {
-        return None;
-    };
+    let role_raw = entry.get("role").and_then(|v| v.as_str())?;
     let role = match role_raw {
         "User" => "user",
         "Assistant" => "assistant",

@@ -5588,6 +5588,8 @@ pub(crate) mod test_support {
             db: None,
             secrets_store: None,
             auth_manager: None,
+            extension_manager: None,
+            project_root: super::resolve_project_root(),
         };
 
         let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
