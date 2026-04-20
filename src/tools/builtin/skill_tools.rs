@@ -2689,9 +2689,10 @@ mod tests {
     #[test]
     fn test_zip_extract_ignores_non_skill_entries() {
         // ZIP with README.md and src/main.rs but no SKILL.md -- should error.
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&build_zip_entry_store("README.md", b"# Readme"));
-        zip.extend_from_slice(&build_zip_entry_store("src/main.rs", b"fn main() {}"));
+        let zip = build_zip_archive(
+            &[("README.md", b"# Readme"), ("src/main.rs", b"fn main() {}")],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
@@ -2727,15 +2728,16 @@ mod tests {
 
     #[test]
     fn test_zip_extract_oversized_rejected() {
-        let oversized_body = vec![b'x'; 2 * 1024 * 1024];
+        let oversized_body = vec![b'x'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
         let zip = build_zip_archive(
-            &[("SKILL.md", oversized_body.as_slice())],
+            &[("blob.bin", oversized_body.as_slice())],
             zip::CompressionMethod::Stored,
         );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("too large"),
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
             "Oversized entry should be rejected, got: {}",
             err
         );
