@@ -10577,7 +10577,7 @@ mod tests {
             mgr.pending_oauth_flows().write().await.insert(
                 state.to_string(),
                 crate::auth::oauth::PendingOAuthFlow {
-                    extension_name: "github".to_string(),
+                    extension_name: ironclaw_common::ExtensionName::from_trusted("github".to_string()),
                     display_name: "GitHub".to_string(),
                     token_url: "https://github.com/login/oauth/access_token".to_string(),
                     client_id: "client-id".to_string(),

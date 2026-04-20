@@ -1277,6 +1277,7 @@ impl EffectBridgeAdapter {
                                     auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
+                                None,
                             ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {

@@ -105,7 +105,7 @@ async fn resolve_extension_for_action(
     // test harness): delegate to the same canonical resolver used by the
     // auth-manager path so the extension-manager branch of the precedence
     // still runs instead of falling through to a stringly credential name.
-    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+    crate::auth::extension::resolve_auth_flow_extension_name(
         action_name,
         parameters,
         credential_fallback,

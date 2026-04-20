@@ -803,7 +803,7 @@ pub(crate) async fn pending_gate_extension_name(
     // "one resolver" rule in `src/bridge/CLAUDE.md` exist to prevent
     // exactly that drift.
     Some(
-        crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+        crate::auth::extension::resolve_auth_flow_extension_name(
             tool_name,
             &parsed_parameters,
             credential_name.as_str(),
