@@ -66,7 +66,7 @@ Lint/boundary/safety scripts under `scripts/` are enforcement infrastructure. Th
 
 ## Doc Absolute Paths
 
-Committed `.md` and `.py` files (outside `tests/` and `scripts/`) must not contain developer-local absolute paths (`/home/<user>/`, `/Users/<user>/`, `/tmp/`). Reference: PR #2689. Pre-commit flags these.
+Review convention (not currently enforced by pre-commit, which only scans `.rs` diffs): committed `.md` and `.py` files (outside `tests/` and `scripts/`) must not contain developer-local absolute paths (`/home/<user>/`, `/Users/<user>/`, `/tmp/`). Grep for these before merging a docs-touching PR. Reference: PR #2689.
 
 ## Stale Comments After Refactors
 

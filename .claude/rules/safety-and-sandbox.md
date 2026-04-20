@@ -4,6 +4,11 @@ paths:
   - "src/sandbox/**"
   - "src/secrets/**"
   - "src/tools/wasm/**"
+  - "src/bridge/**"
+  - "src/channels/**"
+  - "src/workspace/**"
+  - "src/agent/**"
+  - "crates/ironclaw_engine/**"
 ---
 # Safety Layer & Sandbox Rules
 

@@ -90,7 +90,7 @@ already trusts the shape.
 pub struct MyId(String);
 
 impl MyId {
-    pub fn new(raw: impl AsRef<str>) -> Result<Self, MyIdError> { ... }
+    pub fn new(raw: impl Into<String>) -> Result<Self, MyIdError> { ... }
     pub fn from_trusted(raw: String) -> Self { Self(raw) }
     pub fn as_str(&self) -> &str { &self.0 }
 }
@@ -132,15 +132,25 @@ impl From<MyId> for String { ... }      // infallible
 `from_trusted(String)` is an escape hatch for internal-to-internal
 handoff — not a shortcut for external input.
 
-**Allowed call sites:** values read from a typed upstream that already
-validated — DB rows loaded through typed repos, registry entries, test
-fixtures with literal strings, values copied between already-typed
-fields of the same shape.
+The distinction is **where the string came from at this call site**,
+not what format it lives in on disk:
 
-**Forbidden call sites:** anything originating outside the process. If
-the input came from an HTTP body, a WebSocket frame, a webhook payload,
-a config file, a CLI arg, or a registry JSON field, use `::new(..)`
-(fallible) and propagate the error.
+- **Trusted** = the value has already passed through a typed parse step
+  that validated it. A DB row loaded through a typed repo is trusted
+  (the repo's column type is the newtype, or a previous `::new()` call
+  populated it). A skill-manifest registry entry *as a typed field on a
+  parsed `ExtensionManifest` struct* is trusted. A test fixture with a
+  literal string is trusted.
+- **Untrusted** = the value is still a raw `String` / `&str` pulled
+  from a payload that was not itself validated as this newtype. A JSON
+  field you just deserialized into a `String`, a CLI arg, an HTTP body,
+  a webhook frame, a config file, a registry JSON field read as
+  `Value::String` — all untrusted. Use `::new(..)` and propagate the
+  error.
+
+The literal text "registry entry" can be either: a field on a parsed
+manifest struct is trusted; reaching into the raw JSON for the same
+name is not.
 
 Review flag: added `from_trusted` in `src/channels/**`, `src/bridge/**`,
 handler files, or `*_handler.rs`. References: PR #2685
@@ -149,17 +159,19 @@ PR #2687 `extensions_install_handler`.
 
 ## Validated newtype template
 
-`new(impl AsRef<str>) -> Result<Self, _>` and `TryFrom<String>` must
-share a private `validate(&str)` helper. `TryFrom<String>` validates on
-the borrow, then consumes the owned `String` — never re-allocates.
+`new(impl Into<String>) -> Result<Self, _>` and `TryFrom<String>` must
+share a private `validate(&str)` helper. Both validate on a borrow,
+then consume the owned `String` — never re-allocate. `impl Into<String>`
+on `new` is what lets `&str` *and* owned `String` callers avoid a clone.
 
 ```rust
 impl MyId {
     fn validate(s: &str) -> Result<(), MyIdError> { /* ... */ }
 
-    pub fn new(raw: impl AsRef<str>) -> Result<Self, MyIdError> {
-        Self::validate(raw.as_ref())?;
-        Ok(Self(raw.as_ref().to_owned()))
+    pub fn new(raw: impl Into<String>) -> Result<Self, MyIdError> {
+        let s = raw.into();
+        Self::validate(&s)?;
+        Ok(Self(s))
     }
 }
 
@@ -172,13 +184,26 @@ impl TryFrom<String> for MyId {
 }
 ```
 
-### Validated newtypes must gate `Deserialize`
+### Validated newtypes must gate `Deserialize` (new types only)
 
-Never combine `#[derive(Deserialize)]` with `#[serde(transparent)]` on a
-validated newtype — `transparent` bypasses `::new()` entirely. Use
+For a **new** validated newtype whose wire contract must match its
+construction invariant, never combine `#[derive(Deserialize)]` with
+`#[serde(transparent)]` — `transparent` bypasses `::new()` entirely. Use
 `#[serde(try_from = "String")]` and implement `TryFrom<String>` as
-above. Review flag: `#[serde(transparent)]` on any type whose `::new()`
-returns `Result`.
+above.
+
+**Exception — existing identity newtypes**: `CredentialName` and
+`ExtensionName` in `crates/ironclaw_common/src/identity.rs`
+intentionally use `#[serde(transparent)]` + derived `Deserialize` and
+do *not* re-validate on the wire. This is deliberate: legacy persisted
+rows may not satisfy the current rule, and the `serde_does_not_revalidate`
+test locks that contract in. Don't "fix" those to `try_from` — you will
+break rehydration of pre-existing DB rows. Validation for those types
+happens at explicit `::new()` construction sites.
+
+Review flag: `#[serde(transparent)]` on a *newly added* type whose
+`::new()` returns `Result`, without a documented legacy-persistence
+reason.
 
 ### Byte-length vs. character-length
 
