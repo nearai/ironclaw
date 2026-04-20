@@ -34,9 +34,15 @@ pub fn build(plan: &MovementPlan, config: &ProjectConfig) -> Result<IntentBundle
     };
 
     let leg_id = format!("{}-leg-0", plan.proposal_id);
+    let terminal_kind = plan
+        .legs
+        .last()
+        .ok_or_else(|| "MovementPlan has no legs".to_string())?
+        .kind
+        .clone();
     let leg = IntentLeg {
         id: leg_id.clone(),
-        kind: plan.legs.last().unwrap().kind.clone(),
+        kind: terminal_kind,
         chain: plan.expected_out.chain.clone(),
         near_intent_payload: json!({
             "kind": "fixture",

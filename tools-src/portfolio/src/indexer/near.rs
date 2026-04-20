@@ -209,6 +209,7 @@ pub fn parse_fastnear_response(
         let value_usd = if !info.price.is_empty() && info.price != "0" {
             compute_value_usd(&amount, &info.price)
         } else {
+            warn_near_missing_price(&symbol, &token.contract_id, &amount);
             String::new()
         };
 
@@ -321,10 +322,45 @@ fn raw_to_decimal(raw: &str, decimals: u32) -> String {
 
 /// Compute `amount * price_usd` using f64 and format as 2-decimal string.
 fn compute_value_usd(amount: &str, price_usd: &str) -> String {
-    let amt: f64 = amount.parse().unwrap_or(0.0);
-    let price: f64 = price_usd.parse().unwrap_or(0.0);
+    let amt: f64 = amount.parse().unwrap_or_else(|_| {
+        warn_unparseable_number("amount", amount);
+        0.0
+    });
+    let price: f64 = price_usd.parse().unwrap_or_else(|_| {
+        warn_unparseable_number("price_usd", price_usd);
+        0.0
+    });
     let value = amt * price;
     format!("{value:.2}")
+}
+
+/// Warn when Intear has no price data for a token the wallet actually
+/// holds. The position will be silently dropped downstream (the dust
+/// filter skips empty value_usd), so surface it here for diagnostics.
+fn warn_near_missing_price(symbol: &str, contract_id: &str, amount: &str) {
+    let amount_is_positive = amount.parse::<f64>().map(|n| n > 0.0).unwrap_or(false);
+    if !amount_is_positive {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    crate::near::agent::host::log(
+        crate::near::agent::host::LogLevel::Warn,
+        &format!(
+            "NEAR indexer: {symbol} ({contract_id}) amount={amount} has no Intear price — position dropped"
+        ),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (symbol, contract_id, amount);
+}
+
+fn warn_unparseable_number(field: &str, raw: &str) {
+    #[cfg(target_arch = "wasm32")]
+    crate::near::agent::host::log(
+        crate::near::agent::host::LogLevel::Warn,
+        &format!("NEAR indexer: unparseable {field} '{raw}' — treating as 0"),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (field, raw);
 }
 
 // ── WASM scan (production path) ────────────────────────────────────

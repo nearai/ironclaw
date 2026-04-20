@@ -3,7 +3,19 @@
 import json
 
 import httpx
+import pytest
 from helpers import AUTH_TOKEN, SEL, api_post, send_chat_and_wait_for_terminal_message
+
+
+async def _open_portfolio_tab_or_skip(page) -> None:
+    """Click the portfolio tab button, or skip the test if the widget
+    isn't registered in this build. A silent `return` would let tests
+    pass when the widget regresses — use `pytest.skip` so missing
+    registration surfaces in the suite summary."""
+    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
+    if await tab_btn.count() == 0:
+        pytest.skip("portfolio widget not registered in this build")
+    await tab_btn.click()
 
 
 SAMPLE_STATE = {
@@ -146,11 +158,7 @@ async def test_portfolio_widget_renders_positions(page, ironclaw_server):
     """Pre-seed state.json and verify the portfolio widget renders positions."""
     await _seed_portfolio_state(ironclaw_server)
 
-    # Navigate to the portfolio tab
-    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
-    if await tab_btn.count() == 0:
-        return  # widget not registered in this build
-    await tab_btn.click()
+    await _open_portfolio_tab_or_skip(page)
 
     panel = page.locator('[data-widget="portfolio"]')
     await panel.wait_for(state="visible", timeout=10000)
@@ -186,10 +194,7 @@ async def test_portfolio_widget_shows_share_button(page, ironclaw_server):
     """Share button appears when there are gains/suggestions."""
     await _seed_portfolio_state(ironclaw_server)
 
-    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
-    if await tab_btn.count() == 0:
-        return
-    await tab_btn.click()
+    await _open_portfolio_tab_or_skip(page)
 
     panel = page.locator('[data-widget="portfolio"]')
     card = panel.locator(".pf-card")
@@ -204,10 +209,7 @@ async def test_portfolio_share_modal_opens(page, ironclaw_server):
     """Clicking 'Share gains' opens the share modal with social buttons."""
     await _seed_portfolio_state(ironclaw_server)
 
-    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
-    if await tab_btn.count() == 0:
-        return
-    await tab_btn.click()
+    await _open_portfolio_tab_or_skip(page)
 
     panel = page.locator('[data-widget="portfolio"]')
     card = panel.locator(".pf-card")
@@ -244,10 +246,7 @@ async def test_portfolio_share_modal_closes(page, ironclaw_server):
     """Share modal closes when clicking the X button or the overlay."""
     await _seed_portfolio_state(ironclaw_server)
 
-    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
-    if await tab_btn.count() == 0:
-        return
-    await tab_btn.click()
+    await _open_portfolio_tab_or_skip(page)
 
     card = page.locator('[data-widget="portfolio"] .pf-card')
     await card.wait_for(state="visible", timeout=15000)
@@ -294,10 +293,7 @@ async def test_portfolio_widget_no_share_button_without_gains(page, ironclaw_ser
         timeout=10,
     )
 
-    tab_btn = page.locator('.tab-bar button[data-tab="portfolio"]')
-    if await tab_btn.count() == 0:
-        return
-    await tab_btn.click()
+    await _open_portfolio_tab_or_skip(page)
 
     card = page.locator('[data-widget="portfolio"] .pf-card')
     await card.wait_for(state="visible", timeout=15000)

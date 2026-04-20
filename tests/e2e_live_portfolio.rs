@@ -41,7 +41,6 @@ mod live_tests {
         The response should NOT contain error messages about fuel exhaustion \
         or missing credentials.";
 
-
     /// Scan root.near and verify the agent returns portfolio positions.
     ///
     /// This is the critical end-to-end test that caught multiple bugs:
@@ -176,7 +175,10 @@ mod live_tests {
         );
 
         // The agent must have called portfolio at least once (scan)
-        let portfolio_calls: Vec<_> = tools.iter().filter(|t| t.starts_with("portfolio")).collect();
+        let portfolio_calls: Vec<_> = tools
+            .iter()
+            .filter(|t| t.starts_with("portfolio"))
+            .collect();
         assert!(
             !portfolio_calls.is_empty(),
             "Expected at least one portfolio tool call, got: {tools:?}"

@@ -16,6 +16,13 @@ pub const DEFAULT_MEMORY_LIMIT: u64 = 10 * 1024 * 1024;
 /// instructions between the recursive-descent parser and the Value tree builder.
 /// Tools like `portfolio` parse ~235KB token price maps, which at ~1.5M
 /// instructions per KB needs 350M+. 500M provides headroom for growth.
+///
+/// TODO(#2368): the 500M value is driven by a single tool (portfolio/near),
+/// but sets the ceiling for every WASM tool in the sandbox. A per-tool
+/// override — either capability-declared in `<tool>.capabilities.json` or
+/// surfaced via `ResourceLimits::with_fuel()` at dispatch — would let us
+/// keep a tighter default for the common case and only hand out the 500M
+/// budget to tools that prove they need it.
 pub const DEFAULT_FUEL_LIMIT: u64 = 500_000_000;
 
 /// Default execution timeout: 60 seconds.

@@ -42,6 +42,34 @@ use super::ScanResult;
 
 const SIM_BASE: &str = "https://api.sim.dune.com";
 
+/// Log a warning when Dune returned a non-zero `amount` but an empty
+/// or zero `value_usd`. A silent zero would undercount the wallet —
+/// the dust filter drops positions below $1, so a missing price could
+/// make a real balance invisible. We warn, then preserve the original
+/// behaviour of treating the value as zero.
+fn warn_missing_value_usd(
+    endpoint: &str,
+    symbol: &str,
+    chain: &str,
+    amount: &str,
+    value_usd: &str,
+) {
+    if value_usd.is_empty() || value_usd == "0" || value_usd == "0.0" {
+        let amount_is_positive = amount.parse::<f64>().map(|n| n > 0.0).unwrap_or(false);
+        if amount_is_positive {
+            #[cfg(target_arch = "wasm32")]
+            crate::near::agent::host::log(
+                crate::near::agent::host::LogLevel::Warn,
+                &format!(
+                    "Dune {endpoint}: {symbol} on {chain} has amount={amount} but value_usd is missing — counted as $0"
+                ),
+            );
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = (endpoint, symbol, chain, amount);
+        }
+    }
+}
+
 /// Deserialize a value that may be a JSON string or number into `Option<String>`.
 /// Dune's API sometimes returns `value_usd` as a float and sometimes as a string.
 fn deserialize_optional_string_or_number<'de, D>(
@@ -190,6 +218,8 @@ pub fn parse_balances_response(
             "wallet".to_string()
         };
 
+        let value_usd = bal.value_usd.unwrap_or_default();
+        warn_missing_value_usd("balances", &bal.symbol, &bal.chain, &bal.amount, &value_usd);
         let token_balance = TokenAmount {
             symbol: bal.symbol,
             address: if bal.address.is_empty() {
@@ -199,7 +229,7 @@ pub fn parse_balances_response(
             },
             chain: bal.chain.clone(),
             amount: bal.amount,
-            value_usd: bal.value_usd.unwrap_or_default(),
+            value_usd,
         };
 
         out.push(RawPosition {
@@ -235,16 +265,20 @@ pub fn parse_positions_response(
     for pos in response.positions {
         let to_amounts = |xs: Vec<DuneBalance>| -> Vec<TokenAmount> {
             xs.into_iter()
-                .map(|b| TokenAmount {
-                    symbol: b.symbol,
-                    address: if b.address.is_empty() {
-                        None
-                    } else {
-                        Some(b.address)
-                    },
-                    chain: b.chain,
-                    amount: b.amount,
-                    value_usd: b.value_usd.unwrap_or_default(),
+                .map(|b| {
+                    let value_usd = b.value_usd.unwrap_or_default();
+                    warn_missing_value_usd("positions", &b.symbol, &b.chain, &b.amount, &value_usd);
+                    TokenAmount {
+                        symbol: b.symbol,
+                        address: if b.address.is_empty() {
+                            None
+                        } else {
+                            Some(b.address)
+                        },
+                        chain: b.chain,
+                        amount: b.amount,
+                        value_usd,
+                    }
                 })
                 .collect()
         };

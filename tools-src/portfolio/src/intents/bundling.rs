@@ -50,7 +50,10 @@ pub fn order_legs(legs: Vec<IntentLeg>) -> Result<Vec<IntentLeg>, String> {
     }
     for leg in by_id.values() {
         if leg.depends_on.is_some() {
-            *indegree.get_mut(&leg.id).expect("indegree") += 1;
+            let entry = indegree
+                .get_mut(&leg.id)
+                .ok_or_else(|| format!("internal: indegree missing leg '{}'", leg.id))?;
+            *entry += 1;
         }
     }
 
@@ -104,10 +107,14 @@ pub fn order_legs(legs: Vec<IntentLeg>) -> Result<Vec<IntentLeg>, String> {
     });
     let final_ids = if valid { ordered } else { out_ids };
 
-    Ok(final_ids
+    final_ids
         .into_iter()
-        .map(|id| by_id.remove(&id).expect("leg by id"))
-        .collect())
+        .map(|id| {
+            by_id
+                .remove(&id)
+                .ok_or_else(|| format!("internal: leg '{id}' missing from by_id map"))
+        })
+        .collect()
 }
 
 #[cfg(test)]

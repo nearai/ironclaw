@@ -22,24 +22,48 @@ pub fn check(
         return Err("plan expected_out.value_usd is empty".to_string());
     }
     let expected_out = parse_decimal(&plan.expected_out.value_usd);
+    // Reject zero/negative/NaN/infinite — a zero anchor would make
+    // min_required = 0 and every leg would pass vacuously; NaN would
+    // poison the comparison below (NaN comparisons are always false).
+    if !expected_out.is_finite() || expected_out <= 0.0 {
+        return Err(format!(
+            "plan expected_out.value_usd must be > 0, got {}",
+            plan.expected_out.value_usd
+        ));
+    }
     let slippage_factor = 1.0 - (config.max_slippage_bps as f64 / 10_000.0);
     let min_required = expected_out * slippage_factor;
 
+    // For multi-leg bundles the terminal leg is the one whose chain
+    // matches plan.expected_out.chain — that's where the USD value
+    // ultimately materializes. Intermediate legs may legitimately
+    // carry an empty value_usd (they're hops in the solver route).
+    let single_leg = bundle.legs.len() == 1;
+    let terminal_chain = &plan.expected_out.chain;
+    let mut terminal_checked = false;
     for leg in &bundle.legs {
-        // Multi-leg bundles tolerate empty per-leg value_usd because
-        // intermediate legs may not have a meaningful USD value until
-        // the final leg resolves. Single-leg bundles must be tight.
-        if bundle.legs.len() == 1 && leg.min_out.value_usd.is_empty() {
-            return Err("leg min_out.value_usd is empty".to_string());
+        let is_terminal = single_leg || &leg.chain == terminal_chain;
+        if !is_terminal {
+            continue;
+        }
+        if leg.min_out.value_usd.is_empty() {
+            return Err("terminal leg min_out.value_usd is empty".to_string());
         }
         let leg_min = parse_decimal(&leg.min_out.value_usd);
         // Tolerate rounding from 2-decimal-place formatting (±0.005)
-        if bundle.legs.len() == 1 && leg_min + 0.005 < min_required {
+        if leg_min + 0.005 < min_required {
             return Err(format!(
                 "min_out {} below required {} ({} bps slippage)",
                 leg_min, min_required, config.max_slippage_bps
             ));
         }
+        terminal_checked = true;
+    }
+    if !terminal_checked {
+        return Err(format!(
+            "no leg on terminal chain '{}' (plan.expected_out.chain)",
+            terminal_chain
+        ));
     }
 
     // 2. total_cost_usd must not exceed the plan's expected cost.
@@ -189,14 +213,94 @@ mod tests {
     }
 
     #[test]
-    fn multi_leg_skips_slippage_check() {
-        // Multi-leg bundles allow per-leg min_out to be lower
-        let l1 = leg("base", "500.00");
-        let mut l2 = leg("base", "500.00");
+    fn multi_leg_intermediate_ignored_terminal_checked() {
+        // Intermediate leg (on a different chain) is skipped; the
+        // terminal leg on plan.expected_out.chain must still clear
+        // slippage.
+        let l1 = leg("ethereum", "");
+        let mut l2 = leg("base", "995.00");
         l2.id = "leg-1".to_string();
         let b = bundle(vec![l1, l2], "0.50");
         let p = plan("1000.00", "0.50");
         assert!(check(&b, &p, &cfg(50, vec![])).is_ok());
+    }
+
+    #[test]
+    fn multi_leg_terminal_below_slippage_fails() {
+        // Regression: previously only single-leg bundles enforced
+        // slippage, so a terminal leg with min_out == "0" would pass
+        // for any multi-leg bundle. Now the terminal leg (matching
+        // plan.expected_out.chain) must clear min_required.
+        let l1 = leg("ethereum", "");
+        let mut l2 = leg("base", "0");
+        l2.id = "leg-1".to_string();
+        let b = bundle(vec![l1, l2], "0.50");
+        let p = plan("1000.00", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("min_out"));
+    }
+
+    #[test]
+    fn multi_leg_terminal_empty_value_usd_fails() {
+        // If no leg carries the terminal USD, we can't verify slippage.
+        let l1 = leg("ethereum", "");
+        let mut l2 = leg("base", "");
+        l2.id = "leg-1".to_string();
+        let b = bundle(vec![l1, l2], "0.50");
+        let p = plan("1000.00", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn multi_leg_no_terminal_chain_fails() {
+        let l1 = leg("ethereum", "500.00");
+        let mut l2 = leg("optimism", "500.00");
+        l2.id = "leg-1".to_string();
+        let b = bundle(vec![l1, l2], "0.50");
+        let p = plan("1000.00", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("terminal chain"));
+    }
+
+    #[test]
+    fn zero_expected_out_rejected() {
+        // Regression: "0" expected_out would make min_required == 0
+        // and any leg value would pass vacuously.
+        let b = bundle(vec![leg("base", "0")], "0.50");
+        let p = plan("0", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected_out"));
+    }
+
+    #[test]
+    fn unparseable_expected_out_rejected() {
+        let b = bundle(vec![leg("base", "1000")], "0.50");
+        let p = plan("not-a-number", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected_out"));
+    }
+
+    #[test]
+    fn slippage_rounding_drift_tolerated() {
+        // Single leg at 994.99 against required 995.00 — 0.005 epsilon
+        // tolerates the 2-decimal-place truncation in fixture output.
+        let b = bundle(vec![leg("base", "994.995")], "0.50");
+        let p = plan("1000.00", "0.50");
+        assert!(check(&b, &p, &cfg(50, vec![])).is_ok());
+    }
+
+    #[test]
+    fn slippage_below_rounding_epsilon_fails() {
+        // 994.98 is more than 0.005 under the 995.00 floor.
+        let b = bundle(vec![leg("base", "994.98")], "0.50");
+        let p = plan("1000.00", "0.50");
+        let result = check(&b, &p, &cfg(50, vec![]));
+        assert!(result.is_err());
     }
 
     // ---- cost checks ----

@@ -32,16 +32,65 @@ pub struct ScanResult {
 
 /// Returns true if the address looks like a NEAR account rather than
 /// an EVM address.
+///
+/// NEAR account rules (enforced here to avoid shipping garbage to the
+/// FastNEAR `/v1/account/{id}/full` endpoint):
+/// - 2..=64 characters
+/// - lowercase ASCII letters, digits, `_`, `-`, `.`
+/// - no leading/trailing `.` or `-` or `_`, no consecutive `.`
+/// - OR a 64-char lowercase hex string (implicit account)
+///
+/// See https://nomicon.io/DataStructures/Account for the full spec.
 fn is_near_address(address: &str) -> bool {
-    // EVM addresses are 0x-prefixed hex
+    // EVM addresses are 0x-prefixed hex — explicitly not NEAR.
     if address.starts_with("0x") || address.starts_with("0X") {
         return false;
     }
-    // NEAR implicit accounts are 64-char hex (no 0x prefix)
-    if address.len() == 64 && address.chars().all(|c| c.is_ascii_hexdigit()) {
+    // NEAR implicit accounts are 64-char lowercase hex.
+    if address.len() == 64
+        && address
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
         return true;
     }
-    // Named NEAR accounts: contain a dot or are plain alphanumeric
+    is_valid_near_named_account(address)
+}
+
+fn is_evm_address(address: &str) -> bool {
+    let Some(hex) = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"))
+    else {
+        return false;
+    };
+    hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_valid_near_named_account(s: &str) -> bool {
+    let len = s.len();
+    if !(2..=64).contains(&len) {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    // Must start and end with an alphanumeric lowercase char.
+    let valid_edge = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !valid_edge(bytes[0]) || !valid_edge(bytes[len - 1]) {
+        return false;
+    }
+    let mut prev_sep = false;
+    for &b in bytes {
+        let is_sep = matches!(b, b'-' | b'_' | b'.');
+        let is_alnum = b.is_ascii_lowercase() || b.is_ascii_digit();
+        if !is_sep && !is_alnum {
+            return false;
+        }
+        if is_sep && prev_sep {
+            // No `..`, `__`, `.-`, etc. runs of separators.
+            return false;
+        }
+        prev_sep = is_sep;
+    }
     true
 }
 
@@ -81,8 +130,12 @@ fn scan_auto(
     for addr in addresses {
         if is_near_address(addr) {
             near_addrs.push(addr.clone());
-        } else {
+        } else if is_evm_address(addr) {
             evm_addrs.push(addr.clone());
+        } else {
+            return Err(format!(
+                "address '{addr}' is neither a valid EVM address (0x + 40 hex) nor a valid NEAR account id"
+            ));
         }
     }
 
@@ -143,9 +196,73 @@ mod tests {
 
     #[test]
     fn is_near_address_detects_implicit_accounts() {
-        // 64-char hex without 0x prefix = NEAR implicit account
+        // 64-char lowercase hex without 0x prefix = NEAR implicit account
         assert!(is_near_address(
             "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6648cdf0dbd6de"
         ));
+    }
+
+    #[test]
+    fn is_near_address_rejects_uppercase_implicit() {
+        // Uppercase hex is not a valid implicit account id.
+        assert!(!is_near_address(
+            "98793CD91A3F870FB126F66285808C7E094AFCFC4EDA8A970F6648CDF0DBD6DE"
+        ));
+    }
+
+    #[test]
+    fn is_near_address_rejects_garbage() {
+        // Regression: previously these all returned true and got
+        // shipped to FastNEAR as `/v1/account/{garbage}/full`.
+        assert!(!is_near_address(""));
+        assert!(!is_near_address(" "));
+        assert!(!is_near_address("  spaces  "));
+        assert!(!is_near_address("drop table"));
+        assert!(!is_near_address("🦀"));
+        assert!(!is_near_address("UPPERCASE"));
+        assert!(!is_near_address(".leading-dot"));
+        assert!(!is_near_address("trailing-dot."));
+        assert!(!is_near_address("double..dot"));
+        assert!(!is_near_address("a"));
+        assert!(!is_near_address(&"x".repeat(65)));
+        assert!(!is_near_address("has/slash"));
+        assert!(!is_near_address("has@at"));
+        assert!(!is_near_address("../etc/passwd"));
+    }
+
+    #[test]
+    fn is_near_address_accepts_edge_named_accounts() {
+        assert!(is_near_address("ab"));
+        assert!(is_near_address("a-b.c"));
+        assert!(is_near_address("test_account.near"));
+        assert!(is_near_address(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn is_evm_address_accepts_valid() {
+        assert!(is_evm_address("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"));
+        assert!(is_evm_address("0x0000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn is_evm_address_rejects_wrong_length() {
+        assert!(!is_evm_address("0xabcd"));
+        assert!(!is_evm_address(&format!("0x{}", "a".repeat(41))));
+    }
+
+    #[test]
+    fn is_evm_address_rejects_no_prefix() {
+        // A 40-char hex string without 0x prefix is not an EVM address.
+        assert!(!is_evm_address(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn scan_auto_rejects_garbage_address() {
+        let addrs = vec!["not a wallet".to_string()];
+        let res = scan_auto(&addrs, &ChainSelector::default(), None);
+        match res {
+            Err(msg) => assert!(msg.contains("neither a valid"), "got: {msg}"),
+            Ok(_) => panic!("expected error for garbage address"),
+        }
     }
 }
