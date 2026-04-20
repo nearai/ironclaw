@@ -1,3 +1,13 @@
+function approvalCardRoot(card) {
+  return (card && card.closest('.gw-msg')) || card;
+}
+
+function summarizeApprovalParameters(parameters) {
+  const normalized = String(parameters || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= 200) return normalized;
+  return normalized.substring(0, 200) + '...';
+}
+
 function showApproval(data) {
   // Avoid duplicate cards on reconnect/history refresh.
   const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
@@ -44,7 +54,9 @@ function showApproval(data) {
     card.appendChild(desc);
   }
 
-  // Detail grid for parameters
+  // Detail grid for parameters. Keep the card compact, but never hide the
+  // full approval payload behind an irreversible truncation — operators must
+  // be able to inspect the entire tool input before approving it.
   if (data.parameters) {
     const details = document.createElement('dl');
     details.className = 'gw-approval__details';
@@ -52,13 +64,35 @@ function showApproval(data) {
     dt.textContent = 'params';
     const dd = document.createElement('dd');
     const code = document.createElement('code');
-    code.textContent = data.parameters.length > 200
-      ? data.parameters.substring(0, 200) + '...'
+    const hasExpandableParams = data.parameters.length > 200 || /[\r\n]/.test(data.parameters);
+    code.textContent = hasExpandableParams
+      ? summarizeApprovalParameters(data.parameters)
       : data.parameters;
     dd.appendChild(code);
     details.appendChild(dt);
     details.appendChild(dd);
     card.appendChild(details);
+
+    if (hasExpandableParams) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'gw-approval__toggle';
+      toggle.textContent = I18n.t('approval.showParams');
+
+      const paramsBlock = document.createElement('pre');
+      paramsBlock.className = 'gw-approval__params';
+      paramsBlock.hidden = true;
+      paramsBlock.textContent = data.parameters;
+
+      toggle.addEventListener('click', () => {
+        const willShow = paramsBlock.hidden;
+        paramsBlock.hidden = !willShow;
+        toggle.textContent = I18n.t(willShow ? 'approval.hideParams' : 'approval.showParams');
+      });
+
+      card.appendChild(toggle);
+      card.appendChild(paramsBlock);
+    }
   }
 
   // Actions: Deny (ghost), Approve once (secondary), Always allow (primary)
@@ -371,7 +405,10 @@ function handleGateResolved(data) {
     debouncedLoadThreads();
     return;
   }
-  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
+  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => {
+    const root = approvalCardRoot(el);
+    if (root) root.remove();
+  });
   if (
     data.resolution === 'credential_provided'
     || data.resolution === 'cancelled'

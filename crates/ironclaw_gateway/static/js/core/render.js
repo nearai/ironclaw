@@ -390,8 +390,12 @@ function pruneOldMessages() {
   let removed = 0;
   const target = items.length - MAX_DOM_MESSAGES;
   for (let i = 0; i < items.length && removed < target; i++) {
-    if (items[i].getAttribute('data-streaming') === 'true') continue;
-    items[i].remove();
+    const item = items[i];
+    if (item.getAttribute('data-streaming') === 'true') continue;
+    const removalTarget = item.classList.contains('assistant')
+      ? (item.closest('.gw-msg') || item)
+      : item;
+    removalTarget.remove();
     removed++;
   }
   // Clean up orphaned leading time-separators left after pruning.
