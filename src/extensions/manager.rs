@@ -19,7 +19,7 @@ use crate::channels::wasm::{
     LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
     RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
-    owner_id_from_capabilities,
+    owner_id_from_capabilities, setup::inject_wasm_channel_secret_config_mappings,
 };
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
@@ -281,22 +281,6 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
 }
 
 use crate::pairing::approval::build_runtime_config_updates as build_wasm_channel_runtime_config_updates;
-
-async fn inject_wasm_channel_secret_config_updates(
-    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
-    owner_id: &str,
-    secret_config_mappings: &[crate::channels::wasm::SecretConfigMappingSchema],
-    config_updates: &mut HashMap<String, serde_json::Value>,
-) {
-    for mapping in secret_config_mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(owner_id, &mapping.secret_name).await {
-            config_updates.insert(
-                mapping.config_key.clone(),
-                serde_json::Value::String(decrypted.expose().to_string()),
-            );
-        }
-    }
-}
 
 // Auth instructions come from the capabilities file's `prompt` field (single
 // source of truth). Post-activation pairing instructions live in
@@ -5735,9 +5719,10 @@ impl ExtensionManager {
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
-            inject_wasm_channel_secret_config_updates(
-                self.secrets.as_ref(),
+            inject_wasm_channel_secret_config_mappings(
+                &channel_name,
                 &self.user_id,
+                self.secrets.as_ref(),
                 &secret_config_mappings,
                 &mut config_updates,
             )
@@ -5962,9 +5947,10 @@ impl ExtensionManager {
             owner_actor_id.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
-        inject_wasm_channel_secret_config_updates(
-            self.secrets.as_ref(),
+        inject_wasm_channel_secret_config_mappings(
+            name,
             &self.user_id,
+            self.secrets.as_ref(),
             &secret_config_mappings,
             &mut config_updates,
         )
@@ -6185,13 +6171,12 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one.
-        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // Delete any stale nonce before storing the new one. Best-effort
+        // delete of the legacy caller-scoped entry first so upgrade residue
+        // does not linger in the secrets table. The primary delete uses
+        // self.user_id (the gateway owner) — NOT the caller's user_id —
         // because the OAuth callback handler looks up the nonce under
-        // state.owner_id which matches self.user_id.
-        //
-        // Also best-effort delete any legacy caller-scoped entry so older
-        // per-user nonces don't remain in the secrets table after upgrading.
+        // state.owner_id, which matches self.user_id.
         let _ = self.secrets.delete(user_id, &state_key).await;
         let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets

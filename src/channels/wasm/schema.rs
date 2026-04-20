@@ -129,7 +129,11 @@ impl ChannelCapabilitiesFile {
             );
         }
 
-        // Validate mapping safety constraints for runtime config secret injection.
+        // Validate manifest-driven runtime-config secret injection. Called
+        // purely for its side effect: emitting warnings for unsafe mapping
+        // entries (empty keys, reserved runtime keys, undeclared secret
+        // names). The runtime path uses `validated_secret_config_mappings`
+        // (silent filter).
         let _ = self.validated_secret_config_mappings_with_warnings();
     }
 

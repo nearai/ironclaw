@@ -370,7 +370,10 @@ function renderExtensionCard(ext) {
     const channelStatus = ext.onboarding_state || ext.activation_status || 'installed';
     const adminView = currentUserIsAdmin();
     const showFullPairing = channelStatus === 'pairing_required' || channelStatus === 'pairing';
-    const showPendingOnly = adminView && channelStatus === 'active';
+    // 'ready' is treated as an active state elsewhere in this file (status
+    // label, stepper), so admins should see pending pairing on both.
+    const isActiveLike = channelStatus === 'active' || channelStatus === 'ready';
+    const showPendingOnly = adminView && isActiveLike;
 
     if (channelStatus === 'setup_required') {
       const setupSection = document.createElement('div');

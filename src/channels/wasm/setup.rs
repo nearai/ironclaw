@@ -16,9 +16,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RegisteredEndpoint, SharedWasmChannel,
-    TELEGRAM_CHANNEL_NAME, WasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
-    WasmChannelRuntimeConfig, bot_username_setting_key, create_wasm_channel_router,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RegisteredEndpoint, SecretConfigMappingSchema,
+    SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel, WasmChannelLoader, WasmChannelRouter,
+    WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+    create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
@@ -313,14 +314,16 @@ async fn register_channel(
         // The credential injection system only replaces placeholders in URLs
         // and headers, so channels like Feishu that exchange app_id + app_secret
         // for a tenant token need the raw values in their config.
-        inject_channel_secrets_into_config(
-            &channel_name,
-            &config.owner_id,
-            secrets_store,
-            &secret_config_mappings,
-            &mut config_updates,
-        )
-        .await;
+        if let Some(secrets) = secrets_store {
+            inject_wasm_channel_secret_config_mappings(
+                &channel_name,
+                &config.owner_id,
+                secrets.as_ref(),
+                &secret_config_mappings,
+                &mut config_updates,
+            )
+            .await;
+        }
 
         if !config_updates.is_empty() {
             channel_arc.update_config(config_updates).await;
@@ -592,25 +595,25 @@ pub async fn inject_channel_credentials(
     Ok(count)
 }
 
-/// Inject channel-specific secrets into the config JSON.
+/// Inject manifest-declared secrets into a WASM channel's runtime config.
 ///
 /// Some channels (e.g., Feishu) need raw credential values in their config
 /// because they perform token exchanges that require secrets in the HTTP
 /// request body. The standard credential injection system only replaces
 /// placeholders in URLs and headers, so this function fills config fields
-/// that map to secret names.
+/// declared via `setup.secret_config_mappings`.
 ///
-async fn inject_channel_secrets_into_config(
+/// Both startup (`register_channel`) and hot-activation/refresh paths in
+/// `ExtensionManager` must funnel through this single helper so the two
+/// call sites stay in behavioral lockstep — including the env-var
+/// fallback used when the secrets store has no entry.
+pub(crate) async fn inject_wasm_channel_secret_config_mappings(
     channel_name: &str,
     owner_id: &str,
-    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    secret_config_mappings: &[crate::channels::wasm::SecretConfigMappingSchema],
+    secrets: &(dyn SecretsStore + Send + Sync),
+    secret_config_mappings: &[SecretConfigMappingSchema],
     config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
 ) {
-    let Some(secrets) = secrets_store else {
-        return;
-    };
-
     for mapping in secret_config_mappings {
         match secrets.get_decrypted(owner_id, &mapping.secret_name).await {
             Ok(decrypted) => {
@@ -625,7 +628,9 @@ async fn inject_channel_secrets_into_config(
                 );
             }
             Err(_) => {
-                // Also try environment variable fallback.
+                // Fall back to an uppercased env var so a channel can still
+                // boot from pure-env configuration (e.g. Feishu via
+                // FEISHU_APP_ID) without a populated secrets store.
                 let env_name = mapping.secret_name.to_uppercase();
                 if let Ok(val) = std::env::var(&env_name)
                     && !val.is_empty()
@@ -652,8 +657,8 @@ mod tests {
     use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::{
-        ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule, WasmChannel,
-        WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule, SecretConfigMappingSchema,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::config::Config;
     use crate::pairing::PairingStore;
@@ -1058,23 +1063,23 @@ mod tests {
 
         let mut config_updates = HashMap::new();
         let secret_config_mappings = vec![
-            crate::channels::wasm::SecretConfigMappingSchema {
+            SecretConfigMappingSchema {
                 config_key: "app_id".to_string(),
                 secret_name: "feishu_app_id".to_string(),
             },
-            crate::channels::wasm::SecretConfigMappingSchema {
+            SecretConfigMappingSchema {
                 config_key: "app_secret".to_string(),
                 secret_name: "feishu_app_secret".to_string(),
             },
-            crate::channels::wasm::SecretConfigMappingSchema {
+            SecretConfigMappingSchema {
                 config_key: "verification_token".to_string(),
                 secret_name: "feishu_verification_token".to_string(),
             },
         ];
-        super::inject_channel_secrets_into_config(
+        super::inject_wasm_channel_secret_config_mappings(
             "feishu",
             "owner-123",
-            &Some(Arc::clone(&secrets)),
+            secrets.as_ref(),
             &secret_config_mappings,
             &mut config_updates,
         )
