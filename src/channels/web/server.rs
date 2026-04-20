@@ -49,6 +49,10 @@ mod tests {
         css_handler, generate_csp_nonce, stamp_nonce_into_html,
     };
     use crate::channels::web::sse::SseManager;
+    use crate::channels::web::test_helpers::{
+        test_gateway_state, test_gateway_state_with_dependencies,
+        test_gateway_state_with_store_and_session_manager,
+    };
     use crate::channels::web::types::*;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
@@ -164,119 +168,6 @@ mod tests {
     }
 
     // --- OAuth callback handler tests ---
-
-    /// Build a minimal `GatewayState` for handler tests.
-    fn test_gateway_state_with_dependencies(
-        ext_mgr: Option<Arc<ExtensionManager>>,
-        store: Option<Arc<dyn Database>>,
-        db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
-        pairing_store: Option<Arc<crate::pairing::PairingStore>>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: ext_mgr,
-            tool_registry: None,
-            store,
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth,
-            pairing_store,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
-
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
-        test_gateway_state_with_dependencies(ext_mgr, None, None, None)
-    }
-
-    fn test_gateway_state_with_store_and_session_manager(
-        store: Arc<dyn Database>,
-        session_manager: Arc<SessionManager>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: Some(session_manager),
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: Some(store),
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth: None,
-            pairing_store: None,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]

@@ -1042,12 +1042,13 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
 // validation, turn-info construction, and live-state summarization.
 // Caller-level tests (`test_chat_history_handler_*`,
 // `test_chat_approval_handler*`, `test_chat_auth_*_handler*`,
-// `test_chat_gate_resolve_handler*`) stay in `server.rs::tests` for now
-// because they rely on shared `GatewayState` builders
-// (`test_gateway_state`, `test_gateway_state_with_store_and_session_manager`,
-// `test_gateway_state_with_dependencies`) that construct state for multiple
-// slices, not just chat. Promoting those builders to the public
-// `src/channels/web/test_helpers.rs` surface is a follow-up.
+// `test_chat_gate_resolve_handler*`) still live in `server.rs::tests`;
+// the shared `GatewayState` builders they depend on (`test_gateway_state`,
+// `test_gateway_state_with_store_and_session_manager`,
+// `test_gateway_state_with_dependencies`) now live in
+// `crate::channels::web::test_helpers` as `pub(crate)` functions, so
+// stage 6 of ironclaw#2599 can migrate the caller-level tests into this
+// module alongside the helpers without an API change.
 
 #[cfg(test)]
 mod tests {

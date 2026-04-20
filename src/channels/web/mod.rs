@@ -35,11 +35,15 @@ pub use platform::auth;
 pub use platform::sse;
 pub use platform::ws;
 
-/// Test helpers for gateway integration tests.
+/// Test helpers for gateway tests.
 ///
 /// Always compiled (not behind `#[cfg(test)]`) so that integration tests in
 /// `tests/` -- which import this crate as a regular dependency -- can use
-/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder).
+/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder). The
+/// cross-slice `pub(crate)` builders inside the module
+/// (`test_gateway_state`, `test_gateway_state_with_dependencies`,
+/// `test_gateway_state_with_store_and_session_manager`) are individually
+/// `#[cfg(test)]`-gated since they only have in-crate unit-test callers.
 pub mod test_helpers;
 
 #[cfg(test)]
