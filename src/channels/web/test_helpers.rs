@@ -1,8 +1,19 @@
-//! Shared test utilities for gateway integration tests.
+//! Shared test utilities for gateway tests.
 //!
-//! This module is always compiled (not `#[cfg(test)]`) because integration tests
-//! in `tests/` import the crate as a regular dependency and `cfg(test)` is only
-//! set when compiling *this* crate's unit tests.
+//! This module is **always compiled** (not `#[cfg(test)]`) because integration
+//! tests in `tests/` import the crate as a regular dependency and `cfg(test)`
+//! is only set when compiling *this* crate's unit tests. The publicly exposed
+//! [`TestGatewayBuilder`] is therefore unconditionally visible.
+//!
+//! The three cross-slice `pub(crate)` functions below — `test_gateway_state`,
+//! `test_gateway_state_with_dependencies`,
+//! `test_gateway_state_with_store_and_session_manager` — are scoped to unit
+//! tests and are individually gated with `#[cfg(test)]`. They previously
+//! lived inside `server.rs::tests` where they were unreachable from other
+//! slice test modules; promoting them here (ironclaw#2599 stage-6
+//! prerequisite) lets caller-level tests migrate out of `server.rs::tests`
+//! and into the feature slice they actually exercise (chat, oauth, pairing,
+//! extensions).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,6 +25,11 @@ use crate::channels::web::auth::MultiAuthState;
 use crate::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter, start_server};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::ws::WsConnectionTracker;
+
+#[cfg(test)]
+use crate::channels::web::auth::DbAuthenticator;
+#[cfg(test)]
+use crate::channels::web::server::ActiveConfigSnapshot;
 
 /// Builder for constructing a [`GatewayState`] with sensible test defaults.
 ///
@@ -74,12 +90,16 @@ impl TestGatewayBuilder {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -91,7 +111,9 @@ impl TestGatewayBuilder {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -136,4 +158,143 @@ impl TestGatewayBuilder {
         let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-slice positional builders used by unit tests in `server.rs::tests`
+// and (per the ironclaw#2599 stage-6 plan) the chat / extensions / oauth /
+// pairing slice test modules. Kept as `pub(crate)` free functions with
+// the same positional signatures they had when they lived in
+// `server.rs::tests`, so call sites migrate in later PRs without touching
+// argument lists. Gated to `cfg(test)` because the surrounding module is
+// always-compiled (so integration tests in `tests/` can reach
+// `TestGatewayBuilder`), but these three functions only have in-crate
+// unit-test callers.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `GatewayState` with every optional subsystem `None`
+/// except `extension_manager`.
+///
+/// Equivalent to calling
+/// [`test_gateway_state_with_dependencies(ext_mgr, None, None, None)`].
+#[cfg(test)]
+pub(crate) fn test_gateway_state(
+    ext_mgr: Option<Arc<crate::extensions::ExtensionManager>>,
+) -> Arc<GatewayState> {
+    test_gateway_state_with_dependencies(ext_mgr, None, None, None)
+}
+
+/// Build a `GatewayState` with the four subsystems most commonly exercised
+/// by cross-slice handler tests (extensions, store, db-auth, pairing).
+/// Every field not reachable from these four dependencies stays `None`.
+#[cfg(test)]
+pub(crate) fn test_gateway_state_with_dependencies(
+    ext_mgr: Option<Arc<crate::extensions::ExtensionManager>>,
+    store: Option<Arc<dyn crate::db::Database>>,
+    db_auth: Option<Arc<DbAuthenticator>>,
+    pairing_store: Option<Arc<crate::pairing::PairingStore>>,
+) -> Arc<GatewayState> {
+    Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(None),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: ext_mgr,
+        tool_registry: None,
+        store,
+        settings_cache: None,
+        job_manager: None,
+        prompt_queue: None,
+        owner_id: "test".to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: None,
+        llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
+        skill_registry: None,
+        skill_catalog: None,
+        auth_manager: None,
+        scheduler: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        webhook_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: vec![],
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
+        secrets_store: None,
+        db_auth,
+        pairing_store,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
+    })
+}
+
+/// Build a `GatewayState` wired to a real store + `SessionManager` for
+/// chat-slice caller-level tests (history / approval / auth-token / gate).
+#[cfg(test)]
+pub(crate) fn test_gateway_state_with_store_and_session_manager(
+    store: Arc<dyn crate::db::Database>,
+    session_manager: Arc<crate::agent::SessionManager>,
+) -> Arc<GatewayState> {
+    Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(None),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: Some(session_manager),
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: Some(store),
+        settings_cache: None,
+        job_manager: None,
+        prompt_queue: None,
+        owner_id: "test".to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: None,
+        llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
+        skill_registry: None,
+        skill_catalog: None,
+        auth_manager: None,
+        scheduler: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+        webhook_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: vec![],
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
+    })
 }

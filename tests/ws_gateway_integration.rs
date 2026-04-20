@@ -48,6 +48,7 @@ async fn start_test_server() -> (
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -55,6 +56,9 @@ async fn start_test_server() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -65,7 +69,9 @@ async fn start_test_server() -> (
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(
+            ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        )),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -331,6 +337,7 @@ async fn test_ws_multiple_events_in_sequence() {
     state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
         detail: None,
+        call_id: Some("call_shell_1".to_string()),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {
@@ -338,6 +345,8 @@ async fn test_ws_multiple_events_in_sequence() {
         success: true,
         error: None,
         parameters: None,
+        call_id: Some("call_shell_1".to_string()),
+        duration_ms: Some(42),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::Response {
@@ -358,7 +367,10 @@ async fn test_ws_multiple_events_in_sequence() {
 
     assert_eq!(p1["event_type"], "thinking");
     assert_eq!(p2["event_type"], "tool_started");
+    assert_eq!(p2["data"]["call_id"], "call_shell_1");
     assert_eq!(p3["event_type"], "tool_completed");
+    assert_eq!(p3["data"]["call_id"], "call_shell_1");
+    assert_eq!(p3["data"]["duration_ms"], 42);
     assert_eq!(p4["event_type"], "response");
 
     ws.close(None).await.unwrap();

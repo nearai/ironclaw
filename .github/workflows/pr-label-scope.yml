@@ -9,6 +9,10 @@ permissions:
   issues: write
   pull-requests: write
 
+concurrency:
+  group: pr-scope-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   scope:
     runs-on: ubuntu-latest

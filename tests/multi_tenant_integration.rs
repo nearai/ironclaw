@@ -316,12 +316,12 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     let manager = SseManager::new();
     let mut alice_stream = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob_stream = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -361,12 +361,12 @@ async fn sse_global_event_delivered_to_all_users() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -394,7 +394,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -426,7 +426,7 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     let manager = SseManager::new();
     // Unscoped subscriber (None user_id) — backwards-compatible single-user mode
-    let mut stream = Box::pin(manager.subscribe_raw(None).expect("subscribe"));
+    let mut stream = Box::pin(manager.subscribe_raw(None, false).expect("subscribe"));
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
@@ -504,14 +504,14 @@ async fn sse_connection_count_tracks_scoped_subscribers() {
 
     let _alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 1);
 
     let _bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 2);
@@ -543,6 +543,7 @@ fn gateway_state_has_multi_tenant_fields() {
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -550,6 +551,9 @@ fn gateway_state_has_multi_tenant_fields() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -560,7 +564,7 @@ fn gateway_state_has_multi_tenant_fields() {
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -631,6 +635,7 @@ async fn start_owner_scoped_sender_server() -> (
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -638,6 +643,9 @@ async fn start_owner_scoped_sender_server() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -648,7 +656,7 @@ async fn start_owner_scoped_sender_server() -> (
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -1029,6 +1037,7 @@ async fn start_multi_user_server_with_db() -> (
         extension_manager: None,
         tool_registry: None,
         store: Some(Arc::clone(&db)),
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -1036,6 +1045,9 @@ async fn start_multi_user_server_with_db() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -1046,7 +1058,7 @@ async fn start_multi_user_server_with_db() -> (
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
