@@ -331,9 +331,7 @@ function renderExtensionCard(ext) {
       // "Reconfigure" after. Closes #2235.
       var reconfigureBtn = document.createElement('button');
       reconfigureBtn.className = 'btn-ext configure';
-      var fallbackStatus = ext.onboarding_state || ext.activation_status || 'installed';
-      var inlineSetupCoversIt = fallbackStatus === 'setup_required';
-      if (inlineSetupCoversIt) {
+      if (status === 'setup_required') {
         reconfigureBtn.textContent = I18n.t('ext.reconfigure');
       } else {
         reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');

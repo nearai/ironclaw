@@ -1394,16 +1394,15 @@ mod tests {
             .as_array()
             .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
             .expect("telegram entry post-setup");
+        // A missing field indexes to `Value::Null` and trips this assertion
+        // too, so the single check covers both "field stripped from the wire"
+        // and "field present but wrong value".
         assert_eq!(
             telegram["authenticated"], true,
-            "post-setup: the `authenticated` flag must be true once the required \
-             secret is written — the Settings card's Setup/Reconfigure branch reads \
-             this field directly, and a regression here reopens #2235."
-        );
-        // The wire field must also still be present (not serialized away).
-        assert!(
-            telegram.get("authenticated").is_some(),
-            "`authenticated` must remain on the wire for the JS button-label branch"
+            "post-setup: the `authenticated` flag must be present and true once \
+             the required secret is written — the Settings card's \
+             Setup/Reconfigure branch reads this field directly, and a regression \
+             here reopens #2235."
         );
     }
 
