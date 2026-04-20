@@ -2258,11 +2258,23 @@ async fn process_mission_outcome_and_notify(
         }
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
+            // A terminal thread failure means the mission did not merely
+            // produce a disappointing result — the execution itself crashed.
+            // Leave a durable failed status so cron/event schedulers stop
+            // re-firing the same broken mission until the user explicitly
+            // resumes it after fixing the underlying problem.
+            mission.status = MissionStatus::Failed;
             mission.approach_history.push(format!("FAILED: {error}"));
             notify_response = Some(format!("Mission failed: {error}"));
             is_error = true;
         }
         ThreadOutcome::MaxIterations => {
+            // MaxIterations is also terminal for the just-fired mission run:
+            // without a failed lifecycle transition the scheduler will treat
+            // the mission as still Active and keep spawning fresh threads on
+            // every due tick, which is the runaway-loop behavior reported in
+            // #2736.
+            mission.status = MissionStatus::Failed;
             mission
                 .approach_history
                 .push("Hit max iterations without completing".into());
@@ -3820,6 +3832,102 @@ mod tests {
             mission.status,
             MissionStatus::Completed,
             "mission should be completed when goal is achieved"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_outcome_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "GitHub Poller",
+                "Poll the GitHub API and summarize updates",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::Failed {
+                error: "github api returned 404".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("github api returned 404")),
+            "failure should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "failed missions must not keep spawning new threads until resumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_iterations_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Long Runner",
+                "Keep checking the endpoint until it succeeds",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::MaxIterations,
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("max iterations")),
+            "max-iterations outcome should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "max-iterations missions must not keep spawning new threads until resumed"
         );
     }
 
