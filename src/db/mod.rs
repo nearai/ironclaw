@@ -514,12 +514,11 @@ pub async fn set_title_if_missing(
             .get("title")
             .and_then(|t| t.as_str())
             .is_some_and(|s| !s.is_empty()),
-        Ok(None) => false,
-        Err(_) => return,
+        Ok(None) | Err(_) => return,
     };
 
     if !has_title {
-        let title_text: String = trimmed.chars().take(100).collect();
+        let title_text: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect();
         let title_val = serde_json::json!(title_text);
         let _ = store
             .update_conversation_metadata_field(conversation_id, "title", &title_val)

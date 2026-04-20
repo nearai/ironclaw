@@ -170,7 +170,9 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("started_at"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let sql_title = get_opt_text(&row, 6);
+            let sql_title = get_opt_text(&row, 6)
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|s| !s.is_empty());
             let title = sql_title
                 .or_else(|| {
                     metadata
@@ -257,7 +259,9 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("started_at"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let sql_title = get_opt_text(&row, 6);
+            let sql_title = get_opt_text(&row, 6)
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|s| !s.is_empty());
             let title = sql_title
                 .or_else(|| {
                     metadata
