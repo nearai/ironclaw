@@ -209,6 +209,11 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    // TODO(external-thread-id): accept `&ExternalThreadId` instead of `&str`
+    // once the downstream `Uuid::parse_str` call and internal `session_manager`
+    // boundary are converted. The typed parameter is blocked on
+    // `SessionManager::resolve_thread` which still takes `Option<&str>`; moving
+    // it in one step would invert this PR's "boundary only" scope.
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,

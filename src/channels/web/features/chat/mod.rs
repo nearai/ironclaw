@@ -381,33 +381,48 @@ pub(crate) async fn chat_ws_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
     Query(params): Query<ChatEventsQuery>,
-    ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // `Result<WebSocketUpgrade, _>` instead of plain `WebSocketUpgrade`
+    // so the Origin gate below fires *before* the extractor rejects
+    // with 426. Two benefits: (a) unit tests reach the origin-rejection
+    // branches without needing a real hyper `OnUpgrade` extension
+    // (`tower::ServiceExt::oneshot` can't synthesize one), and (b)
+    // callers with a bad origin always see a `403` regardless of
+    // whether they sent upgrade headers, which is a more accurate
+    // security signal than the protocol-level 426.
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
     // Validate Origin header to prevent cross-site WebSocket hijacking.
     // Require the header outright; browsers always send it for WS upgrades,
     // so a missing Origin means a non-browser client trying to bypass the check.
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::FORBIDDEN,
-                "WebSocket Origin header required".to_string(),
-            )
-        })?;
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return (StatusCode::FORBIDDEN, "WebSocket Origin header required").into_response();
+    };
 
-    let is_local = is_local_origin(origin);
-    if !is_local {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "WebSocket origin not allowed".to_string(),
-        ));
+    if !is_local_origin(origin) {
+        return (StatusCode::FORBIDDEN, "WebSocket origin not allowed").into_response();
     }
+
+    // Origin accepted — now require the upgrade to succeed. A caller
+    // hitting `/api/chat/ws` from a trusted origin but without
+    // `Connection: Upgrade` / `Upgrade: websocket` / `Sec-WebSocket-*`
+    // (or via a test harness that can't supply hyper's `OnUpgrade`
+    // extension) falls into this branch. Return axum's own
+    // `WebSocketUpgradeRejection::into_response()` verbatim so RFC 7231
+    // §6.5.15 metadata (notably the `Upgrade` header on a 426) is
+    // preserved — flagged by PR #2712 review (Copilot + Gemini).
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rej) => return rej.into_response(),
+    };
+
     let verbose = params.debug && user.role == "admin";
-    Ok(ws.on_upgrade(move |socket| {
+    ws.on_upgrade(move |socket| {
         crate::channels::web::platform::ws::handle_ws_connection(socket, state, user, verbose)
-    }))
+    })
+    .into_response()
 }
 
 pub(crate) async fn chat_history_handler(
@@ -875,9 +890,14 @@ pub(crate) struct HistoryQuery {
 /// literal formats) and compares it against known local addresses. Used to
 /// prevent cross-site WebSocket hijacking while allowing localhost access.
 pub(crate) fn is_local_origin(origin: &str) -> bool {
-    let host = origin
+    // Accept both `http://localhost` and `http://LOCALHOST`. Browsers
+    // normalize the Origin header to lowercase in practice, but RFC 7230
+    // §5.4 allows uppercase hostnames. Normalize before parsing so the
+    // match never depends on the caller's casing.
+    let origin_lc = origin.to_ascii_lowercase();
+    let host = origin_lc
         .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
+        .or_else(|| origin_lc.strip_prefix("https://"))
         .and_then(|rest| {
             if rest.starts_with('[') {
                 // IPv6 literal: extract "[::1]" up to and including ']'
@@ -1582,6 +1602,346 @@ mod tests {
         assert!(!is_local_origin(""));
     }
 
+    #[test]
+    fn test_is_local_origin_accepts_uppercase() {
+        // Regression: the exact-case match used to reject `http://LOCALHOST`
+        // and other defensible uppercase variants per RFC 7230 §5.4. The
+        // implementation now lowercases before parsing so scheme AND host
+        // casing are both normalized.
+        assert!(is_local_origin("http://LOCALHOST:3001"));
+        assert!(is_local_origin("HTTP://localhost"));
+        assert!(is_local_origin("HTTP://127.0.0.1"));
+        // Spot-check that lowercasing doesn't change the already-passing cases.
+        assert!(is_local_origin("http://localhost"));
+        assert!(is_local_origin("http://127.0.0.1"));
+    }
+
+    // ── Caller-level tests for side-effect-gating handlers ─────────────
+    //
+    // Per `.claude/rules/testing.md` ("Test Through the Caller, Not Just
+    // the Helper"), the four chat handlers below each gate a different
+    // side effect (mpsc send, WS upgrade, DB write + session mutation).
+    // A helper-level test on their internal predicates isn't enough;
+    // these drive the handler directly so a future refactor that drops
+    // an input between the predicate and the side effect fails a real
+    // regression, not just a lint.
+
+    #[tokio::test]
+    async fn test_chat_send_handler_forwards_message_to_msg_tx() {
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::channels::IncomingMessage>(8);
+        *state.msg_tx.write().await = Some(tx);
+
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: None,
+            content: "hello agent".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let (status, body) = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect("handler ok");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body.status, "accepted");
+
+        // The whole point of the test: the side effect actually fired.
+        // Prior regression shape: a wrapper dropped the message silently
+        // and returned 202 anyway — caller test catches it, helper test
+        // on web_incoming_message alone does not. The timeout prevents
+        // such a regression from hanging the whole suite; flagged by
+        // PR #2712 review (Copilot).
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("accepted send must enqueue a message promptly")
+            .expect("msg_tx must receive the message the handler just accepted");
+        assert_eq!(received.content, "hello agent");
+        assert_eq!(received.user_id, "alice");
+        assert_eq!(received.id, body.message_id);
+    }
+
+    #[tokio::test]
+    async fn test_chat_send_handler_returns_503_without_channel() {
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        // Deliberately do NOT set msg_tx — the handler must detect the
+        // unwired channel and 503 rather than silently drop.
+        assert!(state.msg_tx.read().await.is_none());
+
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: None,
+            content: "noop".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let err = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect_err("expected SERVICE_UNAVAILABLE when msg_tx is None");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_chat_send_handler_rate_limits_after_threshold() {
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::channels::IncomingMessage>(64);
+        *state.msg_tx.write().await = Some(tx);
+
+        fn user() -> crate::channels::web::auth::AuthenticatedUser {
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            })
+        }
+
+        // `PerUserRateLimiter::new(30, 60)` — 30 requests per user per 60s.
+        // The 31st must be rejected with 429.
+        for _ in 0..30 {
+            let req = crate::channels::web::types::SendMessageRequest {
+                thread_id: None,
+                content: "burst".to_string(),
+                images: Vec::new(),
+                attachments: Vec::new(),
+                timezone: None,
+            };
+            let (status, _) = chat_send_handler(
+                axum::extract::State(Arc::clone(&state)),
+                user(),
+                axum::http::HeaderMap::new(),
+                axum::Json(req),
+            )
+            .await
+            .expect("within-budget call must succeed");
+            assert_eq!(status, StatusCode::ACCEPTED);
+            // Drain so the channel doesn't block the sender. Wrapped in
+            // a timeout so a regression that returns 202 without actually
+            // enqueueing can't hang the loop — flagged by PR #2712 review
+            // (Copilot).
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .expect("accepted send must enqueue a message promptly")
+                .expect("channel closed before queued message was received");
+        }
+
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: None,
+            content: "over-budget".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let err = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            user(),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect_err("31st call must be rate-limited");
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // The three WS handler tests below use `tower::ServiceExt::oneshot`,
+    // which cannot synthesize hyper's `OnUpgrade` extension. That means
+    // a localhost + valid upgrade-headers request cannot reach the 101
+    // SWITCHING_PROTOCOLS response inside these unit tests — it instead
+    // stops at the handler's `ws.ok_or(UPGRADE_REQUIRED)?` branch. We
+    // use that 426 as the positive signal that the Origin gate passed
+    // (the rejection path would have returned 403 first). The real
+    // upgrade-completes case is covered by `tests/ws_gateway_integration.rs`
+    // where tokio-tungstenite opens a real TCP connection.
+
+    fn ws_request(
+        origin: Option<&str>,
+        include_upgrade_headers: bool,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/chat/ws");
+        if include_upgrade_headers {
+            builder = builder
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+        }
+        if let Some(o) = origin {
+            builder = builder.header("Origin", o);
+        }
+        let mut req = builder
+            .body(axum::body::Body::empty())
+            .expect("request build");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "alice".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        req
+    }
+
+    #[tokio::test]
+    async fn test_chat_ws_handler_rejects_missing_origin() {
+        use tower::ServiceExt;
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        let app = Router::new()
+            .route("/api/chat/ws", axum::routing::get(chat_ws_handler))
+            .with_state(state);
+
+        let req = ws_request(None, true);
+        let resp = ServiceExt::<axum::http::Request<axum::body::Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "WS without Origin must 403 — non-browser client trying to bypass CSRF gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_ws_handler_rejects_remote_origin() {
+        use tower::ServiceExt;
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        let app = Router::new()
+            .route("/api/chat/ws", axum::routing::get(chat_ws_handler))
+            .with_state(state);
+
+        let req = ws_request(Some("http://evil.com"), true);
+        let resp = ServiceExt::<axum::http::Request<axum::body::Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "WS from remote origin must 403 — cross-site WS hijacking attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_ws_handler_accepts_localhost_origin() {
+        use tower::ServiceExt;
+        let state = test_gateway_state_with_dependencies(None, None, None, None);
+        let app = Router::new()
+            .route("/api/chat/ws", axum::routing::get(chat_ws_handler))
+            .with_state(state);
+
+        // Valid upgrade + localhost Origin. oneshot can't supply hyper's
+        // `OnUpgrade`, so the handler falls through to the `ok_or` branch
+        // and returns 426. That 426 (instead of 403) is the positive
+        // signal that the Origin gate accepted the request — if the gate
+        // had rejected, we'd have gotten 403 before reaching the upgrade
+        // check. The real 101 SWITCHING_PROTOCOLS path is exercised by
+        // `tests/ws_gateway_integration.rs::test_ws_*` with real TCP.
+        let req = ws_request(Some("http://localhost:3001"), true);
+        let resp = ServiceExt::<axum::http::Request<axum::body::Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UPGRADE_REQUIRED,
+            "WS with localhost Origin must pass the Origin gate and reach the upgrade \
+             step (which oneshot can't complete — real TCP path covered by integration tests)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_threads_handler_returns_in_memory_threads_without_db() {
+        let session_manager = Arc::new(SessionManager::new());
+        // Pre-seed one in-memory thread so the handler's fallback branch
+        // (no DB store) has something to return.
+        {
+            let session = session_manager.get_or_create_session("alice").await;
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("gateway"));
+        }
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned right after construction")
+            .session_manager = Some(session_manager);
+
+        let response = chat_threads_handler(
+            axum::extract::State(state),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+        )
+        .await
+        .expect("handler ok");
+
+        // No DB => no assistant_thread synthesized, but the in-memory
+        // thread must surface so the sidebar has something to render.
+        assert!(response.assistant_thread.is_none());
+        assert_eq!(
+            response.threads.len(),
+            1,
+            "handler must surface the in-memory thread when DB is absent"
+        );
+        assert_eq!(response.threads[0].channel.as_deref(), Some("gateway"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_new_thread_handler_persists_to_db_and_session() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+
+        let info = chat_new_thread_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+        )
+        .await
+        .expect("handler ok")
+        .0;
+
+        // Both side effects must fire: new thread in session AND conversation
+        // row persisted. If either is silently skipped, the sidebar shows
+        // a thread that can't be resumed — the bug shape this test pins.
+        let session_manager = state.session_manager.as_ref().expect("session manager");
+        let session = session_manager.get_or_create_session("alice").await;
+        let sess = session.lock().await;
+        assert!(
+            sess.threads.contains_key(&info.id),
+            "new thread must appear in session"
+        );
+        drop(sess);
+
+        let convs = db
+            .list_conversations_all_channels("alice", 50)
+            .await
+            .expect("list conversations");
+        assert!(
+            convs.iter().any(|c| c.id == info.id),
+            "new thread must be persisted to the conversation store"
+        );
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_chat_history_handler_drops_stale_in_progress_for_completed_turn() {
@@ -2156,7 +2516,7 @@ mod tests {
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "member-1");
         assert_eq!(
-            incoming.thread_id.as_deref(),
+            incoming.thread_id.as_ref().map(|t| t.as_str()),
             Some("gateway-thread-approval")
         );
         assert_eq!(
@@ -2368,7 +2728,10 @@ mod tests {
         ));
         assert_eq!(incoming.content, "[structured auth gate resolution]");
         assert_ne!(incoming.content, "secret-token");
-        assert_eq!(incoming.thread_id.as_deref(), Some("gateway-thread-auth"));
+        assert_eq!(
+            incoming.thread_id.as_ref().map(|t| t.as_str()),
+            Some("gateway-thread-auth")
+        );
         assert_eq!(
             incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
             Some("gateway-thread-auth")

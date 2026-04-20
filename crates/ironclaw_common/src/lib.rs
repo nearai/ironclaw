@@ -9,7 +9,10 @@ pub use event::{
     AppEvent, JobResultStatus, JobResultStatusParseError, OnboardingStateDto, PlanStepDto,
     ToolDecisionDto,
 };
-pub use identity::{CredentialName, ExtensionName, IdentityError, MAX_NAME_LEN};
+pub use identity::{
+    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, IdentityError,
+    MAX_EXTERNAL_THREAD_ID_LEN, MAX_NAME_LEN,
+};
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::truncate_preview;
 
