@@ -57,6 +57,8 @@ pub struct ThreadListResponse {
 #[derive(Debug, Serialize)]
 pub struct TurnInfo {
     pub turn_number: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     pub user_input: String,
     pub response: Option<String>,
     pub state: String,
@@ -76,7 +78,11 @@ pub struct ToolCallInfo {
     pub has_result: bool,
     pub has_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Agent's reasoning for choosing this tool.
@@ -106,6 +112,9 @@ pub struct HistoryResponse {
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,
+    /// Durable in-flight turn state used to rehydrate the UI after refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_progress: Option<InProgressInfo>,
 }
 
 /// Lightweight DTO for unified pending gate state.
@@ -118,8 +127,18 @@ pub struct PendingGateInfo {
     pub description: String,
     pub parameters: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_name: Option<String>,
+    pub extension_name: Option<ironclaw_common::ExtensionName>,
     pub resume_kind: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InProgressInfo {
+    pub turn_number: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
+    pub state: String,
+    pub user_input: String,
+    pub started_at: String,
 }
 
 // --- Approval ---
@@ -1374,7 +1393,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_auth_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: Some("req-123".to_string()),
             message: None,
@@ -1399,7 +1418,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_ready_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::Ready,
             request_id: None,
             message: Some("notion authenticated (3 tools loaded)".to_string()),
@@ -1421,7 +1440,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_auth_required() {
         let event = AppEvent::OnboardingState {
-            extension_name: "openai".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("openai").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: None,
             message: None,
@@ -1445,7 +1464,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_pairing_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "telegram".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
             state: OnboardingStateDto::PairingRequired,
             request_id: None,
             message: None,
@@ -1470,7 +1489,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_failed() {
         let event = AppEvent::OnboardingState {
-            extension_name: "slack".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("slack").unwrap(),
             state: OnboardingStateDto::Failed,
             request_id: None,
             message: Some("Invalid token".to_string()),

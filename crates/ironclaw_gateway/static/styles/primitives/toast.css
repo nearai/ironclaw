@@ -1,0 +1,71 @@
+/* --- Toast notifications --- */
+
+#toasts {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+.toast {
+  padding: 10px 16px 10px 12px;
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--text);
+  pointer-events: auto;
+  transform: translateX(120%);
+  transition: transform 400ms var(--ease-spring), opacity 200ms ease;
+  max-width: 360px;
+  word-break: break-word;
+  box-shadow: var(--shadow-lg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  position: relative;
+  overflow: hidden;
+}
+
+.toast.visible {
+  transform: translateX(0);
+}
+
+.toast.dismissing {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.toast-info {
+  border-left: 3px solid var(--accent);
+}
+
+.toast-success {
+  border-left: 3px solid var(--success);
+}
+
+.toast-error {
+  border-left: 3px solid var(--danger);
+}
+
+.toast-icon {
+  font-size: var(--text-base);
+  flex-shrink: 0;
+}
+
+.toast-countdown {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--accent);
+  animation: toastCountdown 4s linear forwards;
+}
+
+.toast-success .toast-countdown { background: var(--success); }
+.toast-error .toast-countdown { background: var(--danger); }
+

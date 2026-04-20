@@ -39,6 +39,7 @@ I18n.register('ko', {
   'tab.chat': '채팅',
   'tab.memory': '기억',
   'tab.jobs': '작업',
+  'tab.projects': '프로젝트',
   'tab.missions': '미션',
   'tab.routines': '루틴',
   'tab.settings': '설정',

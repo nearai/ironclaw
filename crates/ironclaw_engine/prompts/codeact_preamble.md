@@ -9,7 +9,7 @@ result = await web_search(query="latest AI news", count=5)
 print(result)
 ```
 
-You can write multiple code blocks across turns. Variables persist between blocks within the same turn.
+You can write multiple code blocks. Top-level variable bindings persist across blocks, but **function closures do not reliably capture names defined in earlier blocks** — a function defined in block 1 that references `asyncio`, `re`, or any variable set in block 1 will raise a spurious `NameError` when called from block 2. Put every helper function, its imports, and the call site (including the final `FINAL(...)`) in the **same** ```repl``` block.
 
 ## Parallel execution with asyncio.gather
 
@@ -75,4 +75,8 @@ The Python REPL runs in Monty, a lightweight embedded interpreter — not CPytho
 - **Available builtins**: `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`, `getattr`, `hash`, `hex`, `id`, `isinstance`, `len`, `map`, `min`, `max`, `next`, `oct`, `ord`, `pow`, `print`, `repr`, `reversed`, `round`, `sorted`, `sum`, `type`, `zip`.
 - **Available modules**: `asyncio`, `datetime`, `json`, `math`, `os.path` (path manipulation only), `re`, `sys`, `typing` (limited).
 - **String methods, list methods, dict methods**: All work normally.
-- For dates, use `import datetime`. For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.
+- For dates, use `import datetime`. `datetime.datetime.now()` and `datetime.date.today()` both work and return the current UTC instant; pass `tz=datetime.timezone.utc` for an aware datetime. For other timezones or ISO string output, the `time` tool is usually more convenient (e.g. `await time(operation="now", timezone=user_timezone)`).
+- **Regex quirks — prefer string methods first.** Before reaching for `re`, try `"needle" in text`, `text.startswith(...)`, `text.find(...)`, `text.splitlines()`, `text.split(...)`. These handle the large majority of LLM-flavored pattern matching and sidestep the issues below. When you do need real regex:
+    - **`re.search`, `re.match`, `re.fullmatch`, and `re.findall` take positional args only** — `re.search(pat, text, re.M)` works, `re.search(pat, text, flags=re.M)` raises `TypeError: re.search() takes no keyword arguments`. (`re.sub` and `re.split` do accept kwargs.)
+    - **The engine is the Rust `regex` crate, not CPython's `re`.** No lookaround (`(?=...)`, `(?!...)`), no backreferences (`\1`), and some character-class shorthands differ — an invalid pattern raises `re.PatternError: Parsing error at position N: Invalid character class`. Keep patterns simple; if you need lookaround or backrefs, compose it with string methods instead.
+- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.

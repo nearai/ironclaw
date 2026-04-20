@@ -38,6 +38,26 @@ pub struct ImageUrl {
     pub detail: Option<String>,
 }
 
+impl ImageUrl {
+    /// Normalize the OpenAI image detail hint, defaulting missing or invalid
+    /// values to `"auto"` per the Chat Completions schema.
+    pub fn normalized_openai_detail(&self) -> String {
+        normalize_openai_image_detail(self.detail.as_deref())
+    }
+}
+
+/// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
+pub fn normalize_openai_image_detail(detail: Option<&str>) -> String {
+    match detail
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| detail.to_ascii_lowercase())
+    {
+        Some(detail) if matches!(detail.as_str(), "auto" | "low" | "high") => detail,
+        _ => "auto".to_string(),
+    }
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -747,6 +767,35 @@ mod tests {
                  but duplicate ID '{id}' found for seeds ({a}, {b})"
             );
         }
+    }
+
+    #[test]
+    fn normalize_openai_image_detail_defaults_to_auto() {
+        assert_eq!(normalize_openai_image_detail(None), "auto");
+        assert_eq!(normalize_openai_image_detail(Some("")), "auto");
+        assert_eq!(normalize_openai_image_detail(Some("AUTO")), "auto");
+        assert_eq!(normalize_openai_image_detail(Some("unexpected")), "auto");
+    }
+
+    #[test]
+    fn normalize_openai_image_detail_preserves_valid_values() {
+        assert_eq!(normalize_openai_image_detail(Some("low")), "low");
+        assert_eq!(normalize_openai_image_detail(Some("high")), "high");
+        assert_eq!(normalize_openai_image_detail(Some(" auto ")), "auto");
+    }
+
+    #[test]
+    fn image_content_part_without_url_is_rejected() {
+        let err = serde_json::from_value::<ContentPart>(serde_json::json!({
+            "type": "image_url",
+            "image_url": {}
+        }))
+        .expect_err("missing image_url.url must fail");
+
+        assert!(
+            err.to_string().contains("url"),
+            "expected error to mention missing url, got: {err}"
+        );
     }
 
     #[test]

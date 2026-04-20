@@ -1,13 +1,63 @@
 //! Shared utility functions for the web gateway.
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::{GeneratedImageInfo, ToolCallInfo, TurnInfo};
+use crate::channels::web::types::{GeneratedImageInfo, ImageData, ToolCallInfo, TurnInfo};
 use crate::generated_images::GeneratedImageSentinel;
 
 pub use ironclaw_common::truncate_preview;
 
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
+const MAX_TOOL_RESULT_DISPLAY_BYTES: usize = 1000;
 
 /// Build an incoming message with the metadata invariants expected by the web
 /// gateway and downstream status routing.
@@ -56,11 +106,28 @@ pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
 }
 
-/// Convert stored tool result content into plain text suitable for UI display.
-pub fn tool_result_for_display(content: &str) -> String {
-    let unwrapped = ironclaw_safety::SafetyLayer::unwrap_tool_output(content)
-        .unwrap_or_else(|| content.to_string());
-    truncate_preview(&unwrapped, 1000)
+/// Convert stored tool results into plain text suitable for UI display.
+pub fn tool_result_for_display(result: &serde_json::Value) -> Option<String> {
+    if result.is_null() {
+        return None;
+    }
+
+    if GeneratedImageSentinel::from_value(result).is_some() {
+        return Some("Generated image".to_string());
+    }
+
+    let content = match result {
+        serde_json::Value::String(s) => {
+            ironclaw_safety::SafetyLayer::unwrap_tool_output(s).unwrap_or_else(|| s.clone())
+        }
+        other => other.to_string(),
+    };
+
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(truncate_preview(&content, MAX_TOOL_RESULT_DISPLAY_BYTES))
 }
 
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
@@ -68,18 +135,20 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
         .iter()
         .map(|c| {
-            let result_source = c
-                .get("result")
-                .or_else(|| c.get("result_preview"))
-                .and_then(|v| v.as_str());
+            let result_preview = c.get("result_preview").and_then(tool_result_for_display);
+            let result = c.get("result").and_then(tool_result_for_display);
             ToolCallInfo {
                 name: c["name"].as_str().unwrap_or("unknown").to_string(),
-                has_result: c
-                    .get("result")
-                    .or_else(|| c.get("result_preview"))
-                    .is_some_and(|v| !v.is_null()),
+                has_result: c.get("result").is_some_and(|v| !v.is_null())
+                    || c.get("result_preview").is_some_and(|v| !v.is_null()),
                 has_error: c.get("error").is_some_and(|v| !v.is_null()),
-                result_preview: result_source.map(tool_result_for_display),
+                call_id: c
+                    .get("tool_call_id")
+                    .or_else(|| c.get("call_id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                result,
+                result_preview,
                 error: c["error"].as_str().map(tool_error_for_display),
                 rationale: c["rationale"].as_str().map(String::from),
             }
@@ -133,14 +202,7 @@ pub fn collect_generated_images_from_tool_results<'a>(
 
 pub fn tool_result_preview(result: Option<&serde_json::Value>) -> Option<String> {
     let result = result?;
-    if GeneratedImageSentinel::from_value(result).is_some() {
-        return Some("Generated image".to_string());
-    }
-    let s = match result {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    Some(tool_result_for_display(&s))
+    tool_result_for_display(result)
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -160,6 +222,7 @@ pub fn build_turns_from_db_messages(
         if msg.role == "user" {
             let mut turn = TurnInfo {
                 turn_number,
+                user_message_id: Some(msg.id),
                 user_input: msg.content.clone(),
                 response: None,
                 state: "Completed".to_string(),
@@ -250,6 +313,7 @@ pub fn build_turns_from_db_messages(
             // with no preceding user message — render as a turn with empty input.
             turns.push(TurnInfo {
                 turn_number,
+                user_message_id: None,
                 user_input: String::new(),
                 response: Some(msg.content.clone()),
                 state: "Completed".to_string(),
@@ -343,9 +407,54 @@ mod tests {
         assert_eq!(turns[0].tool_calls.len(), 2);
         assert_eq!(turns[0].tool_calls[0].name, "shell");
         assert!(turns[0].tool_calls[0].has_result);
+        assert_eq!(turns[0].tool_calls[0].result.as_deref(), None);
         assert_eq!(turns[0].tool_calls[1].name, "http");
         assert!(turns[0].tool_calls[1].has_error);
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_with_persisted_tool_result_for_display() {
+        let tc_json = serde_json::json!([{
+            "name": "memory_search",
+            "call_id": "turn0_0",
+            "result_preview": "Found 3 results",
+            "result": "<tool_output name=\"memory_search\">\n{\"hits\":3}\n</tool_output>"
+        }]);
+        let messages = vec![
+            make_msg("user", "Search memory", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 1);
+        assert_eq!(turns[0].tool_calls[0].call_id.as_deref(), Some("turn0_0"));
+        assert_eq!(
+            turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("Found 3 results")
+        );
+        assert_eq!(
+            turns[0].tool_calls[0].result.as_deref(),
+            Some("{\"hits\":3}")
+        );
+    }
+
+    #[test]
+    fn test_tool_result_for_display_truncates_long_content() {
+        let long_result = serde_json::Value::String("x".repeat(1200));
+
+        let display = tool_result_for_display(&long_result);
+
+        assert_eq!(display.as_deref().map(str::len), Some(1003));
+        assert!(display.as_deref().is_some_and(|s| s.ends_with("...")));
+    }
+
+    #[test]
+    fn test_tool_result_for_display_skips_null() {
+        assert_eq!(tool_result_for_display(&serde_json::Value::Null), None);
     }
 
     #[test]
@@ -373,8 +482,13 @@ mod tests {
 
     #[test]
     fn test_tool_result_for_display_unwraps_wrapped_content() {
-        let wrapped = "<tool_output name=\"http\">\n{\"city\":\"Shanghai\"}\n</tool_output>";
-        assert_eq!(tool_result_for_display(wrapped), "{\"city\":\"Shanghai\"}");
+        let wrapped = serde_json::json!(
+            "<tool_output name=\"http\">\n{\"city\":\"Shanghai\"}\n</tool_output>"
+        );
+        assert_eq!(
+            tool_result_for_display(&wrapped).as_deref(),
+            Some("{\"city\":\"Shanghai\"}")
+        );
     }
 
     #[test]
@@ -407,8 +521,35 @@ mod tests {
 
         assert_eq!(
             turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("short preview...")
+        );
+        assert_eq!(
+            turns[0].tool_calls[0].result.as_deref(),
             Some("full result body")
         );
+    }
+
+    #[test]
+    fn test_build_turns_preview_only_does_not_populate_full_result() {
+        let tc_json = serde_json::json!({
+            "calls": [{
+                "name": "web_search",
+                "result_preview": "<tool_output name=\"web_search\">\npreview body\n</tool_output>"
+            }]
+        });
+        let messages = vec![
+            make_msg("user", "Search", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(
+            turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("preview body")
+        );
+        assert_eq!(turns[0].tool_calls[0].result.as_deref(), None);
     }
 
     #[test]
@@ -660,6 +801,7 @@ mod tests {
         let mut turns = vec![
             TurnInfo {
                 turn_number: 0,
+                user_message_id: None,
                 user_input: "older".to_string(),
                 response: Some("done".to_string()),
                 state: "Completed".to_string(),
@@ -675,6 +817,7 @@ mod tests {
             },
             TurnInfo {
                 turn_number: 1,
+                user_message_id: None,
                 user_input: "newer".to_string(),
                 response: Some("done".to_string()),
                 state: "Completed".to_string(),

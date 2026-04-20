@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use ironclaw_common::ExtensionName;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -343,6 +344,8 @@ pub enum StatusUpdate {
         parameters: Option<String>,
         /// Stable tool-call ID when available.
         call_id: Option<String>,
+        /// Actual tool execution duration when available.
+        duration_ms: Option<u64>,
     },
     /// Brief preview of tool execution output.
     ToolResult {
@@ -375,7 +378,7 @@ pub enum StatusUpdate {
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
@@ -383,7 +386,7 @@ pub enum StatusUpdate {
     },
     /// Extension authentication completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },
@@ -447,7 +450,17 @@ pub enum StatusUpdate {
         cost_usd: String,
     },
     /// Skills activated for this conversation turn.
-    SkillActivated { skill_names: Vec<String> },
+    ///
+    /// `feedback` carries optional human-readable notes about the
+    /// activation — e.g. "chain-loaded from code-review", "ceo-setup
+    /// excluded by setup marker", "budget exhausted". Empty when the
+    /// activation path has nothing to annotate. The UI should render
+    /// each line as a muted sub-bullet under the skill list; channels
+    /// that ignore it should just drop the field.
+    SkillActivated {
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
     /// Thread list for interactive resume picker.
     ThreadList { threads: Vec<ThreadSummary> },
     /// Engine v2 thread list for TUI activity sidebar.
@@ -584,6 +597,7 @@ impl StatusUpdate {
         result: &Result<String, crate::error::Error>,
         params: &serde_json::Value,
         tool: Option<&dyn crate::tools::Tool>,
+        duration_ms: Option<u64>,
     ) -> Self {
         let success = result.is_ok();
         let sensitive = tool.map(|t| t.sensitive_params()).unwrap_or(&[]);
@@ -598,6 +612,7 @@ impl StatusUpdate {
                 None
             },
             call_id,
+            duration_ms,
         }
     }
 }
@@ -865,16 +880,19 @@ mod tests {
             &err,
             &params,
             Some(&tool as &dyn crate::tools::Tool),
+            Some(25),
         );
 
         if let StatusUpdate::ToolCompleted {
             success,
             error,
             parameters,
+            duration_ms,
             ..
         } = &status
         {
             assert!(!success);
+            assert_eq!(*duration_ms, Some(25));
             let err_msg = error.as_deref().expect("should have error");
             assert!(err_msg.contains("db error"), "error: {}", err_msg);
             let param_str = parameters
@@ -905,7 +923,8 @@ mod tests {
         let params = serde_json::json!({"name": "key", "value": "secret"});
         let ok: Result<String, crate::error::Error> = Ok("done".into());
 
-        let status = StatusUpdate::tool_completed("secret_save".into(), None, &ok, &params, None);
+        let status =
+            StatusUpdate::tool_completed("secret_save".into(), None, &ok, &params, None, None);
 
         if let StatusUpdate::ToolCompleted {
             success,
@@ -932,7 +951,7 @@ mod tests {
             }
             .into());
 
-        let status = StatusUpdate::tool_completed("shell".into(), None, &err, &params, None);
+        let status = StatusUpdate::tool_completed("shell".into(), None, &err, &params, None, None);
 
         if let StatusUpdate::ToolCompleted { parameters, .. } = &status {
             let param_str = parameters.as_ref().expect("should have parameters");
