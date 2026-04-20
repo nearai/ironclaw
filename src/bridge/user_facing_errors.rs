@@ -69,7 +69,7 @@ pub(crate) fn user_facing_thread_failure(error: &str) -> String {
                 .into()
         }
         FailureCategory::AuthFailure => {
-            "The AI model could not authenticate. Please reconnect the provider and try again."
+            "The AI model could not authenticate. Please re-authenticate the provider and try again."
                 .into()
         }
         FailureCategory::IterationLimit => {
@@ -102,30 +102,41 @@ pub(crate) fn classify_failure(error: &str) -> FailureCategory {
     }
 
     // Context length: HTTP 413 or explicit context-length error strings.
+    // Note: we deliberately do NOT match on the generic "tokens used"
+    // phrase — it's overly broad and can appear in informational text.
+    // The explicit `context length exceeded` / `context_length_exceeded`
+    // markers cover the real failure modes (including issue #2408).
     if lower.contains("http 413")
         || lower.contains("payload too large")
         || lower.contains("context length exceeded")
         || lower.contains("context_length_exceeded")
-        || lower.contains("tokens used")
     {
         return FailureCategory::ContextTooLarge;
     }
 
-    // Authentication failures. Match on both HTTP status and on the
-    // `LlmError::AuthFailed` / session-expired text the providers emit.
+    // Authentication failures. Match on specific HTTP status lines and
+    // explicit auth-failure markers. We deliberately do NOT match on
+    // bare "unauthorized" because that word also appears in
+    // tool-level / resource-access errors that are not LLM auth issues.
     if lower.contains("http 401")
         || lower.contains("http 403")
+        || lower.contains("401 unauthorized")
+        || lower.contains("invalid api key")
+        || lower.contains("invalid_api_key")
         || lower.contains("authentication failed")
         || lower.contains("session expired")
         || lower.contains("session renewal failed")
-        || lower.contains("unauthorized")
     {
         return FailureCategory::AuthFailure;
     }
 
     // Provider unavailability. Matches the exact shape of the issue
     // #2546 traceback (`HTTP 502 Bad Gateway`) and also covers 503/504
-    // and common upstream-timeout phrasings.
+    // and common upstream-timeout phrasings. We deliberately do NOT
+    // match on the very generic `"request failed"` or `"provider nearai"`
+    // phrases — they would misclassify non-5xx provider failures
+    // (e.g. `Provider openai_codex request failed: HTTP 400`) as
+    // transient unavailability.
     if lower.contains("http 502")
         || lower.contains("http 503")
         || lower.contains("http 504")
@@ -133,9 +144,9 @@ pub(crate) fn classify_failure(error: &str) -> FailureCategory {
         || lower.contains("service unavailable")
         || lower.contains("gateway timeout")
         || lower.contains("upstream connect error")
+        || lower.contains("upstream")
+        || lower.contains("provider temporarily unavailable")
         || lower.contains("llm call failed")
-        || lower.contains("provider nearai")
-        || lower.contains("request failed")
     {
         return FailureCategory::LlmUnavailable;
     }
@@ -333,6 +344,77 @@ mod tests {
         assert_eq!(
             classify_failure("Reached maximum iterations"),
             FailureCategory::IterationLimit
+        );
+    }
+
+    #[test]
+    fn non_5xx_provider_failure_is_not_llm_unavailable() {
+        // Regression for PR #2747 review: the old classifier matched
+        // on the very generic `"request failed"` phrase, which caused
+        // non-5xx provider failures (like a 400 Bad Request) to be
+        // misclassified as transient unavailability. Those should now
+        // fall through to `Unknown` so the user gets the generic
+        // "something went wrong" message instead of an incorrect
+        // "try again in a few moments" nudge.
+        let raw = "Provider openai_codex request failed: HTTP 400 Bad Request";
+        assert_ne!(
+            classify_failure(raw),
+            FailureCategory::LlmUnavailable,
+            "non-5xx provider failure must not classify as LlmUnavailable"
+        );
+        assert_eq!(classify_failure(raw), FailureCategory::Unknown);
+    }
+
+    #[test]
+    fn bare_unauthorized_is_not_auth_failure() {
+        // Regression for PR #2747 review: the old classifier matched
+        // on bare `"unauthorized"`, which caught tool-level resource
+        // permission errors and mislabeled them as LLM provider auth
+        // failures. Only explicit LLM-auth markers should match.
+        let raw = "Tool failed: unauthorized to access /etc/shadow";
+        assert_ne!(
+            classify_failure(raw),
+            FailureCategory::AuthFailure,
+            "bare 'unauthorized' must not classify as AuthFailure"
+        );
+    }
+
+    #[test]
+    fn invalid_api_key_is_auth_failure() {
+        assert_eq!(
+            classify_failure("Provider returned: Invalid API key"),
+            FailureCategory::AuthFailure
+        );
+        assert_eq!(
+            classify_failure("{\"error\":{\"code\":\"invalid_api_key\"}}"),
+            FailureCategory::AuthFailure
+        );
+    }
+
+    #[test]
+    fn http_401_with_unauthorized_word_still_matches() {
+        // The common wire shape `HTTP 401 Unauthorized` continues to
+        // classify as AuthFailure via the explicit `"http 401"` marker.
+        assert_eq!(
+            classify_failure("401 Unauthorized: invalid token"),
+            FailureCategory::AuthFailure
+        );
+    }
+
+    #[test]
+    fn auth_failure_message_is_channel_agnostic() {
+        // Regression for PR #2747 review: the old copy said "Please
+        // reconnect the provider", which is web-UI-specific. The
+        // router is used across channels (web/telegram/CLI), so the
+        // message must avoid channel-specific verbs.
+        let msg = user_facing_thread_failure("HTTP 401 Unauthorized");
+        assert!(
+            !msg.contains("reconnect"),
+            "auth failure copy must not use 'reconnect' (web-only verb): {msg}"
+        );
+        assert!(
+            msg.contains("re-authenticate"),
+            "auth failure copy should guide users to re-authenticate: {msg}"
         );
     }
 
