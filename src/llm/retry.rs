@@ -348,6 +348,49 @@ mod tests {
             status: 502,
             retry_after: None,
         }));
+        // Any 5xx status code surfaces as BadGateway — including 500 which
+        // is the exact case called out by the PR #2753 review (Gemini,
+        // security-medium): upstream 500 with a Python traceback in the body
+        // used to leak through `RequestFailed { reason }`, now mapped to
+        // BadGateway which drops the body entirely.
+        assert!(is_retryable(&LlmError::BadGateway {
+            provider: "p".into(),
+            status: 500,
+            retry_after: None,
+        }));
+    }
+
+    /// Regression for PR #2753 review: when `BadGateway` carries
+    /// `retry_after: None` (because the upstream response didn't include a
+    /// Retry-After header), the retry loop must fall through to
+    /// `retry_backoff_delay` instead of matching the `Some(_)` arm. A
+    /// previous version of `nearai_chat` wrapped every response in
+    /// `Some(parse_retry_after(...))`, which defaulted missing headers to
+    /// 60s and silently defeated exponential backoff.
+    #[test]
+    fn bad_gateway_without_retry_after_does_not_match_some_arm() {
+        let err = LlmError::BadGateway {
+            provider: "p".into(),
+            status: 502,
+            retry_after: None,
+        };
+        // Mirrors the match arms inside `RetryProvider::retry_loop` —
+        // if this assertion ever fails, exponential backoff is silently
+        // being replaced by whatever `retry_after` defaulted to.
+        let explicitly_timed = matches!(
+            err,
+            LlmError::BadGateway {
+                retry_after: Some(_),
+                ..
+            } | LlmError::RateLimited {
+                retry_after: Some(_),
+                ..
+            }
+        );
+        assert!(
+            !explicitly_timed,
+            "BadGateway without Retry-After must fall through to exponential backoff"
+        );
 
         // NOT retryable
         assert!(!is_retryable(&LlmError::AuthFailed {

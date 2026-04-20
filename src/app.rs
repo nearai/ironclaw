@@ -89,22 +89,19 @@ pub struct AppBuilderFlags {
 /// Build an ephemeral in-memory secrets store backed by a freshly-generated
 /// master key.
 ///
-/// Returns `None` only if the crypto routine fails to initialize — which
+/// Returns `Err` only if the crypto routine fails to initialize — which
 /// should not happen in practice, since the key is produced by the same
-/// generator used throughout the test suite. Exposed as a free function so
-/// that both `install_ephemeral_secrets_store` and the unit tests can exercise
-/// the exact same construction path.
-fn build_ephemeral_secrets_store() -> Option<Arc<dyn SecretsStore + Send + Sync>> {
+/// generator used throughout the test suite. Propagated (rather than
+/// swallowed) so that a construction failure aborts startup at
+/// `init_secrets` instead of surfacing later as an unactionable
+/// "secrets store not initialized" error from `init_extensions`.
+fn build_ephemeral_secrets_store()
+-> Result<Arc<dyn SecretsStore + Send + Sync>, crate::secrets::SecretError> {
     use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
     let ephemeral_key =
         secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-    match SecretsCrypto::new(ephemeral_key) {
-        Ok(crypto) => Some(Arc::new(InMemorySecretsStore::new(Arc::new(crypto)))),
-        Err(e) => {
-            tracing::warn!("Failed to initialize ephemeral secrets crypto: {e}");
-            None
-        }
-    }
+    let crypto = SecretsCrypto::new(ephemeral_key)?;
+    Ok(Arc::new(InMemorySecretsStore::new(Arc::new(crypto))))
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -266,16 +263,27 @@ impl AppBuilder {
     /// at warn so operators diagnosing a TEE deployment can distinguish
     /// "master key never resolved" from "master key resolved but no DB
     /// handle" from "crypto init failed" without turning on debug logging.
-    fn install_ephemeral_secrets_store(&mut self, reason: &str) {
-        if let Some(store) = build_ephemeral_secrets_store() {
-            tracing::warn!(
-                reason = reason,
-                "Persistent secrets store unavailable; installing ephemeral in-memory fallback. \
-                 Credentials saved via `ironclaw tool auth` will not persist across restarts. \
-                 Run `ironclaw doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
-            );
-            self.secrets_store = Some(store);
-        }
+    ///
+    /// Returns the error from `build_ephemeral_secrets_store` so that a
+    /// genuinely broken crypto setup aborts startup here — otherwise a
+    /// downstream phase (e.g. `init_extensions`) would later fail with a
+    /// less actionable "secrets store not initialized" error.
+    fn install_ephemeral_secrets_store(&mut self, reason: &str) -> Result<(), anyhow::Error> {
+        let store = build_ephemeral_secrets_store().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to initialize ephemeral secrets store ({reason}): {e}. \
+                 This should not happen in practice; please report at \
+                 https://github.com/nearai/ironclaw/issues"
+            )
+        })?;
+        tracing::warn!(
+            reason = reason,
+            "Persistent secrets store unavailable; installing ephemeral in-memory fallback. \
+             Credentials saved via `ironclaw tool auth` will not persist across restarts. \
+             Run `ironclaw doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
+        );
+        self.secrets_store = Some(store);
+        Ok(())
     }
 
     /// Phase 2: Create secrets store.
@@ -310,7 +318,7 @@ impl AppBuilder {
                     );
                 }
 
-                self.install_ephemeral_secrets_store("master key resolution produced no key");
+                self.install_ephemeral_secrets_store("master key resolution produced no key")?;
                 return Ok(());
             }
         };
@@ -320,7 +328,7 @@ impl AppBuilder {
             Err(e) => {
                 tracing::warn!("Failed to initialize secrets crypto: {}", e);
                 self.handles.take();
-                self.install_ephemeral_secrets_store("secrets crypto initialization failed");
+                self.install_ephemeral_secrets_store("secrets crypto initialization failed")?;
                 return Ok(());
             }
         };
@@ -453,7 +461,7 @@ impl AppBuilder {
             } else {
                 "master key resolved and DB handles present but create_secrets_store returned None (unexpected)"
             };
-            self.install_ephemeral_secrets_store(reason);
+            self.install_ephemeral_secrets_store(reason)?;
         }
 
         Ok(())

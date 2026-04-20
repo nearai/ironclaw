@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -258,9 +259,16 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
-            response.headers().get("retry-after"),
-        ));
+        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
+        // header was actually present on the response — `None` otherwise, so
+        // that 502/503/504 retries fall back to `retry_backoff_delay`'s
+        // exponential schedule instead of the 60s default that
+        // `parse_retry_after` applies to missing headers. Preserving the 60s
+        // floor for 429 (rate limit) still happens at the 429 call site below.
+        let retry_after_header: Option<Duration> = response
+            .headers()
+            .get("retry-after")
+            .map(|h| crate::llm::retry::parse_retry_after(Some(h)));
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -293,9 +301,12 @@ impl NearAiChatProvider {
             }
 
             if status_code == 429 {
+                // Preserve existing rate-limit behavior: fall back to a 60s
+                // default when the server omits Retry-After. Long sleeps are
+                // appropriate for rate-limit backpressure.
                 return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header,
+                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
                 });
             }
 
@@ -324,12 +335,16 @@ impl NearAiChatProvider {
                 }
             }
 
-            // HTTP 5xx from the upstream LLM gateway — map to BadGateway so the
-            // retry layer backs off, the circuit breaker counts a transient failure,
-            // and the channel boundary produces a user-safe message (never the raw
-            // upstream body, which often contains a Python traceback). The raw
-            // body is logged at debug for operators.
-            if matches!(status_code, 502..=504) {
+            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
+            // so the retry layer backs off, the circuit breaker counts a
+            // transient failure, and the channel boundary produces a user-safe
+            // message. HTTP 500 is the most important case for the #2546
+            // traceback-leak report: upstream application errors frequently
+            // return 500 with a Python traceback in the body. 502/503/504 are
+            // the proxy-layer variants. The `status` field preserves the
+            // specific code for operators; the body is logged at debug and
+            // never carried on the error.
+            if matches!(status_code, 500..=599) {
                 tracing::debug!(
                     provider = "nearai_chat",
                     status = status_code,
