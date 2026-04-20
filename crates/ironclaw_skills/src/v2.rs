@@ -183,6 +183,12 @@ pub struct V2SkillMetadata {
     /// SHA-256 hash of the prompt content.
     #[serde(default)]
     pub content_hash: String,
+    /// Installed bundle path on disk when the skill came from a filesystem bundle.
+    #[serde(default)]
+    pub bundle_path: Option<String>,
+    /// Original source URL when the install came from a remote bundle.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -276,6 +282,8 @@ mod tests {
                 repaired_at: None,
             }],
             content_hash: "sha256:abc".to_string(),
+            bundle_path: Some("/tmp/skills/test-skill".to_string()),
+            source_url: Some("https://github.com/example/test-skill".to_string()),
         };
 
         let json = serde_json::to_string(&meta).expect("serialize");
@@ -285,6 +293,14 @@ mod tests {
         assert_eq!(parsed.version, 3);
         assert_eq!(parsed.source, V2SkillSource::Extracted);
         assert_eq!(parsed.code_snippets.len(), 1);
+        assert_eq!(
+            parsed.bundle_path.as_deref(),
+            Some("/tmp/skills/test-skill")
+        );
+        assert_eq!(
+            parsed.source_url.as_deref(),
+            Some("https://github.com/example/test-skill")
+        );
         assert_eq!(parsed.metrics.success_count, 4);
         assert_eq!(parsed.parent_version, Some(2));
         assert_eq!(parsed.revisions.len(), 1);
@@ -303,5 +319,7 @@ mod tests {
         assert!((parsed.metrics.confidence() - 1.0).abs() < f64::EPSILON);
         assert!(parsed.revisions.is_empty());
         assert!(parsed.repairs.is_empty());
+        assert_eq!(parsed.bundle_path, None);
+        assert_eq!(parsed.source_url, None);
     }
 }
