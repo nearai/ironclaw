@@ -387,10 +387,17 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
     await seed_non_oauth_credentials(stack.base_url, stack.gateway_token, owner_user_id)
 
     # Phase 3: Install and activate all extensions.
+    # Lifecycle cases reuse the same extension as their read-only counterpart
+    # (e.g. gmail_roundtrip shares extension_install_name="gmail"),
+    # so we deduplicate by extension_install_name to avoid double-install.
+    installed_extensions: set[str] = set()
     for probe in probes:
+        if probe.extension_install_name in installed_extensions:
+            continue
         is_google = probe.shared_secret_name == "google_oauth_token"
         if is_google and google_oauth_done and probe.extension_install_name == "gmail":
             # Already installed and authenticated via OAuth flow above.
+            installed_extensions.add(probe.extension_install_name)
             continue
         ext = await install_extension(
             stack.base_url,
@@ -400,6 +407,7 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
             install_kind=probe.install_kind,
             install_url=probe.install_url,
         )
+        installed_extensions.add(probe.extension_install_name)
         if is_google and google_oauth_done:
             # Google extensions share google_oauth_token but ironclaw tracks
             # auth per-extension. Complete OAuth for each one individually.
@@ -913,7 +921,9 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help=(
             "Limit the run to selected providers. Repeat for multiple values. "
-            "For seeded mode: gmail, google_calendar, github, notion. "
+            "For seeded mode: gmail, google_calendar, github, notion, "
+            "gmail_roundtrip, google_calendar_lifecycle, "
+            "notion_search_lifecycle. "
             "For browser mode: google, github, notion."
         ),
     )
@@ -932,7 +942,11 @@ def parse_args() -> argparse.Namespace:
 def _validate_case_choices(args: argparse.Namespace) -> None:
     if not args.case:
         return
-    seeded_choices = {"gmail", "google_calendar", "github", "notion"}
+    seeded_choices = {
+        "gmail", "google_calendar", "github", "notion",
+        "gmail_roundtrip",
+        "google_calendar_lifecycle", "notion_search_lifecycle",
+    }
     browser_choices = set(BROWSER_CASES)
     allowed = seeded_choices if args.mode == "seeded" else browser_choices
     bad = [c for c in args.case if c not in allowed]

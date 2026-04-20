@@ -85,6 +85,24 @@ EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
 
+# Lifecycle canary triggers for write+cleanup flows against real provider APIs.
+GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
+    r"create a github issue in (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+) titled",
+    re.IGNORECASE,
+)
+GMAIL_ROUNDTRIP_TRIGGER = re.compile(
+    r"send an email to (?P<email>\S+@\S+) with subject",
+    re.IGNORECASE,
+)
+GCAL_LIFECYCLE_TRIGGER = re.compile(
+    r"create a google calendar event titled",
+    re.IGNORECASE,
+)
+NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
+    r"search notion for .*, then search again",
+    re.IGNORECASE,
+)
+
 TOOL_CALL_PATTERNS = [
     # Parallel tool calls: return both echo and time in one response
     (
@@ -1075,6 +1093,97 @@ def _conversation_has_tool_name(messages: list[dict], expected_name: str) -> boo
     return False
 
 
+# ── Lifecycle canary helpers ────────────────────────────────────────────────
+#
+# These extract structured data from real provider tool-result JSON so the
+# multi-step lifecycle flows can pass IDs between steps (e.g. the issue
+# number from create_issue feeds into create_issue_comment, the event_id
+# from create_event feeds into delete_event, etc.).
+
+
+def _extract_canary_title(text: str) -> str:
+    """Extract a quoted title like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"titled\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"titled\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_canary_subject(text: str) -> str:
+    """Extract a subject like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"subject\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"subject\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_issue_number(content: str) -> int | None:
+    """Extract the issue number from a GitHub create_issue tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "number" in data:
+            return int(data["number"])
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"number"\s*:\s*(\d+)', content)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _extract_gmail_message_id(content: str) -> str | None:
+    """Extract the message id from a Gmail send_message tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return data.get("id") or data.get("message_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_calendar_event_id(content: str) -> str | None:
+    """Extract the event id from a Google Calendar create_event tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            event = data.get("event", data)
+            return event.get("id") or event.get("event_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _tomorrow_10am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:00 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=0, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tomorrow_1030am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:30 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=30, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_base(completion_id: str) -> dict:
     return {"id": completion_id, "object": "chat.completion.chunk",
             "created": int(time.time()), "model": "mock-model"}
@@ -1150,6 +1259,194 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
             "text": "Multi-step complete: executed echo then time.",
         }
 
+    # ── Lifecycle canary: GitHub issue create → comment → verify ─────────
+    m = GITHUB_ISSUE_LIFECYCLE_TRIGGER.search(last_user)
+    if m and has_tools:
+        owner = m.group("owner")
+        repo = m.group("repo")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "github",
+                    "arguments": {
+                        "action": "create_issue",
+                        "owner": owner,
+                        "repo": repo,
+                        "title": _extract_canary_title(last_user),
+                        "body": "Automated canary lifecycle test.",
+                        "labels": ["canary"],
+                    },
+                },
+            }
+        if n == 1:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "create_issue_comment",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                            "body": "Canary verification",
+                        },
+                    },
+                }
+        if n == 2:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "get_issue",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "github issue lifecycle complete. Issue created, commented, and verified.",
+        }
+
+    # ── Lifecycle canary: Gmail send → list → trash ──────────────────────
+    m = GMAIL_ROUNDTRIP_TRIGGER.search(last_user)
+    if m and has_tools:
+        email = m.group("email")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            subject = _extract_canary_subject(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "send_message",
+                        "to": email,
+                        "subject": subject,
+                        "body": "Canary test",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "list_messages",
+                        "query": "subject:[canary] newer_than:1h",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            message_id = _extract_gmail_message_id(tool_results[0].get("content", ""))
+            if message_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "gmail",
+                        "arguments": {
+                            "action": "trash_message",
+                            "message_id": message_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "gmail roundtrip complete. Message sent, verified, and trashed.",
+        }
+
+    # ── Lifecycle canary: Google Calendar create → list → delete ─────────
+    if GCAL_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            title = _extract_canary_title(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "create_event",
+                        "calendar_id": "primary",
+                        "summary": title,
+                        "start_datetime": _tomorrow_10am_utc(),
+                        "end_datetime": _tomorrow_1030am_utc(),
+                        "timezone": "UTC",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "list_events",
+                        "calendar_id": "primary",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            event_id = _extract_calendar_event_id(tool_results[0].get("content", ""))
+            if event_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "google_calendar",
+                        "arguments": {
+                            "action": "delete_event",
+                            "calendar_id": "primary",
+                            "event_id": event_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "google_calendar lifecycle complete. Event created, verified, and deleted.",
+        }
+
+    # ── Lifecycle canary: Notion search → search again ────────────────────
+    if NOTION_SEARCH_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "canary",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "test",
+                    },
+                },
+            }
+        return {
+            "type": "text",
+            "text": "notion search lifecycle complete. Both searches executed successfully.",
+        }
+
     return None
 
 
@@ -1215,6 +1512,15 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     # Multi-step chain: must bypass tool-result-summary to issue second tool call
     if special and _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
+    # Lifecycle canary multi-step chains: create → verify → cleanup → summarize
+    for lifecycle_trigger in (
+        GITHUB_ISSUE_LIFECYCLE_TRIGGER,
+        GMAIL_ROUNDTRIP_TRIGGER,
+        GCAL_LIFECYCLE_TRIGGER,
+        NOTION_SEARCH_LIFECYCLE_TRIGGER,
+    ):
+        if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
+            return await _dispatch_special_response(request, cid, stream, special)
 
     # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)

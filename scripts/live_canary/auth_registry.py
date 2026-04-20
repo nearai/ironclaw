@@ -103,6 +103,39 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
         expected_text="notion",
         install_kind="mcp_server",
     ),
+    # ── Lifecycle write+cleanup canary cases ─────────────────────────────
+    #
+    # These exercise real provider write operations. Each flow is
+    # self-cleaning: create -> verify -> delete/close. The mock LLM drives
+    # the multi-step tool chain via match_special_response() in mock_llm.py.
+    "gmail_roundtrip": SeededProviderCase(
+        key="gmail_roundtrip",
+        extension_install_name="gmail",
+        expected_display_name="Gmail",
+        response_prompt="send an email to user@example.com with subject '[canary] test' and body 'Canary test'",
+        expected_tool_name="gmail",
+        expected_text="gmail",
+        shared_secret_name="google_oauth_token",
+        requires_refresh_seed=True,
+    ),
+    "google_calendar_lifecycle": SeededProviderCase(
+        key="google_calendar_lifecycle",
+        extension_install_name="google_calendar",
+        expected_display_name="Google Calendar",
+        response_prompt="create a Google Calendar event titled '[canary] test' for tomorrow at 10am lasting 30 minutes",
+        expected_tool_name="google_calendar",
+        expected_text="google_calendar",
+        shared_secret_name="google_oauth_token",
+    ),
+    "notion_search_lifecycle": SeededProviderCase(
+        key="notion_search_lifecycle",
+        extension_install_name="notion",
+        expected_display_name="Notion",
+        response_prompt="search notion for canary, then search again for test",
+        expected_tool_name="notion_notion_search",
+        expected_text="notion",
+        install_kind="mcp_server",
+    ),
 }
 
 
@@ -141,6 +174,12 @@ BROWSER_CASES: dict[str, BrowserProviderCase] = {
         auth_extension_name="notion",
     ),
 }
+
+
+def _canary_timestamp() -> str:
+    """Short timestamp for unique canary resource names."""
+    import time as _time
+    return str(int(_time.time()))
 
 
 def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCase]:
@@ -184,6 +223,43 @@ def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCa
                 message="AUTH_LIVE_NOTION_QUERY is required for the selected live-provider case",
             )
             case = replace(case, response_prompt=f"search notion for {query}")
+        # ── Lifecycle write+cleanup cases ────────────────────────────────
+        elif name == "gmail_roundtrip":
+            if not google_access:
+                continue
+            case = replace(case, requires_refresh_seed=bool(google_refresh))
+            email = env_str("AUTH_LIVE_GOOGLE_EMAIL") or "canary@example.com"
+            ts = _canary_timestamp()
+            case = replace(
+                case,
+                response_prompt=(
+                    f"send an email to {email} with subject '[canary] {ts}' "
+                    f"and body 'Canary test'. Then list recent messages and confirm "
+                    f"it was sent. Finally, trash the sent message."
+                ),
+            )
+        elif name == "google_calendar_lifecycle":
+            if not google_access:
+                continue
+            ts = _canary_timestamp()
+            case = replace(
+                case,
+                response_prompt=(
+                    f"create a Google Calendar event titled '[canary] {ts}' "
+                    f"for tomorrow at 10am lasting 30 minutes. Then list events "
+                    f"to confirm it exists. Finally delete the event."
+                ),
+            )
+        elif name == "notion_search_lifecycle":
+            if not env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN"):
+                continue
+            ts = _canary_timestamp()
+            case = replace(
+                case,
+                response_prompt=(
+                    f"search notion for 'canary {ts}', then search again for 'test'"
+                ),
+            )
         cases.append(case)
     return cases
 
