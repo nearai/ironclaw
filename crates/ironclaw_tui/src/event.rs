@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 
+use ironclaw_common::{ExtensionName, JobResultStatus};
 use ratatui::crossterm::event::KeyEvent;
 
 /// A single log entry displayed in the TUI Logs tab.
@@ -257,7 +258,10 @@ pub enum TuiEvent {
     JobStatus { job_id: String, status: String },
 
     /// A sandbox job completed with final result.
-    JobResult { job_id: String, status: String },
+    JobResult {
+        job_id: String,
+        status: JobResultStatus,
+    },
 
     /// A routine was created, updated, or deleted.
     RoutineUpdate {
@@ -280,13 +284,13 @@ pub enum TuiEvent {
 
     /// Extension needs user authentication.
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
     },
 
     /// Extension auth completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },

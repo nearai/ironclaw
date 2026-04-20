@@ -411,8 +411,10 @@ pub struct ChannelSettings {
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
     /// Enabled WASM channels by name.
-    /// Channels not in this list but present in the channels directory will still load.
-    /// This is primarily used by the setup wizard to track which channels were configured.
+    /// Primarily used by the setup wizard to track which channels were configured.
+    ///
+    /// Startup treats this as a fallback restore source only until
+    /// `activated_channels` has been persisted by the runtime.
     #[serde(default)]
     pub wasm_channels: Vec<String>,
 
@@ -665,7 +667,7 @@ fn default_wasm_timeout() -> u64 {
 }
 
 fn default_wasm_fuel_limit() -> u64 {
-    10_000_000
+    500_000_000
 }
 
 impl Default for WasmSettings {
