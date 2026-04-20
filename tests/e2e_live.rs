@@ -144,6 +144,8 @@ mod live_tests {
                 || t.starts_with("shell(")
                 || t == "tool_install"
                 || t.starts_with("tool_install(")
+                || t == "tool-install"
+                || t.starts_with("tool-install(")
                 || t.starts_with("tool_search")
                 || t.starts_with("skill_search")
         });
