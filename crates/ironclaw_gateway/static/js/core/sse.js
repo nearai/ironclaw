@@ -13,12 +13,22 @@ function connectSSE(lastEventIdOverride) {
   let chatSseUrl = (token && !oidcProxyAuth)
     ? '/api/chat/events?token=' + encodeURIComponent(token)
     : '/api/chat/events';
+  if (window.isDebugMode) {
+    chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?') + 'debug=true';
+  }
   const lastEventId = lastEventIdOverride || _lastSseEventId;
   if (lastEventId) {
     chatSseUrl += (chatSseUrl.includes('?') ? '&' : '?')
       + 'last_event_id=' + encodeURIComponent(lastEventId);
   }
   eventSource = new EventSource(chatSseUrl);
+
+  // Notify the debug panel (when loaded) so it can attach listeners to
+  // the freshly created EventSource. Hooked in lazily so the panel can
+  // be absent in non-admin builds without breaking SSE setup.
+  if (typeof window.onDebugSSEConnect === 'function') {
+    window.onDebugSSEConnect(eventSource);
+  }
 
   const addTrackedEventListener = (eventType, handler) => {
     eventSource.addEventListener(eventType, (event) => {

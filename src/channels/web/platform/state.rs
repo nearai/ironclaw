@@ -146,6 +146,7 @@ pub struct ActiveConfigSnapshot {
     pub llm_backend: String,
     pub llm_model: String,
     pub enabled_channels: Vec<String>,
+    pub default_timezone: String,
 }
 
 /// Per-user rate limiter that maintains a separate sliding window per user_id.

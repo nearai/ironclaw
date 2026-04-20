@@ -30,6 +30,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`web_incoming_message`, `build_turns_from_db_messages`, `images_to_attachments`, `truncate_preview`) |
+| `test_helpers.rs` | Always-compiled test utilities. `TestGatewayBuilder` (public) — the `tests/` crate's entry point for spinning up a `GatewayState` + optional Axum server on a random port. Plus three `pub(crate)` `#[cfg(test)]`-gated cross-slice builders — `test_gateway_state(ext_mgr)`, `test_gateway_state_with_dependencies(ext_mgr, store, db_auth, pairing_store)`, `test_gateway_state_with_store_and_session_manager(store, session_manager)` — promoted from `server.rs::tests` as the ironclaw#2599 stage-6 prerequisite so chat / extensions / oauth / pairing slice test modules can reach them without staying inside `server.rs::tests`. |
 | `static/` | Single-page app (HTML/CSS/JS) — embedded at compile time via `include_str!`/`include_bytes!` |
 
 ## Platform vs. feature layering (ironclaw#2599)
@@ -257,6 +258,7 @@ Legacy cleanup note:
 | GET | `/api/pairing/{channel}` | Admin-only list of pending pairing requests |
 | POST | `/api/pairing/{channel}/approve` | Authenticated user self-claims a pairing code |
 | GET | `/api/gateway/status` | Server uptime, connected clients, config |
+| GET | `/api/debug/prompt` | Inspect the current system prompt components (workspace identity files) |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
 
