@@ -810,6 +810,11 @@ async fn async_main() -> anyhow::Result<()> {
     let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
         Arc::new(tokio::sync::RwLock::new(None));
 
+    // Create channel routing Arc early so CreateJobTool can share it.
+    // Config is loaded from the DB later; the Arc is None until then but the
+    // tool reads it lazily at job creation time.
+    let channel_routing_arc = ironclaw::agent::channel_routing::ChannelRoutingConfig::none_arc();
+
     // Register job tools even under --cli-only so scheduler-backed jobs remain available.
     // Sandbox-only dependencies are injected only when the container manager is running.
     components.tools.register_job_tools(
@@ -825,6 +830,7 @@ async fn async_main() -> anyhow::Result<()> {
             None
         },
         components.secrets_store.clone(),
+        Some(Arc::clone(&channel_routing_arc)),
     );
 
     // ── Gateway channel ────────────────────────────────────────────────
@@ -1213,8 +1219,7 @@ async fn async_main() -> anyhow::Result<()> {
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
     // Load channel routing config from database before components.db is moved.
-    // Arc shared with SIGHUP handler for hot-reload.
-    let channel_routing_arc = ironclaw::agent::channel_routing::ChannelRoutingConfig::none_arc();
+    // Arc shared with register_job_tools (created earlier) and the SIGHUP handler.
     if let Some(ref db) = components.db {
         ironclaw::agent::channel_routing::ChannelRoutingConfig::reload_from_store(
             db.as_ref(),

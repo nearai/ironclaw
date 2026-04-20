@@ -186,6 +186,7 @@ impl GatewayWorkflowHarness {
             None,
             None,
             None,
+            None,
         );
 
         // Agent::run() creates its own RoutineEngine and populates this slot.

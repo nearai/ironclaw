@@ -301,12 +301,12 @@ impl ChannelRoutingConfig {
         if DM_RELAY_PREFIXES.iter().any(|p| channel.starts_with(p)) {
             return true;
         }
-        // Relay transports must stamp a trusted DM flag after webhook/auth validation.
-        if channel == "slack-relay"
-            && metadata
-                .get(TRUSTED_DM_METADATA_KEY)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+        // Any trusted relay adapter can stamp this flag to bypass routing.
+        // Set server-side after webhook/auth validation — not spoofable by clients.
+        if metadata
+            .get(TRUSTED_DM_METADATA_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
         {
             return true;
         }
@@ -499,15 +499,26 @@ mod tests {
     }
 
     #[test]
-    fn test_is_dm_slack_relay_requires_trusted_flag() {
+    fn test_is_dm_trusted_flag_works_for_any_channel() {
+        // Without the flag, relay channels are subject to routing.
         let untrusted_meta = serde_json::json!({"event_type": "direct_message"});
         assert!(!ChannelRoutingConfig::is_dm("slack-relay", &untrusted_meta));
+        assert!(!ChannelRoutingConfig::is_dm(
+            "telegram-relay",
+            &untrusted_meta
+        ));
 
+        // With the trusted server-side flag, any relay channel bypasses routing.
         let trusted_meta = serde_json::json!({
             "event_type": "direct_message",
             TRUSTED_DM_METADATA_KEY: true,
         });
         assert!(ChannelRoutingConfig::is_dm("slack-relay", &trusted_meta));
+        assert!(ChannelRoutingConfig::is_dm("telegram-relay", &trusted_meta));
+        assert!(ChannelRoutingConfig::is_dm(
+            "some-future-relay",
+            &trusted_meta
+        ));
     }
 
     #[test]
