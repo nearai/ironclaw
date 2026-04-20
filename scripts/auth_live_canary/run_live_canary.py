@@ -903,6 +903,43 @@ def _validate_case_choices(args: argparse.Namespace) -> None:
         )
 
 
+def _preflight_refresh_google_token() -> None:
+    """Refresh the Google access token before the gateway starts.
+
+    GitHub secrets store a static access token that expires after 1 hour.
+    The mock_llm exchange endpoint returns whatever is in
+    AUTH_LIVE_GOOGLE_ACCESS_TOKEN, so we must refresh it here to ensure
+    the token is valid when the test runs.
+    """
+    import urllib.request
+    import urllib.parse
+
+    refresh_token = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
+    client_id = env_str("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = env_str("GOOGLE_OAUTH_CLIENT_SECRET")
+    if not all([refresh_token, client_id, client_secret]):
+        return
+
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+        fresh_token = body.get("access_token")
+        if fresh_token:
+            os.environ["AUTH_LIVE_GOOGLE_ACCESS_TOKEN"] = fresh_token
+            print(f"[preflight] Refreshed Google access token (expires_in={body.get('expires_in')}s)")
+        else:
+            print(f"[preflight] Google token refresh returned no access_token: {body}")
+    except Exception as exc:
+        print(f"[preflight] Google token refresh failed: {exc}")
+
+
 async def async_main(args: argparse.Namespace) -> int:
     mode_cfg = MODE_CONFIG[args.mode]
 
@@ -918,6 +955,11 @@ async def async_main(args: argparse.Namespace) -> int:
 
     if not args.skip_build:
         cargo_build()
+
+    # Pre-flight: refresh the Google access token so the mock exchange
+    # endpoint returns a fresh token (the one in secrets may be expired).
+    if args.mode == "seeded":
+        _preflight_refresh_google_token()
 
     extra_gateway_env: dict[str, str] = {}
     for env_name in mode_cfg["extra_gateway_env_names"]:
