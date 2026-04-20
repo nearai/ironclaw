@@ -287,9 +287,13 @@ impl AuthManager {
                 false
             }
             Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
-                active_skill_names
-                    .iter()
-                    .any(|name| name == &provenance.artifact_name)
+                if active_skill_names.is_empty() {
+                    true
+                } else {
+                    active_skill_names
+                        .iter()
+                        .any(|name| name == &provenance.artifact_name)
+                }
             }
             _ => true,
         }

@@ -274,6 +274,31 @@ async def _wait_for_auth_prompt(base_url, thread_id, *, timeout=45.0):
     raise AssertionError(f"Timed out waiting for auth prompt. Last: {last[:500]}")
 
 
+async def _maybe_approve_secret_binding_gate(base_url, thread_id, pending, approved):
+    if not pending or pending.get("gate_name") != "secret_binding_approval":
+        return False
+
+    request_id = pending.get("request_id")
+    if not request_id or request_id in approved:
+        return False
+
+    approve_r = await api_post(
+        base_url,
+        "/api/chat/gate/resolve",
+        json={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "resolution": "approved",
+            "always": False,
+        },
+        timeout=15,
+    )
+    approve_r.raise_for_status()
+    approved.add(request_id)
+    await asyncio.sleep(0.5)
+    return True
+
+
 async def _wait_for_response(base_url, thread_id, *, timeout=45.0, expect_substring=None):
     approved = set()
     for _ in range(int(timeout * 2)):
@@ -298,6 +323,8 @@ async def _wait_for_response(base_url, thread_id, *, timeout=45.0, expect_substr
                 approved.add(request_id)
                 await asyncio.sleep(0.5)
                 continue
+        if await _maybe_approve_secret_binding_gate(base_url, thread_id, pending, approved):
+            continue
 
         turns = history.get("turns", [])
         if turns:

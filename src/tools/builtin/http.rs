@@ -456,9 +456,13 @@ fn mapping_applies_to_http_call(
     match mapping.provenance.as_ref() {
         Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::WasmTool => false,
         Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
-            active_skill_names
-                .iter()
-                .any(|name| name == &provenance.artifact_name)
+            if active_skill_names.is_empty() {
+                true
+            } else {
+                active_skill_names
+                    .iter()
+                    .any(|name| name == &provenance.artifact_name)
+            }
         }
         _ => true,
     }

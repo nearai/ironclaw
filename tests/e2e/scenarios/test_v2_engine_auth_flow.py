@@ -736,6 +736,42 @@ async def _wait_for_pending_gate_in_history(
     )
 
 
+async def _resolve_secret_binding_gate_if_present(
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 45.0,
+) -> bool:
+    for _ in range(int(timeout * 2)):
+        response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=15,
+        )
+        response.raise_for_status()
+        history = response.json()
+        pending_gate = history.get("pending_gate") or {}
+        gate_name = (pending_gate.get("gate_name") or "").lower()
+        if gate_name == "secret_binding_approval":
+            approve = await api_post(
+                base_url,
+                "/api/chat/gate/resolve",
+                json={
+                    "request_id": pending_gate["request_id"],
+                    "thread_id": thread_id,
+                    "resolution": "approved",
+                    "always": False,
+                },
+                timeout=15,
+            )
+            assert approve.status_code == 200, approve.text
+            return True
+        if gate_name and gate_name != "authentication":
+            return False
+        await asyncio.sleep(0.5)
+    return False
+
+
 async def _wait_for_skill(base_url: str, skill_name: str, *, timeout: float = 90.0) -> dict:
     last_skills = {}
     for _ in range(int(timeout * 2)):
@@ -1019,7 +1055,7 @@ class TestV2EngineSkillActivation:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "/github create an issue in nearai/ironclaw repo",
+                "content": "/github list issues in nearai/ironclaw repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -1773,8 +1809,16 @@ class TestV2EngineAuthMainFlow:
             timeout=30,
         )
 
-        # Step 4: Wait for the retry — the token submission triggers a retry
-        # and clears the pending_gate once the credential is stored.
+        # Step 4: Token submission stores the credential first. For
+        # user-authored skills, the resumed action may then pause on the
+        # dedicated secret-binding approval gate before the retry is allowed.
+        await _resolve_secret_binding_gate_if_present(
+            v2_server,
+            thread_id,
+            timeout=30,
+        )
+
+        # Step 5: Wait for the retry to complete.
         for _ in range(120):
             await asyncio.sleep(0.5)
             async with httpx.AsyncClient() as client:
@@ -1784,13 +1828,28 @@ class TestV2EngineAuthMainFlow:
                 break
             r = await api_get(v2_server, f"/api/chat/history?thread_id={thread_id}", timeout=15)
             payload = r.json()
+            pending = payload.get("pending_gate") or {}
+            if (pending.get("gate_name") or "").lower() == "secret_binding_approval":
+                approve = await api_post(
+                    v2_server,
+                    "/api/chat/gate/resolve",
+                    json={
+                        "request_id": pending["request_id"],
+                        "thread_id": thread_id,
+                        "resolution": "approved",
+                        "always": False,
+                    },
+                    timeout=15,
+                )
+                assert approve.status_code == 200, approve.text
+                continue
             # Pending gate cleared means the retry has advanced.
             if not payload.get("pending_gate"):
                 turns = payload.get("turns", [])
                 if len(turns) > 1 and (turns[-1].get("response") or ""):
                     break
 
-        # Step 5: Verify the token was stored and the retry happened
+        # Step 6: Verify the token was stored and the retry happened
         async with httpx.AsyncClient() as client:
             tokens_r = await client.get(f"{mock_api_url}/__mock/received-tokens")
             tokens_data = tokens_r.json()

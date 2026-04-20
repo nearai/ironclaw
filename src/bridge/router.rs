@@ -2496,10 +2496,11 @@ pub async fn resolve_gate(
                 && let Some(approval) =
                     secret_binding_approval_from_resume_output(pending.resume_output.as_ref())
             {
-                let settings_store = state
-                    .db
-                    .as_ref()
-                    .map(|db| db.as_ref() as &(dyn crate::db::SettingsStore + Send + Sync));
+                let settings_store = agent
+                    .deps
+                    .settings_store
+                    .as_deref()
+                    .map(|store| store as &(dyn crate::db::SettingsStore + Send + Sync));
                 grant_binding_approval(settings_store, &pending.user_id, approval)
                     .await
                     .map_err(|error| engine_err("binding approval", error))?;
