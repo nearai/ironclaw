@@ -509,7 +509,7 @@ Create a response.
 
 ```json
 {
-  "model": "claude-sonnet-4-5-20250514",
+  "model": "default",
   "input": "What's a good time to send money to India?",
   "stream": true,
   "previous_response_id": null
@@ -518,7 +518,7 @@ Create a response.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `model` | string | LLM model to use. Pass `"default"` to use the server-configured model |
+| `model` | string | Currently only `"default"` is accepted; the server-selected model is determined by gateway configuration. Any other value returns 400. |
 | `input` | string or array | User message as a string, or a messages array (see below) |
 | `stream` | boolean | `true` for SSE, `false` for blocking (120s timeout) |
 | `previous_response_id` | string | Pass the previous `id` to continue a conversation thread |

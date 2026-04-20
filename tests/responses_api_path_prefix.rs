@@ -171,3 +171,29 @@ async fn both_paths_require_auth() {
         );
     }
 }
+
+/// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
+/// must also enforce bearer-token auth. A missing token should return 401,
+/// not 404 — the auth middleware has to apply to legacy aliases as well.
+#[tokio::test]
+async fn both_get_paths_require_auth() {
+    let (addr, _state) = start_test_server().await;
+
+    for path in [
+        "/api/v1/responses/not_a_valid_id",
+        "/v1/responses/not_a_valid_id",
+    ] {
+        let url = format!("http://{}{}", addr, path);
+        let resp = client()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(
+            resp.status(),
+            401,
+            "{path} should return 401 without a token, got {}",
+            resp.status()
+        );
+    }
+}
