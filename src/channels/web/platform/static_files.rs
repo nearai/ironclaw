@@ -1,0 +1,1424 @@
+//! Static file serving, CSP assembly, and the frontend HTML bundle.
+//!
+//! This module owns everything the browser pulls from unauthenticated or
+//! project-scoped routes: the CSP directive set (single source of truth for
+//! both the global response header and the per-response nonce variant), the
+//! embedded asset handlers (`/`, `/style.css`, `/app.js`, `/theme.css`,
+//! `/favicon.ico`, `/i18n/*`, `/admin*`), the `build_frontend_html` path
+//! that splices `.system/gateway/` customizations into the embedded SPA,
+//! and the authenticated `/projects/{id}/...` file-serving routes.
+//!
+//! No feature handlers should depend on the private pieces here — only on
+//! the `pub(crate)` surface registered by `start_server()`.
+
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use sha2::{Digest, Sha256};
+
+use ironclaw_gateway::assets;
+use ironclaw_gateway::{
+    FrontendBundle, LayoutConfig, NONCE_PLACEHOLDER, ResolvedWidget, WidgetManifest,
+    is_safe_widget_id,
+};
+
+use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::platform::state::{FrontendCacheKey, FrontendHtmlCache, GatewayState};
+use crate::channels::web::types::HealthResponse;
+use crate::workspace::Workspace;
+
+// --- Content Security Policy ---
+//
+// A single source of truth for the gateway's CSP. The static value below is
+// used by the global response-header layer for every endpoint.
+//
+// The gateway serves two flavors of CSP on the same set of directives:
+//
+// * The static header applied by `SetResponseHeaderLayer` to *every*
+//   response (see [`BASE_CSP_HEADER`]). No inline scripts are authorized.
+// * A per-response variant produced by [`build_csp`] with a `'nonce-…'`
+//   source added to `script-src`, used only by `index_handler` when it
+//   serves customized HTML containing inline `<script>` blocks.
+//
+// Both variants MUST carry the same directive set except for `script-src`
+// — if one grows a new `connect-src` origin, the other silently stays on
+// the old policy, and customized pages end up under a stricter CSP than
+// plain pages (or vice versa). Previous versions of this file duplicated
+// the full directive string in two places, so adding a CDN to one was a
+// latent regression waiting to happen. Keep every directive as a named
+// constant and assemble both flavors via [`build_csp`] so there is a
+// single source of truth.
+
+/// `script-src` sources other than `'self'` and the per-response nonce.
+const SCRIPT_SRC_EXTRAS: &str =
+    "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
+const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
+const FONT_SRC: &str = "https://fonts.gstatic.com data:";
+const CONNECT_SRC: &str =
+    "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org";
+const IMG_SRC: &str =
+    "'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com";
+const FRAME_SRC: &str = "https://accounts.google.com https://appleid.apple.com";
+const FORM_ACTION: &str =
+    "'self' https://accounts.google.com https://github.com https://appleid.apple.com";
+
+/// Build a CSP string. When `nonce` is `Some`, the resulting policy adds
+/// `'nonce-{nonce}'` to `script-src` so a single inline `<script
+/// nonce="{nonce}">` block on the same response is authorized. When
+/// `nonce` is `None`, the policy matches the static header emitted by
+/// [`BASE_CSP_HEADER`]. This is the single source of truth for the
+/// gateway CSP — edit per-directive constants above, not the format
+/// string here.
+pub(crate) fn build_csp(nonce: Option<&str>) -> String {
+    let script_nonce = match nonce {
+        Some(n) => format!(" 'nonce-{n}'"),
+        None => String::new(),
+    };
+    format!(
+        "default-src 'self'; \
+         script-src 'self'{script_nonce} {SCRIPT_SRC_EXTRAS}; \
+         style-src {STYLE_SRC}; \
+         font-src {FONT_SRC}; \
+         connect-src {CONNECT_SRC}; \
+         img-src {IMG_SRC}; \
+         frame-src {FRAME_SRC}; \
+         object-src 'none'; \
+         frame-ancestors 'none'; \
+         base-uri 'self'; \
+         form-action {FORM_ACTION}"
+    )
+}
+
+/// Static CSP header applied to every gateway response by the
+/// response-header layer. Assembled at first use via [`build_csp`] with no
+/// nonce. Falls back to a minimally-permissive `default-src 'self'` if the
+/// assembled value somehow fails to parse as a `HeaderValue` — in practice
+/// the assembled string is pure ASCII and this branch is unreachable, but
+/// production code in this repo avoids panics on request-path values, so
+/// we fall back instead of calling `expect`.
+pub(crate) static BASE_CSP_HEADER: std::sync::LazyLock<header::HeaderValue> =
+    std::sync::LazyLock::new(|| {
+        header::HeaderValue::from_str(&build_csp(None))
+            .unwrap_or_else(|_| header::HeaderValue::from_static("default-src 'self'"))
+    });
+
+/// Build a CSP equivalent to the static header but with `'nonce-{nonce}'`
+/// added to the `script-src` directive. Thin wrapper kept for call-site
+/// readability (the name is the contract the nonce handler wants).
+pub(crate) fn build_csp_with_nonce(nonce: &str) -> String {
+    build_csp(Some(nonce))
+}
+
+/// Generate a fresh per-response CSP nonce. 16 random bytes hex-encoded
+/// (32 chars) — well above the 128-bit minimum recommended for nonces and
+/// matching the `OsRng + hex` pattern used elsewhere in this module.
+pub(crate) fn generate_csp_nonce() -> String {
+    use rand::RngCore;
+    use rand::rngs::OsRng;
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+// --- Frontend bundle assembly ---
+
+/// Compute a cheap cache key for `build_frontend_html` — one `list` call
+/// against `.system/gateway/`. The directory entry for `widgets/` carries the
+/// max `updated_at` of its children, so any widget file edit naturally bubbles
+/// into the key without needing to read individual manifests.
+async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> FrontendCacheKey {
+    let Ok(entries) = workspace.list(".system/gateway/").await else {
+        return FrontendCacheKey {
+            layout: None,
+            widgets: None,
+        };
+    };
+    let mut key = FrontendCacheKey {
+        layout: None,
+        widgets: None,
+    };
+    for entry in entries {
+        let ts = entry
+            .updated_at
+            .map(|t| (t.timestamp(), t.timestamp_subsec_nanos()));
+        match entry.name() {
+            "layout.json" if !entry.is_directory => key.layout = ts,
+            "widgets" if entry.is_directory => key.widgets = ts,
+            _ => {}
+        }
+    }
+    key
+}
+
+/// Build customized HTML from the workspace gateway config.
+///
+/// Returns `None` if the workspace is unavailable or the loaded layout has no
+/// customizations and no widgets — in that case the caller serves the embedded
+/// default HTML unchanged. Custom CSS is deliberately **not** included in the
+/// returned bundle: `css_handler` appends `.system/gateway/custom.css` onto
+/// `/style.css` so the stylesheet is the single source of truth for CSS
+/// overrides.
+///
+/// The assembled HTML is cached in `GatewayState::frontend_html_cache` behind
+/// a fingerprint of `.system/gateway/layout.json` and `.system/gateway/widgets/`
+/// mtimes (computed with a single `list()` call). A cache hit skips reading
+/// every widget manifest / JS / CSS file, which would otherwise fire on every
+/// page load.
+///
+/// **Multi-tenant safety.** In multi-user mode (`workspace_pool` set) this
+/// function ALWAYS returns `None`, regardless of whether `state.workspace` is
+/// also populated. The customization assembly path is fundamentally
+/// single-tenant: `index_handler` (`GET /`) is the unauthenticated bootstrap
+/// route — no user identity is available at request time, so there is no way
+/// to resolve the *correct* per-user workspace inside this function. Reading
+/// `state.workspace` instead would expose one global workspace's
+/// customizations to every user, and the process-wide
+/// `frontend_html_cache` would pin the leak across requests. We refuse the
+/// path entirely and serve the embedded default to all users; per-user
+/// customization can ride a future JS-side fetch against
+/// `/api/frontend/layout`, which is authenticated and routes through
+/// `resolve_workspace(&state, &user)` so it returns the right workspace.
+/// See `crates/ironclaw_gateway/static/js/core/widgets.js` — the
+/// layout-config IIFE already reads `window.__IRONCLAW_LAYOUT__`, which
+/// a future change can populate from a `fetch('/api/frontend/layout')`
+/// after auth.
+///
+/// **Cache key TOCTOU window (known and accepted).** The fast-path cache
+/// key is computed by [`compute_frontend_cache_key`] in a single
+/// `Workspace::list` call, but the slow-path data read
+/// (`read_layout_config` + `load_resolved_widgets`) happens *after* that
+/// key is observed, in separate workspace operations. A workspace write
+/// landing between the two — operator edits `layout.json` while a
+/// request is mid-rebuild — can therefore produce a cache entry whose
+/// HTML was assembled from a layout *newer* than the key it's stored
+/// under. The next request after the writes settle will recompute the
+/// key, see a different fingerprint, and replace the cache entry, so
+/// the staleness window is always self-correcting and bounded by one
+/// rebuild round-trip.
+///
+/// This is intentional. Making the read+key+store sequence atomic would
+/// require a workspace-level read lock that the rest of the gateway
+/// doesn't take, and would punish the (much hotter) cache hit path with
+/// extra coordination. The acceptability rests on three observations:
+/// (a) the staleness window is bounded by a single `list()` call's
+/// worth of wall time, (b) the cache is per-process so the staleness
+/// can never outlive `Drop` of `GatewayState`, and (c) layout writes
+/// are rare and operator-initiated — there is no realistic workload
+/// that fires a write at the cadence required to keep the entry
+/// permanently stale. If a future workload changes that calculus, the
+/// right fix is a workspace version generation counter, not a lock
+/// around this function.
+pub(crate) async fn build_frontend_html(state: &GatewayState) -> Option<String> {
+    if state.workspace_pool.is_some() {
+        // Multi-tenant: refuse the assembly path entirely. See the function
+        // doc comment above for the full rationale. The cache write below
+        // is unreachable on this branch, so the cache stays empty and
+        // cannot leak one user's customizations to another.
+        return None;
+    }
+
+    let ws = state.workspace.as_ref()?;
+
+    // Fast path — cache hit. One workspace `list()` call, no file reads.
+    let cache_key = compute_frontend_cache_key(ws).await;
+    {
+        let cache = state.frontend_html_cache.read().await;
+        if let Some(ref cached) = *cache
+            && cached.key == cache_key
+        {
+            return cached.html.clone();
+        }
+    }
+
+    // Slow path — rebuild.
+    let layout = read_layout_config(ws).await;
+    let widgets = load_resolved_widgets(ws, &layout).await;
+
+    // Skip assembly when nothing is customized. `layout_has_customizations`
+    // is the single source of truth so adding a new field to `LayoutConfig`
+    // forces an update in one place instead of a big boolean expression here.
+    let html = if widgets.is_empty() && !layout_has_customizations(&layout) {
+        None
+    } else {
+        let bundle = FrontendBundle {
+            layout,
+            widgets,
+            // Custom CSS is served via /style.css (css_handler) to avoid
+            // double-application — see the doc comment on this function.
+            custom_css: None,
+        };
+        Some(ironclaw_gateway::assemble_index(
+            assets::INDEX_HTML,
+            &bundle,
+        ))
+    };
+
+    // Store in cache. If another request raced us here, either writer wins —
+    // both produced the same HTML for the same key, so the cache ends up
+    // consistent either way.
+    *state.frontend_html_cache.write().await = Some(FrontendHtmlCache {
+        key: cache_key,
+        html: html.clone(),
+    });
+
+    html
+}
+
+/// Returns `true` if the layout config has any field that would affect the
+/// rendered HTML. When this returns `false` and there are no widgets, the
+/// gateway serves the embedded default unchanged.
+fn layout_has_customizations(layout: &LayoutConfig) -> bool {
+    let b = &layout.branding;
+    let t = &layout.tabs;
+    let c = &layout.chat;
+    // `branding.colors` is opaque to this function — `BrandingColors` may
+    // exist as `Some({})` (both fields `None`) or with values that the
+    // `is_safe_css_color` validator strips at injection time. Treating
+    // bare `colors.is_some()` as a customization forces the customized
+    // HTML path (and the per-response nonce CSP that comes with it) for
+    // layouts that produce zero effective branding output. Require at
+    // least one trimmed-non-empty color field, mirroring what
+    // `to_css_vars` actually emits.
+    let has_branding_colors = b.colors.as_ref().is_some_and(|colors| {
+        let nonempty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        nonempty(&colors.primary) || nonempty(&colors.accent)
+    });
+    // Same precedent for URL fields: route through the `safe_logo_url`
+    // / `safe_favicon_url` getters that apply `is_safe_url`. A
+    // `layout.json` with `logo_url: "javascript:alert(1)"` would
+    // otherwise force the customized HTML path even though the value
+    // gets dropped at consumer time. Symmetric with how branding colors
+    // are gated above.
+    b.title.is_some()
+        || b.subtitle.is_some()
+        || b.safe_logo_url().is_some()
+        || b.safe_favicon_url().is_some()
+        || has_branding_colors
+        || t.order.is_some()
+        || t.hidden.is_some()
+        || t.default_tab.is_some()
+        || c.suggestions.is_some()
+        || c.image_upload.is_some()
+        || c.upgrade_inline_json.is_some()
+        || !layout.widgets.is_empty()
+}
+
+// --- Workspace-backed layout + widget readers ---
+//
+// These helpers are shared between `build_frontend_html` above (platform
+// layer, builds the `/` HTML bundle at request time) and the `/api/frontend/*`
+// HTTP handlers in `handlers/frontend.rs`. They live in the platform layer
+// because any handler that wants to read layout/widget state must go
+// through them — there's only one on-disk contract for
+// `.system/gateway/layout.json` and `.system/gateway/widgets/`, and
+// keeping both callers on the same helper forces any change to the
+// fallback / parse / warning behavior to land in exactly one place.
+
+/// Workspace path to the layout config document.
+pub(crate) const LAYOUT_PATH: &str = ".system/gateway/layout.json";
+
+/// Workspace directory containing widget subdirectories. Trailing slash is
+/// kept so it can be passed straight to `Workspace::list()`.
+pub(crate) const WIDGETS_DIR: &str = ".system/gateway/widgets/";
+
+/// Per-widget size caps. Widget JS/CSS is inlined into every page response
+/// (and cached), so a single oversized file bloats every page load. The
+/// caps are generous enough for real-world widget bundles but stop a
+/// multi-MB file from ending up in the cached HTML.
+pub(crate) const MAX_WIDGET_JS_BYTES: usize = 512 * 1024; // 512 KB
+pub(crate) const MAX_WIDGET_CSS_BYTES: usize = 256 * 1024; // 256 KB
+
+/// Read and parse `.system/gateway/layout.json` from the workspace.
+///
+/// * Missing file → returns [`LayoutConfig::default`] silently. A workspace
+///   with no customizations is the common case and shouldn't generate log
+///   noise.
+/// * Malformed JSON → logs a `warn!` with the parse error and falls back to
+///   the default. A broken file must never be allowed to crash a page load.
+pub(crate) async fn read_layout_config(workspace: &Workspace) -> LayoutConfig {
+    match workspace.read(LAYOUT_PATH).await {
+        Ok(doc) => match serde_json::from_str(&doc.content) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = LAYOUT_PATH,
+                    "layout.json is invalid — falling back to default layout"
+                );
+                LayoutConfig::default()
+            }
+        },
+        // A workspace with no `.system/gateway/layout.json` is the common
+        // case (no customizations) and must stay silent — every page load
+        // hits this path. Any OTHER error variant (IoError, SearchFailed,
+        // backend connectivity, etc.) is unexpected and would otherwise
+        // silently drop customizations without any operator signal; log
+        // it at warn! so backend problems surface even though the caller
+        // falls back to the default layout either way.
+        Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => LayoutConfig::default(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = LAYOUT_PATH,
+                "workspace read failed — falling back to default layout \
+                 (customizations may be silently skipped)"
+            );
+            LayoutConfig::default()
+        }
+    }
+}
+
+/// Read and parse a single widget's `manifest.json`. Returns `None` (with a
+/// `warn!`) for parse failures and `None` silently when the file is missing.
+///
+/// Validates the on-disk `directory_name` against [`is_safe_widget_id`]
+/// BEFORE touching the workspace, and additionally enforces that the parsed
+/// `manifest.id` also satisfies `is_safe_widget_id` and equals the on-disk
+/// directory name. See the longer rationale in the git history (migrated
+/// from `handlers/frontend.rs` with the rest of the widget readers).
+pub(crate) async fn read_widget_manifest(
+    workspace: &Workspace,
+    directory_name: &str,
+) -> Option<WidgetManifest> {
+    if !is_safe_widget_id(directory_name) {
+        tracing::warn!(
+            directory = directory_name,
+            "skipping widget: directory name is not a safe widget identifier \
+             (alphanumeric + `._-`, first char alphanumeric, ≤64 chars)"
+        );
+        return None;
+    }
+    let manifest_path = format!("{WIDGETS_DIR}{directory_name}/manifest.json");
+    let doc = workspace.read(&manifest_path).await.ok()?;
+    let manifest = match serde_json::from_str::<WidgetManifest>(&doc.content) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            tracing::warn!(
+                path = %manifest_path,
+                error = %e,
+                "skipping widget with invalid manifest"
+            );
+            return None;
+        }
+    };
+    if !is_safe_widget_id(&manifest.id) {
+        tracing::warn!(
+            path = %manifest_path,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id contains characters outside the \
+             safe widget identifier charset (alphanumeric + `._-`, ≤64 chars)"
+        );
+        return None;
+    }
+    if manifest.id != directory_name {
+        tracing::warn!(
+            path = %manifest_path,
+            directory = directory_name,
+            manifest_id = %manifest.id,
+            "skipping widget: manifest.id does not match the on-disk directory name"
+        );
+        return None;
+    }
+    Some(manifest)
+}
+
+/// Discover every widget in `.system/gateway/widgets/` and return the
+/// fully-resolved set (manifest + `index.js` + optional `style.css`), filtered
+/// by the `enabled` flag in the supplied layout. Widgets missing `index.js`
+/// are skipped silently — they're assumed to be in-progress scaffolds.
+pub(crate) async fn load_resolved_widgets(
+    workspace: &Workspace,
+    layout: &LayoutConfig,
+) -> Vec<ResolvedWidget> {
+    let entries = match workspace.list(WIDGETS_DIR).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = WIDGETS_DIR,
+                "workspace list failed — rendering index with no widgets \
+                 (installed widgets may be silently skipped)"
+            );
+            Vec::new()
+        }
+    };
+
+    let mut widgets = Vec::new();
+    for entry in entries {
+        if !entry.is_directory {
+            continue;
+        }
+        let name = entry.name();
+        let Some(manifest) = read_widget_manifest(workspace, name).await else {
+            continue;
+        };
+
+        let js_path = format!("{WIDGETS_DIR}{name}/index.js");
+        let js = match workspace.read(&js_path).await {
+            Ok(doc) => doc.content,
+            Err(_) => continue,
+        };
+        if js.len() > MAX_WIDGET_JS_BYTES {
+            tracing::warn!(
+                widget = name,
+                bytes = js.len(),
+                cap = MAX_WIDGET_JS_BYTES,
+                "skipping widget: index.js exceeds size cap"
+            );
+            continue;
+        }
+
+        let css = workspace
+            .read(&format!("{WIDGETS_DIR}{name}/style.css"))
+            .await
+            .ok()
+            .map(|doc| doc.content)
+            .filter(|c| !c.trim().is_empty())
+            .filter(|c| {
+                if c.len() > MAX_WIDGET_CSS_BYTES {
+                    tracing::warn!(
+                        widget = name,
+                        bytes = c.len(),
+                        cap = MAX_WIDGET_CSS_BYTES,
+                        "dropping oversized widget style.css"
+                    );
+                    return false;
+                }
+                true
+            });
+
+        let enabled = layout
+            .widgets
+            .get(&manifest.id)
+            .map(|w| w.enabled)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+
+        widgets.push(ResolvedWidget { manifest, js, css });
+    }
+    widgets
+}
+
+// --- Static file handlers ---
+//
+// All frontend assets are embedded in the `ironclaw_gateway` crate.
+// These handlers serve them with appropriate MIME types and cache headers.
+
+/// Substitute [`NONCE_PLACEHOLDER`] sentinels in the assembled HTML with a
+/// fresh per-response CSP nonce.
+///
+/// **Why an attribute-targeted replace, not a bare string replace.** The
+/// assembled HTML embeds widget JavaScript inline (so a CSP-protected
+/// `<script src>` doesn't need to authenticate against `/api/frontend/widget/...`).
+/// A widget author has every right to write the literal string
+/// `__IRONCLAW_CSP_NONCE__` inside their own source — in a comment, a log
+/// line, a test fixture, or just as a constant they happen to define. A
+/// naive `html.replace(NONCE_PLACEHOLDER, nonce)` would silently rewrite
+/// every such occurrence into a per-request nonce, mutating widget code
+/// in a way the author didn't ask for.
+///
+/// The substitution here targets the full attribute form
+/// `nonce="__IRONCLAW_CSP_NONCE__"`, which is the exact shape
+/// `assemble_index` emits when stamping nonces onto `<script>` tags. The
+/// double-quoted sentinel is unambiguous in HTML context — it can never
+/// accidentally match free text in a JS module body, a comment, or a
+/// JSON payload. Inline `<style>` blocks deliberately get no nonce
+/// (style-src allows `'unsafe-inline'`) so they're untouched either way.
+pub(crate) fn stamp_nonce_into_html(html_with_placeholder: &str, nonce: &str) -> String {
+    let placeholder_attr = format!("nonce=\"{NONCE_PLACEHOLDER}\"");
+    let nonce_attr = format!("nonce=\"{nonce}\"");
+    html_with_placeholder.replace(&placeholder_attr, &nonce_attr)
+}
+
+pub(crate) async fn index_handler(State(state): State<Arc<GatewayState>>) -> Response {
+    // Try to assemble customized HTML from workspace frontend config.
+    // Falls back to embedded HTML if workspace is unavailable or has no
+    // customizations — in that case there are no inline scripts and the
+    // global CSP layer applies unchanged.
+    let assembled = build_frontend_html(&state).await;
+
+    let Some(html_with_placeholder) = assembled else {
+        return (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            assets::INDEX_HTML,
+        )
+            .into_response();
+    };
+
+    // Customized path: the assembled HTML contains inline `<script>` blocks
+    // (layout config + widget modules) carrying [`NONCE_PLACEHOLDER`] in
+    // their `nonce` attribute. Stamp a fresh per-response nonce in both
+    // the HTML and the response's Content-Security-Policy header so the
+    // browser actually executes the scripts.
+    //
+    // Setting `Content-Security-Policy` here suppresses the global
+    // `SetResponseHeaderLayer::if_not_present` value for this response only.
+    let nonce = generate_csp_nonce();
+    let html = stamp_nonce_into_html(&html_with_placeholder, &nonce);
+    let csp = build_csp_with_nonce(&nonce);
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (
+                header::HeaderName::from_static("content-security-policy"),
+                csp,
+            ),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+/// Compute the strong ETag value for a CSS body.
+///
+/// Strong validators are quoted, sha-prefixed, and truncated to 16 hex chars
+/// (64 bits) — collisions are statistically irrelevant for cache validation
+/// and the short form keeps headers compact. The same scheme is used for
+/// both the embedded base stylesheet and the workspace-customized variant
+/// so a flip between the two flavors naturally invalidates the client's
+/// cached copy.
+pub(crate) fn css_etag(body: &str) -> String {
+    let digest = Sha256::digest(body.as_bytes());
+    let hex = hex::encode(digest);
+    // 16 hex chars = 64 bits, plenty for content addressing.
+    format!("\"sha256-{}\"", &hex[..16]) // safety: hex::encode is pure ASCII, char-boundary safe
+}
+
+pub(crate) async fn css_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    // Append custom CSS from `.system/gateway/custom.css` if it exists.
+    //
+    // The hot path (no workspace overlay) borrows `assets::STYLE_CSS` directly
+    // via `Cow::Borrowed` so we don't allocate / copy the entire embedded
+    // stylesheet on every request. We only fall through to an owned
+    // `format!` when there's actually content to append.
+    //
+    // **Multi-tenant safety.** This must mirror the same guard
+    // `build_frontend_html` already enforces (see its doc comment): in
+    // multi-user mode (`workspace_pool.is_some()`) we cannot resolve a
+    // per-user workspace because `/style.css` is the unauthenticated
+    // bootstrap stylesheet — there is no user identity at request time.
+    // Reading from `state.workspace` here would expose one global
+    // workspace's `custom.css` to every user, defeating the
+    // `index_handler` guard at the sibling endpoint. Refuse the overlay
+    // path entirely in multi-tenant mode and serve the embedded base
+    // stylesheet to all users; per-user CSS overrides can ride a future
+    // authenticated `/api/frontend/custom-css` endpoint.
+    let css: std::borrow::Cow<'static, str> = if state.workspace_pool.is_some() {
+        std::borrow::Cow::Borrowed(assets::STYLE_CSS)
+    } else {
+        match &state.workspace {
+            Some(ws) => match ws.read(".system/gateway/custom.css").await {
+                Ok(doc) if !doc.content.trim().is_empty() => std::borrow::Cow::Owned(format!(
+                    "{}\n/* --- custom overrides --- */\n{}",
+                    assets::STYLE_CSS,
+                    doc.content
+                )),
+                _ => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+            },
+            None => std::borrow::Cow::Borrowed(assets::STYLE_CSS),
+        }
+    };
+
+    // Strong validator over the assembled body. The cache key naturally
+    // tracks both base stylesheet edits (compile-time) and `custom.css`
+    // edits (workspace mutation) — operators no longer need to ask users
+    // to hard-refresh after tweaking branding.
+    let etag = css_etag(&css);
+
+    // Conditional GET: if the client already holds this exact body, send a
+    // 304 with no body and let the browser reuse its cached copy. RFC 9110
+    // §13.1.2 — `If-None-Match` is a list of validators; we accept either
+    // an exact match or the literal `*`. Anything else falls through to a
+    // full 200 response.
+    if let Some(value) = headers.get(header::IF_NONE_MATCH)
+        && let Ok(s) = value.to_str()
+        && s.split(',').any(|v| {
+            let v = v.trim();
+            v == "*" || v == etag
+        })
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag.as_str()),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+        )
+            .into_response();
+    }
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/css".to_string()),
+            // Keep `no-cache` so the browser always revalidates — combined
+            // with the ETag this gives us "fast 304" semantics rather than
+            // a stale `max-age` window where operator edits don't show up.
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag),
+        ],
+        css,
+    )
+        .into_response()
+}
+
+pub(crate) async fn theme_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::THEME_CSS,
+    )
+}
+
+pub(crate) async fn js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::APP_JS,
+    )
+}
+
+pub(crate) async fn theme_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::THEME_INIT_JS,
+    )
+}
+
+pub(crate) async fn debug_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_INIT_JS,
+    )
+}
+
+pub(crate) async fn debug_panel_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_PANEL_JS,
+    )
+}
+
+pub(crate) async fn debug_panel_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::DEBUG_PANEL_CSS,
+    )
+}
+
+pub(crate) async fn favicon_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        assets::FAVICON_ICO,
+    )
+}
+
+pub(crate) async fn i18n_index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_INDEX_JS,
+    )
+}
+
+pub(crate) async fn i18n_en_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_EN_JS,
+    )
+}
+
+pub(crate) async fn i18n_zh_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_ZH_CN_JS,
+    )
+}
+
+pub(crate) async fn i18n_ko_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_KO_JS,
+    )
+}
+
+pub(crate) async fn i18n_app_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::I18N_APP_JS,
+    )
+}
+
+// --- Admin panel static handlers ---
+
+pub(crate) async fn admin_html_handler() -> impl IntoResponse {
+    // Admin panel CSP — fully same-origin, no CDN allowances.
+    // Delivered as an HTTP header (not a <meta> tag) so the browser enforces
+    // it before any markup is parsed.
+    const ADMIN_CSP: &str = "default-src 'self'; \
+        script-src 'self'; \
+        style-src 'self' 'unsafe-inline'; \
+        font-src 'self'; \
+        connect-src 'self'; \
+        img-src 'self' data:; \
+        object-src 'none'; \
+        frame-ancestors 'none'; \
+        base-uri 'self'; \
+        form-action 'self'";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static(ADMIN_CSP),
+    );
+    (headers, assets::ADMIN_HTML)
+}
+
+pub(crate) async fn admin_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_CSS,
+    )
+}
+
+pub(crate) async fn admin_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_JS,
+    )
+}
+
+// --- Health ---
+
+pub(crate) async fn health_handler() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "healthy",
+        channel: "gateway",
+    })
+}
+
+// --- Project files (authenticated) ---
+
+/// Redirect `/projects/{id}` to `/projects/{id}/` so relative paths in
+/// the served HTML resolve within the project namespace.
+pub(crate) async fn project_redirect_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    axum::response::Redirect::permanent(&format!("/projects/{project_id}/")).into_response()
+}
+
+/// Serve `index.html` when hitting `/projects/{project_id}/`.
+pub(crate) async fn project_index_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    serve_project_file(&project_id, "index.html").await
+}
+
+/// Serve any file under `/projects/{project_id}/{path}`.
+pub(crate) async fn project_file_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path((project_id, path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    serve_project_file(&project_id, &path).await
+}
+
+/// Check that a project directory belongs to a job owned by the given user.
+/// Returns false if the store is unavailable or the project is not found.
+async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_id: &str) -> bool {
+    let Some(ref store) = state.store else {
+        return false;
+    };
+    // The project_id is a sandbox job UUID used as the directory name.
+    let Ok(job_id) = project_id.parse::<uuid::Uuid>() else {
+        return false;
+    };
+    match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => job.user_id == user_id,
+        _ => false,
+    }
+}
+
+/// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
+/// guard against path traversal, and stream the content with the right MIME type.
+async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
+    // Reject project_id values that could escape the projects directory.
+    if project_id.contains('/')
+        || project_id.contains('\\')
+        || project_id.contains("..")
+        || project_id.is_empty()
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
+    }
+
+    let base = ironclaw_base_dir().join("projects").join(project_id);
+
+    let file_path = base.join(path);
+
+    // Path traversal guard
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let base_canonical = match base.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if !canonical.starts_with(&base_canonical) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+
+    match tokio::fs::read(&canonical).await {
+        Ok(contents) => {
+            let mime = mime_guess::from_path(&canonical)
+                .first_or_octet_stream()
+                .to_string();
+            ([(header::CONTENT_TYPE, mime)], contents).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
+// Tests for these helpers live alongside the route-level handler tests in
+// `src/channels/web/server.rs` (for now), where the full `GatewayState`
+// fixture is already in scope. They will migrate here once `server.rs` is
+// further trimmed in the next ironclaw#2599 increment.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{Router, http::StatusCode, http::header, routing::get};
+
+    use crate::channels::web::auth::CombinedAuthState;
+
+    use crate::channels::web::platform::router::start_server;
+    use crate::channels::web::platform::state::WorkspacePool;
+    use crate::channels::web::platform::static_files::{
+        BASE_CSP_HEADER, build_csp, build_csp_with_nonce, build_frontend_html, css_etag,
+        css_handler, generate_csp_nonce, stamp_nonce_into_html,
+    };
+
+    use crate::channels::web::test_helpers::test_gateway_state;
+
+    use crate::db::Database;
+
+    use crate::workspace::Workspace;
+    use ironclaw_gateway::{NONCE_PLACEHOLDER, assets};
+
+    #[tokio::test]
+    async fn test_csp_header_present_on_responses() {
+        use std::net::SocketAddr;
+
+        let state = test_gateway_state(None);
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
+            "test-token".to_string(),
+            "test".to_string(),
+        ));
+        let bound = start_server(addr, state.clone(), auth)
+            .await
+            .expect("server should start");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header must be present");
+
+        let csp_str = csp.to_str().expect("CSP header should be valid UTF-8");
+        assert!(
+            csp_str.contains("default-src 'self'"),
+            "CSP must contain default-src"
+        );
+        assert!(
+            csp_str.contains(
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh"
+            ),
+            "CSP must allow the explicit script CDNs without unsafe-inline"
+        );
+        assert!(
+            csp_str.contains("object-src 'none'"),
+            "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("frame-ancestors 'none'"),
+            "CSP must contain frame-ancestors 'none'"
+        );
+
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    #[test]
+    fn test_base_and_nonce_csp_agree_outside_script_src() {
+        // Regression for the drift risk flagged in PR #1725 review: the
+        // static header and the per-response nonce header must share every
+        // directive except `script-src`. Build both, strip `script-src …;`
+        // from each, and assert the remaining policy is byte-identical.
+        let base = build_csp(None);
+        let nonce = build_csp(Some("feedc0de"));
+
+        fn strip_script_src(csp: &str) -> String {
+            // Directives are separated by `; `. Drop the one that starts
+            // with `script-src` and rejoin the rest.
+            csp.split("; ")
+                .filter(|d| !d.trim_start().starts_with("script-src"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+
+        assert_eq!(
+            strip_script_src(&base),
+            strip_script_src(&nonce),
+            "base CSP and nonce CSP must agree on every directive except script-src\n\
+             base:  {base}\n\
+             nonce: {nonce}"
+        );
+    }
+
+    #[test]
+    fn test_base_csp_header_matches_build_csp_none() {
+        // The lazy static header used by the response-header layer must be
+        // byte-identical to `build_csp(None)`. If the fallback branch of
+        // the LazyLock ever fires, the header would regress to
+        // `default-src 'self'` and this test would catch it.
+        let lazy = BASE_CSP_HEADER.to_str().expect("static CSP is ASCII");
+        assert_eq!(lazy, build_csp(None));
+    }
+
+    #[test]
+    fn test_build_csp_with_nonce_includes_nonce_source() {
+        // Per-response CSP must add `'nonce-…'` to script-src so a single
+        // inline `<script nonce="…">` block is authorized for that response.
+        let csp = build_csp_with_nonce("deadbeefcafebabe");
+        assert!(
+            csp.contains("script-src 'self' 'nonce-deadbeefcafebabe' https://cdn.jsdelivr.net"),
+            "nonce source must appear immediately after 'self' in script-src; got: {csp}"
+        );
+        // The other directives must match the static BASE_CSP so the
+        // per-response value never accidentally relaxes anything else.
+        for needle in [
+            "default-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+        ] {
+            assert!(csp.contains(needle), "missing directive: {needle}");
+        }
+        // And it must NOT contain `'unsafe-inline'` for scripts.
+        assert!(
+            !csp.contains("script-src 'self' 'unsafe-inline'"),
+            "script-src must not allow 'unsafe-inline'"
+        );
+    }
+
+    #[test]
+    fn test_generate_csp_nonce_is_unique_and_hex() {
+        let a = generate_csp_nonce();
+        let b = generate_csp_nonce();
+        assert_eq!(a.len(), 32, "16 bytes hex-encoded should be 32 chars");
+        assert_ne!(a, b, "nonces must be unique per call");
+        assert!(
+            a.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "nonce must be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn test_css_etag_is_strong_validator_format() {
+        // Strong validators are double-quoted (no `W/` prefix). The
+        // sha-prefix lets future readers identify the digest function at a
+        // glance, and 16 hex chars (64 bits) is plenty for content-address
+        // collision avoidance on a single-tenant CSS payload.
+        let etag = css_etag("body { color: red; }");
+        assert!(etag.starts_with("\"sha256-"));
+        assert!(etag.ends_with('"'));
+        assert!(!etag.starts_with("W/"));
+        // Header value must be ASCII so it can land in a `HeaderValue`.
+        assert!(etag.is_ascii());
+    }
+
+    #[test]
+    fn test_css_etag_changes_when_body_changes() {
+        // The whole point of the ETag: editing `custom.css` must produce
+        // a new validator so the browser fetches the updated body.
+        let base = css_etag("body { color: red; }");
+        let edited = css_etag("body { color: blue; }");
+        assert_ne!(base, edited);
+        // Adding even a single byte must invalidate.
+        let appended = css_etag("body { color: red; } ");
+        assert_ne!(base, appended);
+    }
+
+    #[test]
+    fn test_css_etag_stable_for_identical_body() {
+        // Two requests against the same assembled body must produce the
+        // same validator — otherwise every request misses the cache.
+        let body = "body { color: red; }";
+        assert_eq!(css_etag(body), css_etag(body));
+    }
+
+    #[tokio::test]
+    async fn test_css_handler_returns_etag_and_serves_304_on_match() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Pure-static path: no workspace overlay, so the body is exactly
+        // the embedded `STYLE_CSS`. Cheap and deterministic.
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        // First request: 200 with ETag header.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .expect("ETag header must be present on 200")
+            .to_str()
+            .expect("ETag is ASCII")
+            .to_string();
+        assert!(etag.starts_with("\"sha256-"));
+
+        // Second request with `If-None-Match` matching the validator: 304
+        // and an empty body. The browser keeps its cached copy.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert!(body.is_empty(), "304 must have an empty body");
+
+        // Third request with a stale validator: 200 again. Operators
+        // expect this when `custom.css` changes underneath them — the
+        // browser revalidates, sees the body shifted, and fetches anew.
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .header(header::IF_NONE_MATCH, "\"sha256-0000000000000000\"")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_css_handler_returns_base_in_multi_tenant_mode() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_css.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a global workspace with a hostile-looking custom.css.
+        // If css_handler ever reads state.workspace in multi-tenant
+        // mode, the marker would leak into the response body and this
+        // test would fail with an actionable diagnostic.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/custom.css",
+                "body { background: #ff0000; } /* TENANT-LEAK-BAIT */",
+            )
+            .await
+            .expect("seed bait custom.css");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        let app = Router::new()
+            .route("/style.css", get(css_handler))
+            .with_state(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body_str = String::from_utf8_lossy(&body);
+
+        // Contract 1: the bait marker is absent. If a future regression
+        // re-reads state.workspace in multi-tenant mode, the marker
+        // would land here and this assertion fails with the leaked
+        // content visible in the diagnostic.
+        assert!(
+            !body_str.contains("TENANT-LEAK-BAIT"),
+            "custom.css from global workspace leaked into multi-tenant /style.css \
+             response — css_handler is missing its workspace_pool guard"
+        );
+
+        // Contract 2: the response is exactly the embedded base
+        // stylesheet, byte-for-byte. This catches a subtler regression
+        // where the leak content is dropped but the multi-tenant path
+        // still does the owned `format!` (turning what should be a
+        // borrowed hot-path response into an allocation).
+        assert_eq!(
+            body_str.as_ref(),
+            assets::STYLE_CSS,
+            "multi-tenant /style.css must serve the embedded base stylesheet \
+             unchanged — no overlay, no allocation"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_replaces_attribute() {
+        // Vanilla case: a placeholder inside a `nonce="…"` attribute on
+        // a script tag must be substituted with the real nonce. Both
+        // the layout-config script and any widget script tags emitted
+        // by `assemble_index` carry the same attribute shape, so a
+        // single test covers every emission point.
+        let html = format!("<script nonce=\"{NONCE_PLACEHOLDER}\">window.X = 1;</script>");
+        let stamped = stamp_nonce_into_html(&html, "deadbeef");
+        assert!(
+            stamped.contains("nonce=\"deadbeef\""),
+            "real nonce attribute must be present after substitution: {stamped}"
+        );
+        assert!(
+            !stamped.contains(NONCE_PLACEHOLDER),
+            "placeholder must be gone after substitution: {stamped}"
+        );
+    }
+
+    #[test]
+    fn test_stamp_nonce_into_html_does_not_mutate_widget_body() {
+        // Regression for the PR #1725 Copilot finding: a bare-string
+        // replace would also rewrite any *body content* that happens to
+        // contain the literal sentinel — e.g. a widget JS module that
+        // mentions `__IRONCLAW_CSP_NONCE__` in a comment, log line, or
+        // string constant. The attribute-targeted replace must leave
+        // those untouched.
+        //
+        // Build a fragment with TWO sentinels: one inside the
+        // legitimate `nonce="…"` attribute (must be replaced) and one
+        // inside the script body as a string constant (must NOT be
+        // replaced).
+        let html = format!(
+            "<script type=\"module\" nonce=\"{NONCE_PLACEHOLDER}\">\n\
+             // hostile widget body — author writes the sentinel as a constant\n\
+             const SENTINEL = \"{NONCE_PLACEHOLDER}\";\n\
+             console.log(SENTINEL);\n\
+             </script>"
+        );
+        let stamped = stamp_nonce_into_html(&html, "cafebabe");
+
+        // Contract 1: the attribute was rewritten.
+        assert!(
+            stamped.contains("nonce=\"cafebabe\""),
+            "attribute must carry the per-response nonce: {stamped}"
+        );
+
+        // Contract 2: the body sentinel survived intact. The widget
+        // author's source must round-trip byte-for-byte.
+        assert!(
+            stamped.contains(&format!("const SENTINEL = \"{NONCE_PLACEHOLDER}\"")),
+            "widget body sentinel must NOT be rewritten: {stamped}"
+        );
+
+        // Contract 3: exactly one occurrence of the placeholder remains
+        // (the one in the body). If a future regression switches to a
+        // bare-string replace, this count would drop to 0 and the test
+        // would fail loudly with the diff.
+        assert_eq!(
+            stamped.matches(NONCE_PLACEHOLDER).count(),
+            1,
+            "exactly one placeholder occurrence (in widget body) must \
+             survive; the attribute one must be replaced. Got: {stamped}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_build_frontend_html_returns_none_in_multi_tenant_mode() {
+        use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+        use crate::db::Database as _;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::EmbeddingCacheConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_index.db"))
+            .await
+            .expect("backend");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+
+        // Bait: a *global* workspace with customizations. If
+        // build_frontend_html ever read state.workspace in multi-tenant
+        // mode, the title "TENANT-LEAK-BAIT" would appear in the
+        // assembled HTML for every user. The assertions below pin the
+        // refusal contract — both the return value AND the cache slot.
+        let global_ws = Arc::new(Workspace::new_with_db("tenant-leak-bait", Arc::clone(&db)));
+        global_ws
+            .write(
+                ".system/gateway/layout.json",
+                r#"{"branding":{"title":"TENANT-LEAK-BAIT"}}"#,
+            )
+            .await
+            .expect("seed bait layout");
+
+        let pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&db),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        // Build state via the standard test helper, then mutate the
+        // workspace + workspace_pool fields. `Arc::get_mut` succeeds here
+        // because no other strong reference exists yet — the helper just
+        // returned the freshly-constructed Arc.
+        let mut state = test_gateway_state(None);
+        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
+        state_mut.workspace = Some(global_ws);
+        state_mut.workspace_pool = Some(pool);
+
+        // Contract 1: build_frontend_html refuses to assemble.
+        let html = build_frontend_html(&state).await;
+        assert!(
+            html.is_none(),
+            "build_frontend_html must return None in multi-tenant mode \
+             (got Some HTML — bait layout may have leaked across tenants)"
+        );
+
+        // Contract 2: the cache slot is still empty. The early return
+        // above MUST short-circuit before the cache write at the bottom
+        // of the function — otherwise a poisoned cache entry would serve
+        // the leaked HTML to subsequent requests even after the bug is
+        // fixed.
+        let cache = state.frontend_html_cache.read().await;
+        assert!(
+            cache.is_none(),
+            "frontend_html_cache must remain empty in multi-tenant mode"
+        );
+    }
+}

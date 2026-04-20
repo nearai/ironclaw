@@ -16,12 +16,15 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, EffectExecutor, EngineError,
+    MountError, Store, ThreadExecutionContext, WorkspaceMounts,
 };
+use ironclaw_skills::SkillRegistry;
 
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::bridge::router::synthetic_action_call_id;
+use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
@@ -56,6 +59,22 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
+    /// Optional per-project workspace mount table. When set and a sandbox-eligible
+    /// tool call carries a `/project/...` path, the call is dispatched through
+    /// the mount backend (passthrough host filesystem in Phase 1; containerized
+    /// in Phase 5+) instead of the host tool. When unset, all tool calls run
+    /// on the host as before.
+    workspace_mounts: RwLock<Option<Arc<WorkspaceMounts>>>,
+    /// Engine capability registry. `available_actions()` reads this to surface
+    /// actions from non-v1 capabilities (e.g. `missions`) to the LLM. The v1
+    /// `ToolRegistry` only covers built-in + extension tools; engine-native
+    /// capabilities like `missions` are registered here in `router.rs` and
+    /// would otherwise be invisible to the LLM despite having active leases.
+    capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -75,7 +94,30 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
+            workspace_mounts: RwLock::new(None),
+            capability_registry: RwLock::new(None),
         }
+    }
+
+    /// Install a per-project workspace mount table on this adapter. When set,
+    /// sandbox-eligible tool calls (`file_read`, `file_write`, `list_dir`,
+    /// `apply_patch`, `shell`) whose path argument resolves into a mount get
+    /// dispatched through the mount backend instead of the host tool.
+    ///
+    /// Pass `None` to remove the mount table and revert to direct host
+    /// execution for all tools.
+    pub async fn set_workspace_mounts(&self, mounts: Option<Arc<WorkspaceMounts>>) {
+        *self.workspace_mounts.write().await = mounts;
+    }
+
+    /// Install the engine capability registry so `available_actions()` can
+    /// surface actions from engine-native capabilities (missions, etc.) to
+    /// the LLM. Called once at bridge setup after `router.rs` has finished
+    /// registering all capabilities.
+    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+        *self.capability_registry.write().await = Some(registry);
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -86,6 +128,18 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -127,6 +181,38 @@ impl EffectBridgeAdapter {
         self.mission_manager.read().await.clone()
     }
 
+    async fn sync_skill_install_result(
+        &self,
+        output_value: &serde_json::Value,
+        project_id: ironclaw_engine::ProjectId,
+    ) -> Result<(), EngineError> {
+        let Some(skill_name) = output_value.get("name").and_then(|value| value.as_str()) else {
+            return Ok(());
+        };
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Ok(());
+        };
+        let Some(registry) = self.skill_registry.read().await.clone() else {
+            return Ok(());
+        };
+
+        let skill = {
+            let guard = registry.read().map_err(|e| EngineError::Store {
+                reason: format!("skill registry lock poisoned: {e}"),
+            })?;
+            guard.find_by_name(skill_name).cloned()
+        }
+        .ok_or_else(|| EngineError::Skill {
+            reason: format!(
+                "skill_install reported '{}', but the installed skill was not found in the registry",
+                skill_name
+            ),
+        })?;
+
+        crate::bridge::skill_migration::sync_v1_skill_to_store(&skill, &store, project_id).await?;
+        Ok(())
+    }
+
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -134,6 +220,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
+        paused_lease: Option<CapabilityLease>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -142,6 +229,7 @@ impl EffectBridgeAdapter {
             parameters: Box::new(parameters),
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
+            paused_lease: paused_lease.map(Box::new),
         }
     }
 
@@ -150,6 +238,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         context: &ThreadExecutionContext,
         output_value: &serde_json::Value,
+        lease: &CapabilityLease,
     ) -> Option<EngineError> {
         let status = output_value.get("status").and_then(|v| v.as_str())?;
         let name = output_value.get("name").and_then(|v| v.as_str())?;
@@ -161,7 +250,21 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: name.to_string(),
+                    // Validate the tool-declared credential name — it is
+                    // external/untrusted input. Fall back to the tool's
+                    // own name (structurally trusted, from the registry)
+                    // if the external value fails validation; if even the
+                    // tool name fails (shouldn't happen in practice),
+                    // preserve the legacy passthrough so the gate can
+                    // still reach the user.
+                    credential_name: output_value
+                        .get("credential_name")
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| ironclaw_common::CredentialName::new(raw).ok())
+                        .or_else(|| ironclaw_common::CredentialName::new(name).ok())
+                        .unwrap_or_else(|| {
+                            ironclaw_common::CredentialName::from_trusted(name.to_string())
+                        }),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())
@@ -172,6 +275,7 @@ impl EffectBridgeAdapter {
                     ),
                 },
                 None,
+                Some(lease.clone()),
             )),
             _ => None,
         }
@@ -212,6 +316,16 @@ impl EffectBridgeAdapter {
 
         let result = match action_name {
             "mission_create" => {
+                if should_reject_immediate_mission_create(context) {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Refusing to create a mission for an immediate one-shot request. \
+                             The user asked for this to run now, so complete the task in the \
+                             current foreground thread. Only call mission_create/routine_create \
+                             when the user explicitly asks to schedule, automate, or create a \
+                             recurring routine/mission."
+                            .to_string(),
+                    }));
+                }
                 let name = params
                     .get("name")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -225,8 +339,25 @@ impl EffectBridgeAdapter {
                 let cadence_str = params
                     .get("cadence")
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("manual");
+                    .and_then(|v| v.as_str());
+                let Some(cadence_str) = cadence_str else {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "error": concat!(
+                                "cadence is required. Use 'manual', a cron expression ",
+                                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+                            )
+                        }),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                };
                 // Use explicit timezone param, fall back to user's channel timezone.
                 // ValidTimezone::parse filters empty/invalid strings.
                 let timezone = params
@@ -234,6 +365,21 @@ impl EffectBridgeAdapter {
                     .and_then(|v| v.as_str())
                     .and_then(ironclaw_engine::ValidTimezone::parse)
                     .or(context.user_timezone);
+                let cadence = match parse_cadence(cadence_str, timezone) {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        return Some(Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                            action_name: action_name.to_string(),
+                            output: serde_json::json!({"error": msg}),
+                            is_error: true,
+                            duration: std::time::Duration::ZERO,
+                        }));
+                    }
+                };
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -245,35 +391,134 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project = if let Some(pid_str) =
+                    params.get("project_id").and_then(|v| v.as_str())
+                {
+                    match uuid::Uuid::parse_str(pid_str) {
+                        Ok(uuid) => {
+                            let pid = ironclaw_engine::ProjectId(uuid);
+                            if pid != context.project_id {
+                                // Verify the target project belongs to this user.
+                                let store = mgr.store();
+                                match store.load_project(pid).await {
+                                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => pid,
+                                    Ok(Some(_)) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: "project_id does not belong to current user"
+                                                .to_string(),
+                                        }));
+                                    }
+                                    Ok(None) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!("Project not found: {pid_str}"),
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!(
+                                                "Failed to validate project ownership: {e}"
+                                            ),
+                                        }));
+                                    }
+                                }
+                            } else {
+                                pid
+                            }
+                        }
+                        Err(_) => {
+                            // Non-UUID project_id (e.g. slug or name) — resolve by
+                            // matching against the user's projects.
+                            let store = mgr.store();
+                            let projects = match store.list_projects(&context.user_id).await {
+                                Ok(ps) => ps,
+                                Err(e) => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "Failed to resolve project slug '{pid_str}': {e}"
+                                        ),
+                                    }));
+                                }
+                            };
+                            let needle = pid_str.to_lowercase();
+                            let matched = projects.iter().find(|p| {
+                                // Match against lowercased name or its slug form
+                                let name_lower = p.name.to_lowercase();
+                                let name_slug: String = name_lower
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                name_lower == needle || name_slug == needle
+                            });
+                            match matched {
+                                Some(p) => p.id,
+                                None => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "No project matching '{pid_str}' found for current user. \
+                                             Use a project name, slug, or UUID."
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    context.project_id
+                };
+                // Validate guardrail params before creating the mission so
+                // a type mismatch doesn't leave a "ghost" mission in storage.
+                let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
+                if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({"error": msg}),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                }
+                if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
+                    guardrail_updates.success_criteria = Some(criteria.to_string());
+                }
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str, timezone),
+                        cadence,
                         notify_channels,
                     )
                     .await
                 {
                     Ok(id) => {
-                        // Routine alias post-create update: apply the
-                        // non-execution routine fields (description,
-                        // context_paths, notify_user, cooldown, max_concurrent,
-                        // dedup_window) via update_mission. Mission_create's
-                        // signature doesn't take these directly.
-                        //
-                        // We don't have a `delete_mission` to roll back on
-                        // partial failure, so the next-best contract is to
-                        // surface the failure clearly: status flips to
-                        // `created_with_warnings` and the warning text goes
-                        // into a `warnings` array. The LLM (or downstream
-                        // code) sees the partial-success signal and can
-                        // call `update_mission` directly to retry, instead
-                        // of believing the routine was fully configured.
+                        let has_updates = guardrail_updates.cooldown_secs.is_some()
+                            || guardrail_updates.max_concurrent.is_some()
+                            || guardrail_updates.dedup_window_secs.is_some()
+                            || guardrail_updates.max_threads_per_day.is_some()
+                            || guardrail_updates.description.is_some()
+                            || guardrail_updates.context_paths.is_some()
+                            || guardrail_updates.notify_user.is_some()
+                            || guardrail_updates.notify_channels.is_some()
+                            || guardrail_updates.cadence.is_some()
+                            || guardrail_updates.success_criteria.is_some();
                         let mut warnings: Vec<String> = Vec::new();
-                        if let Some(updates) = post_create_update.clone()
-                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        if has_updates
+                            && let Err(e) = mgr
+                                .update_mission(id, &context.user_id, guardrail_updates)
+                                .await
                         {
                             tracing::warn!(
                                 mission_id = %id,
@@ -312,14 +557,30 @@ impl EffectBridgeAdapter {
                     let list: Vec<serde_json::Value> = missions
                         .iter()
                         .map(|m| {
+                            let timezone =
+                                if let ironclaw_engine::types::mission::MissionCadence::Cron {
+                                    timezone: Some(tz),
+                                    ..
+                                } = &m.cadence
+                                {
+                                    serde_json::Value::String(tz.to_string())
+                                } else {
+                                    serde_json::Value::Null
+                                };
                             serde_json::json!({
                                 "id": m.id.to_string(),
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
+                                "cadence": cadence_to_round_trip_string(&m.cadence),
+                                "timezone": timezone,
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
+                                "cooldown_secs": m.cooldown_secs,
+                                "max_concurrent": m.max_concurrent,
+                                "dedup_window_secs": m.dedup_window_secs,
+                                "max_threads_per_day": m.max_threads_per_day,
                             })
                         })
                         .collect();
@@ -327,6 +588,75 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
+            "mission_get" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name"))
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.get_mission(id).await {
+                        Ok(Some(mission)) => {
+                            // Ownership check: only the mission owner can
+                            // retrieve its details (mirrors fire/pause/resume).
+                            if mission.user_id != context.user_id {
+                                return Some(Err(EngineError::Effect {
+                                    reason: format!("mission {id_str} belongs to another user"),
+                                }));
+                            }
+                            // Load recent threads (last 5) to show results
+                            let store = mgr.store();
+                            let recent_thread_ids: Vec<_> =
+                                mission.thread_history.iter().rev().take(5).collect();
+                            let mut thread_summaries = Vec::new();
+                            for tid in recent_thread_ids {
+                                if let Ok(Some(thread)) = store.load_thread(*tid).await {
+                                    let last_response = thread
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| m.role == ironclaw_engine::MessageRole::Assistant)
+                                        .map(|m| m.content.clone());
+                                    thread_summaries.push(serde_json::json!({
+                                        "thread_id": tid.to_string(),
+                                        "state": format!("{:?}", thread.state),
+                                        "created_at": thread.created_at.to_rfc3339(),
+                                        "completed_at": thread.completed_at.map(|t| t.to_rfc3339()),
+                                        "steps": thread.step_count,
+                                        "tokens_used": thread.total_tokens_used,
+                                        "result": last_response,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::json!({
+                                "id": mission.id.to_string(),
+                                "name": mission.name,
+                                "goal": mission.goal,
+                                "status": format!("{:?}", mission.status),
+                                "current_focus": mission.current_focus,
+                                "approach_history": mission.approach_history.iter().rev().take(10).rev().cloned().collect::<Vec<_>>(),
+                                "success_criteria": mission.success_criteria,
+                                "total_threads": mission.thread_history.len(),
+                                "cadence": format!("{:?}", mission.cadence),
+                                "last_fire_at": mission.last_fire_at.map(|t| t.to_rfc3339()),
+                                "next_fire_at": mission.next_fire_at.map(|t| t.to_rfc3339()),
+                                "recent_threads": thread_summaries,
+                            }))
+                        }
+                        Ok(None) => Err(EngineError::Effect {
+                            reason: format!("mission not found: {id_str}"),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             "mission_fire" => {
                 let id_str = params
                     .get("id")
@@ -377,7 +707,7 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_delete" => {
+            "mission_complete" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("name")) // routine_delete uses "name" param
@@ -391,7 +721,7 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => match mgr.complete_mission(id).await {
-                        Ok(()) => Ok(serde_json::json!({"status": "deleted"})),
+                        Ok(()) => Ok(serde_json::json!({"status": "completed"})),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -423,7 +753,20 @@ impl EffectBridgeAdapter {
                                 .and_then(|v| v.as_str())
                                 .and_then(ironclaw_engine::ValidTimezone::parse)
                                 .or(context.user_timezone);
-                            updates.cadence = Some(parse_cadence(cadence, tz));
+                            match parse_cadence(cadence, tz) {
+                                Ok(c) => updates.cadence = Some(c),
+                                Err(msg) => {
+                                    return Some(Ok(ActionResult {
+                                        call_id: context.current_call_id.clone().unwrap_or_else(
+                                            || synthetic_action_call_id(action_name),
+                                        ),
+                                        action_name: action_name.to_string(),
+                                        output: serde_json::json!({"error": msg}),
+                                        is_error: true,
+                                        duration: std::time::Duration::ZERO,
+                                    }));
+                                }
+                            }
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -433,10 +776,17 @@ impl EffectBridgeAdapter {
                                     .collect(),
                             );
                         }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            updates.max_threads_per_day = Some(max as u32);
+                        if let Err(msg) = extract_guardrails(params, &mut updates) {
+                            return Some(Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({"error": msg}),
+                                is_error: true,
+                                duration: std::time::Duration::ZERO,
+                            }));
                         }
                         if let Some(criteria) =
                             params.get("success_criteria").and_then(|v| v.as_str())
@@ -510,7 +860,7 @@ impl EffectBridgeAdapter {
         &self,
         action_name: &str,
         parameters: serde_json::Value,
-        _lease: &CapabilityLease,
+        lease: &CapabilityLease,
         context: &ThreadExecutionContext,
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
@@ -610,6 +960,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
@@ -682,6 +1033,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -723,6 +1075,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -770,13 +1123,19 @@ impl EffectBridgeAdapter {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
+                    if !approval_already_granted {
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                            None,
+                            Some(lease.clone()),
+                        ));
+                    }
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approve_tools
@@ -790,6 +1149,7 @@ impl EffectBridgeAdapter {
                             parameters,
                             ironclaw_engine::ResumeKind::Approval { allow_always: true },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -839,14 +1199,90 @@ impl EffectBridgeAdapter {
             job_ctx.http_interceptor = Some(Arc::clone(interceptor));
         }
 
-        let result = crate::tools::execute::execute_tool_with_safety(
-            &self.tools,
-            &self.safety,
-            &lookup_name,
-            parameters.clone(),
-            &job_ctx,
-        )
-        .await;
+        // ── Sandbox interception (engine v2 Phase 8) ──
+        //
+        // For sandbox-eligible tools (`file_read`, `file_write`, `list_dir`,
+        // `apply_patch`, `shell`), check whether the call's path argument
+        // resolves into a workspace mount. If so, dispatch through the mount
+        // backend (filesystem passthrough today, containerized later) instead
+        // of running the host tool. This is the single decision point that
+        // routes between host and sandbox execution; everything outside this
+        // block runs unchanged.
+        // Pre-intercept safety validation: sandbox-dispatched calls must
+        // pass the same parameter checks as host-dispatched calls (rate
+        // limiting is skipped because the backend has its own limits, but
+        // prompt-injection / param validation must run).
+        let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
+        let sandbox_result = if let Some(mounts) = mounts_snapshot {
+            // Normalize parameters the same way the host path does
+            // (`execute_tool_with_safety` → `prepare_tool_params`) so
+            // validation sees consistent types (e.g. string "true" → bool).
+            let normalized = if let Some(tool) = self.tools.get(&lookup_name).await {
+                crate::tools::prepare_tool_params(tool.as_ref(), &parameters)
+            } else {
+                parameters.clone()
+            };
+            let validation = self.safety.validator().validate_tool_params(&normalized);
+            if !validation.is_valid {
+                let details = validation
+                    .errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::InvalidParameters {
+                        name: lookup_name.clone(),
+                        reason: format!("Invalid tool parameters: {details}"),
+                    },
+                )))
+            } else {
+                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                {
+                    Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
+                    Ok(InterceptOutcome::FellThrough) => None,
+                    Err(MountError::NotFound { path }) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: not found: {path}"),
+                        },
+                    ))),
+                    Err(MountError::PermissionDenied { path }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: permission denied: {path}"),
+                        }),
+                    )),
+                    Err(MountError::InvalidPath { path, reason }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::InvalidParameters {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: invalid path '{path}': {reason}"),
+                        }),
+                    )),
+                    Err(e) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: {e}"),
+                        },
+                    ))),
+                }
+            }
+        } else {
+            None
+        };
+
+        let result = if let Some(intercepted) = sandbox_result {
+            intercepted
+        } else {
+            crate::tools::execute::execute_tool_with_safety(
+                &self.tools,
+                &self.safety,
+                &lookup_name,
+                parameters.clone(),
+                &job_ctx,
+            )
+            .await
+        };
 
         let duration = start.elapsed();
 
@@ -857,12 +1293,16 @@ impl EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
-                if (lookup_name == "tool_activate" || lookup_name == "tool_auth")
+                if (lookup_name == "tool_activate"
+                    || lookup_name == "tool_auth"
+                    || lookup_name == "tool_install"
+                    || lookup_name == "tool-install")
                     && let Some(err) = Self::auth_gate_from_extension_result(
                         action_name,
                         parameters.clone(),
                         context,
                         &output_value,
+                        lease,
                     )
                 {
                     return Err(err);
@@ -895,11 +1335,14 @@ impl EffectBridgeAdapter {
                                 ironclaw_engine::ResumeKind::Authentication {
                                     credential_name: credential_name.clone(),
                                     instructions: instructions.unwrap_or_else(|| {
-                                        auth_mgr.get_setup_instructions_or_default(&credential_name)
+                                        auth_mgr.get_setup_instructions_or_default(
+                                            credential_name.as_str(),
+                                        )
                                     }),
                                     auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
+                                None,
                             ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {
@@ -938,6 +1381,11 @@ impl EffectBridgeAdapter {
                     }
                 }
 
+                if lookup_name == "skill_install" {
+                    self.sync_skill_install_result(&output_value, context.project_id)
+                        .await?;
+                }
+
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
@@ -967,11 +1415,14 @@ impl EffectBridgeAdapter {
                         context.current_call_id.as_deref(),
                         parameters,
                         ironclaw_engine::ResumeKind::Authentication {
-                            credential_name: cred_name.clone(),
+                            credential_name: ironclaw_common::CredentialName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: format!("Provide your {} token", cred_name),
                             auth_url: None,
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
 
@@ -1025,7 +1476,7 @@ impl EffectExecutor for EffectBridgeAdapter {
 
     async fn available_actions(
         &self,
-        _leases: &[CapabilityLease],
+        leases: &[CapabilityLease],
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
@@ -1076,10 +1527,159 @@ impl EffectExecutor for EffectBridgeAdapter {
             }
         }
 
+        // Surface actions from engine-native capabilities (e.g. `missions`).
+        // The v1 `ToolRegistry` path above only covers built-in + extension
+        // tools; capabilities registered directly against the engine
+        // (`CapabilityRegistry`) would otherwise be invisible to the LLM
+        // even though the thread holds active leases for them. Iterate
+        // leases so we only advertise what the current thread actually has
+        // access to, and skip the `"tools"` capability — that lease is
+        // reconciled dynamically from the v1 path already covered above.
+        if let Some(registry) = self.capability_registry.read().await.as_ref() {
+            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            for lease in leases {
+                if lease.capability_name == "tools" {
+                    continue;
+                }
+                let Some(cap) = registry.get(&lease.capability_name) else {
+                    continue;
+                };
+                for action in &cap.actions {
+                    if !lease.granted_actions.covers(&action.name) {
+                        continue;
+                    }
+                    // Defensive: apply the same v1-isolation filters we run
+                    // on v1 tools. If a future engine capability registers
+                    // an action under a v1-denylisted name (`create_job`,
+                    // `tool_auth`, ...), the v1 filters above would have
+                    // hidden it — the engine path must not become a
+                    // silent bypass.
+                    if is_v1_only_tool(&action.name) || is_v1_auth_tool(&action.name) {
+                        continue;
+                    }
+                    if !seen.insert(action.name.clone()) {
+                        continue;
+                    }
+                    actions.push(action.clone());
+                }
+            }
+        }
+
         actions.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(actions)
     }
+}
+
+/// Whole-word immediate-execution markers (word-set membership).
+const IMMEDIATE_WORDS: &[&str] = &["now", "immediate", "immediately", "asap"];
+
+/// Multi-word immediate-execution phrases (substring match on lowered text).
+const IMMEDIATE_PHRASES: &[&str] = &[
+    "right away",
+    "right now",
+    "at once",
+    "do it now",
+    "do this now",
+];
+
+/// Prefix stems for scheduling intent so morphological variants match:
+/// "monitor" matches monitoring/monitors, "routin" matches routine/routinely, etc.
+const SCHEDULE_STEMS: &[&str] = &[
+    "automat",  // automate, automation, automated, automatically
+    "cron",     // cron
+    "daily",    // daily
+    "hourly",   // hourly
+    "mission",  // mission, missions
+    "monitor",  // monitor, monitoring, monitors
+    "monthly",  // monthly
+    "periodic", // periodic, periodically
+    "recur",    // recurring, recurrence, recurs
+    "routin",   // routine, routines, routinely
+    "schedul",  // schedule, scheduled, scheduling
+    "weekly",   // weekly
+];
+
+/// Multi-word scheduling-intent phrases (substring match on lowered text).
+const SCHEDULE_PHRASES: &[&str] = &[
+    "every day",
+    "every morning",
+    "every evening",
+    "every week",
+    "every month",
+    "every hour",
+    "from now on",
+    "long-running",
+];
+
+fn should_reject_immediate_mission_create(context: &ThreadExecutionContext) -> bool {
+    if context.thread_type != ironclaw_engine::types::thread::ThreadType::Foreground {
+        return false;
+    }
+
+    let Some(goal) = context.thread_goal.as_deref() else {
+        return false;
+    };
+
+    let lower = goal.to_ascii_lowercase();
+    let words = word_set(&lower);
+
+    contains_immediate_execution_marker(&lower, &words)
+        && !contains_scheduling_intent(&lower, &words)
+}
+
+fn contains_immediate_execution_marker(lower: &str, words: &HashSet<&str>) -> bool {
+    IMMEDIATE_WORDS.iter().any(|w| words.contains(*w))
+        || IMMEDIATE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn contains_scheduling_intent(lower: &str, words: &HashSet<&str>) -> bool {
+    SCHEDULE_STEMS
+        .iter()
+        .any(|stem| words.iter().any(|w| w.starts_with(stem)))
+        || SCHEDULE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn word_set(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Strictly extract a u64 from a JSON value, rejecting wrong types.
+fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("'{key}' must be an integer, got {v}")),
+    }
+}
+
+/// Extract guardrail overrides from params, failing on type mismatches.
+fn extract_guardrails(
+    params: &serde_json::Value,
+    base: &mut ironclaw_engine::MissionUpdate,
+) -> Result<(), String> {
+    if let Some(v) = strict_u64(params, "cooldown_secs")? {
+        base.cooldown_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_concurrent")? {
+        base.max_concurrent = Some(
+            u32::try_from(v).map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
+        );
+    }
+    if let Some(v) = strict_u64(params, "dedup_window_secs")? {
+        base.dedup_window_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_threads_per_day")? {
+        base.max_threads_per_day = Some(
+            u32::try_from(v)
+                .map_err(|_| format!("'max_threads_per_day' value {v} exceeds u32 max"))?,
+        );
+    }
+    Ok(())
 }
 
 /// Parse a cadence string into a MissionCadence.
@@ -1087,46 +1687,100 @@ impl EffectExecutor for EffectBridgeAdapter {
 /// When cadence is a cron expression, `timezone` is used as the scheduling
 /// timezone. This is typically the user's channel timezone, auto-injected
 /// from `ThreadExecutionContext::user_timezone`.
+///
+/// Returns an error for unrecognized cadence strings so the LLM can correct
+/// the call instead of silently falling back to Manual.
 fn parse_cadence(
     s: &str,
     timezone: Option<ironclaw_engine::ValidTimezone>,
-) -> ironclaw_engine::types::mission::MissionCadence {
+) -> Result<ironclaw_engine::types::mission::MissionCadence, String> {
     use ironclaw_engine::types::mission::MissionCadence;
-    let trimmed = s.trim().to_lowercase();
+    let trimmed = s.trim();
+    let lower = trimmed.to_lowercase();
     // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
     // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
     // is silently misclassified as a cron expression — the user said
     // "event:..." and gets a Cron cadence with a parse error downstream.
-    if trimmed == "manual" {
-        MissionCadence::Manual
-    } else if trimmed.starts_with("event:") {
-        MissionCadence::OnEvent {
-            event_pattern: trimmed
-                .strip_prefix("event:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            channel: None,
+    if lower == "manual" {
+        Ok(MissionCadence::Manual)
+    } else if lower.starts_with("event:") {
+        // Extract from original (not lowercased) to preserve case in regex patterns.
+        let rest = trimmed["event:".len()..].trim();
+        // Expected format: event:<channel>:<pattern>
+        // Split on first ':' after the channel name.
+        let (channel, pattern) = match rest.split_once(':') {
+            Some((ch, pat)) if !ch.trim().is_empty() && !pat.trim().is_empty() => {
+                (ch.trim(), pat.trim())
+            }
+            _ => {
+                return Err(concat!(
+                    "event cadence requires 'event:<channel>:<pattern>', ",
+                    "e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                )
+                .to_string());
+            }
+        };
+        // Validate with the same size limit the engine uses at runtime.
+        if let Err(e) = regex::RegexBuilder::new(pattern)
+            .size_limit(ironclaw_engine::runtime::mission::MAX_EVENT_REGEX_SIZE)
+            .build()
+        {
+            return Err(format!(
+                "event pattern '{pattern}' is not a valid regex: {e}"
+            ));
         }
-    } else if trimmed.starts_with("webhook:") {
-        MissionCadence::Webhook {
-            path: trimmed
-                .strip_prefix("webhook:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            secret: None,
+        Ok(MissionCadence::OnEvent {
+            event_pattern: pattern.to_string(),
+            channel: if channel == "*" {
+                None
+            } else {
+                Some(channel.to_string())
+            },
+        })
+    } else if lower.starts_with("system_event:") {
+        // Round-trip format emitted by cadence_to_round_trip_string():
+        //   system_event:<source>/<event_type>
+        let rest = trimmed["system_event:".len()..].trim();
+        let (source, event_type) = match rest.split_once('/') {
+            Some((s, e)) if !s.trim().is_empty() && !e.trim().is_empty() => {
+                (s.trim().to_string(), e.trim().to_string())
+            }
+            _ => {
+                return Err(
+                    "system_event cadence requires 'system_event:<source>/<event_type>', \
+                     e.g. 'system_event:self-improvement/thread_completed'"
+                        .to_string(),
+                );
+            }
+        };
+        Ok(MissionCadence::OnSystemEvent {
+            source,
+            event_type,
+            filters: std::collections::HashMap::new(),
+        })
+    } else if lower.starts_with("webhook:") {
+        // Extract from original to preserve case in webhook paths.
+        let path = trimmed["webhook:".len()..].trim().to_string();
+        if path.is_empty() {
+            return Err(
+                "webhook cadence requires a path after 'webhook:', e.g. 'webhook:github'"
+                    .to_string(),
+            );
         }
-    } else if trimmed.split_whitespace().count() >= 5 {
+        Ok(MissionCadence::Webhook { path, secret: None })
+    } else if lower.split_whitespace().count() >= 5 {
         // Looks like a cron expression (5+ fields). `split_whitespace` handles
         // tabs and newlines, not just spaces.
-        MissionCadence::Cron {
+        Ok(MissionCadence::Cron {
             expression: s.trim().to_string(),
             timezone,
-        }
+        })
     } else {
-        // Default to manual if unrecognized
-        MissionCadence::Manual
+        Err(format!(
+            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
+             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
+             (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+        ))
     }
 }
 
@@ -1297,7 +1951,13 @@ fn routine_to_mission_alias(
         }),
 
         "routine_delete" => Some(RoutineMissionAlias {
-            mission_action: "mission_delete",
+            mission_action: "mission_complete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_history" => Some(RoutineMissionAlias {
+            mission_action: "mission_get",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -1479,7 +2139,13 @@ fn cadence_to_round_trip_string(
     use ironclaw_engine::types::mission::MissionCadence;
     match cadence {
         MissionCadence::Cron { expression, .. } => expression.clone(),
-        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnEvent {
+            event_pattern,
+            channel,
+        } => match channel {
+            Some(ch) => format!("event:{ch}:{event_pattern}"),
+            None => format!("event:*:{event_pattern}"),
+        },
         MissionCadence::OnSystemEvent {
             source, event_type, ..
         } => {
@@ -1654,7 +2320,27 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "Always gate must set allow_always=false to prevent sticky session approval"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused for Always-approval (not LeaseDenied), got {other:?}")
+            }
+        }
     }
 
     struct ApprovalTestTool;
@@ -1759,6 +2445,7 @@ mod tests {
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
             user_timezone: None,
+            thread_goal: Some("test goal".to_string()),
         }
     }
 
@@ -1847,6 +2534,169 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    ///
+    /// PR #1958 reviewer-flagged regression: the original effect bridge
+    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
+    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
+    /// to `GatePaused(Approval { allow_always: false })`, and
+    /// `MemoryWriteTool::requires_approval` returns `Always` for
+    /// protected orchestrator targets so session auto-approve cannot
+    /// silently skip the gate. This test asserts the full path:
+    /// `requires_approval` → adapter → gate, with the real tool wired
+    /// into a real registry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_approve")),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "protected orchestrator writes must set allow_always=false \
+                             to prevent session auto-approve bypass"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            Err(EngineError::LeaseDenied { reason }) => {
+                panic!(
+                    "memory_write protected target was hard-denied (LeaseDenied) \
+                     instead of pausing for approval — this is the regression \
+                     that PR #1958's Always fix is meant to prevent. \
+                     Reason: {reason}"
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
+    }
+
+    /// Sibling check: when self-modify is **disabled**, the tool's
+    /// `execute()` returns `NotAuthorized` and the adapter reports the
+    /// failure as a non-success ToolOutput (not a GatePaused). The agent
+    /// must NOT see this as a resumable gate — it's a permanent refusal.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_refused_when_self_modify_disabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_disabled")),
+            )
+            .await;
+
+        // The adapter must NOT pause for approval when self-modify is off
+        // (otherwise the agent could be tricked into accepting a write
+        // that the static gate refuses). What it surfaces — error result
+        // vs. is_error ToolOutput — depends on plumbing; both must mention
+        // the self-modify denial.
+        let surfaced = match result {
+            Ok(output) => {
+                assert!(
+                    output.is_error,
+                    "self-modify-disabled write must surface as is_error"
+                );
+                serde_json::to_string(&output.output).unwrap_or_default()
+            }
+            Err(EngineError::GatePaused { .. }) => panic!(
+                "self-modify-disabled write must NOT pause for approval — \
+                 the gate must surface a permanent refusal so the agent \
+                 cannot loop on it"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            surfaced.contains("self-modification is disabled") || surfaced.contains("self-modify"),
+            "expected self-modify denial in surfaced result; got: {surfaced}"
+        );
     }
 
     /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
@@ -2201,28 +3051,88 @@ mod tests {
     }
 
     #[test]
-    fn parse_cadence_event_prefix_with_multi_token_pattern() {
-        // Regression: `parse_cadence` previously checked the cron heuristic
-        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
-        // so an `event:`-prefixed pattern containing 5+ tokens was silently
-        // misclassified as a Cron cadence with a parse error downstream.
-        let cadence = parse_cadence("event: a b c d e", None);
+    fn parse_cadence_event_channel_pattern_format() {
+        // event:<channel>:<pattern> should populate both fields.
+        let cadence = parse_cadence("event:telegram:.*", None).expect("should parse");
         match cadence {
-            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
-                assert_eq!(event_pattern, "a b c d e");
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, ".*");
+                assert_eq!(channel.as_deref(), Some("telegram"));
             }
             other => panic!("expected OnEvent, got {other:?}"),
         }
 
+        // Pattern with special regex chars.
+        let cadence = parse_cadence("event:github:review requested", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Pattern containing colons (split on first colon only).
+        let cadence = parse_cadence("event:slack:error:.*fatal", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "error:.*fatal");
+                assert_eq!(channel.as_deref(), Some("slack"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_missing_channel_or_pattern() {
+        // Just "event:<something>" with no second colon should fail.
+        let err = parse_cadence("event:telegram", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty channel.
+        let err = parse_cadence("event::.*", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty pattern.
+        let err = parse_cadence("event:telegram:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_invalid_regex() {
+        let err = parse_cadence("event:telegram:[invalid(", None).unwrap_err();
+        assert!(err.contains("not a valid regex"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_wins_over_cron_heuristic() {
+        // Regression: an event cadence with 5+ whitespace-separated tokens
+        // in the pattern must NOT be misclassified as a cron expression.
+        let cadence =
+            parse_cadence("event:slack:a]b c d e f", None).expect("should parse as event");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { .. }
+        ));
+
         // Same hazard for `webhook:` — verify the prefix wins.
-        let cadence = parse_cadence("webhook: a b c d e", None);
+        let cadence = parse_cadence("webhook: a b c d e", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
         ));
 
         // Sanity: a real cron expression still parses as cron.
-        let cadence = parse_cadence("0 9 * * *", None);
+        let cadence = parse_cadence("0 9 * * *", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Cron { .. }
@@ -2251,7 +3161,7 @@ mod tests {
             ("routine_fire", "mission_fire"),
             ("routine_pause", "mission_pause"),
             ("routine_resume", "mission_resume"),
-            ("routine_delete", "mission_delete"),
+            ("routine_delete", "mission_complete"),
         ] {
             let alias = routine_to_mission_alias(routine, &params)
                 .unwrap_or_else(|| panic!("expected alias for {routine}"));
@@ -2314,11 +3224,519 @@ mod tests {
     }
 
     #[test]
+    fn extract_guardrails_rejects_string_typed_integers() {
+        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
+        // The old code silently ignored the wrong type, so mission_update
+        // returned {"status":"updated"} but changed nothing in the database.
+        let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        let err = extract_guardrails(&params, &mut updates).unwrap_err();
+        assert!(err.contains("must be an integer"), "got: {err}");
+
+        // Integer values must succeed.
+        let params = serde_json::json!({"cooldown_secs": 0, "max_concurrent": 2});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("should succeed");
+        assert_eq!(updates.cooldown_secs, Some(0));
+        assert_eq!(updates.max_concurrent, Some(2));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_string() {
+        // Regression: malformed cadence used to silently default to Manual,
+        // causing reactive missions to never fire.
+        let err = parse_cadence("bogus", None).unwrap_err();
+        assert!(
+            err.contains("unrecognized cadence"),
+            "expected helpful error, got: {err}"
+        );
+
+        let err = parse_cadence("every 5 min", None).unwrap_err();
+        assert!(err.contains("unrecognized cadence"));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_bare_event_prefix() {
+        let err = parse_cadence("event:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_system_event_round_trips() {
+        let cadence = parse_cadence("system_event:self-improvement/thread_completed", None)
+            .expect("should parse system_event cadence");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                ref source,
+                ref event_type,
+                ..
+            } if source == "self-improvement" && event_type == "thread_completed"
+        ));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_system_event() {
+        let err = parse_cadence("system_event:", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+
+        let err = parse_cadence("system_event:no_slash_here", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_cadence_rejects_empty_webhook_path() {
+        let err = parse_cadence("webhook:", None).unwrap_err();
+        assert!(err.contains("requires a path"));
+    }
+
+    #[test]
+    fn parse_cadence_accepts_manual() {
+        let cadence = parse_cadence("manual", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Manual
+        ));
+    }
+
+    #[test]
     fn routine_alias_returns_none_for_unrelated_action() {
         let params = serde_json::json!({});
         assert!(routine_to_mission_alias("http", &params).is_none());
         assert!(routine_to_mission_alias("mission_create", &params).is_none());
         assert!(routine_to_mission_alias("web_search", &params).is_none());
+    }
+
+    #[test]
+    fn foreground_immediate_one_shot_goal_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Summarize the product feedback for me right now. Do it immediately.".to_string(),
+            ),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_explicit_schedule_allows_mission_create_even_if_run_now() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Create a daily routine to summarize product feedback and run it now.".to_string(),
+            ),
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_every_quantifier_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_set_up_without_schedule_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_monitoring_stem_matches_scheduling_intent() {
+        // Regression: "monitoring" must match the "monitor" stem so that
+        // "set up monitoring now" is recognised as scheduling intent and
+        // NOT incorrectly rejected.
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up monitoring now.".to_string()),
+        };
+
+        // Should NOT be rejected — "monitoring" implies scheduling intent.
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn background_mission_threads_can_create_follow_up_missions() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Mission,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: Some("Summarize feedback immediately.".to_string()),
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    // ── Caller-level mission rejection tests ──────────────────
+    //
+    // These test `EffectBridgeAdapter::execute_action` (the caller) rather
+    // than `should_reject_immediate_mission_create` (the helper) in
+    // isolation. This verifies that the computed inputs — thread_goal,
+    // thread_type, and alias-normalized params — flow through correctly.
+    //
+    // Motivated by `.claude/rules/testing.md`: "Test Through the Caller,
+    // Not Just the Helper".
+
+    mod caller_level_mission {
+        use super::*;
+
+        // ── Stubs for MissionManager dependencies ───────────
+
+        struct StubStore;
+
+        #[async_trait]
+        impl ironclaw_engine::Store for StubStore {
+            async fn save_thread(
+                &self,
+                _: &ironclaw_engine::types::thread::Thread,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_thread(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Option<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(None)
+            }
+            async fn list_threads(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ironclaw_engine::ThreadId,
+                _: ironclaw_engine::types::thread::ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(
+                &self,
+                _: &ironclaw_engine::types::step::Step,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::types::step::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ironclaw_engine::ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, _: &ironclaw_engine::Mission) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_mission(
+                &self,
+                _: ironclaw_engine::MissionId,
+            ) -> Result<Option<ironclaw_engine::Mission>, EngineError> {
+                Ok(None)
+            }
+            async fn list_missions(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::Mission>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_mission_status(
+                &self,
+                _: ironclaw_engine::MissionId,
+                _: ironclaw_engine::MissionStatus,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+        }
+
+        struct StubLlm;
+
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for StubLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::types::message::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                unimplemented!("StubLlm — not called in mission create path")
+            }
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+        }
+
+        struct StubEffects;
+
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for StubEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unimplemented!("StubEffects — not called in mission create path")
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Helpers ──────────────────────────────────────────
+
+        async fn make_adapter_with_mission_manager() -> EffectBridgeAdapter {
+            let store: Arc<dyn ironclaw_engine::Store> = Arc::new(StubStore);
+            let thread_manager = Arc::new(ironclaw_engine::ThreadManager::new(
+                Arc::new(StubLlm) as Arc<dyn ironclaw_engine::LlmBackend>,
+                Arc::new(StubEffects) as Arc<dyn ironclaw_engine::EffectExecutor>,
+                Arc::clone(&store),
+                Arc::new(ironclaw_engine::CapabilityRegistry::new()),
+                Arc::new(ironclaw_engine::LeaseManager::new()),
+                Arc::new(ironclaw_engine::PolicyEngine::new()),
+            ));
+            let mgr = Arc::new(ironclaw_engine::MissionManager::new(store, thread_manager));
+            let adapter = make_adapter();
+            adapter.set_mission_manager(mgr).await;
+            adapter
+        }
+
+        fn foreground_ctx(goal: &str) -> ironclaw_engine::ThreadExecutionContext {
+            ironclaw_engine::ThreadExecutionContext {
+                thread_id: ironclaw_engine::ThreadId::new(),
+                thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+                project_id: ironclaw_engine::ProjectId::new(),
+                user_id: "test_user".to_string(),
+                step_id: ironclaw_engine::StepId::new(),
+                current_call_id: None,
+                source_channel: Some("gateway".to_string()),
+                user_timezone: None,
+                thread_goal: Some(goal.to_string()),
+            }
+        }
+
+        // ── Tests ────────────────────────────────────────────
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// return an `EngineError::Effect` rejection when the foreground
+        /// thread goal contains immediate-execution markers and no
+        /// scheduling intent.
+        #[tokio::test]
+        async fn execute_action_rejects_mission_create_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Summarize the product feedback for me right now");
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Product feedback summarizer",
+                        "goal": "Summarize the product feedback",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     mission_create, got: {other:?}"
+                ),
+            }
+        }
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// succeed when the foreground thread goal contains scheduling
+        /// intent, even though it also contains an immediate marker.
+        #[tokio::test]
+        async fn execute_action_allows_mission_create_with_scheduling_intent() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx(
+                "Create a daily routine to summarize product feedback and run it now",
+            );
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Daily feedback summary",
+                        "goal": "Summarize all product feedback from today",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            let action_result =
+                result.expect("scheduling-intent foreground mission_create should not be rejected");
+            assert!(
+                !action_result.is_error,
+                "mission_create should succeed, got error output"
+            );
+        }
+
+        /// Caller-level: the `routine_create` alias path must also be
+        /// rejected when the goal is immediate. This exercises the
+        /// `routine_to_mission_alias` → `handle_mission_call` →
+        /// `should_reject_immediate_mission_create` full path.
+        #[tokio::test]
+        async fn execute_action_rejects_routine_create_alias_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Send me the weather right now");
+
+            let result = adapter
+                .execute_action(
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "Weather update",
+                        "prompt": "Send the current weather forecast",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message via routine alias, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     routine_create alias, got: {other:?}"
+                ),
+            }
+        }
     }
 
     // ── extract_credential_name tests ──────────────────────────
@@ -2368,6 +3786,19 @@ mod tests {
         assert!(!is_v1_only_tool("routine_pause"));
         assert!(!is_v1_only_tool("routine_resume"));
         assert!(!is_v1_only_tool("routine_update"));
+    }
+
+    // ── routine_to_mission_alias tests ────────────────────────
+
+    /// `routine_history` should map to `mission_get` so the LLM can
+    /// retrieve mission results via either the v1 or v2 action name.
+    #[test]
+    fn routine_history_maps_to_mission_get() {
+        let params = serde_json::json!({"name": "test-mission-id"});
+        let alias = routine_to_mission_alias("routine_history", &params);
+        let alias = alias.expect("routine_history should produce an alias");
+        assert_eq!(alias.mission_action, "mission_get");
+        assert!(alias.post_create_update.is_none());
     }
 
     #[test]
@@ -2480,6 +3911,7 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2575,6 +4007,7 @@ mod tests {
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter
@@ -2608,6 +4041,104 @@ mod tests {
                 }
             }
             other => panic!("expected auth gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_install_post_install_auth_gate_preserves_secret_name_for_resume() {
+        struct InstallTool;
+
+        #[async_trait]
+        impl Tool for InstallTool {
+            fn name(&self) -> &str {
+                "tool_install"
+            }
+
+            fn description(&self) -> &str {
+                "install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "telegram",
+                        "status": "awaiting_token",
+                        "credential_name": "telegram_bot_token",
+                        "instructions": "Enter your Telegram Bot API token (from @BotFather)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(InstallTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "tools".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_install".to_string()),
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+        };
+
+        let result = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({"name": "telegram"}),
+                &lease,
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "telegram_bot_token");
+                }
+                other => panic!("expected authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected auth gate pause after tool_install, got {other:?}"),
         }
     }
 
@@ -2673,5 +4204,1114 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    #[tokio::test]
+    async fn skill_install_syncs_installed_skill_into_v2_store() {
+        use ironclaw_skills::v2::V2SkillMetadata;
+
+        struct SkillInstallStub;
+
+        #[async_trait]
+        impl Tool for SkillInstallStub {
+            fn name(&self) -> &str {
+                "skill_install"
+            }
+
+            fn description(&self) -> &str {
+                "stub skill install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "pikastream-video-meeting",
+                        "status": "installed",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut raw_registry = SkillRegistry::new(dir.path().to_path_buf());
+        raw_registry
+            .install_skill(
+                r#"---
+name: pikastream-video-meeting
+version: "1.0.0"
+description: Pika meeting setup
+keywords:
+  - pika
+  - hangouts
+---
+# Pika Skill
+
+Use this skill to set up a Pika meeting.
+"#,
+            )
+            .await
+            .expect("install test skill");
+        let skill_registry = Arc::new(std::sync::RwLock::new(raw_registry));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SkillInstallStub)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+        adapter.set_engine_store(Arc::clone(&store)).await;
+        adapter
+            .set_skill_registry(Arc::clone(&skill_registry))
+            .await;
+
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_skill_install_sync"),
+        );
+        let result = adapter
+            .execute_action("skill_install", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("skill install should succeed");
+        assert!(!result.is_error);
+
+        let docs = store
+            .list_shared_memory_docs(ctx.project_id)
+            .await
+            .expect("list docs");
+        let doc = docs
+            .into_iter()
+            .find(|doc| doc.title == "skill:pikastream-video-meeting")
+            .expect("synced v2 skill doc");
+        assert_eq!(doc.doc_type, ironclaw_engine::DocType::Skill);
+        assert!(
+            doc.content.contains("Pika Skill"),
+            "doc content: {}",
+            doc.content
+        );
+
+        let metadata: V2SkillMetadata =
+            serde_json::from_value(doc.metadata).expect("valid skill metadata");
+        assert_eq!(metadata.name, "pikastream-video-meeting");
+        assert!(
+            metadata
+                .bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
+            "bundle path: {:?}",
+            metadata.bundle_path
+        );
+    }
+
+    // ── Caller-level mission action tests ─────────────────────
+    //
+    // These drive execute_action("mission_create"/...) through the full
+    // handle_mission_call path, per .claude/rules/testing.md.
+
+    mod mission_store {
+        use ironclaw_engine::types::mission::{Mission, MissionId, MissionStatus};
+        use ironclaw_engine::types::thread::{Thread, ThreadId, ThreadState};
+        use ironclaw_engine::{EngineError, ProjectId};
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        pub(super) struct TestStore {
+            threads: RwLock<HashMap<ThreadId, Thread>>,
+            missions: RwLock<HashMap<MissionId, Mission>>,
+        }
+
+        impl TestStore {
+            pub fn new() -> Self {
+                Self {
+                    threads: RwLock::new(HashMap::new()),
+                    missions: RwLock::new(HashMap::new()),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::Store for TestStore {
+            async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+                self.threads.write().await.insert(thread.id, thread.clone());
+                Ok(())
+            }
+            async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+                Ok(self.threads.read().await.get(&id).cloned())
+            }
+            async fn list_threads(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ThreadId,
+                _: ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(&self, _: &ironclaw_engine::Step) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+                self.missions
+                    .write()
+                    .await
+                    .insert(mission.id, mission.clone());
+                Ok(())
+            }
+            async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
+                Ok(self.missions.read().await.get(&id).cloned())
+            }
+            async fn list_missions(
+                &self,
+                project_id: ProjectId,
+                user_id: &str,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id && m.user_id == user_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn list_all_missions(
+                &self,
+                project_id: ProjectId,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn update_mission_status(
+                &self,
+                id: MissionId,
+                status: MissionStatus,
+            ) -> Result<(), EngineError> {
+                if let Some(m) = self.missions.write().await.get_mut(&id) {
+                    m.status = status;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a MissionManager backed by an in-memory store and wire it
+    /// into an EffectBridgeAdapter so tests can drive `execute_action`.
+    async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
+        use ironclaw_safety::SafetyConfig;
+
+        // Minimal LlmBackend mock — missions don't call the LLM in these tests.
+        struct NoopLlm;
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::types::step::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::types::step::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        // Minimal EffectExecutor mock.
+        struct NoopEffects;
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(mission_store::TestStore::new());
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter.set_mission_manager(Arc::new(mgr)).await;
+        adapter
+    }
+
+    /// Regression: mission_create with missing cadence must return an
+    /// actionable error through the full execute_action path, not panic
+    /// or silently create a Manual mission.
+    #[tokio::test]
+    async fn mission_create_missing_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({"name": "test", "goal": "do stuff"}),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1")),
+            )
+            .await
+            .expect("should return Ok with is_error=true, not Err");
+
+        assert!(result.is_error, "missing cadence should be an error result");
+        let output = &result.output;
+        assert!(
+            output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("cadence is required")),
+            "error message should mention cadence, got: {output}"
+        );
+    }
+
+    /// Regression: mission_create with a malformed cadence string must
+    /// return a helpful error through execute_action.
+    #[tokio::test]
+    async fn mission_create_malformed_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "every tuesday"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c2")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("unrecognized cadence")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Regression: mission_create with string-typed guardrails (e.g.
+    /// cooldown_secs="0") must be caught before creating the mission.
+    #[tokio::test]
+    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "300"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Happy path: mission_create with valid params succeeds through execute_action.
+    #[tokio::test]
+    async fn mission_create_valid_params_succeeds_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c4")),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(
+            result.output.get("status").and_then(|v| v.as_str()),
+            Some("created")
+        );
+        assert!(
+            result
+                .output
+                .get("mission_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+    }
+
+    /// Regression: mission_update with string-typed guardrails must be
+    /// caught at the execute_action level, not silently ignored.
+    #[tokio::test]
+    async fn mission_update_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
+
+        // First create a mission to get an ID.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "updatable",
+                    "goal": "test update",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        // Now update with string-typed guardrails — should fail.
+        let update_result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": mission_id,
+                    "max_concurrent": "5"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(
+            update_result.is_error,
+            "string guardrails should fail: {}",
+            update_result.output
+        );
+        assert!(
+            update_result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            update_result.output
+        );
+    }
+
+    /// Verify system_event cadence round-trips through mission_list.
+    #[tokio::test]
+    async fn system_event_cadence_round_trips_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rt1"));
+
+        // Create a mission with a system_event cadence.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "sys event test",
+                    "goal": "test round-trip",
+                    "cadence": "system_event:self-improvement/thread_completed"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(
+            !create_result.is_error,
+            "create failed: {}",
+            create_result.output
+        );
+
+        // List missions — the returned cadence should parse back.
+        let list_result = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        assert!(!list_result.is_error);
+
+        let missions = list_result.output.as_array().expect("should be array");
+        let mission = missions
+            .iter()
+            .find(|m| m.get("name").and_then(|v| v.as_str()) == Some("sys event test"))
+            .expect("should find the created mission");
+        let cadence_str = mission
+            .get("cadence")
+            .and_then(|v| v.as_str())
+            .expect("cadence should be a string");
+
+        // The cadence string must parse back successfully.
+        let round_tripped = parse_cadence(cadence_str, None);
+        assert!(
+            round_tripped.is_ok(),
+            "cadence '{cadence_str}' failed to round-trip: {}",
+            round_tripped.unwrap_err()
+        );
+    }
+
+    /// Verify mission_complete returns "completed" status.
+    #[tokio::test]
+    async fn mission_complete_returns_completed_status_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("d1"));
+
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "deletable",
+                    "goal": "test delete",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        let delete_result = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+
+        assert!(!delete_result.is_error);
+        assert_eq!(
+            delete_result.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "mission_complete should return 'completed', got: {}",
+            delete_result.output
+        );
+    }
+
+    // ── Phase 6 acceptance: full mission lifecycle through the bridge ──
+    //
+    // These tests pin the gateway-facing contract that v2 clients rely on:
+    // a mission round-trips through create → list → fire → complete and
+    // each step's response shape stays stable. Existing per-action tests
+    // above cover error paths; these cover the happy-path interactions
+    // between actions, which is where regressions tend to bite (e.g.
+    // status not surfacing in mission_list after complete, or fire not
+    // returning a thread_id for manual missions).
+
+    /// Full lifecycle: create → list (present) → complete → list (Completed).
+    /// Pins the post-complete visibility of status through `mission_list`,
+    /// which a chat client polls to render terminal-state UI.
+    #[tokio::test]
+    async fn mission_full_lifecycle_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("lc1"));
+
+        // Create
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lifecycle-mission",
+                    "goal": "exercise the full lifecycle",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("create must return mission_id")
+            .to_string();
+
+        // List → present, status not yet Completed
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("list output is array");
+        let entry = missions
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("created mission must appear in list");
+        let initial_status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(
+            initial_status, "Completed",
+            "fresh mission should not be Completed; got status={initial_status}"
+        );
+
+        // Complete
+        let complete = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+        assert!(!complete.is_error);
+        assert_eq!(
+            complete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+
+        // List again → Completed status now visible
+        let list_after = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list-after should succeed");
+        let missions_after = list_after.output.as_array().expect("array");
+        let entry_after = missions_after
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("mission still present after complete");
+        let post_status = entry_after
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            post_status, "Completed",
+            "mission_list must surface Completed status after mission_complete; got {post_status}"
+        );
+    }
+
+    /// `mission_fire` on a manual-cadence mission returns a thread_id and
+    /// fired status. Pins the response shape gateway clients consume to
+    /// link the fired mission to its child thread.
+    #[tokio::test]
+    async fn mission_fire_returns_thread_id_for_manual_cadence_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("fire1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "fireable",
+                    "goal": "test fire flow",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire should succeed");
+
+        assert!(!fire.is_error, "fire failed: {}", fire.output);
+        // Two terminal shapes are valid: (a) {thread_id, status="fired"}
+        // when the mission ran; (b) {status="not_fired", reason} when
+        // budget/cooldown gated it. A fresh manual mission has no
+        // budget — must produce shape (a).
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "fresh manual mission should fire successfully, got: {}",
+            fire.output
+        );
+        let thread_id = fire
+            .output
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .expect("fired response must include thread_id");
+        assert!(
+            uuid::Uuid::parse_str(thread_id).is_ok(),
+            "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// `mission_list` returns every mission the user created in the
+    /// current project, isolated from other users. Pins the per-user
+    /// scoping that chat history and project-detail pages rely on.
+    #[tokio::test]
+    async fn mission_list_returns_all_user_missions_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("list1"));
+
+        let names = ["alpha", "beta", "gamma"];
+        for name in names {
+            let r = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": name,
+                        "goal": format!("test {name}"),
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!r.is_error, "create {name} failed: {}", r.output);
+        }
+
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        let listed_names: Vec<&str> = missions
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for expected in names {
+            assert!(
+                listed_names.contains(&expected),
+                "expected mission {expected:?} in list, got: {listed_names:?}"
+            );
+        }
+    }
+
+    // ── available_actions surfaces engine-registered capability actions ──
+    //
+    // Regression: without the capability registry, `available_actions`
+    // returned only v1 `ToolRegistry` tools + latent OAuth actions, so
+    // the LLM never saw mission tools in its tools list even though the
+    // thread held an active `missions` lease. This test pins that a
+    // thread with a mission lease gets `mission_*` advertised.
+
+    fn mission_capability() -> ironclaw_engine::Capability {
+        ironclaw_engine::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![
+                ActionDef {
+                    name: "mission_create".into(),
+                    description: "Create a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_list".into(),
+                    description: "List missions".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "mission_complete".into(),
+                    description: "Complete a mission".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    fn mission_lease(granted: &[&str]) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "missions".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(
+                granted.iter().map(|s| s.to_string()).collect(),
+            ),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_surfaces_leased_mission_capability() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for expected in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} in advertised actions, got: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_respects_partial_lease_grant() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // Lease only grants mission_list; mission_create / mission_complete
+        // must NOT be advertised to the LLM even though they exist in the
+        // capability registry.
+        let actions = adapter
+            .available_actions(&[mission_lease(&["mission_list"])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"mission_list"),
+            "mission_list should be advertised: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_create"),
+            "mission_create must not leak when lease did not grant it: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mission_complete"),
+            "mission_complete must not leak when lease did not grant it: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn available_actions_omits_capability_without_lease() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        // No leases passed — no capability actions should surface even
+        // though the registry has them.
+        let actions = adapter
+            .available_actions(&[])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        for name in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not appear without a lease: {names:?}"
+            );
+        }
+    }
+
+    /// Trivial v1 tool for the combined advertising test. Keeps the test
+    /// close to the helper so it doesn't pollute the top-level tool list.
+    struct V1EchoTool;
+
+    #[async_trait]
+    impl Tool for V1EchoTool {
+        fn name(&self) -> &str {
+            "v1_echo"
+        }
+        fn description(&self) -> &str {
+            "v1 echo tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn available_actions_merges_v1_tools_with_engine_capabilities() {
+        // Exercises the real production shape: the adapter has both a v1
+        // `ToolRegistry` (echo tool) and a capability registry (missions).
+        // With a missions lease active, the LLM's tools list must include
+        // BOTH. Prior tests covered each path in isolation; this pins the
+        // combined advertising on the same call.
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(V1EchoTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut registry = CapabilityRegistry::new();
+        registry.register(mission_capability());
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let actions = adapter
+            .available_actions(&[mission_lease(&[
+                "mission_create",
+                "mission_list",
+                "mission_complete",
+            ])])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"v1_echo"),
+            "v1 tool should be advertised: {names:?}"
+        );
+        for mission in ["mission_create", "mission_list", "mission_complete"] {
+            assert!(
+                names.contains(&mission),
+                "engine capability action {mission} should be advertised alongside v1 tools: {names:?}"
+            );
+        }
+    }
+
+    /// Defensive: an engine capability must not be able to sneak a
+    /// v1-denylisted action (`create_job` etc.) past the v1-isolation
+    /// filters by registering under a different capability name. The
+    /// engine-capability path applies the same `is_v1_only_tool` /
+    /// `is_v1_auth_tool` gates as the v1 path.
+    #[tokio::test]
+    async fn available_actions_filters_v1_denylisted_names_from_engine_capabilities() {
+        let adapter = make_adapter();
+        let mut registry = CapabilityRegistry::new();
+        // A hypothetical malformed capability that tries to expose v1
+        // tools through the v2 advertising path.
+        registry.register(ironclaw_engine::Capability {
+            name: "rogue".into(),
+            description: "should not surface denylisted v1 names".into(),
+            actions: vec![
+                ActionDef {
+                    name: "create_job".into(), // v1-only denylist
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "tool_auth".into(), // v1 auth tool
+                    description: "forbidden".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+                ActionDef {
+                    name: "safe_action".into(),
+                    description: "allowed".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                },
+            ],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        adapter.set_capability_registry(Arc::new(registry)).await;
+
+        let rogue_lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "rogue".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+
+        let actions = adapter
+            .available_actions(&[rogue_lease])
+            .await
+            .expect("available_actions should succeed");
+
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            !names.contains(&"create_job"),
+            "create_job is v1-denylisted and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            !names.contains(&"tool_auth"),
+            "tool_auth is a v1 auth tool and must not surface via engine capability: {names:?}"
+        );
+        assert!(
+            names.contains(&"safe_action"),
+            "safe_action should surface through the engine capability path: {names:?}"
+        );
     }
 }

@@ -14,9 +14,8 @@ mod tests {
 
     use ironclaw::agent::SessionManager;
     use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
-    use ironclaw::channels::web::server::{
-        GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-    };
+    use ironclaw::channels::web::platform::router::start_server;
+    use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
     use ironclaw::channels::web::sse::SseManager;
     use ironclaw::channels::web::ws::WsConnectionTracker;
     use ironclaw::db::Database;
@@ -78,6 +77,9 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -88,7 +90,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: Default::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,

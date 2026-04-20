@@ -1110,8 +1110,8 @@ impl ChannelPairingStore for PgBackend {
         &self,
         channel: &str,
         external_id: &str,
-    ) -> Result<Option<crate::ownership::Identity>, DatabaseError> {
-        use crate::ownership::{Identity, OwnerId, UserRole};
+    ) -> Result<Option<crate::ownership::UserId>, DatabaseError> {
+        use crate::ownership::{UserId, UserRole};
         let channel = crate::pairing::normalize_channel_name(channel);
         let client = self
             .pool()
@@ -1133,12 +1133,8 @@ impl ChannelPairingStore for PgBackend {
         Ok(row.map(|r| {
             let owner_id: String = r.get(0);
             let role_str: String = r.get(1);
-            let role = if role_str.eq_ignore_ascii_case("admin") {
-                UserRole::Admin
-            } else {
-                UserRole::Member
-            };
-            Identity::new(OwnerId::from(owner_id), role)
+            let role = UserRole::from_db_role(&role_str);
+            UserId::from_trusted(owner_id, role)
         }))
     }
 
@@ -1163,6 +1159,35 @@ impl ChannelPairingStore for PgBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn resolve_channel_external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 LEFT JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = $1
+                   AND ci.owner_id = $2
+                   AND (u.id IS NULL OR u.status = 'active')
+                 ORDER BY ci.external_id ASC
+                 LIMIT 1",
+                &[&channel, &owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.map(|r| r.get(0)))
     }
 
     async fn upsert_pairing_request(
@@ -1260,7 +1285,7 @@ impl ChannelPairingStore for PgBackend {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let mut client = self
             .pool()
@@ -1292,6 +1317,17 @@ impl ChannelPairingStore for PgBackend {
         let req_id: uuid::Uuid = row.get(0);
         let channel: String = row.get(1);
         let external_id: String = row.get(2);
+        let previous_owner_id = tx
+            .query_opt(
+                "SELECT owner_id
+                 FROM channel_identities
+                 WHERE channel = $1 AND external_id = $2
+                 FOR UPDATE",
+                &[&channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|row| row.get(0));
 
         tx.execute(
             "UPDATE pairing_requests SET owner_id = $1, approved_at = NOW() WHERE id = $2",
@@ -1312,7 +1348,68 @@ impl ChannelPairingStore for PgBackend {
         tx.commit()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+        Ok(crate::db::PairingApprovalRecord {
+            request_id: req_id,
+            channel,
+            external_id,
+            owner_id: owner_id.to_string(),
+            previous_owner_id,
+        })
+    }
+
+    async fn revert_pairing_approval(
+        &self,
+        approval: &crate::db::PairingApprovalRecord,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let updated = tx
+            .execute(
+                "UPDATE pairing_requests
+             SET owner_id = NULL, approved_at = NULL
+             WHERE id = $1 AND owner_id = $2 AND approved_at IS NOT NULL",
+                &[&approval.request_id, &approval.owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "pairing_approval".to_string(),
+                id: approval.request_id.to_string(),
+            });
+        }
+
+        if let Some(previous_owner_id) = approval.previous_owner_id.as_ref() {
+            tx.execute(
+                "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+                 VALUES (gen_random_uuid(), $1, $2, $3)
+                 ON CONFLICT (channel, external_id) DO UPDATE SET owner_id = $1",
+                &[previous_owner_id, &approval.channel, &approval.external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        } else {
+            tx.execute(
+                "DELETE FROM channel_identities
+                 WHERE channel = $1 AND external_id = $2 AND owner_id = $3",
+                &[&approval.channel, &approval.external_id, &approval.owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))
     }
 
     async fn list_pending_pairings(

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
 // ── WorkspaceResolver ──────────────────────────────────────────────
@@ -50,14 +50,94 @@ impl WorkspaceResolver for FixedWorkspaceResolver {
     }
 }
 
+/// Normalize a workspace path for security checks.
+///
+/// Strips `.` and empty (`//`) segments and rejects any `..` traversal
+/// component outright. Returns `None` when the input contains `..` so the
+/// caller can treat traversal attempts as protected (or reject them).
+///
+/// Examples:
+/// - `engine/./orchestrator/v3.py`      → `Some("engine/orchestrator/v3.py")`
+/// - `engine//orchestrator/v3.py`       → `Some("engine/orchestrator/v3.py")`
+/// - `engine/knowledge/../orchestrator` → `None` (rejected — traversal)
+/// - `./foo/bar`                        → `Some("foo/bar")`
+pub(crate) fn normalize_workspace_path(path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None;
+        }
+        segments.push(seg);
+    }
+    Some(segments.join("/"))
+}
+
 /// Check if a path controls the execution loop or system prompt.
+///
 /// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
-fn is_protected_orchestrator_path(path: &str) -> bool {
-    matches!(
-        path,
-        "orchestrator:main" | "prompt:codeact_preamble" | "orchestrator:failures"
-    ) || path.starts_with("orchestrator:")
-        || path.starts_with("prompt:")
+/// Covers both the logical aliases (`orchestrator:*`, `prompt:*`) used by
+/// the engine and the physical workspace paths where these docs are
+/// persisted. Input is normalized first so dot/double-slash/traversal
+/// components cannot bypass the guard (e.g. `engine/./orchestrator/v3.py`
+/// or `engine/knowledge/../orchestrator/v3.py`).
+///
+/// Traversal attempts (`..` segments) are treated as protected — the gate
+/// fires even if the would-be target is not orchestrator-related, so the
+/// caller can reject the write with a clear error.
+pub(crate) fn is_protected_orchestrator_path(path: &str) -> bool {
+    // Logical engine aliases — case-sensitive, plain string match.
+    if path.starts_with("orchestrator:") || path.starts_with("prompt:") {
+        return true;
+    }
+
+    // Physical workspace paths — normalize before matching so traversal
+    // and dot-component tricks can't bypass the check.
+    let Some(canonical) = normalize_workspace_path(path) else {
+        // Traversal attempt (`..`) — treat as protected so the caller
+        // blocks or routes through the approval gate.
+        return true;
+    };
+
+    // Canonical physical paths where the v2 engine persists orchestrator
+    // and prompt overlay documents. Keep both the current `.system/engine/`
+    // root and the pre-#2049 legacy `engine/` root (legacy startup
+    // migration moves files to the new root, but a fresh write targeted
+    // at the legacy path must still hit the gate).
+    const PROTECTED_PREFIXES: &[&str] = &[".system/engine/orchestrator", "engine/orchestrator"];
+
+    for prefix in PROTECTED_PREFIXES {
+        if canonical == *prefix || canonical.starts_with(&format!("{prefix}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-export the engine's process-wide self-modify snapshot so the tool
+/// reads the same value as the engine loop, store gate, and self-improvement
+/// mission. See `ironclaw_engine::runtime::self_modify_enabled` for the
+/// rationale (single OnceLock-backed snapshot, can't flip at runtime).
+fn self_modify_enabled() -> bool {
+    ironclaw_engine::runtime::self_modify_enabled()
+}
+
+/// True when the normalized path resolves to a `.py` file inside the
+/// orchestrator directory. Used to gate syntax validation in
+/// `MemoryWriteTool::execute()` — the Store-level validator only fires
+/// on the `save_memory_doc` path (engine doc writes), but `memory_write`
+/// writes directly via Workspace, so we must validate here too.
+fn is_protected_py_path(path: &str) -> bool {
+    let Some(canonical) = normalize_workspace_path(path) else {
+        return false;
+    };
+    if !canonical.ends_with(".py") {
+        return false;
+    }
+    canonical.starts_with(".system/engine/orchestrator/")
+        || canonical.starts_with("engine/orchestrator/")
 }
 
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
@@ -95,6 +175,16 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
     }
 }
 
+/// Rate limit for reasoning LLM calls: max 10 per minute, 60 per hour.
+const REASONING_RATE_LIMIT: crate::tools::tool::ToolRateLimitConfig =
+    crate::tools::tool::ToolRateLimitConfig {
+        requests_per_minute: 10,
+        requests_per_hour: 60,
+    };
+
+/// Timeout for reasoning LLM calls (prevents unbounded waits).
+const REASONING_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Tool for searching workspace memory.
 ///
 /// Performs hybrid search (FTS + semantic) across all memory documents.
@@ -102,18 +192,44 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
 /// prior work, decisions, preferences, or any historical context.
 pub struct MemorySearchTool {
     resolver: Arc<dyn WorkspaceResolver>,
+    llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+    reasoning_enabled: bool,
+    /// Per-user rate limiter for reasoning LLM calls.
+    reasoning_limiter: Arc<crate::tools::rate_limiter::RateLimiter>,
 }
 
 impl MemorySearchTool {
     /// Create a new memory search tool with a workspace resolver.
     pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            llm: None,
+            reasoning_enabled: false,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
+        }
+    }
+
+    /// Create a memory search tool with optional reasoning-augmented recall.
+    pub fn with_reasoning(
+        resolver: Arc<dyn WorkspaceResolver>,
+        llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_enabled: bool,
+    ) -> Self {
+        Self {
+            resolver,
+            llm,
+            reasoning_enabled,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
+        }
     }
 
     /// Create from a fixed workspace (backward compatibility).
     pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
         Self {
             resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+            llm: None,
+            reasoning_enabled: false,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
         }
     }
 }
@@ -144,6 +260,11 @@ impl Tool for MemorySearchTool {
                     "default": 5,
                     "minimum": 1,
                     "maximum": 20
+                },
+                "reasoning": {
+                    "type": "boolean",
+                    "description": "When true, synthesize search results into a coherent summary using LLM reasoning. Default: controlled by SEARCH_REASONING_ENABLED config.",
+                    "default": false
                 }
             },
             "required": ["query"]
@@ -172,9 +293,103 @@ impl Tool for MemorySearchTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
         let result_count = results.len();
+
+        let use_reasoning = params
+            .get("reasoning")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(self.reasoning_enabled);
+
+        if use_reasoning
+            && let Some(ref llm) = self.llm
+            && !results.is_empty()
+        {
+            // Check per-user rate limit before firing the LLM call.
+            let rate_check = self
+                .reasoning_limiter
+                .check_and_record(
+                    &ctx.user_id,
+                    "memory_search_reasoning",
+                    &REASONING_RATE_LIMIT,
+                )
+                .await;
+            if !rate_check.is_allowed() {
+                tracing::debug!(
+                    user_id = %ctx.user_id,
+                    "Reasoning LLM call rate-limited, returning raw results"
+                );
+            } else {
+                let fragments: String = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        format!(
+                            "[{}] (path: {}, score: {:.2})\n{}",
+                            i + 1,
+                            r.document_path,
+                            r.score,
+                            r.content
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                let llm_messages = vec![
+                    crate::llm::ChatMessage::system(include_str!(
+                        "../../../crates/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
+                    )),
+                    crate::llm::ChatMessage::user(format!(
+                        "Query: {query}\n\nMemory fragments:\n{fragments}"
+                    )),
+                ];
+
+                let request = crate::llm::CompletionRequest::new(llm_messages).with_max_tokens(500);
+
+                match tokio::time::timeout(REASONING_LLM_TIMEOUT, llm.complete(request)).await {
+                    Ok(Ok(response)) => {
+                        // Memory chunks may contain attacker-controlled text that
+                        // flows through the synthesis and back into future LLM
+                        // contexts. Match SessionSummaryHook's sanitization.
+                        let sanitizer = ironclaw_safety::Sanitizer::new();
+                        let sanitized = sanitizer.sanitize(response.content.trim());
+                        if sanitized.was_modified {
+                            tracing::debug!(
+                                user_id = %ctx.user_id,
+                                warnings = sanitized.warnings.len(),
+                                "Reasoning synthesis contained suspicious patterns; content was sanitized"
+                            );
+                        }
+                        let synthesis = sanitized.content;
+                        let output = serde_json::json!({
+                            "query": query,
+                            "synthesis": synthesis,
+                            "results": results.iter().map(|r| serde_json::json!({
+                                "content": r.content,
+                                "score": r.score,
+                                "path": r.document_path,
+                                "document_id": r.document_id.to_string(),
+                                "is_hybrid_match": r.is_hybrid(),
+                            })).collect::<Vec<_>>(),
+                            "result_count": result_count,
+                            "reasoning_used": true,
+                        });
+                        return Ok(ToolOutput::success(output, start.elapsed()));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!("Reasoning synthesis failed, returning raw results: {e}");
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "Reasoning synthesis timed out after {:?}, returning raw results",
+                            REASONING_LLM_TIMEOUT
+                        );
+                    }
+                }
+            }
+        }
+
         let output = serde_json::json!({
             "query": query,
-            "results": results.into_iter().map(|r| serde_json::json!({
+            "results": results.iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
                 "path": r.document_path,
@@ -283,6 +498,47 @@ impl Tool for MemoryWriteTool {
         })
     }
 
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // When orchestrator self-modification is enabled, writing to protected
+        // paths (orchestrator code, prompt overlays) requires explicit human
+        // approval on every call. Uses `Always` (not `UnlessAutoApproved`) so
+        // session auto-approve cannot silently skip the gate — the effect
+        // bridge maps `Always` to `GatePaused(Approval { allow_always: false })`.
+        //
+        // When self-modify is disabled we return `Never` deliberately: the
+        // approval gate would be cosmetic because `execute()` below rejects
+        // the write with `NotAuthorized` *before* any persistence or patch
+        // computation (see the `is_protected_orchestrator_path(target) &&
+        // !self_modify_enabled()` branch later in this file, ~line 444).
+        // Returning `Always` here would pop an approval dialog only to hard-
+        // deny immediately afterward — wasted UX, not extra security.
+        // **Invariant**: that `execute()` rejection is the load-bearing gate
+        // in the disabled case. Any refactor that moves or weakens it must
+        // also flip this branch to `Always` so the approval dialog becomes
+        // the backstop.
+        //
+        // Delegates to is_protected_orchestrator_path for consistency, but
+        // excludes traversal attempts (`..`) — those return Never here so
+        // execute() rejects them immediately as InvalidParameters rather
+        // than triggering a spurious approval gate before the rejection.
+        let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        if !self_modify_enabled() {
+            return ApprovalRequirement::Never;
+        }
+        // Traversal attempts: normalization fails → execute() rejects.
+        // Don't gate-pause for something that will be rejected anyway.
+        if !target.starts_with("orchestrator:")
+            && !target.starts_with("prompt:")
+            && normalize_workspace_path(target).is_none()
+        {
+            return ApprovalRequirement::Never;
+        }
+        if is_protected_orchestrator_path(target) {
+            return ApprovalRequirement::Always;
+        }
+        ApprovalRequirement::Never
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value,
@@ -317,20 +573,28 @@ impl Tool for MemoryWriteTool {
             )));
         }
 
+        // Reject any path containing `..` traversal segments before either
+        // the protected check or the write itself sees them. Workspace paths
+        // are always relative; `..` cannot legitimately appear here.
+        if !target.starts_with("orchestrator:")
+            && !target.starts_with("prompt:")
+            && normalize_workspace_path(target).is_none()
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' contains a parent-directory ('..') segment, which is not allowed in workspace paths.",
+                target
+            )));
+        }
+
         // Block writes to orchestrator and prompt overlay paths when
         // self-modification is disabled. These are security-sensitive docs
         // that control the execution loop and system prompt.
-        if is_protected_orchestrator_path(target) {
-            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if !allow {
-                return Err(ToolError::NotAuthorized(format!(
-                    "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
-                     Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
-                    target
-                )));
-            }
+        if is_protected_orchestrator_path(target) && !self_modify_enabled() {
+            return Err(ToolError::NotAuthorized(format!(
+                "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
+                 Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
+                target
+            )));
         }
 
         let workspace = self.resolver.resolve(&ctx.user_id).await;
@@ -382,6 +646,11 @@ impl Tool for MemoryWriteTool {
             "heartbeat" => paths::HEARTBEAT.to_string(),
             path => path.to_string(),
         };
+
+        // Whether this is a protected `.py` orchestrator path that needs
+        // Python syntax validation before writing. Checked in both the patch
+        // and write branches below, after parameter validation has run.
+        let needs_py_validation = is_protected_py_path(&resolved_path);
 
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
@@ -448,6 +717,27 @@ impl Tool for MemoryWriteTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            // Validate the would-be content for protected .py paths before
+            // the actual write. Runs AFTER parameter validation so
+            // empty-old_string / missing-new_string are already rejected.
+            if needs_py_validation {
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                let preview = if replace_all {
+                    existing.replace(old_str, new_str)
+                } else {
+                    existing.replacen(old_str, new_str, 1)
+                };
+                if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&preview) {
+                    return Err(ToolError::InvalidParameters(format!(
+                        "orchestrator patch has invalid Python syntax: {reason}"
+                    )));
+                }
+            }
+
             let result = workspace
                 .patch(&resolved_path, old_str, new_str, replace_all)
                 .await
@@ -460,6 +750,27 @@ impl Tool for MemoryWriteTool {
                 "content_length": result.document.content.len(),
             });
             return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Validate Python syntax for protected .py paths before write/append.
+        // The Store-level validator only fires on the `save_memory_doc` path;
+        // `memory_write` writes directly via Workspace so we must check here.
+        if needs_py_validation {
+            let final_content = if append {
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                format!("{existing}{content}")
+            } else {
+                content.to_string()
+            };
+            if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&final_content) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "orchestrator patch has invalid Python syntax: {reason}"
+                )));
+            }
         }
 
         // When a layer is specified, route through layer-aware methods for ALL targets.
@@ -906,6 +1217,213 @@ mod tests {
         assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
     }
 
+    // ── Path normalization & protected-path guard ─────────────
+
+    #[test]
+    fn normalize_strips_dot_and_double_slash_segments() {
+        assert_eq!(
+            normalize_workspace_path("engine/./orchestrator/v3.py").as_deref(),
+            Some("engine/orchestrator/v3.py")
+        );
+        assert_eq!(
+            normalize_workspace_path("engine//orchestrator/v3.py").as_deref(),
+            Some("engine/orchestrator/v3.py")
+        );
+        assert_eq!(
+            normalize_workspace_path(".system/engine/orchestrator/v0.py").as_deref(),
+            Some(".system/engine/orchestrator/v0.py")
+        );
+        assert_eq!(
+            normalize_workspace_path("./foo/bar").as_deref(),
+            Some("foo/bar")
+        );
+        assert_eq!(
+            normalize_workspace_path("foo//bar///baz").as_deref(),
+            Some("foo/bar/baz")
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_parent_traversal() {
+        assert!(normalize_workspace_path("engine/knowledge/../orchestrator/v3.py").is_none());
+        assert!(normalize_workspace_path("../etc/passwd").is_none());
+        assert!(normalize_workspace_path("foo/../bar").is_none());
+        assert!(normalize_workspace_path("foo/bar/..").is_none());
+    }
+
+    #[test]
+    fn protected_path_matches_logical_aliases() {
+        assert!(is_protected_orchestrator_path("orchestrator:main"));
+        assert!(is_protected_orchestrator_path("orchestrator:failures"));
+        assert!(is_protected_orchestrator_path("prompt:codeact_preamble"));
+    }
+
+    #[test]
+    fn protected_path_matches_canonical_physical_paths() {
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/failures.json"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator/codeact-preamble-overlay.md"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine/orchestrator"
+        ));
+    }
+
+    #[test]
+    fn protected_path_matches_legacy_physical_paths() {
+        // Pre-#2049 root: legacy startup migration moves files, but a fresh
+        // write to the legacy path must still trip the gate.
+        assert!(is_protected_orchestrator_path("engine/orchestrator/v3.py"));
+        assert!(is_protected_orchestrator_path("engine/orchestrator"));
+    }
+
+    #[test]
+    fn protected_path_blocks_dot_segment_bypass() {
+        // The reviewer-flagged bypass: `engine/./orchestrator/v3.py` was
+        // not caught by the old raw `starts_with` check.
+        assert!(is_protected_orchestrator_path(
+            "engine/./orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path(
+            ".system/./engine/orchestrator/v3.py"
+        ));
+    }
+
+    #[test]
+    fn protected_path_blocks_double_slash_bypass() {
+        assert!(is_protected_orchestrator_path("engine//orchestrator/v3.py"));
+        assert!(is_protected_orchestrator_path(
+            ".system/engine//orchestrator/v3.py"
+        ));
+    }
+
+    #[test]
+    fn protected_path_treats_traversal_as_protected() {
+        // Traversal attempts can't be a legitimate workspace path. The
+        // guard treats them as protected so the caller routes through the
+        // approval gate (and `execute()` rejects with InvalidParameters).
+        assert!(is_protected_orchestrator_path(
+            "engine/knowledge/../orchestrator/v3.py"
+        ));
+        assert!(is_protected_orchestrator_path("../engine/orchestrator"));
+    }
+
+    #[test]
+    fn protected_path_rejects_unrelated_workspace_paths() {
+        assert!(!is_protected_orchestrator_path("MEMORY.md"));
+        assert!(!is_protected_orchestrator_path("daily/2026-03-11.md"));
+        assert!(!is_protected_orchestrator_path("projects/alpha/notes.md"));
+        assert!(!is_protected_orchestrator_path(
+            ".system/engine/knowledge/notes/foo.md"
+        ));
+        // Substring inside a path component must not match the prefix.
+        assert!(!is_protected_orchestrator_path("engine_other/file.py"));
+    }
+
+    // ── requires_approval gate (caller-level coverage) ─────────
+
+    fn make_test_write_tool() -> MemoryWriteTool {
+        struct StubResolver;
+        #[async_trait::async_trait]
+        impl WorkspaceResolver for StubResolver {
+            async fn resolve(&self, _user_id: &str) -> Arc<Workspace> {
+                unreachable!("requires_approval should not call resolve")
+            }
+        }
+        MemoryWriteTool::new(Arc::new(StubResolver))
+    }
+
+    #[test]
+    fn requires_approval_protected_path_self_modify_enabled() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "orchestrator:main",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Always));
+    }
+
+    #[test]
+    fn requires_approval_protected_path_self_modify_disabled() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let tool = make_test_write_tool();
+        // Falls through to Never — execute() will return NotAuthorized.
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "orchestrator:main",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
+    }
+
+    #[test]
+    fn requires_approval_physical_orchestrator_path_with_self_modify() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": ".system/engine/orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Always));
+    }
+
+    #[test]
+    fn requires_approval_dot_segment_bypass_attempt() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "engine/./orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(
+            matches!(result, ApprovalRequirement::Always),
+            "dot-segment bypass should still trigger the approval gate"
+        );
+    }
+
+    #[test]
+    fn requires_approval_traversal_returns_never() {
+        // Traversal paths fail normalization — return Never so execute()
+        // rejects immediately as InvalidParameters rather than triggering
+        // a spurious approval gate that the user would see before the error.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "engine/knowledge/../orchestrator/v3.py",
+            "content": "anything"
+        }));
+        assert!(
+            matches!(result, ApprovalRequirement::Never),
+            "traversal should return Never (execute rejects it), not pause for approval"
+        );
+    }
+
+    #[test]
+    fn requires_approval_unprotected_path_is_never() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "target": "daily_log",
+            "content": "regular note"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
+    }
+
+    #[test]
+    fn requires_approval_missing_target_is_never() {
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let tool = make_test_write_tool();
+        let result = tool.requires_approval(&serde_json::json!({
+            "content": "no target"
+        }));
+        assert!(matches!(result, ApprovalRequirement::Never));
+    }
+
     #[cfg(feature = "postgres")]
     mod postgres_schema_tests {
         use super::*;
@@ -1188,7 +1706,7 @@ mod tests {
         async fn test_workspace_pool_resolver_returns_different_workspaces() {
             let db = make_test_db().await;
 
-            let pool = crate::channels::web::server::WorkspacePool::new(
+            let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),
@@ -1209,7 +1727,7 @@ mod tests {
         async fn test_workspace_pool_resolver_caches_workspace() {
             let db = make_test_db().await;
 
-            let pool = crate::channels::web::server::WorkspacePool::new(
+            let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),
@@ -1222,6 +1740,246 @@ mod tests {
 
             // Same user_id should return the same cached Arc (pointer equality)
             assert!(Arc::ptr_eq(&ws1, &ws2));
+        }
+    }
+
+    /// Caller-level tests for reasoning-augmented recall. These drive
+    /// `MemorySearchTool::execute` (the call site) with an LLM mock,
+    /// verifying the full wiring: config flag, LLM dispatch, fallback on
+    /// failure, and rate limiting.
+    #[cfg(feature = "libsql")]
+    mod reasoning_recall_tests {
+        use super::*;
+        use crate::llm::{
+            CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use rust_decimal::Decimal;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// LLM mock that records call count and returns a canned synthesis.
+        struct CountingMockLlm {
+            call_count: AtomicU32,
+            response: String,
+        }
+
+        impl CountingMockLlm {
+            fn new(response: &str) -> Self {
+                Self {
+                    call_count: AtomicU32::new(0),
+                    response: response.to_string(),
+                }
+            }
+
+            fn calls(&self) -> u32 {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for CountingMockLlm {
+            fn model_name(&self) -> &str {
+                "counting-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: self.response.clone(),
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unimplemented!()
+            }
+        }
+
+        /// LLM mock that always fails.
+        struct FailingMockLlm {
+            call_count: AtomicU32,
+        }
+
+        impl FailingMockLlm {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicU32::new(0),
+                }
+            }
+
+            fn calls(&self) -> u32 {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for FailingMockLlm {
+            fn model_name(&self) -> &str {
+                "failing-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(LlmError::RequestFailed {
+                    provider: "mock".into(),
+                    reason: "simulated failure".into(),
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unimplemented!()
+            }
+        }
+
+        async fn make_test_db() -> Arc<dyn crate::db::Database> {
+            use crate::db::libsql::LibSqlBackend;
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let db_path = temp_dir.path().join("reasoning_test.db");
+            let backend = LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend");
+            <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+                .await
+                .expect("migrations");
+            std::mem::forget(temp_dir);
+            Arc::new(backend)
+        }
+
+        async fn make_workspace_with_doc(user_id: &str) -> Arc<Workspace> {
+            let db = make_test_db().await;
+            let ws = Arc::new(Workspace::new_with_db(user_id, db));
+            // Seed a document so search returns results.
+            ws.write("test/notes.md", "Project Alpha: use Rust for the backend.")
+                .await
+                .expect("seed doc");
+            ws
+        }
+
+        #[tokio::test]
+        async fn reasoning_enabled_fires_llm_and_returns_synthesis() {
+            let ws = make_workspace_with_doc("alice").await;
+
+            // Sanity check: FTS must return the seeded doc, otherwise the
+            // synthesis branch below would be unreachable and the test
+            // assertions would silently never run.
+            let preflight = ws.search("Rust backend", 5).await.expect("search");
+            assert!(
+                !preflight.is_empty(),
+                "FTS preflight returned no results — seed data is not indexed; \
+                 the synthesis branch would never execute"
+            );
+
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(CountingMockLlm::new("Synthesized: use Rust"));
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                true,
+            );
+
+            let ctx = JobContext::with_user("alice", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend"});
+            let output = tool
+                .execute(params, &ctx)
+                .await
+                .expect("execute should succeed");
+
+            assert_eq!(
+                llm.calls(),
+                1,
+                "synthesis branch must call the LLM exactly once"
+            );
+
+            let json = &output.result;
+            assert_eq!(json["reasoning_used"], true);
+            assert_eq!(
+                json["synthesis"].as_str(),
+                Some("Synthesized: use Rust"),
+                "synthesis must be the (sanitized) LLM response"
+            );
+            assert!(
+                json.get("results").and_then(|r| r.as_array()).is_some(),
+                "raw results must still be returned alongside synthesis"
+            );
+        }
+
+        #[tokio::test]
+        async fn reasoning_disabled_does_not_fire_llm() {
+            let ws = make_workspace_with_doc("bob").await;
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(CountingMockLlm::new("should not appear"));
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                false, // disabled
+            );
+
+            let ctx = JobContext::with_user("bob", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend"});
+            let result = tool.execute(params, &ctx).await;
+
+            assert!(result.is_ok());
+            assert_eq!(
+                llm.calls(),
+                0,
+                "LLM should not be called when reasoning is disabled"
+            );
+        }
+
+        #[tokio::test]
+        async fn reasoning_llm_failure_falls_back_to_raw_results() {
+            let ws = make_workspace_with_doc("charlie").await;
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(FailingMockLlm::new());
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                true,
+            );
+
+            let ctx = JobContext::with_user("charlie", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend", "reasoning": true});
+            let result = tool.execute(params, &ctx).await;
+
+            // Should succeed with raw results (no synthesis), not propagate the LLM error.
+            assert!(
+                result.is_ok(),
+                "execute should succeed even with LLM failure"
+            );
+            let output = result.unwrap();
+            let json = &output.result;
+
+            // If LLM was called (there were search results), verify no synthesis field
+            if llm.calls() > 0 {
+                assert!(
+                    json.get("synthesis").is_none(),
+                    "Should not have synthesis on LLM failure"
+                );
+            }
         }
     }
 }
