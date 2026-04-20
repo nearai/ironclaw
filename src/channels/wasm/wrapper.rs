@@ -3775,14 +3775,33 @@ async fn websocket_start_decision(
             }
         },
     };
-    // Declaring a credential without an identify template means the runtime
-    // could never build an identify payload even with a valid value. Catch
-    // it here so the log message is accurate instead of the generic
-    // "credential missing".
-    if credential_name.is_some() && config.identify.is_none() {
-        return WebsocketStartDecision::MalformedConfig {
-            reason: "identify_secret_name declared without identify template".to_string(),
-        };
+    // `identify` and `identify_secret_name` must be declared together: the
+    // runtime builds an identify payload by filling the template with the
+    // resolved secret, so either side on its own produces a connection that
+    // cannot send a valid Identify and will be kicked by the peer.
+    match (config.identify.as_ref(), credential_name.as_ref()) {
+        (None, Some(_)) => {
+            return WebsocketStartDecision::MalformedConfig {
+                reason: "identify_secret_name declared without identify template".to_string(),
+            };
+        }
+        (Some(_), None) => {
+            return WebsocketStartDecision::MalformedConfig {
+                reason: "identify template declared without identify_secret_name".to_string(),
+            };
+        }
+        _ => {}
+    }
+    // Normalize `config.identify_secret_name` to the canonicalized form
+    // (`CredentialName::new` trims whitespace and folds `-` → `_`) before
+    // returning `Spawn`. Preflight checks existence via the canonical form,
+    // but `resolve_websocket_identify_message` later reads the raw string
+    // from the config; without this write-back, a capability declaring
+    // `"github-token"` against a store holding `"github_token"` would pass
+    // preflight and then fail in the runtime.
+    let mut config = config;
+    if let Some(name) = credential_name.as_ref() {
+        config.identify_secret_name = Some(name.as_str().to_string());
     }
     match websocket_auth_preflight(credential_name.as_ref(), store, owner_scope_id).await {
         WebsocketAuthPreflight::Ready => WebsocketStartDecision::Spawn(config),
@@ -5581,6 +5600,90 @@ mod tests {
             websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
 
         assert!(matches!(decision, WebsocketStartDecision::Spawn(_)));
+    }
+
+    /// The reverse of the existing "secret without identify template" case:
+    /// `identify` present but no `identify_secret_name` must also be flagged
+    /// as `MalformedConfig`. Without this branch, the runtime spawned but
+    /// could not build an Identify payload, so the peer would kick it — the
+    /// exact #2557 spin we are preventing.
+    #[tokio::test]
+    async fn test_websocket_start_decision_malformed_config_without_secret_name() {
+        let store = empty_secrets_store();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify": { "intents": 513 }
+                // identify_secret_name intentionally omitted.
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::MalformedConfig { reason } = decision else {
+            panic!("expected MalformedConfig, got {decision:?}");
+        };
+        assert!(
+            reason.contains("identify template declared without identify_secret_name"),
+            "reason should name the missing field, got: {reason}"
+        );
+    }
+
+    /// `CredentialName::new` canonicalizes `-` to `_` and trims whitespace.
+    /// A capability declaring `"discord-bot-token"` against a store holding
+    /// `"discord_bot_token"` must pass preflight AND the returned Spawn
+    /// config must carry the canonicalized name — otherwise the runtime's
+    /// `resolve_websocket_identify_message` reads the raw dashed form and
+    /// fails the store lookup inside the spawn.
+    #[tokio::test]
+    async fn test_websocket_start_decision_spawn_canonicalizes_secret_name() {
+        let store = empty_secrets_store();
+        store
+            .create(
+                "owner_42",
+                CreateSecretParams {
+                    name: "discord_bot_token".to_string(), // canonical form
+                    value: SecretString::from("token".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let tool_capabilities = ToolCapabilities {
+            http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                "gateway.discord.gg",
+            )])),
+            websocket: Some(serde_json::json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify_secret_name": "discord-bot-token", // dashed, non-canonical
+                "identify": { "intents": 513 }
+            })),
+            ..Default::default()
+        };
+        let capabilities =
+            ChannelCapabilities::for_channel("discord").with_tool_capabilities(tool_capabilities);
+
+        let decision =
+            websocket_start_decision(&capabilities, Some(store.as_ref()), "owner_42").await;
+
+        let WebsocketStartDecision::Spawn(config) = decision else {
+            panic!("expected Spawn, got {decision:?}");
+        };
+        assert_eq!(
+            config.identify_secret_name.as_deref(),
+            Some("discord_bot_token"),
+            "Spawn config must carry the canonicalized name so runtime lookups match preflight"
+        );
     }
 
     #[tokio::test]
