@@ -1,0 +1,4 @@
+[live-canary] lane=auth-live-seeded scenario=<default> provider=default
+[live-canary] artifacts=artifacts/live-canary/auth-live-seeded/default/20260420T082047Z
+[live-canary] summary=artifacts/live-canary/auth-live-seeded/default/20260420T082047Z/summary.md
+[live-canary] log=artifacts/live-canary/auth-live-seeded/default/20260420T082047Z/test-output.log

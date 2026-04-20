@@ -1,0 +1,16 @@
+{
+  "base_url": "http://127.0.0.1:55821",
+  "generated_at": "2026-04-20T12:26:55Z",
+  "results": [
+    {
+      "details": {
+        "error": "Timed out waiting for google OAuth callback page",
+        "screenshot": "/Users/nikolajpismenkov/Documents/near/ironclaw/artifacts/auth-live-canary/browser/google-browser-failure.png"
+      },
+      "latency_ms": 185343,
+      "mode": "browser_oauth",
+      "provider": "google",
+      "success": false
+    }
+  ]
+}

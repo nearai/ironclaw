@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_common::McpServerName;
 
 use crate::tools::mcp::protocol::{McpRequest, McpResponse};
 use crate::tools::mcp::session::McpSessionManager;
@@ -20,7 +21,9 @@ use crate::tools::tool::ToolError;
 /// manages session IDs via [`McpSessionManager`] and supports custom headers.
 pub struct HttpMcpTransport {
     server_url: String,
-    server_name: String,
+    /// Typed name so session-manager lookups cannot accidentally be keyed
+    /// by a free-form string. See `ironclaw_common::identity`.
+    server_name: McpServerName,
     http_client: reqwest::Client,
     session_manager: Option<Arc<McpSessionManager>>,
     session_user_id: Option<String>,
@@ -29,10 +32,28 @@ pub struct HttpMcpTransport {
 
 impl HttpMcpTransport {
     /// Create a new HTTP transport for the given server URL.
+    ///
+    /// TODO(type-safety PR 4 of 4): accept `McpServerName` directly once
+    /// all callers migrate. For now the raw string is validated through
+    /// `McpServerName::new`; if validation fails we fall back to the
+    /// canonical `"unknown"` value rather than bypassing the allowlist
+    /// via `from_trusted`. This mirrors the hardening applied to
+    /// `McpClient::new` / `McpClient::new_with_name`.
     pub fn new(server_url: impl Into<String>, server_name: impl Into<String>) -> Self {
+        let raw: String = server_name.into();
+        let server_name = McpServerName::new(&raw).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %raw,
+                error = %e,
+                "HttpMcpTransport::new: caller-provided server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         Self {
             server_url: server_url.into(),
-            server_name: server_name.into(),
+            server_name,
             // reqwest::Client::builder().build() only fails if the TLS backend
             // cannot initialize, which does not happen with the default rustls
             // feature set. Panic is acceptable here (same as reqwest's own
@@ -116,14 +137,14 @@ impl McpTransport for HttpMcpTransport {
 
         // Extract session ID from response headers before consuming the body.
         if let Some(ref session_manager) = self.session_manager
-            && let Some(ref user_id) = self.session_user_id
+            && let Some(ref _user_id) = self.session_user_id
             && let Some(session_id) = response
                 .headers()
                 .get("Mcp-Session-Id")
                 .and_then(|v| v.to_str().ok())
         {
             session_manager
-                .update_session_id(user_id, &self.server_name, Some(session_id.to_string()))
+                .update_session_id(&self.server_name, Some(session_id.to_string()))
                 .await;
         }
 
@@ -383,6 +404,34 @@ mod tests {
         assert_eq!(transport.server_url(), "http://localhost:8080");
         assert!(transport.session_manager().is_none());
         assert!(transport.custom_headers.is_empty());
+    }
+
+    /// Regression for Copilot review comment 3108156275: `HttpMcpTransport::new`
+    /// previously wrapped the caller-provided `server_name` with
+    /// `McpServerName::from_trusted`, bypassing the allowlist validator.
+    /// After the fix, invalid inputs fall back to the canonical
+    /// `"unknown"` value — matching the pattern in `McpClient::new` and
+    /// `McpClient::new_with_name`.
+    #[test]
+    fn new_falls_back_on_invalid_server_name() {
+        // Slashes are forbidden by the `McpServerName` allowlist, so the
+        // fallback path must engage.
+        let transport = HttpMcpTransport::new("http://localhost:8080", "bad/name");
+        let name = McpServerName::new(transport.server_name.as_str())
+            .expect("stored server_name must be a valid McpServerName (allowlist or fallback)");
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "invalid caller-supplied name should fall back to canonical 'unknown'"
+        );
+    }
+
+    /// Complementary positive case: a valid allowlist name survives
+    /// construction intact (no accidental fold or truncation).
+    #[test]
+    fn new_preserves_valid_server_name() {
+        let transport = HttpMcpTransport::new("http://localhost:8080", "good_name123");
+        assert_eq!(transport.server_name.as_str(), "good_name123");
     }
 
     #[test]

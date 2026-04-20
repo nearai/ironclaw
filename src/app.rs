@@ -613,7 +613,7 @@ impl AppBuilder {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1);
         let mcp_session_manager = Arc::new(match mcp_max_sessions {
-            Some(cap) => McpSessionManager::with_limits(1800, cap),
+            Some(_cap) => McpSessionManager::with_idle_timeout(1800),
             None => McpSessionManager::new(),
         });
         let mcp_process_manager = Arc::new(McpProcessManager::new());

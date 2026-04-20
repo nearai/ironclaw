@@ -1,0 +1,182 @@
+{
+  "base_url": "http://127.0.0.1:51637",
+  "generated_at": "2026-04-20T13:17:16Z",
+  "results": [
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_4ef480c32cd247889052cdf9be9943150b0efa24a47f48ae897f7caba4437c4e",
+        "response_text": "The gmail tool returned: <tool_output name=\"gmail\">\n{\n  \"messages\": [],\n  \"result_size_estimate\": 0\n}\n</tool_output>",
+        "status": "completed",
+        "tool_names": [
+          "gmail"
+        ],
+        "tool_outputs": [
+          "{\n  \"messages\": [],\n  \"result_size_estimate\": 0\n}"
+        ]
+      },
+      "latency_ms": 523,
+      "mode": "responses_api",
+      "provider": "gmail",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_c57c8d9ff7fa48f3a76fdf648dad7ddc4f2ac4c32bdb4f0c845ac200a7679ad3",
+        "response_text": "The google_calendar tool returned: <tool_output name=\"google_calendar\">\n{\n  \"events\": [\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK.<br>Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a target=\\\"_blank\\\" href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-02-06T09:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTAyMDZUMTYwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250206T160000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-02-06T08:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    }\n  ],\n  \"next_page_token\": \"EkoKSBJGCgYIgLmTvQYSPBo6ChwKGjI1djJzbjk5cXA1bmdmZGFmYWRuYnNtaWdyEggKBgiAuZO9BhoQMjAyNTAyMDZUMTYwMDAwWsA-AQ==\"\n}\n</tool_output>",
+        "status": "completed",
+        "tool_names": [
+          "google_calendar"
+        ],
+        "tool_outputs": [
+          "{\n  \"events\": [\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK.<br>Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a target=\\\"_blank\\\" href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-02-06T09:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTAyMDZUMTYwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250206T160000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-02-06T08:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    }\n  ],\n  \"next_page_token\": \"EkoKSBJGCgYIgLmTvQYSPBo6ChwKGjI1djJzbjk5cXA1bmdmZGFmYWRuYnNtaWdyEggKBgiAuZO9BhoQMjAyNTAyMDZUMTYwMDAwWsA-AQ==\"\n}"
+        ]
+      },
+      "latency_ms": 10714,
+      "mode": "responses_api",
+      "provider": "google_calendar",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_a3d1098cdcc841429928b5ada8b29a2f9633003b1c5840d68956271efdf8987f",
+        "response_text": "The github tool returned: <tool_output name=\"github\">\n{\n  \"active_lock_reason\": null,\n  \"assignees\": [],\n  \"author_association\": \"CONTRIBUTOR\",\n  \"body\": \"All WASM channel sources are now in channels-src/:\\r\\n- slack/\\r\\n- telegram/\\r\\n- whatsapp/ (moved from channels/)\",\n  \"closed_at\": \"2026-02-06T19:17:11Z\",\n  \"closed_by\": {\n    \"avatar_url\": \"https://avatars.githubusercontent.com/u/175486?v=4\",\n    \"events_url\": \"https://api.github.com/users/ilblackdragon/events{/privacy}\",\n    \"followers_url\": \"https://api.github.com/users/ilblackdragon/followers\",\n    \"following_url\": \"https://api.github.com/users/ilblackdragon/following{/other_user}\",\n    \"gists_url\": \"https://api.github.com/users/ilblackdragon/gists{/gist_id}\",\n    \"gravatar_id\": \"\",\n    \"html_url\": \"https://github.com/ilblackdragon\",\n    \"id\": 175486,\n    \"login\": \"ilblackdragon\",\n    \"node_id\": \"MDQ6VXNlcjE3NTQ4Ng==\",\n    \"organizations_url\": \"https://api.github.com/users/ilblackdragon/orgs\",\n    \"received_events_url\": \"https://api.github.com/users/ilblackdragon/received_events\",\n    \"repos_url\": \"https://api.github.com/users/ilblackdragon/repos\",\n    \"site_admin\": false,\n    \"starred_url\": \"https://api.github.com/users/ilblackdragon/starred{/owner}{/repo}\",\n    \"subscriptions_url\": \"https://api.github.com/users/ilblackdragon/subscriptions\",\n    \"type\": \"User\",\n    \"url\": \"https://api.github.com/users/ilblackdragon\",\n    \"user_view_type\": \"public\"\n  },\n  \"comments\": 1,\n  \"comments_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/comments\",\n  \"created_at\": \"2026-02-06T05:04:55Z\",\n  \"draft\": false,\n  \"events_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/events\",\n  \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\",\n  \"id\": 3904903166,\n  \"labels\": [],\n  \"labels_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/labels{/name}\",\n  \"locked\": false,\n  \"milestone\": null,\n  \"node_id\": \"PR_kwDORHZ7Z87B5oQD\",\n  \"number\": 1,\n  \"performed_via_github_app\": null,\n  \"pull_request\": {\n    \"diff_url\": \"https://github.com/nearai/ironclaw/pull/1.diff\",\n    \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\",\n    \"merged_at\": null,\n    \"patch_url\": \"https://github.com/nearai/ironclaw/pull/1.patch\",\n    \"url\": \"https://api.github.com/repos/nearai/ironclaw/pulls/1\"\n  },\n  \"reactions\": {\n    \"+1\": 0,\n    \"-1\": 0,\n    \"confused\": 0,\n    \"eyes\": 0,\n    \"heart\": 0,\n    \"hooray\": 0,\n    \"laugh\": 0,\n    \"rocket\": 0,\n    \"total_count\": 0,\n    \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/reactions\"\n  },\n  \"repository_url\": \"https://api.github.com/repos/nearai/ironclaw\",\n  \"state\": \"closed\",\n  \"state_reason\": null,\n  \"timeline_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/timeline\",\n  \"title\": \"Move whatsapp channel source to channels-src/ for consistency\",\n  \"type\": null,\n  \"updated_at\": \"2026-02-06T19:17:17Z\",\n  \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1\",\n  \"user\": {\n    \"avatar_url\": \"https://avatars.githubusercontent.com/u/13601726?v=4\",\n    \"events_url\": \"https://api.github.com/users/bowenwang1996/events{/privacy}\",\n    \"followers_url\": \"https://api.github.com/users/bowenwang1996/followers\",\n    \"following_url\": \"https://api.github.com/users/bowenwang1996/following{/other_user}\",\n    \"gists_url\": \"https://api.github.com/users/bowenwang1996/gists{/gist_id}\",\n    \"gravatar_id\": \"\",\n    \"html_url\": \"https://github.com/bowenwang1996\",\n    \"id\": 13601726,\n    \"login\": \"bowenwang1996\",\n    \"node_id\": \"MDQ6VXNlcjEzNjAxNzI2\",\n    \"organizations_url\": \"https://api.github.com/users/bowenwang1996/orgs\",\n    \"received_events_url\": \"https://api.github.com/users/bowenwang1996/received_events\",\n    \"repos_url\": \"https://api.github.com/users/bowenwang1996/repos\",\n    \"site_admin\": false,\n    \"starred_url\": \"https://api.github.com/users/bowenwang1996/starred{/owner}{/repo}\",\n    \"subscriptions_url\": \"https://api.github.com/users/bowenwang1996/subscriptions\",\n    \"type\": \"User\",\n    \"url\": \"https://api.github.com/users/bowenwang1996\",\n    \"user_view_type\": \"public\"\n  }\n}\n</tool_output>",
+        "status": "completed",
+        "tool_names": [
+          "github"
+        ],
+        "tool_outputs": [
+          "{\n  \"active_lock_reason\": null,\n  \"assignees\": [],\n  \"author_association\": \"CONTRIBUTOR\",\n  \"body\": \"All WASM channel sources are now in channels-src/:\\r\\n- slack/\\r\\n- telegram/\\r\\n- whatsapp/ (moved from channels/)\",\n  \"closed_at\": \"2026-02-06T19:17:11Z\",\n  \"closed_by\": {\n    \"avatar_url\": \"https://avatars.githubusercontent.com/u/175486?v=4\",\n    \"events_url\": \"https://api.github.com/users/ilblackdragon/events{/privacy}\",\n    \"followers_url\": \"https://api.github.com/users/ilblackdragon/followers\",\n    \"following_url\": \"https://api.github.com/users/ilblackdragon/following{/other_user}\",\n    \"gists_url\": \"https://api.github.com/users/ilblackdragon/gists{/gist_id}\",\n    \"gravatar_id\": \"\",\n    \"html_url\": \"https://github.com/ilblackdragon\",\n    \"id\": 175486,\n    \"login\": \"ilblackdragon\",\n    \"node_id\": \"MDQ6VXNlcjE3NTQ4Ng==\",\n    \"organizations_url\": \"https://api.github.com/users/ilblackdragon/orgs\",\n    \"received_events_url\": \"https://api.github.com/users/ilblackdragon/received_events\",\n    \"repos_url\": \"https://api.github.com/users/ilblackdragon/repos\",\n    \"site_admin\": false,\n    \"starred_url\": \"https://api.github.com/users/ilblackdragon/starred{/owner}{/repo}\",\n    \"subscriptions_url\": \"https://api.github.com/users/ilblackdragon/subscriptions\",\n    \"type\": \"User\",\n    \"url\": \"https://api.github.com/users/ilblackdragon\",\n    \"user_view_type\": \"public\"\n  },\n  \"comments\": 1,\n  \"comments_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/comments\",\n  \"created_at\": \"2026-02-06T05:04:55Z\",\n  \"draft\": false,\n  \"events_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/events\",\n  \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\",\n  \"id\": 3904903166,\n  \"labels\": [],\n  \"labels_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/labels{/name}\",\n  \"locked\": false,\n  \"milestone\": null,\n  \"node_id\": \"PR_kwDORHZ7Z87B5oQD\",\n  \"number\": 1,\n  \"performed_via_github_app\": null,\n  \"pull_request\": {\n    \"diff_url\": \"https://github.com/nearai/ironclaw/pull/1.diff\",\n    \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\",\n    \"merged_at\": null,\n    \"patch_url\": \"https://github.com/nearai/ironclaw/pull/1.patch\",\n    \"url\": \"https://api.github.com/repos/nearai/ironclaw/pulls/1\"\n  },\n  \"reactions\": {\n    \"+1\": 0,\n    \"-1\": 0,\n    \"confused\": 0,\n    \"eyes\": 0,\n    \"heart\": 0,\n    \"hooray\": 0,\n    \"laugh\": 0,\n    \"rocket\": 0,\n    \"total_count\": 0,\n    \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/reactions\"\n  },\n  \"repository_url\": \"https://api.github.com/repos/nearai/ironclaw\",\n  \"state\": \"closed\",\n  \"state_reason\": null,\n  \"timeline_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/timeline\",\n  \"title\": \"Move whatsapp channel source to channels-src/ for consistency\",\n  \"type\": null,\n  \"updated_at\": \"2026-02-06T19:17:17Z\",\n  \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1\",\n  \"user\": {\n    \"avatar_url\": \"https://avatars.githubusercontent.com/u/13601726?v=4\",\n    \"events_url\": \"https://api.github.com/users/bowenwang1996/events{/privacy}\",\n    \"followers_url\": \"https://api.github.com/users/bowenwang1996/followers\",\n    \"following_url\": \"https://api.github.com/users/bowenwang1996/following{/other_user}\",\n    \"gists_url\": \"https://api.github.com/users/bowenwang1996/gists{/gist_id}\",\n    \"gravatar_id\": \"\",\n    \"html_url\": \"https://github.com/bowenwang1996\",\n    \"id\": 13601726,\n    \"login\": \"bowenwang1996\",\n    \"node_id\": \"MDQ6VXNlcjEzNjAxNzI2\",\n    \"organizations_url\": \"https://api.github.com/users/bowenwang1996/orgs\",\n    \"received_events_url\": \"https://api.github.com/users/bowenwang1996/received_events\",\n    \"repos_url\": \"https://api.github.com/users/bowenwang1996/repos\",\n    \"site_admin\": false,\n    \"starred_url\": \"https://api.github.com/users/bowenwang1996/starred{/owner}{/repo}\",\n    \"subscriptions_url\": \"https://api.github.com/users/bowenwang1996/subscriptions\",\n    \"type\": \"User\",\n    \"url\": \"https://api.github.com/users/bowenwang1996\",\n    \"user_view_type\": \"public\"\n  }\n}"
+        ]
+      },
+      "latency_ms": 20741,
+      "mode": "responses_api",
+      "provider": "github",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_ee7e5c483c5b413b94dcdad028f52b7e3e6f7ff3e16d4b6d876b59dc49db6b49",
+        "response_text": "The notion_notion_search tool returned: <tool_output name=\"notion_notion_search\">\n\"{\\\"results\\\":[],\\\"type\\\":\\\"workspace_search\\\"}\"\n</tool_output>",
+        "status": "completed",
+        "tool_names": [
+          "notion_notion_search"
+        ],
+        "tool_outputs": [
+          "\"{\\\"results\\\":[],\\\"type\\\":\\\"workspace_search\\\"}\""
+        ]
+      },
+      "latency_ms": 923,
+      "mode": "responses_api",
+      "provider": "notion",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_0467473c87174d4483ddbd36a9dd49ee18efee491a5d4dee84c67115f9fae4f6",
+        "response_text": "gmail roundtrip complete. Message sent, verified, and trashed.",
+        "status": "completed",
+        "tool_names": [
+          "gmail",
+          "gmail",
+          "gmail"
+        ],
+        "tool_outputs": [
+          "{\n  \"id\": \"19dab092dfb25826\",\n  \"label_ids\": [\n    \"UNREAD\",\n    \"SENT\",\n    \"INBOX\"\n  ],\n  \"thread_id\": \"19dab092dfb25826\"\n}",
+          "{\n  \"messages\": [\n    {\n      \"date\": \"Mon, 20 Apr 2026 06:16:38 -0700\",\n      \"from\": \"mikalai.pismiankou@near.ai\",\n      \"id\": \"19dab092dfb25826\",\n      \"is_unread\": true,\n      \"label_ids\": [\n        \"UNREAD\",\n        \"SENT\",\n        \"INBOX\"\n      ],\n      \"snippet\": \"Canary test\",\n      \"subject\": \"[canary] 1776690939\",\n      \"thread_id\": \"19dab092dfb25826\",\n      \"to\": \"mikalai.pismiankou@near.ai\"\n    }\n  ],\n  \"result_size_estimate\": 1\n}",
+          "{\n  \"id\": \"19dab092dfb25826\",\n  \"trashed\": true\n}"
+        ]
+      },
+      "latency_ms": 2044,
+      "mode": "responses_api",
+      "provider": "gmail_roundtrip",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_62236ef01fb2468186f4ca25d4a72e749e8f9251a08348fc98bfefed9713d8be",
+        "response_text": "google_calendar lifecycle complete. Event created, verified, and deleted.",
+        "status": "completed",
+        "tool_names": [
+          "google_calendar",
+          "google_calendar",
+          "google_calendar"
+        ],
+        "tool_outputs": [
+          "{\n  \"event\": {\n    \"end\": {\n      \"date_time\": \"2026-04-21T03:30:00-07:00\",\n      \"time_zone\": \"UTC\"\n    },\n    \"html_link\": \"https://www.google.com/calendar/event?eid=aDhrbnE2czJmcHJsZjh1M3JtdDVwM3A1ZDQgbWlrYWxhaS5waXNtaWFua291QG5lYXIuYWk\",\n    \"id\": \"h8knq6s2fprlf8u3rmt5p3p5d4\",\n    \"organizer\": {\n      \"email\": \"mikalai.pismiankou@near.ai\"\n    },\n    \"start\": {\n      \"date_time\": \"2026-04-21T03:00:00-07:00\",\n      \"time_zone\": \"UTC\"\n    },\n    \"status\": \"confirmed\",\n    \"summary\": \"[canary] 1776690939\"\n  }\n}",
+          "{\n  \"events\": [\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK.<br>Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a target=\\\"_blank\\\" href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-02-06T09:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTAyMDZUMTYwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250206T160000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-02-06T08:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    },\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK.<br>Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a target=\\\"_blank\\\" href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-03-06T09:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTAzMDZUMTYwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250306T160000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-03-06T08:00:00-08:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    },\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK.<br>Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a target=\\\"_blank\\\" href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-04-03T09:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTA0MDNUMTUwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250403T150000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-04-03T08:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    },\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK, Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\"><u>https://twitter.com/NEARWEEK</u></a><br><br>or go directly here on Youtube for instant access.\u00a0<br><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\"><u>https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</u></a>\",\n      \"end\": {\n        \"date_time\": \"2025-05-08T09:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTA1MDFUMTUwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250501T150000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-05-08T08:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    },\n    {\n      \"attendees\": [\n        {\n          \"email\": \"mikalai.pismiankou@near.ai\",\n          \"response_status\": \"accepted\"\n        }\n      ],\n      \"description\": \"<b>Agenda\u00a0</b><br>NEAR Town Hall, open to NEAR Foundation &amp; Eco projects.\u00a0<br>Owned by NEARWEEK, Monthly cadence.\u00a0\u00a0<br><br><b>Archives found here:\u00a0</b><br><u><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\"><u></u></a><a href=\\\"https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF\\\" target=\\\"_blank\\\">https://www.youtube.com/playlist?list=PLmgxQHVg7viopvoZg0V1Yt8fp3DEDZucF</a></u><br><br><b>How to join?\u00a0</b><br><br>Go to NEARweek's twitter account to RESISTER for the event. You will need to look for the post.\u00a0<u><a href=\\\"https://twitter.com/NEARWEEK\\\" target=\\\"_blank\\\">https://twitter.com/NEARWEEK</a></u><br><br>or go directly here on Youtube for instant access.\u00a0<br><u><a href=\\\"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\\\" target=\\\"_blank\\\">https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg</a></u><br><br>Streaming on YouTube takes a few minutes to register, so best to try to enter meeting 5 min post start time. But All the links above do work.\",\n      \"end\": {\n        \"date_time\": \"2025-06-12T09:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"html_link\": \"https://www.google.com/calendar/event?eid=MjV2MnNuOTlxcDVuZ2ZkYWZhZG5ic21pZ3JfMjAyNTA2MDVUMTUwMDAwWiBtaWthbGFpLnBpc21pYW5rb3VAbmVhci5haQ\",\n      \"id\": \"25v2sn99qp5ngfdafadnbsmigr_20250605T150000Z\",\n      \"location\": \"https://www.youtube.com/channel/UCzGmVh9APgiMIsLRq0kB8Fg\",\n      \"organizer\": {\n        \"display_name\": \"[Shared] NEAR Eco\",\n        \"email\": \"c_h4lddamd4h98p5fss8t94cnv2o@group.calendar.google.com\"\n      },\n      \"start\": {\n        \"date_time\": \"2025-06-12T08:00:00-07:00\",\n        \"time_zone\": \"America/New_York\"\n      },\n      \"status\": \"confirmed\",\n      \"summary\": \"NEAR Town Hall [monthly] \"\n    }\n  ],\n  \"next_page_token\": \"EkoKSBJGCgYI8NarwgYSPBo6ChwKGjI1djJzbjk5cXA1bmdmZGFmYWRuYnNtaWdyEggKBgjw4YbCBhoQMjAyNTA2MDVUMTUwMDAwWsA-AQ==\"\n}",
+          "{\n  \"deleted\": true,\n  \"event_id\": \"h8knq6s2fprlf8u3rmt5p3p5d4\"\n}"
+        ]
+      },
+      "latency_ms": 12726,
+      "mode": "responses_api",
+      "provider": "google_calendar_lifecycle",
+      "success": true
+    },
+    {
+      "details": {
+        "error": null,
+        "get_status_code": 200,
+        "response_id": "resp_eb7d960145564d138cbf9863e138b4a05685e4771a6f47b396be419862183419",
+        "response_text": "notion search lifecycle complete. Both searches executed successfully.",
+        "status": "completed",
+        "tool_names": [
+          "notion_notion_search",
+          "notion_notion_search"
+        ],
+        "tool_outputs": [
+          "\"{\\\"results\\\":[],\\\"type\\\":\\\"workspace_search\\\"}\"",
+          "\"{\\\"results\\\":[],\\\"type\\\":\\\"workspace_search\\\"}\""
+        ]
+      },
+      "latency_ms": 906,
+      "mode": "responses_api",
+      "provider": "notion_search_lifecycle",
+      "success": true
+    },
+    {
+      "details": {
+        "role": "assistant",
+        "text": "The gmail tool returned: { \"messages\": [], \"result_size_estimate\": 0 }",
+        "thread_id": "5685e477-1a6f-47b3-96be-419862183419",
+        "tool_names": [
+          "notion_notion_search",
+          "notion_notion_search",
+          "gmail"
+        ]
+      },
+      "latency_ms": 1039,
+      "mode": "browser",
+      "provider": "gmail",
+      "success": true
+    },
+    {
+      "details": {
+        "role": "assistant",
+        "text": "The github tool returned: { \"active_lock_reason\": null, \"assignees\": [], \"author_association\": \"CONTRIBUTOR\", \"body\": \"All WASM channel sources are now in channels-src/:\\r\\n- slack/\\r\\n- telegram/\\r\\n- whatsapp/ (moved from channels/)\", \"closed_at\": \"2026-02-06T19:17:11Z\", \"closed_by\": { \"avatar_url\": \"https://avatars.githubusercontent.com/u/175486?v=4\", \"events_url\": \"https://api.github.com/users/ilblackdragon/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ilblackdragon/followers\", \"following_url\": \"https://api.github.com/users/ilblackdragon/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ilblackdragon/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ilblackdragon\", \"id\": 175486, \"login\": \"ilblackdragon\", \"node_id\": \"MDQ6VXNlcjE3NTQ4Ng==\", \"organizations_url\": \"https://api.github.com/users/ilblackdragon/orgs\", \"received_events_url\": \"https://api.github.com/users/ilblackdragon/received_events\", \"repos_url\": \"https://api.github.com/users/ilblackdragon/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ilblackdragon/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ilblackdragon/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ilblackdragon\", \"user_view_type\": \"public\" }, \"comments\": 1, \"comments_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/comments\", \"created_at\": \"2026-02-06T05:04:55Z\", \"draft\": false, \"events_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/events\", \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\", \"id\": 3904903166, \"labels\": [], \"labels_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/labels{/name}\", \"locked\": false, \"milestone\": null, \"node_id\": \"PR_kwDORHZ7Z87B5oQD\", \"number\": 1, \"performed_via_github_app\": null, \"pull_request\": { \"diff_url\": \"https://github.com/nearai/ironclaw/pull/1.diff\", \"html_url\": \"https://github.com/nearai/ironclaw/pull/1\", \"merged_at\": null, \"patch_url\": \"https://github.com/nearai/ironclaw/pull/1.patch\", \"url\": \"https://api.github.com/repos/nearai/ironclaw/pulls/1\" }, \"reactions\": { \"+1\": 0, \"-1\": 0, \"confused\": 0, \"eyes\": 0, \"heart\": 0, \"hooray\": 0, \"laugh\": 0, \"rocket\": 0, \"total_count\": 0, \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/reactions\" }, \"repository_url\": \"https://api.github.com/repos/nearai/ironclaw\", \"state\": \"closed\", \"state_reason\": null, \"timeline_url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1/timeline\", \"title\": \"Move whatsapp channel source to channels-src/ for consistency\", \"type\": null, \"updated_at\": \"2026-02-06T19:17:17Z\", \"url\": \"https://api.github.com/repos/nearai/ironclaw/issues/1\", \"user\": { \"avatar_url\": \"https://avatars.githubusercontent.com/u/13601726?v=4\", \"events_url\": \"https://api.github.com/users/bowenwang1996/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bowenwang1996/followers\", \"following_url\": \"https://api.github.com/users/bowenwang1996/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bowenwang1996/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bowenwang1996\", \"id\": 13601726, \"login\": \"bowenwang1996\", \"node_id\": \"MDQ6VXNlcjEzNjAxNzI2\", \"organizations_url\": \"https://api.github.com/users/bowenwang1996/orgs\", \"received_events_url\": \"https://api.github.com/users/bowenwang1996/received_events\", \"repos_url\": \"https://api.github.com/users/bowenwang1996/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bowenwang1996/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bowenwang1996/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bowenwang1996\", \"user_view_type\": \"public\" } }",
+        "thread_id": "5685e477-1a6f-47b3-96be-419862183419",
+        "tool_names": [
+          "notion_notion_search",
+          "notion_notion_search",
+          "gmail",
+          "github"
+        ]
+      },
+      "latency_ms": 21206,
+      "mode": "browser",
+      "provider": "github",
+      "success": true
+    }
+  ]
+}

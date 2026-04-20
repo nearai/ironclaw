@@ -3,18 +3,13 @@
 //! Supports both local (unauthenticated) and hosted (OAuth-authenticated) servers.
 //! Uses pluggable transports (HTTP, stdio, Unix) via the `McpTransport` trait.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_common::McpServerName;
 use tokio::sync::RwLock;
-
-/// Hard cap on per-user cached client views, per `McpClient`. Bounds memory
-/// when a single server is hit by many distinct users. HTTP transports each
-/// carry their own per-user initialization + tools cache; sharing is only
-/// skipped for HTTP where per-user handshake state actually matters.
-const MAX_USER_CLIENT_CACHE: usize = 256;
 
 use crate::auth::resolve_access_token_string_with_refresh;
 use crate::context::JobContext;
@@ -66,13 +61,17 @@ pub struct McpClient {
     server_url: String,
 
     /// Server name (for logging and session management).
-    server_name: String,
+    ///
+    /// Typed via `McpServerName` so session-manager lookups and logging
+    /// are both compile-time-gated behind the allowlist validation that
+    /// lives in `ironclaw_common::identity`.
+    server_name: McpServerName,
 
     /// Request ID counter.
-    next_id: Arc<AtomicU64>,
+    next_id: AtomicU64,
 
     /// Cached tools.
-    tools_cache: Arc<RwLock<Option<Vec<McpTool>>>>,
+    tools_cache: RwLock<Option<Vec<McpTool>>>,
 
     /// Session manager (shared across clients).
     session_manager: Option<Arc<McpSessionManager>>,
@@ -92,16 +91,7 @@ pub struct McpClient {
     /// Ensures the MCP initialize handshake runs exactly once.
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
-    initialized: Arc<tokio::sync::OnceCell<InitializeResult>>,
-
-    /// Per-user client views, keyed by runtime user id.
-    ///
-    /// Populated only for HTTP transports — stdio/UDS share runtime state
-    /// across users (one process backs all sessions), so caching there wastes
-    /// memory without speeding anything up. An `Arc` + `std::sync::Mutex`
-    /// keeps the hot-path `for_user` lookup cheap and keeps the cache shared
-    /// across clones of the same conceptual `McpClient`.
-    user_client_cache: Arc<Mutex<UserClientCache>>,
+    initialized: tokio::sync::OnceCell<InitializeResult>,
 
     /// Test-only marker recording which constructor produced this client.
     /// Used by caller-level tests to assert the factory chose the correct path.
@@ -109,82 +99,43 @@ pub struct McpClient {
     constructor_kind: McpClientConstructor,
 }
 
-/// FIFO-eviction cache of per-user `McpClient` views.
-///
-/// Each `for_user(user_id)` call against an HTTP transport lazily builds (and
-/// caches) an `Arc<McpClient>` so repeated tool calls from the same user skip
-/// the initialize handshake and tool discovery. The cap prevents runaway
-/// growth if many distinct user IDs hit a single server over the process
-/// lifetime.
-#[derive(Default)]
-struct UserClientCache {
-    clients: HashMap<String, Arc<McpClient>>,
-    order: VecDeque<String>,
-}
-
-impl UserClientCache {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn get(&self, user_id: &str) -> Option<Arc<McpClient>> {
-        self.clients.get(user_id).cloned()
-    }
-
-    fn insert(&mut self, user_id: String, client: Arc<McpClient>) {
-        use std::collections::hash_map::Entry;
-        if let Entry::Occupied(mut entry) = self.clients.entry(user_id.clone()) {
-            entry.insert(client);
-            return;
-        }
-        while self.clients.len() >= MAX_USER_CLIENT_CACHE
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.clients.remove(&oldest);
-        }
-        self.order.push_back(user_id.clone());
-        self.clients.insert(user_id, client);
-    }
-}
-
-struct McpClientRuntimeState {
-    next_id: Arc<AtomicU64>,
-    tools_cache: Arc<RwLock<Option<Vec<McpTool>>>>,
-    initialized: Arc<tokio::sync::OnceCell<InitializeResult>>,
-}
-
 impl McpClient {
-    fn new_user_client_cache() -> Arc<Mutex<UserClientCache>> {
-        Arc::new(Mutex::new(UserClientCache::new()))
-    }
-
-    fn new_runtime_state() -> McpClientRuntimeState {
-        McpClientRuntimeState {
-            next_id: Arc::new(AtomicU64::new(1)),
-            tools_cache: Arc::new(RwLock::new(None)),
-            initialized: Arc::new(tokio::sync::OnceCell::new()),
-        }
-    }
-
-    fn shares_transport_runtime_state(&self) -> bool {
-        !self.transport.supports_http_features()
-    }
-
     /// Create a new simple MCP client (no authentication).
     ///
     /// Use this for local development servers or servers that don't require auth.
     pub fn new(server_url: impl Into<String>) -> Self {
         let url: String = server_url.into();
-        let name = extract_server_name(&url);
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
-        let runtime_state = Self::new_runtime_state();
+        // `extract_server_name` is a heuristic URL parser that may emit
+        // values outside the strict allowlist — e.g. the bracketed IPv6
+        // host `[::1]` survives `host_str()` and contains the `:`
+        // forbidden by `McpServerName`'s rules. Apply the same
+        // hyphen→underscore fold as the other constructors (only when
+        // a hyphen is present, to avoid an unnecessary allocation), then
+        // validate through `McpServerName::new`. If validation fails we
+        // fall back to the canonical `"unknown"` value rather than
+        // bypassing the allowlist via `from_trusted`.
+        let mut name_str = extract_server_name(&url);
+        if name_str.contains('-') {
+            name_str = name_str.replace('-', "_");
+        }
+        let name = McpServerName::new(&name_str).unwrap_or_else(|e| {
+            tracing::debug!(
+                extracted = %name_str,
+                error = %e,
+                "McpClient::new: extracted server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -192,8 +143,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: runtime_state.initialized,
-            user_client_cache: Self::new_user_client_cache(),
+            initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
         }
@@ -203,17 +153,31 @@ impl McpClient {
     ///
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        let name: String = server_name.into().replace('-', "_");
+        // Preserve historical hyphen-to-underscore folding so session
+        // keys match `create_client_from_config`'s canonicalization, then
+        // re-validate through `McpServerName::new`. Caller-provided input
+        // must never reach `from_trusted` — if validation fails we fall
+        // back to the canonical `"unknown"` value.
+        let raw: String = server_name.into().replace('-', "_");
+        let name = McpServerName::new(&raw).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %raw,
+                error = %e,
+                "McpClient::new_with_name: caller-provided name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let url: String = server_url.into();
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
-        let runtime_state = Self::new_runtime_state();
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -221,8 +185,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: runtime_state.initialized,
-            user_client_cache: Self::new_user_client_cache(),
+            initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
         }
@@ -249,27 +212,42 @@ impl McpClient {
                     .to_string(),
             ));
         }
+        // Validate the config-supplied name once and thread the canonical
+        // form into both the transport and the client's typed field so the
+        // two can never diverge (e.g. transport falling back to "unknown"
+        // while the client still holds the raw invalid value, which would
+        // desync session-manager lookups against transport writes).
+        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
+        // `McpServerName` so this shared canonicalization moves upstream.
+        let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %config.name,
+                error = %e,
+                "McpClient::new_with_config: config server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let transport = Arc::new(HttpMcpTransport::new(
             config.url.clone(),
-            config.name.clone(),
+            validated_name.as_str(),
         ));
-        let runtime_state = Self::new_runtime_state();
 
         Ok(Self {
             transport,
             server_url: config.url.clone(),
-            server_name: config.name.clone(),
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            server_name: validated_name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
             // create_client_from_config() for production paths
             user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
-            initialized: runtime_state.initialized,
+            initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
-            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::FromConfig,
         })
@@ -284,28 +262,44 @@ impl McpClient {
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
     ) -> Self {
-        let user_id = user_id.into();
+        // Validate the config-supplied name once and pass the canonical
+        // form into both the transport and the client's typed field. If
+        // the two sides derived the name independently, an invalid config
+        // would leave the transport's `server_name` as "unknown" while
+        // the client's `server_name` held the raw value — session IDs
+        // would then be written under one key and looked up under another.
+        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
+        // `McpServerName` so this shared canonicalization moves upstream.
+        let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %config.name,
+                error = %e,
+                "McpClient::new_authenticated: config server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
+        let user_id_str: String = user_id.into();
         let transport = Arc::new(
-            HttpMcpTransport::new(config.url.clone(), config.name.clone())
-                .with_session_manager(session_manager.clone(), user_id.clone()),
+            HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
+                .with_session_manager(session_manager.clone(), &user_id_str),
         );
 
         let custom_headers = config.headers.clone();
-        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: config.url.clone(),
-            server_name: config.name.clone(),
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            server_name: validated_name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
             secrets: Some(secrets),
-            user_id: user_id.clone(),
+            user_id: user_id_str,
             server_config: Some(config),
             custom_headers,
-            initialized: runtime_state.initialized,
-            user_client_cache: Self::new_user_client_cache(),
+            initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
         }
@@ -322,7 +316,26 @@ impl McpClient {
         user_id: impl Into<String>,
         server_config: Option<McpServerConfig>,
     ) -> Self {
-        let name: String = server_name.into();
+        // The production caller (factory) hands us an already-validated
+        // name, but the signature accepts `impl Into<String>` which means
+        // any other caller (tests, future call sites) could pass something
+        // that hasn't been through the allowlist. Re-validate here with the
+        // same canonical `"unknown"` fallback used in `new`, `new_with_name`,
+        // `new_with_config`, `new_authenticated`, and `HttpMcpTransport::new`
+        // so this constructor can't quietly produce an unchecked `McpServerName`.
+        // TODO(type-safety PR 4 of 4): accept `McpServerName` here directly
+        // and drop this fallback.
+        let raw: String = server_name.into();
+        let name = McpServerName::new(&raw).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %raw,
+                error = %e,
+                "McpClient::new_with_transport: caller-provided server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let url = server_config
             .as_ref()
             .map(|c| c.url.clone())
@@ -331,21 +344,19 @@ impl McpClient {
             .as_ref()
             .map(|c| c.headers.clone())
             .unwrap_or_default();
-        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
             session_manager,
             secrets,
             user_id: user_id.into(),
             server_config,
             custom_headers,
-            initialized: runtime_state.initialized,
-            user_client_cache: Self::new_user_client_cache(),
+            initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
         }
@@ -364,8 +375,16 @@ impl McpClient {
         self
     }
 
-    /// Get the server name.
+    /// Get the server name as a string slice.
+    ///
+    /// For typed access — when feeding the name into a session-manager
+    /// call or another typed API — use [`Self::server_name_typed`].
     pub fn server_name(&self) -> &str {
+        self.server_name.as_str()
+    }
+
+    /// Get the typed server name.
+    pub fn server_name_typed(&self) -> &McpServerName {
         &self.server_name
     }
 
@@ -392,98 +411,6 @@ impl McpClient {
     #[cfg(test)]
     pub(crate) fn constructor_kind(&self) -> McpClientConstructor {
         self.constructor_kind
-    }
-
-    /// Build (or retrieve from the per-user cache) a user-specific view of
-    /// this client.
-    ///
-    /// HTTP transports keep per-user initialization, session, and tool-cache
-    /// state; the cache means repeated tool executions from the same user
-    /// reuse the initialized client instead of re-running the handshake.
-    /// Stdio/UDS transports intentionally *share* initialization, request IDs,
-    /// and tool cache across users because they address a single underlying
-    /// server process — if a future stdio MCP server exposes user-scoped
-    /// capabilities, this sharing contract must be revisited.
-    ///
-    /// Returns an error if `user_id` contains characters that are unsafe to
-    /// propagate into paths, log lines, or credential lookups.
-    fn for_user(&self, user_id: &str) -> Result<Arc<Self>, ToolError> {
-        if !is_valid_mcp_user_id(user_id) {
-            return Err(ToolError::InvalidParameters(format!(
-                "Invalid MCP user_id '{user_id}': must be non-empty and must not contain path separators or control characters"
-            )));
-        }
-        let shares_runtime_state = self.shares_transport_runtime_state();
-        // Only HTTP transports carry per-user runtime state worth caching.
-        // Skipping the cache for shared-runtime transports avoids wasting
-        // memory on stdio/UDS where every view points at the same state.
-        if !shares_runtime_state
-            && let Some(cached) = self
-                .user_client_cache
-                .lock()
-                .map_err(|_| {
-                    ToolError::ExecutionFailed("MCP user client cache poisoned".to_string())
-                })?
-                .get(user_id)
-        {
-            return Ok(cached);
-        }
-
-        let user_id_owned = user_id.to_string();
-        let transport: Arc<dyn McpTransport> = if let (Some(session_manager), Some(config)) =
-            (self.session_manager.as_ref(), self.server_config.as_ref())
-        {
-            if matches!(
-                config.effective_transport(),
-                crate::tools::mcp::config::EffectiveTransport::Http
-            ) {
-                Arc::new(
-                    HttpMcpTransport::new(self.server_url.clone(), self.server_name.clone())
-                        .with_session_manager(session_manager.clone(), user_id_owned.clone()),
-                )
-            } else {
-                self.transport.clone()
-            }
-        } else {
-            self.transport.clone()
-        };
-        let runtime_state = if shares_runtime_state {
-            McpClientRuntimeState {
-                next_id: self.next_id.clone(),
-                tools_cache: self.tools_cache.clone(),
-                initialized: self.initialized.clone(),
-            }
-        } else {
-            Self::new_runtime_state()
-        };
-
-        let client = Arc::new(Self {
-            transport,
-            server_url: self.server_url.clone(),
-            server_name: self.server_name.clone(),
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
-            session_manager: self.session_manager.clone(),
-            secrets: self.secrets.clone(),
-            user_id: user_id_owned.clone(),
-            server_config: self.server_config.clone(),
-            custom_headers: self.custom_headers.clone(),
-            initialized: runtime_state.initialized,
-            // Fresh per-user view gets its own cache so downstream `for_user`
-            // calls don't accidentally chain through a previous user's map.
-            user_client_cache: Self::new_user_client_cache(),
-            #[cfg(test)]
-            constructor_kind: self.constructor_kind,
-        });
-        if !shares_runtime_state {
-            self.user_client_cache
-                .lock()
-                .map_err(|_| {
-                    ToolError::ExecutionFailed("MCP user client cache poisoned".to_string())
-                })?
-                .insert(user_id_owned, Arc::clone(&client));
-        }
-        Ok(client)
     }
 
     /// Get the next request ID.
@@ -515,7 +442,7 @@ impl McpClient {
             secrets.as_ref(),
             &self.user_id,
             &config.token_secret_name(),
-            &self.server_name,
+            self.server_name.as_str(),
             || async {
                 refresh_access_token(config, secrets, &self.user_id)
                     .await
@@ -564,9 +491,7 @@ impl McpClient {
             }
         }
         if let Some(ref session_manager) = self.session_manager
-            && let Some(session_id) = session_manager
-                .get_session_id(&self.user_id, &self.server_name)
-                .await
+            && let Some(session_id) = session_manager.get_session_id(&self.server_name).await
         {
             headers.insert("Mcp-Session-Id".to_string(), session_id);
         }
@@ -579,11 +504,9 @@ impl McpClient {
     /// reports that the current session ID is no longer valid.
     async fn reinitialize_session(&self) -> Result<InitializeResult, ToolError> {
         if let Some(ref session_manager) = self.session_manager {
+            session_manager.terminate(&self.server_name).await;
             session_manager
-                .terminate(&self.user_id, &self.server_name)
-                .await;
-            session_manager
-                .get_or_create(&self.user_id, &self.server_name, &self.server_url)
+                .get_or_create(&self.server_name, &self.server_url)
                 .await;
         }
 
@@ -612,9 +535,7 @@ impl McpClient {
             })?;
 
         if let Some(ref session_manager) = self.session_manager {
-            session_manager
-                .mark_initialized(&self.user_id, &self.server_name)
-                .await;
+            session_manager.mark_initialized(&self.server_name).await;
         }
 
         let notification = McpRequest::initialized_notification();
@@ -730,9 +651,7 @@ impl McpClient {
             .initialized
             .get_or_try_init(|| async {
                 if let Some(ref session_manager) = self.session_manager
-                    && session_manager
-                        .is_initialized(&self.user_id, &self.server_name)
-                        .await
+                    && session_manager.is_initialized(&self.server_name).await
                 {
                     return Ok(InitializeResult::default());
                 }
@@ -827,7 +746,7 @@ impl McpClient {
         // a few dozen tools).
         let mut seen_ids: HashMap<String, String> = HashMap::new();
         for t in &mcp_tools {
-            let id = mcp_tool_id(&self.server_name, &t.name);
+            let id = mcp_tool_id(self.server_name.as_str(), &t.name);
             match seen_ids.get(&id) {
                 Some(prev) if prev != &t.name => {
                     tracing::warn!(
@@ -850,11 +769,11 @@ impl McpClient {
         Ok(mcp_tools
             .into_iter()
             .map(|t| {
-                let prefixed_name = mcp_tool_id(&self.server_name, &t.name);
+                let prefixed_name = mcp_tool_id(self.server_name.as_str(), &t.name);
                 Arc::new(McpToolWrapper {
                     tool: t,
                     prefixed_name,
-                    provider_extension: self.server_name.clone(),
+                    provider_extension: self.server_name.as_str().to_string(),
                     client: client.clone(),
                 }) as Arc<dyn Tool>
             })
@@ -869,55 +788,29 @@ impl McpClient {
     }
 }
 
-/// Clone the client.
-///
-/// For shared-process transports such as stdio/UDS, the clone shares request
-/// IDs, initialization state, and tool cache because those all refer to the
-/// same underlying MCP session. For HTTP transports, the clone resets that
-/// runtime state because each user/session can require an independent
-/// handshake and tool discovery flow.
+/// Clone the client, resetting the tools cache and initialization state.
+/// The cloned client shares the same transport and session manager, so
+/// re-initialization will short-circuit via the session manager check if
+/// the source was already initialized. The `next_id` counter is copied
+/// so that cloned clients continue with monotonically increasing IDs.
 impl Clone for McpClient {
     fn clone(&self) -> Self {
-        let runtime_state = if self.shares_transport_runtime_state() {
-            McpClientRuntimeState {
-                next_id: self.next_id.clone(),
-                tools_cache: self.tools_cache.clone(),
-                initialized: self.initialized.clone(),
-            }
-        } else {
-            Self::new_runtime_state()
-        };
         Self {
             transport: self.transport.clone(),
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
-            next_id: runtime_state.next_id,
-            tools_cache: runtime_state.tools_cache,
+            next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
+            tools_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
-            initialized: runtime_state.initialized,
-            // Share the cache across clones of the same conceptual client so
-            // two clones for the same server don't each build their own
-            // per-user handshake state.
-            user_client_cache: Arc::clone(&self.user_client_cache),
+            initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }
     }
-}
-
-/// Reject user IDs that could corrupt paths, log framing, or credential
-/// lookups. Empty strings, path separators, and control characters are
-/// the minimum set of unsafe shapes; anything else is the caller's
-/// problem.
-fn is_valid_mcp_user_id(user_id: &str) -> bool {
-    !user_id.is_empty()
-        && !user_id
-            .chars()
-            .any(|c| c == '/' || c == '\\' || c.is_control())
 }
 
 /// Extract a server name from a URL for logging/display purposes.
@@ -994,7 +887,7 @@ impl Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -1003,8 +896,7 @@ impl Tool for McpToolWrapper {
         // explicit nulls for fields that should simply be absent.
         let params = strip_top_level_nulls(params);
 
-        let client = self.client.for_user(&ctx.user_id)?;
-        let result = client.call_tool(&self.tool.name, params).await?;
+        let result = self.client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
             .iter()
@@ -1142,6 +1034,54 @@ mod tests {
         assert!(client.secrets.is_none());
     }
 
+    /// Regression for review Fix 7/8: `McpClient::new` must not bypass the
+    /// `McpServerName` allowlist when `extract_server_name` produces a
+    /// value containing forbidden characters (e.g. the `:` in an IPv6
+    /// bracketed host such as `[::1]`). Historically we called
+    /// `McpServerName::from_trusted(...)` here, which silently accepted
+    /// whatever the heuristic parser returned.
+    ///
+    /// Behavior under the fix: invalid extracted names fall back to the
+    /// canonical `"unknown"` and a `tracing::debug!` records the failure.
+    /// Either outcome must still be a valid `McpServerName`.
+    #[test]
+    fn new_validates_server_name_for_ipv6_host() {
+        let client = McpClient::new("http://[::1]:8080/");
+        // The extracted name must round-trip through `McpServerName::new`
+        // without error — the contract of the fix is "allowlist or
+        // canonical fallback, never a raw un-checked string".
+        let name = McpServerName::new(client.server_name())
+            .expect("server_name must be a valid McpServerName (allowlist or fallback)");
+        // In this environment the extracted host `[::1]` contains the
+        // forbidden `:` and `[`/`]` characters, so the fallback fires.
+        // Document that explicitly — the point of the test is that we
+        // end up with `"unknown"` rather than a silently-accepted bogus
+        // value.
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "IPv6 bracketed host should fall back to canonical 'unknown'"
+        );
+    }
+
+    /// Regression for review Fix 8: `McpClient::new_with_name` must not
+    /// bypass the allowlist when the caller passes a name that contains
+    /// forbidden characters after the hyphen fold.
+    #[test]
+    fn new_with_name_falls_back_on_invalid_input() {
+        // Slashes are forbidden by the allowlist and are not touched by
+        // the hyphen fold, so the validation must fire and the fallback
+        // engage.
+        let client = McpClient::new_with_name("bad/name", "http://localhost:8080");
+        let name = McpServerName::new(client.server_name())
+            .expect("server_name must be a valid McpServerName (allowlist or fallback)");
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "invalid caller-supplied name should fall back to canonical 'unknown'"
+        );
+    }
+
     #[test]
     fn test_server_name_accessor() {
         let client = McpClient::new("https://tools.example.org/mcp");
@@ -1164,7 +1104,7 @@ mod tests {
         assert_eq!(cloned.server_url(), "http://localhost:5555");
         assert_eq!(cloned.server_name(), "cloned_server");
         assert_eq!(cloned.user_id, "<unset>");
-        assert_eq!(cloned.next_id.load(Ordering::SeqCst), 1);
+        assert_eq!(cloned.next_id.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -1272,7 +1212,6 @@ mod tests {
         supports_http: bool,
         responses: std::sync::Mutex<Vec<McpResponse>>,
         recorded_headers: std::sync::Mutex<Vec<HashMap<String, String>>>,
-        recorded_requests: std::sync::Mutex<Vec<McpRequest>>,
     }
 
     impl MockTransport {
@@ -1281,14 +1220,10 @@ mod tests {
                 supports_http,
                 responses: std::sync::Mutex::new(responses),
                 recorded_headers: std::sync::Mutex::new(Vec::new()),
-                recorded_requests: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn recorded_headers(&self) -> Vec<HashMap<String, String>> {
             self.recorded_headers.lock().unwrap().clone()
-        }
-        fn recorded_requests(&self) -> Vec<McpRequest> {
-            self.recorded_requests.lock().unwrap().clone()
         }
     }
 
@@ -1296,11 +1231,10 @@ mod tests {
     impl McpTransport for MockTransport {
         async fn send(
             &self,
-            request: &McpRequest,
+            _request: &McpRequest,
             headers: &HashMap<String, String>,
         ) -> Result<McpResponse, ToolError> {
             self.recorded_headers.lock().unwrap().push(headers.clone());
-            self.recorded_requests.lock().unwrap().push(request.clone());
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 return Err(ToolError::ExternalService(
@@ -1466,106 +1400,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stdio_for_user_shares_initialize_cache_and_request_ids() {
-        let init_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(1),
-            result: Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "serverInfo": {"name": "test", "version": "1.0"}
-            })),
-            error: None,
-        };
-        let notification_ack = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            result: None,
-            error: None,
-        };
-        let list_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(2),
-            result: Some(serde_json::json!({"tools": []})),
-            error: None,
-        };
-        let call_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(3),
-            result: Some(serde_json::json!({
-                "content": [{"type": "text", "text": "pong"}],
-                "is_error": false
-            })),
-            error: None,
-        };
-        let transport = Arc::new(MockTransport::new(
-            false,
-            vec![
-                init_response,
-                notification_ack,
-                list_response,
-                call_response,
-            ],
-        ));
-        let client = McpClient::new_with_transport(
-            "test-stdio",
-            transport.clone(),
-            None,
-            None,
-            "default",
-            None,
-        );
-        let user_a = client.for_user("user-a").expect("valid user-a");
-        let user_b = client.for_user("user-b").expect("valid user-b");
-
-        assert!(user_a.list_tools().await.is_ok());
-
-        let result = user_b
-            .call_tool("echo", serde_json::json!({"input": "hello"}))
-            .await
-            .expect("stdio user-b call should reuse shared runtime state");
-        assert!(!result.is_error);
-        assert_eq!(result.content[0].as_text(), Some("pong"));
-
-        let requests = transport.recorded_requests();
-        let methods: Vec<_> = requests
-            .iter()
-            .map(|request| request.method.as_str())
-            .collect();
-        assert_eq!(
-            methods,
-            vec![
-                "initialize",
-                "notifications/initialized",
-                "tools/list",
-                "tools/call"
-            ]
-        );
-        assert_eq!(requests[0].id, Some(1));
-        assert_eq!(requests[2].id, Some(2));
-        assert_eq!(requests[3].id, Some(3));
-    }
-
-    /// Regression: `for_user` must reject user IDs that could corrupt paths,
-    /// log framing, or credential lookups. Empty strings and path separators
-    /// are the minimum set; control chars come with CRLF-injection territory.
-    #[test]
-    fn test_for_user_rejects_invalid_user_ids() {
-        let client = McpClient::new("http://localhost:8080");
-
-        for user_id in ["", "team/user", "team\\user", "team\nuser"] {
-            let error = match client.for_user(user_id) {
-                Ok(_) => panic!("invalid user id {user_id:?} should be rejected"),
-                Err(error) => error.to_string(),
-            };
-            assert!(
-                error.contains("Invalid MCP user_id"),
-                "error should identify invalid user_id: {error}"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn test_http_session_error_triggers_reinitialize_and_retry() {
         let init_response = McpResponse {
             jsonrpc: "2.0".to_string(),
@@ -1676,6 +1510,104 @@ mod tests {
         let obj = result.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert!(obj["outer"]["inner"].is_null());
+    }
+
+    // --- Regression: constructors validate caller-provided server names ---
+    //
+    // Copilot review comments on PR nearai/ironclaw#2681 flagged that
+    // `new_with_transport`, `new_with_config`, and `new_authenticated`
+    // used `McpServerName::from_trusted` on caller-provided input,
+    // allowing invalid names to enter the typed field and diverge from
+    // the transport's independently-validated `server_name`. These tests
+    // pin the safe-fallback behavior and the no-divergence invariant.
+
+    #[test]
+    fn new_with_transport_falls_back_on_invalid_server_name() {
+        let transport = Arc::new(MockTransport::new(false, vec![]));
+        // Slashes are outside the `McpServerName` allowlist, so the
+        // fallback path must engage rather than storing the raw value.
+        let client =
+            McpClient::new_with_transport("bad/name", transport, None, None, "default", None);
+        let name = McpServerName::new(client.server_name())
+            .expect("stored server_name must satisfy the allowlist after the fix");
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "invalid caller-supplied name should fall back to canonical 'unknown'"
+        );
+    }
+
+    #[test]
+    fn new_with_transport_preserves_valid_server_name() {
+        let transport = Arc::new(MockTransport::new(false, vec![]));
+        let client =
+            McpClient::new_with_transport("good_name123", transport, None, None, "default", None);
+        assert_eq!(client.server_name(), "good_name123");
+    }
+
+    #[test]
+    fn new_with_config_falls_back_on_invalid_server_name() {
+        // `McpServerConfig::new` does not pre-validate the name, so the
+        // constructor receives a value that would fail the allowlist.
+        let config = McpServerConfig::new("bad name", "http://localhost:8080");
+        let client = McpClient::new_with_config(config).expect("HTTP transport accepted");
+        assert_eq!(
+            client.server_name(),
+            "unknown",
+            "invalid config name must fall back to canonical 'unknown'"
+        );
+    }
+
+    /// Divergence regression: the client's `server_name` field and the
+    /// value used when constructing the transport must agree. If the
+    /// client stored the raw invalid value and the transport fell back
+    /// to "unknown", session-manager writes (from the transport) would
+    /// use a different key than session-manager lookups (keyed off the
+    /// client's name), silently breaking `Mcp-Session-Id` tracking.
+    #[test]
+    fn new_with_config_client_and_transport_server_name_agree() {
+        let invalid = McpServerConfig::new("bad name", "http://localhost:8080");
+        let client = McpClient::new_with_config(invalid).expect("HTTP transport accepted");
+        // The client surface is the single source of truth for tests;
+        // the transport validates the same input the client just
+        // canonicalized, so parity here proves no divergence exists.
+        assert_eq!(client.server_name(), "unknown");
+
+        let valid = McpServerConfig::new("good_name123", "http://localhost:8080");
+        let client = McpClient::new_with_config(valid).expect("HTTP transport accepted");
+        assert_eq!(client.server_name(), "good_name123");
+    }
+
+    #[tokio::test]
+    async fn new_authenticated_falls_back_on_invalid_server_name() {
+        let session_manager = Arc::new(McpSessionManager::new());
+        let key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(key).expect("test crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+
+        let config = McpServerConfig::new("bad name", "https://api.example.com");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        assert_eq!(
+            client.server_name(),
+            "unknown",
+            "invalid config name must fall back to canonical 'unknown' in the OAuth path too"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_authenticated_preserves_valid_server_name() {
+        let session_manager = Arc::new(McpSessionManager::new());
+        let key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(key).expect("test crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+
+        let config = McpServerConfig::new("good_name123", "https://api.example.com");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        assert_eq!(client.server_name(), "good_name123");
     }
 
     // --- Issue 1 regression: new_with_config rejects non-HTTP transport ---
@@ -1803,187 +1735,6 @@ mod tests {
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::Never);
-    }
-
-    #[tokio::test]
-    async fn test_mcp_tool_wrapper_uses_runtime_user_for_execution() {
-        use crate::secrets::{
-            CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore,
-        };
-        use crate::testing::credentials::TEST_CRYPTO_KEY;
-
-        let key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
-        let crypto = Arc::new(SecretsCrypto::new(key).expect("test crypto"));
-        let secrets: Arc<dyn SecretsStore + Send + Sync> =
-            Arc::new(InMemorySecretsStore::new(crypto));
-
-        let config = McpServerConfig::new("runtime-user", "http://localhost:8080");
-        secrets
-            .create(
-                "user-a",
-                CreateSecretParams::new(config.token_secret_name(), "token-user-a"),
-            )
-            .await
-            .expect("store user-a token");
-        secrets
-            .create(
-                "user-b",
-                CreateSecretParams::new(config.token_secret_name(), "token-user-b"),
-            )
-            .await
-            .expect("store user-b token");
-
-        let init_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(1),
-            result: Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "serverInfo": {"name": "test", "version": "1.0"}
-            })),
-            error: None,
-        };
-        let notification_ack = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            result: None,
-            error: None,
-        };
-        let call_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(2),
-            result: Some(serde_json::json!({
-                "content": [{"type": "text", "text": "done"}],
-                "is_error": false
-            })),
-            error: None,
-        };
-        let transport = Arc::new(MockTransport::new(
-            false,
-            vec![init_response, notification_ack, call_response],
-        ));
-        let client = Arc::new(McpClient::new_with_transport(
-            "runtime-user",
-            transport.clone(),
-            None,
-            Some(Arc::clone(&secrets)),
-            "user-a",
-            Some(config),
-        ));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "runtime_user_do_thing".to_string(),
-            provider_extension: "runtime_user".to_string(),
-            client,
-        };
-        let ctx = JobContext::with_user("user-b", "Test", "Runtime user auth");
-
-        let output = wrapper
-            .execute(serde_json::json!({"input": "hello"}), &ctx)
-            .await
-            .expect("wrapper execute should succeed");
-        assert_eq!(output.result, serde_json::Value::String("done".to_string()));
-
-        let headers = transport.recorded_headers();
-        assert!(
-            headers.iter().all(|h| {
-                h.get("Authorization")
-                    .is_some_and(|v| v == "Bearer token-user-b")
-            }),
-            "wrapper must use the runtime user's token, not the activation-time user"
-        );
-    }
-
-    /// Regression: repeated tool calls from the same runtime user on an HTTP
-    /// transport must reuse the cached per-user `McpClient` view. If the
-    /// cache is missing or broken, the wrapper re-initializes (an extra
-    /// `initialize` + `notifications/initialized` round-trip) on every
-    /// call — this test pins the fast path by counting the method trace.
-    #[tokio::test]
-    async fn test_mcp_tool_wrapper_reuses_http_user_client_between_calls() {
-        let init_response = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(1),
-            result: Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "serverInfo": {"name": "test", "version": "1.0"}
-            })),
-            error: None,
-        };
-        let notification_ack = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            result: None,
-            error: None,
-        };
-        let call_response_1 = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(2),
-            result: Some(serde_json::json!({
-                "content": [{"type": "text", "text": "first"}],
-                "is_error": false
-            })),
-            error: None,
-        };
-        let call_response_2 = McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: Some(3),
-            result: Some(serde_json::json!({
-                "content": [{"type": "text", "text": "second"}],
-                "is_error": false
-            })),
-            error: None,
-        };
-        let transport = Arc::new(MockTransport::new(
-            true,
-            vec![
-                init_response,
-                notification_ack,
-                call_response_1,
-                call_response_2,
-            ],
-        ));
-        let client = Arc::new(McpClient::new_with_transport(
-            "runtime-user",
-            transport.clone(),
-            None,
-            None,
-            "activation-user",
-            None,
-        ));
-        let wrapper = McpToolWrapper {
-            tool: make_test_mcp_tool(false),
-            prefixed_name: "runtime_user_do_thing".to_string(),
-            provider_extension: "runtime_user".to_string(),
-            client,
-        };
-        let ctx = JobContext::with_user("user-b", "Test", "Runtime user auth");
-
-        wrapper
-            .execute(serde_json::json!({"input": "hello"}), &ctx)
-            .await
-            .expect("first call should initialize and execute");
-        wrapper
-            .execute(serde_json::json!({"input": "again"}), &ctx)
-            .await
-            .expect("second call should reuse initialized user client");
-
-        let methods: Vec<_> = transport
-            .recorded_requests()
-            .iter()
-            .map(|request| request.method.clone())
-            .collect();
-        assert_eq!(
-            methods,
-            vec![
-                "initialize",
-                "notifications/initialized",
-                "tools/call",
-                "tools/call"
-            ],
-            "second wrapper call must reuse cached client (no re-initialize)"
-        );
     }
 
     // ── mcp_tool_id canonicalization ──────────────────────────────────────

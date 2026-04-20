@@ -4616,7 +4616,12 @@ pub struct ProjectsOverviewResponse {
 /// Mission summary for list views.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineMissionInfo {
-    pub id: String,
+    /// Typed mission identifier, carried through from the engine rather
+    /// than round-tripped to `String` at the adapter boundary. Serializes
+    /// transparently as a UUID string (via `MissionId`'s derived
+    /// `Serialize`), so the wire shape stays identical to the pre-newtype
+    /// DTO.
+    pub id: ironclaw_engine::MissionId,
     pub name: String,
     pub goal: String,
     pub status: String,
@@ -5220,7 +5225,7 @@ pub async fn list_engine_missions(
     Ok(missions
         .iter()
         .map(|m| EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5275,7 +5280,7 @@ pub async fn get_engine_mission(
 
     Ok(Some(EngineMissionDetail {
         info: EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),

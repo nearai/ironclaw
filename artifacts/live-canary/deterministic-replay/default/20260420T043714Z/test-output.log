@@ -1,0 +1,64 @@
+[live-canary] lane=deterministic-replay scenario=<default> provider=default
+[live-canary] artifacts=artifacts/live-canary/deterministic-replay/default/20260420T043714Z
+[live-canary] running: cargo test --features libsql --test e2e_live -- --ignored --nocapture --test-threads=1
+   Compiling ironclaw_common v0.2.0 (/Users/nikolajpismenkov/Documents/near/ironclaw/crates/ironclaw_common)
+   Compiling ironclaw_skills v0.1.0 (/Users/nikolajpismenkov/Documents/near/ironclaw/crates/ironclaw_skills)
+   Compiling ironclaw v0.25.0 (/Users/nikolajpismenkov/Documents/near/ironclaw)
+   Compiling ironclaw_gateway v0.1.0 (/Users/nikolajpismenkov/Documents/near/ironclaw/crates/ironclaw_gateway)
+   Compiling ironclaw_tui v0.1.0 (/Users/nikolajpismenkov/Documents/near/ironclaw/crates/ironclaw_tui)
+   Compiling ironclaw_engine v0.1.0 (/Users/nikolajpismenkov/Documents/near/ironclaw/crates/ironclaw_engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 03s
+     Running tests/e2e_live.rs (target/debug/deps/e2e_live-6a5c5821f85166e6)
+
+running 4 tests
+test live_tests::drive_auth_gate_roundtrip ... [LiveTest] 'drive_auth_gate_roundtrip' has trace recording disabled and no replay fixture — skipping. Run with IRONCLAW_LIVE_TEST=1 to execute live.
+[DriveAuthGate] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. Hermetic regression covered by `test_auth_wasm_tool_finds_legacy_hyphen_alias`.
+ok
+test live_tests::drive_transparent_oauth_refresh ... [LiveTest] 'drive_transparent_oauth_refresh' has trace recording disabled and no replay fixture — skipping. Run with IRONCLAW_LIVE_TEST=1 to execute live.
+[DriveRefresh] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. Hermetic regression for the OAuth refresh layer lives in `auth::tests::*` and `test_auth_wasm_tool_finds_legacy_hyphen_alias`.
+ok
+test live_tests::zizmor_scan ... [LiveTest] Mode: REPLAY — loading from /Users/nikolajpismenkov/Documents/near/ironclaw/tests/fixtures/llm_traces/live/zizmor_scan.json
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[ZizmorScan] Tools used: ["tool_search", "shell", "list_dir", "list_dir", "list_dir", "shell", "shell"]
+[ZizmorScan] Response preview: Done! I ran zizmor on your GitHub Actions workflows and found **security issues across all 14 workflow files**. Here's the summary:
+
+## 🔴 Critical Issues Found
+
+### 1. **Unpinned Action References** (Most Common)
+Every workflow uses actions like `actions/checkout@v6` instead of pinned SHA hashes. This is a supply chain risk - the action could change without notice.
+
+**Example fixes needed:**
+```yaml
+# Before
+uses: actions/checkout@v6
+
+# After  
+uses: actions/checkout@11bd71901bbe5b1630ceea73d275
+[LiveTest] Session log: /var/folders/8b/3b8t3v4d7rj3v6pznzdkvjpr0000gn/T/ironclaw-live-tests/zizmor_scan.replay.log
+[LiveTest] Diff: diff /Users/nikolajpismenkov/Documents/near/ironclaw/tests/fixtures/llm_traces/live/zizmor_scan.log /var/folders/8b/3b8t3v4d7rj3v6pznzdkvjpr0000gn/T/ironclaw-live-tests/zizmor_scan.replay.log
+ok
+test live_tests::zizmor_scan_v2 ... [LiveTest] Mode: REPLAY — loading from /Users/nikolajpismenkov/Documents/near/ironclaw/tests/fixtures/llm_traces/live/zizmor_scan_v2.json
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[TraceLlm WARN] Request hint mismatch: expected last user message to contain "can we run https://github.com/zizmorcore/zizmor", got Some("Run zizmor against this checkout's GitHub Actions workflows now. Use the shell tool to install or invoke zizmor if needed, then execute it against `.github/workflows` and report the actual scan result. Do not stop after checking whether Rust, Cargo, Git, or zizmor are available. If the scan cannot run, include the exact command attempted and the exact failure output.")
+[ZizmorScanV2] Tools used: ["tool_search(zizmor)", "http(https://github.com/zizmorcore/zizmor)", "tool_search(zizmor github actions security)", "tool_list", "tool_search(zizmor)", "shell(pip install zizmor 2>&1 || echo \"pip install failed\")"]
+[ZizmorScanV2] Response preview: Error: Orchestrator error: effect execution error: Orchestrator error after resume: Traceback (most recent call last):
+  File "orchestrator.py", line 1204, in <module>
+  File "orchestrator.py", line 815, in run_loop
+RuntimeError: LLM call failed: LLM error: Provider live-zizmor_scan_v2 request failed: TraceLlm exhausted: served 4 call(s), no steps left
+[LiveTest] Session log: /var/folders/8b/3b8t3v4d7rj3v6pznzdkvjpr0000gn/T/ironclaw-live-tests/zizmor_scan_v2.replay.log
+[LiveTest] Diff: diff /Users/nikolajpismenkov/Documents/near/ironclaw/tests/fixtures/llm_traces/live/zizmor_scan_v2.log /var/folders/8b/3b8t3v4d7rj3v6pznzdkvjpr0000gn/T/ironclaw-live-tests/zizmor_scan_v2.replay.log
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.59s
+
+[live-canary] summary=artifacts/live-canary/deterministic-replay/default/20260420T043714Z/summary.md
+[live-canary] log=artifacts/live-canary/deterministic-replay/default/20260420T043714Z/test-output.log
