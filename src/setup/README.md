@@ -56,16 +56,27 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 Quick mode (`--quick` flag, or auto-triggered on first run) provides a
 near-instant onboarding experience by auto-defaulting everything except
-the LLM provider and model selection.
+the local deployment profile, LLM provider, and model selection.
 
 ```
+Local Usage Profile     ← choose local or local-sandbox when unset
 auto_setup_database()    → libsql at ~/.ironclaw/ironclaw.db (zero prompts)
 auto_setup_security()    → keychain or env var (zero prompts)
-Step 1/2: Inference Provider  ← only interactive step
-Step 2/2: Model Selection     ← only interactive step
+Step 1/2: Inference Provider  ← interactive unless provider env is detected
+Step 2/2: Model Selection     ← interactive unless defaulted by detected provider
        ↓
    save_and_summarize()      → includes tip to run `ironclaw onboard`
 ```
+
+**Local usage profile:** If `IRONCLAW_PROFILE` is already set, quick mode
+respects it and does not prompt. On a true first run with no profile and no
+existing DB settings, quick mode asks whether the user wants:
+- `local`: TUI, local libSQL, background tasks enabled, no Docker sandbox
+- `local-sandbox`: TUI, local libSQL, background tasks enabled, Docker sandbox enabled with read-only policy
+
+The selected profile is written to `~/.ironclaw/.env` as `IRONCLAW_PROFILE`
+so subsequent startups apply the same built-in profile before database-backed
+settings are loaded.
 
 **`auto_setup_database()`:** Uses existing env vars if set (`DATABASE_URL`
 for postgres, `LIBSQL_PATH` for libsql) without prompting. Otherwise
@@ -423,9 +434,10 @@ Settings are persisted in two places:
 **Layer 1: `~/.ironclaw/.env`** (bootstrap vars)
 
 Contains only the settings needed BEFORE database connection. Written by
-`save_bootstrap_env()` in `bootstrap.rs`.
+`write_bootstrap_env()` in `wizard.rs` via `upsert_bootstrap_vars()`.
 
 ```env
+IRONCLAW_PROFILE="local"
 DATABASE_BACKEND="libsql"
 LIBSQL_PATH="/Users/name/.ironclaw/ironclaw.db"
 SECRETS_MASTER_KEY="..."   # only if env key source selected
@@ -434,6 +446,7 @@ ONBOARD_COMPLETED="true"
 
 Or for PostgreSQL:
 ```env
+IRONCLAW_PROFILE="local"
 DATABASE_BACKEND="postgres"
 DATABASE_URL="postgres://user:pass@localhost/ironclaw"
 SECRETS_MASTER_KEY="..."
@@ -441,8 +454,9 @@ ONBOARD_COMPLETED="true"
 ```
 
 **Why separate?** Chicken-and-egg: you need `DATABASE_BACKEND` to know
-which database to connect to, and `SECRETS_MASTER_KEY` to decrypt the
-secrets store — neither can be stored in the database. LLM settings
+which database to connect to, `IRONCLAW_PROFILE` to apply built-in defaults
+before DB overlays, and `SECRETS_MASTER_KEY` to decrypt the
+secrets store; none of these can rely on database settings. LLM settings
 (`LLM_BACKEND`, base URLs, model names) are persisted to the DB via
 `persist_settings()` and loaded after connection. API keys are stored
 encrypted in the secrets DB.
@@ -509,6 +523,7 @@ Final step of the wizard:
 
 Bootstrap vars written to `~/.ironclaw/.env` (only true chicken-and-egg vars
 that are needed before the DB is connected):
+- `IRONCLAW_PROFILE` (when quick first-run setup selected a profile)
 - `DATABASE_BACKEND` (always)
 - `DATABASE_URL` (if postgres)
 - `LIBSQL_PATH` (if libsql)

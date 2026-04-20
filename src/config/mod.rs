@@ -215,6 +215,7 @@ impl Config {
                 master_key: Some(generate_test_master_key()),
                 enabled: true,
                 source: crate::settings::KeySource::Env,
+                generated: false,
             },
             builder: BuilderModeConfig {
                 enabled: false,
@@ -637,6 +638,24 @@ pub fn inject_single_var(key: &str, value: &str) {
             poisoned
                 .into_inner()
                 .insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
         }
     }
 }

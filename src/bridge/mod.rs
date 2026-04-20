@@ -9,6 +9,7 @@ mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
 mod router;
+pub mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
 mod workspace_reader;
@@ -18,16 +19,19 @@ pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
+    // DTO types
+    AttentionItem,
     AuthCallbackContinuation,
     // Typed outcome from v2 bridge handlers
     BridgeOutcome,
-    // DTO types
     EngineMissionDetail,
     EngineMissionInfo,
     EngineProjectInfo,
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    ProjectOverviewEntry,
+    ProjectsOverviewResponse,
     clear_engine_pending_auth,
     discard_engine_pending_auth_request,
     // Query functions
@@ -35,6 +39,7 @@ pub use router::{
     get_engine_mission,
     get_engine_pending_gate,
     get_engine_project,
+    get_engine_projects_overview,
     get_engine_thread,
     // Action handlers
     handle_approval,
@@ -66,6 +71,17 @@ pub use router::{
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
 
+// `engine_retrospectives_for_test` is a test-only reachability surface —
+// integration tests live in a separate crate, so `#[cfg(test)]` wouldn't
+// expose it. `#[doc(hidden)]` keeps it out of public docs and signals
+// that it is not a supported API.
+#[cfg(feature = "libsql")]
+#[doc(hidden)]
+pub use router::engine_retrospectives_for_test;
+
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]
 pub(crate) use router::handle_mission_notification;
+
+#[cfg(test)]
+pub(crate) use router::test_support;

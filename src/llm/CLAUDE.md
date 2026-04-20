@@ -92,6 +92,8 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true`, converting tool results to user messages with `[Tool result from <name>]: <content>` format. Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
 
+**Tool schema normalization:** `nearai_chat.rs` applies the same `normalize_schema_strict()` boundary normalization as `RigAdapter::convert_tools` and `openai_codex_provider.rs` before sending tool definitions. Top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas are flattened into a permissive object envelope so providers that reject those shapes do not fail with HTTP 400.
+
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
 **HTTP request timeout:** The NEAR AI HTTP client has a 120-second timeout per request. Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.

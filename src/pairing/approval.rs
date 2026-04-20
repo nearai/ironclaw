@@ -166,17 +166,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn telegram_wasm_path() -> PathBuf {
+    fn telegram_wasm_path() -> Option<PathBuf> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = [
             manifest_dir
                 .join("channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm"),
             manifest_dir.join("channels-src/telegram/telegram.wasm"),
         ];
-        candidates
-            .into_iter()
-            .find(|path| path.exists())
-            .unwrap_or_else(|| panic!("telegram wasm fixture not found"))
+        candidates.into_iter().find(|path| path.exists())
     }
 
     fn telegram_capabilities_path() -> PathBuf {
@@ -196,10 +193,18 @@ mod tests {
             "http://127.0.0.1:1",
         );
 
+        let Some(telegram_wasm_path) = telegram_wasm_path() else {
+            crate::config::helpers::set_runtime_env(
+                "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+                original.as_deref().unwrap_or(""),
+            );
+            return;
+        };
+
         let runtime = Arc::new(
             WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime"),
         );
-        let wasm_bytes = std::fs::read(telegram_wasm_path()).expect("read telegram wasm");
+        let wasm_bytes = std::fs::read(telegram_wasm_path).expect("read telegram wasm");
         let prepared = runtime
             .prepare(
                 "telegram",
