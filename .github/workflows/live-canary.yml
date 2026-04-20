@@ -217,9 +217,7 @@ jobs:
 
   auth-browser-consent:
     name: Auth Browser Consent
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '30 3 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
     runs-on: ubuntu-latest
@@ -452,9 +450,7 @@ jobs:
 
   private-oauth:
     name: Private OAuth Live
-    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
-      (github.event_name == 'pull_request') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
     runs-on: [self-hosted, ironclaw-live]
