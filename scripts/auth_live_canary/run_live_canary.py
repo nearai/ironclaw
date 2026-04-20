@@ -381,12 +381,20 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
             install_kind=probe.install_kind,
             install_url=probe.install_url,
         )
-        await activate_extension(
-            stack.base_url,
-            stack.gateway_token,
-            extension_name=ext["name"],
-            expected_display_name=ext.get("display_name") or probe.expected_display_name,
-        )
+        if is_google and google_oauth_done:
+            # Google extensions share google_oauth_token but ironclaw tracks
+            # auth per-extension. Complete OAuth for each one individually.
+            await complete_oauth_flow(
+                stack.base_url, stack.gateway_token,
+                extension_name=ext["name"],
+            )
+        else:
+            await activate_extension(
+                stack.base_url,
+                stack.gateway_token,
+                extension_name=ext["name"],
+                expected_display_name=ext.get("display_name") or probe.expected_display_name,
+            )
 
     results: list[ProbeResult] = []
     for probe in probes:
