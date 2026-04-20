@@ -299,7 +299,7 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path, owner_
             token,
             user_id=owner_user_id,
             name="google_oauth_token_scopes",
-            value=env_str("AUTH_LIVE_GOOGLE_SCOPES", GOOGLE_SCOPE_DEFAULT),
+            value=env_str("AUTH_LIVE_GOOGLE_SCOPES") or GOOGLE_SCOPE_DEFAULT,
             provider="google",
         )
         if google_refresh and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
