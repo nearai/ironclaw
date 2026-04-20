@@ -1,4 +1,5 @@
 # TensorZero Gateway Configuration
+# Updated on April 20 2026 by Chris
 # ============================================================================
 
 [gateway]
@@ -35,7 +36,7 @@ api_key_location = "env::DEEPSEEK_API_KEY"
 routing = ["chutes"]
 
 [models.ds31_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.ds31_chutes_tee.timeouts.non_streaming]
@@ -53,7 +54,7 @@ api_key_location = "env::CHUTES_AI_API_KEY"
 routing = ["chutes"]
 
 [models.ds31_v31_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.ds31_v31_chutes_tee.timeouts.non_streaming]
@@ -70,7 +71,7 @@ api_key_location = "env::CHUTES_AI_API_KEY"
 routing = ["chutes"]
 
 [models.ds32_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.ds32_chutes_tee.timeouts.non_streaming]
@@ -87,7 +88,7 @@ api_key_location = "env::CHUTES_AI_API_KEY"
 routing = ["nanogpt"]
 
 [models.ds31_terminus_nanogpt.timeouts.streaming]
-ttft_ms = 19000
+ttft_ms = 29000
 total_ms = 550000
 
 [models.ds31_terminus_nanogpt.timeouts.non_streaming]
@@ -108,7 +109,7 @@ api_key_location = "env::NANOGPT_API_KEY"
 routing = ["nanogpt"]
 
 [models.qwen397b_nanogpt_tee.timeouts.streaming]
-ttft_ms = 19000
+ttft_ms = 29000
 total_ms = 550000
 
 [models.qwen397b_nanogpt_tee.timeouts.non_streaming]
@@ -125,7 +126,7 @@ api_key_location = "env::NANOGPT_API_KEY"
 routing = ["nanogpt"]
 
 [models.qwen235b_nanogpt_tee.timeouts.streaming]
-ttft_ms = 19000
+ttft_ms = 29000
 total_ms = 550000
 
 [models.qwen235b_nanogpt_tee.timeouts.non_streaming]
@@ -159,7 +160,7 @@ api_key_location = "env::NANOGPT_API_KEY"
 routing = ["chutes"]
 
 [models.qwen397b_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.qwen397b_chutes_tee.timeouts.non_streaming]
@@ -176,7 +177,7 @@ api_key_location = "env::CHUTES_AI_API_KEY"
 routing = ["chutes"]
 
 [models.qwen235b_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.qwen235b_chutes_tee.timeouts.non_streaming]
@@ -193,7 +194,7 @@ api_key_location = "env::CHUTES_AI_API_KEY"
 routing = ["chutes"]
 
 [models.qwen_coder_next_chutes_tee.timeouts.streaming]
-ttft_ms = 15000
+ttft_ms = 25000
 total_ms = 550000
 
 [models.qwen_coder_next_chutes_tee.timeouts.non_streaming]
@@ -1044,20 +1045,44 @@ type = "chat"
 
 [functions.coding.experimentation]
 type = "static"
-candidate_variants = { "ds31" = 0.05, "local_gemma" = 0.95 }
-fallback_variants = ["qwen_nontee"]
+candidate_variants = { "local_bigpc" = 0.05, "qwen_tee" = 0.70, "gpt52_nearai" = 0.15, "gptoss120b_nearai" = 0.05, "glm5_fp8_nearai" = 0.05 }
+fallback_variants = ["qwen235b_nanogpt","ds32_or","gemma4_26b_ng"]
 
-[functions.coding.variants.ds31]
-type = "chat_completion"
-model = "ds_native"
-
-[functions.coding.variants.local_gemma]
+[functions.coding.variants.local_bigpc]
 type = "chat_completion"
 model = "gemma_bigpc"
 
-[functions.coding.variants.qwen_nontee]
+[functions.coding.variants.qwen_tee]
 type = "chat_completion"
-model = "qwen397b_openrouter"
+model = "qwen_tee_redundant"
+
+[functions.coding.variants.gpt52_nearai]
+type = "chat_completion"
+model = "gpt52_nearai"
+
+[functions.coding.variants.gptoss120b_nearai]
+type = "chat_completion"
+model = "gptoss120b_nearai"
+
+[functions.coding.variants.glm5_fp8_nearai]
+type = "chat_completion"
+model = "glm5_fp8_nearai"
+
+[functions.coding.variants.qwen235b_nanogpt]
+type = "chat_completion"
+model = "qwen235b_nanogpt_tee"
+
+[functions.coding.variants.glm51_or]
+type = "chat_completion"
+model = "glm51_openrouter"
+
+[functions.coding.variants.ds32_or]
+type = "chat_completion"
+model = "ds32_openrouter"
+
+[functions.coding.variants.gemma4_26b_ng]
+type = "chat_completion"
+model = "gemma4_26b_nanogpt"
 
 # --- SUMMARIZATION ----------------------------------------------------------
 [functions.summarization]
