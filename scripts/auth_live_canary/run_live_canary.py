@@ -347,6 +347,25 @@ async def seed_non_oauth_credentials(
             value=notion_refresh,
             provider="mcp:notion",
         )
+    # Notion MCP uses DCR — seed client_id/secret so ironclaw can refresh.
+    notion_client_id = env_str("AUTH_LIVE_NOTION_CLIENT_ID")
+    notion_client_secret = env_str("AUTH_LIVE_NOTION_CLIENT_SECRET")
+    if notion_client_id:
+        await put_secret(
+            base_url, token,
+            user_id=owner_user_id,
+            name="mcp_notion_client_id",
+            value=notion_client_id,
+            provider="mcp:notion",
+        )
+    if notion_client_secret:
+        await put_secret(
+            base_url, token,
+            user_id=owner_user_id,
+            name="mcp_notion_client_secret",
+            value=notion_client_secret,
+            provider="mcp:notion",
+        )
 
 
 async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeResult]:
