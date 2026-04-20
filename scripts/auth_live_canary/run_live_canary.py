@@ -940,6 +940,48 @@ def _preflight_refresh_google_token() -> None:
         print(f"[preflight] Google token refresh failed: {exc}")
 
 
+def _preflight_refresh_notion_token() -> None:
+    """Refresh the Notion MCP access token before the gateway starts.
+
+    Notion DCR tokens expire after 1 hour. The seeded token in secrets
+    may be stale, so refresh it using the DCR client credentials and the
+    real Notion token endpoint.
+    """
+    import urllib.request
+    import urllib.parse
+
+    refresh_token = env_str("AUTH_LIVE_NOTION_REFRESH_TOKEN")
+    client_id = env_str("AUTH_LIVE_NOTION_CLIENT_ID")
+    client_secret = env_str("AUTH_LIVE_NOTION_CLIENT_SECRET")
+    if not all([refresh_token, client_id, client_secret]):
+        return
+
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request("https://mcp.notion.com/token", data=data, headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "ironclaw-canary/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+        fresh_token = body.get("access_token")
+        fresh_refresh = body.get("refresh_token")
+        if fresh_token:
+            os.environ["AUTH_LIVE_NOTION_ACCESS_TOKEN"] = fresh_token
+            print(f"[preflight] Refreshed Notion access token (expires_in={body.get('expires_in')}s)")
+        else:
+            print(f"[preflight] Notion token refresh returned no access_token: {body}")
+        if fresh_refresh:
+            os.environ["AUTH_LIVE_NOTION_REFRESH_TOKEN"] = fresh_refresh
+    except Exception as exc:
+        print(f"[preflight] Notion token refresh failed: {exc}")
+
+
 async def async_main(args: argparse.Namespace) -> int:
     mode_cfg = MODE_CONFIG[args.mode]
 
@@ -956,10 +998,10 @@ async def async_main(args: argparse.Namespace) -> int:
     if not args.skip_build:
         cargo_build()
 
-    # Pre-flight: refresh the Google access token so the mock exchange
-    # endpoint returns a fresh token (the one in secrets may be expired).
+    # Pre-flight: refresh expired access tokens so seeded values are fresh.
     if args.mode == "seeded":
         _preflight_refresh_google_token()
+        _preflight_refresh_notion_token()
 
     extra_gateway_env: dict[str, str] = {}
     for env_name in mode_cfg["extra_gateway_env_names"]:
