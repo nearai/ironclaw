@@ -415,6 +415,11 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
         # succeeds on the expired-token path. Other E2E fixtures use the
         # same value (see tests/e2e/conftest.py:600, :901).
         "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+        # Refresh proxy URL is the mock_llm server on 127.0.0.1; the
+        # production SSRF guard blocks loopback by default. Mock-based
+        # E2E tests opt in to the loopback path via this env var
+        # (cf. src/auth/mod.rs::validate_oauth_proxy_url).
+        "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -742,6 +747,25 @@ async def test_oauth_token_refresh_on_expiry(v2_google_server, mock_google_api):
         secret_name = "google_oauth_token"
 
     stored_user_id, expires_before, updated_before = _find_secret_row(db_path, secret_name)
+
+    # The refresh path needs both an access token AND a refresh token on
+    # disk — without the refresh token, `refresh_oauth_access_token` hits
+    # "No refresh token available" and falls straight through to the
+    # auth gate instead of renewing the token. Paste-based auth (the
+    # earlier tests' fallback when no google-drive WASM binary is
+    # available) only stores the access token; skip this test in that
+    # configuration rather than asserting refresh worked.
+    refresh_secret_name = f"{secret_name}_refresh_token"
+    try:
+        _find_secret_row(db_path, refresh_secret_name)
+    except AssertionError:
+        pytest.skip(
+            f"No {refresh_secret_name} stored; refresh requires a prior "
+            "OAuth callback flow (needs the google-drive WASM binary — "
+            "build with: cd tools-src/google-drive && "
+            "cargo build --target wasm32-wasip2 --release)"
+        )
+        return  # unreachable, satisfies type checkers
 
     # Reset mock OAuth state
     async with httpx.AsyncClient() as client:

@@ -219,6 +219,68 @@ async def test_slash_autocomplete_shows_commands_and_skills(page, ironclaw_serve
     assert await chat_input.input_value() == f"/{skill_name} "
 
 
+async def test_message_copy_button_writes_raw_text(page):
+    """Clicking a message's per-message Copy button writes the raw text to
+    navigator.clipboard and flashes the button label to "Copied".
+
+    Covers the `.message-copy-btn` → `copyMessage(btn)` path in
+    `core/render.js`. The existing `test_copy_from_chat_forces_plain_text`
+    only exercises the Cmd+C selection handler, not the button click, so a
+    regression that stopped wiring the button (or that broke the
+    `data-copy-text` attribute on rebuilt history) would ship silently.
+    """
+    # Stub navigator.clipboard.writeText so the test doesn't depend on
+    # browser permission prompts. Capture the last written text.
+    await page.evaluate(
+        """() => {
+          window._copiedText = null;
+          navigator.clipboard.writeText = (text) => {
+            window._copiedText = text;
+            return Promise.resolve();
+          };
+          // Seed one user message (plain text) and one assistant message
+          // (markdown-rendered). Both go through addMessage, which wires
+          // up the per-message Copy button.
+          addMessage('user', 'hello from user');
+          addMessage('assistant', '**bold** answer');
+        }"""
+    )
+
+    # Click the Copy button on the user message. The button is only
+    # visible on hover in CSS, so the parent intercepts pointer events
+    # without `force=True`. The production click handler doesn't care
+    # about pointer events — it's wired via addEventListener('click').
+    user_copy = page.locator('#chat-messages .message.user .message-copy-btn').last
+    await user_copy.wait_for(state="attached", timeout=5000)
+    await user_copy.click(force=True)
+
+    await page.wait_for_function(
+        "() => window._copiedText === 'hello from user'",
+        timeout=5000,
+    )
+
+    # Button label should flash "Copied!" then revert to "Copy" within 1.5s.
+    assert (await user_copy.text_content()) == "Copied!"
+    await page.wait_for_function(
+        """() => {
+          const userMsgs = document.querySelectorAll('#chat-messages .message.user');
+          const lastUser = userMsgs[userMsgs.length - 1];
+          const btn = lastUser && lastUser.querySelector('.message-copy-btn');
+          return btn && (btn.textContent || '').trim() === 'Copy';
+        }""",
+        timeout=3000,
+    )
+
+    # Assistant copy should use the raw markdown (data-raw), not the
+    # rendered HTML text.
+    assistant_copy = page.locator('#chat-messages .message.assistant .message-copy-btn').last
+    await assistant_copy.click(force=True)
+    await page.wait_for_function(
+        "() => window._copiedText === '**bold** answer'",
+        timeout=5000,
+    )
+
+
 async def test_copy_from_chat_forces_plain_text(page):
     """Copying selected chat text should populate plain text clipboard data only."""
     await page.evaluate("addMessage('assistant', 'Copy me into Sheets')")

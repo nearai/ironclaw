@@ -372,11 +372,26 @@ def score_skill(skill, message_lower, message_original):
         trimmed = word.strip(".,!?;:'\"()[]{}<>`~@#$%^&*-_=+/\\|")
         if trimmed:
             words.append(trimmed)
-    for kw in activation.get("keywords", []):
-        kw_lower = kw.lower()
-        if kw_lower in words:
+    # The skill's own name (and the hyphen->space-normalized form) counts
+    # as an implicit keyword. A user who writes "please use pikastream-
+    # video-meeting to prepare this call" is explicitly invoking the
+    # skill by name without the `/` prefix; `extract_explicit_skills`
+    # only picks up slash-prefixed mentions, so without this a manifest
+    # that omits `activation.keywords` would score 0 and never activate
+    # even when the user literally named it. Only count names ≥ 4 chars
+    # so short generic names (e.g. "code") don't match every prompt.
+    name = str(meta.get("name", "")).strip().lower()
+    implicit_keywords = []
+    if len(name) >= 4:
+        implicit_keywords.append(name)
+        normalized_name = name.replace("-", " ").replace("_", " ")
+        if normalized_name != name:
+            implicit_keywords.append(normalized_name)
+    declared = [kw.lower() for kw in activation.get("keywords", [])]
+    for kw in list(dict.fromkeys(declared + implicit_keywords)):
+        if kw in words:
             kw_score += 10
-        elif kw_lower in message_lower:
+        elif kw in message_lower:
             kw_score += 5
     score += min(kw_score, 30)
 
