@@ -444,6 +444,7 @@ impl Config {
         } else {
             let mut s = Settings::default();
             profile::apply_profile(&mut s)?;
+            Self::apply_toml_overlay(&mut s, toml_path)?;
             s
         };
 
@@ -1058,6 +1059,40 @@ mod tests {
             .suffix(".toml")
             .tempfile()
             .expect("create temp toml")
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_without_store_keeps_toml_overlay() {
+        let _env_guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let toml_path = dir.path().join("config.toml");
+        Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("toml-selected-model".to_string()),
+            ..Default::default()
+        }
+        .save_toml(&toml_path)
+        .expect("save config.toml");
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm(None, "operator-user", Some(&toml_path))
+            .await
+            .expect("resolve should succeed without a settings store");
+
+        assert_eq!(
+            cfg.llm.backend, "nearai",
+            "re-resolve without a DB store must keep the TOML-selected backend"
+        );
+        assert_eq!(
+            cfg.llm.nearai.model, "toml-selected-model",
+            "re-resolve without a DB store must keep the TOML-selected model"
+        );
     }
 
     #[tokio::test]
