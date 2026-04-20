@@ -732,6 +732,7 @@ function switchTab(tab) {
     // the Projects tab so widgets don't keep running in the background.
     crBackToOverview();
   }
+  if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
