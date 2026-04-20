@@ -412,6 +412,7 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(crate::llm::DEFAULT_MODEL.to_string()),
         );
         entry.insert("api_key_required".into(), true.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), true.into());
         // Env defaults
         entry.insert(
@@ -454,6 +455,7 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(def.default_model.clone()),
         );
         entry.insert("api_key_required".into(), def.api_key_required.into());
+        entry.insert("base_url_required".into(), def.base_url_required.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
         // Env defaults
@@ -484,6 +486,7 @@ fn build_llm_providers() -> serde_json::Value {
             "anthropic.claude-3-sonnet-20240229-v1:0".into(),
         );
         entry.insert("api_key_required".into(), false.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), false.into());
         providers.push(serde_json::Value::Object(entry));
     }
@@ -636,7 +639,32 @@ mod tests {
                 p.get("default_model").is_some(),
                 "{id} missing default_model"
             );
+            // api_key_required and base_url_required gate frontend activation —
+            // both must be present so isProviderConfigured() can reason about them.
+            assert!(
+                p.get("api_key_required").is_some(),
+                "{id} missing api_key_required"
+            );
+            assert!(
+                p.get("base_url_required").is_some(),
+                "{id} missing base_url_required"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn test_openai_compatible_exposes_base_url_required_true() {
+        // Regression: openai_compatible has base_url_required=true (no default).
+        // The frontend needs this flag to gate activation on a configured URL.
+        let result = build_llm_providers();
+        let arr = result.as_array().expect("should be an array");
+        let oc =
+            find_provider(arr, "openai_compatible").expect("openai_compatible should be present");
+        assert_eq!(
+            oc.get("base_url_required").and_then(|v| v.as_bool()),
+            Some(true),
+            "openai_compatible must advertise base_url_required=true so the UI gates activation"
+        );
     }
 
     // --- is_nearai_private_endpoint tests ---

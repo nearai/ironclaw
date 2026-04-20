@@ -10120,8 +10120,9 @@ function scrollToProviders() {
   if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-/** Check whether a provider has a usable API key (env, DB override, or vaulted secret). */
+/** Check whether a provider has all required credentials (API key + base URL if required). */
 function isProviderConfigured(provider) {
+  // ── API key check ──────────────────────────────────────────────────────
   // Built-in providers carry `api_key_required` from the backend registry.
   // Custom providers don't — derive the requirement from the adapter instead:
   // ollama runs locally and needs no key; other adapters do.
@@ -10139,7 +10140,67 @@ function isProviderConfigured(provider) {
   const hasDbKey = provider.builtin
     ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
     : (customKey === API_KEY_UNCHANGED || (typeof customKey === 'string' && customKey.length > 0));
-  return !needsKey || hasEnvKey || hasDbKey;
+  const keyOk = !needsKey || hasEnvKey || hasDbKey;
+  if (!keyOk) return false;
+
+  // ── Base URL check ─────────────────────────────────────────────────────
+  // Built-ins with `base_url_required` (e.g. openai_compatible) have no
+  // hardcoded fallback in the client layer, so activation must be gated on
+  // having a URL from SOME source. Custom providers always need a URL
+  // because they have no default at all.
+  const needsBaseUrl = provider.builtin
+    ? provider.base_url_required === true
+    : true;
+  if (!needsBaseUrl) return true;
+
+  const overrideBaseUrl = provider.builtin && _builtinOverrides[provider.id]
+    ? _builtinOverrides[provider.id].base_url
+    : undefined;
+  const hasOverrideBaseUrl = typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0;
+  const hasEnvBaseUrl = typeof provider.env_base_url === 'string' && provider.env_base_url.trim().length > 0;
+  // `provider.base_url` is the registry default for built-ins (may be empty
+  // when base_url_required=true and there's no default) OR the user-set URL
+  // for custom providers.
+  const hasProviderBaseUrl = typeof provider.base_url === 'string' && provider.base_url.trim().length > 0;
+  return hasOverrideBaseUrl || hasEnvBaseUrl || hasProviderBaseUrl;
+}
+
+/**
+ * Determine what's missing on an unconfigured provider for a precise toast.
+ * Returns 'base_url' if the base URL is missing, 'api_key' if the key is
+ * missing, or 'ok' if nothing is missing. Mirrors the checks in
+ * isProviderConfigured — keep the two in sync.
+ */
+function providerMissingReason(provider) {
+  // API key check — matches isProviderConfigured above.
+  const needsKey = provider.builtin
+    ? provider.api_key_required !== false
+    : provider.adapter !== 'ollama';
+  if (needsKey) {
+    const hasEnvKey = provider.has_api_key === true;
+    const overrideKey = provider.builtin && _builtinOverrides[provider.id]
+      ? _builtinOverrides[provider.id].api_key
+      : undefined;
+    const customKey = !provider.builtin ? provider.api_key : undefined;
+    const hasDbKey = provider.builtin
+      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+      : (customKey === API_KEY_UNCHANGED || (typeof customKey === 'string' && customKey.length > 0));
+    if (!hasEnvKey && !hasDbKey) return 'api_key';
+  }
+  // Base URL check — matches isProviderConfigured above.
+  const needsBaseUrl = provider.builtin
+    ? provider.base_url_required === true
+    : true;
+  if (needsBaseUrl) {
+    const overrideBaseUrl = provider.builtin && _builtinOverrides[provider.id]
+      ? _builtinOverrides[provider.id].base_url
+      : undefined;
+    const hasOverrideBaseUrl = typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0;
+    const hasEnvBaseUrl = typeof provider.env_base_url === 'string' && provider.env_base_url.trim().length > 0;
+    const hasProviderBaseUrl = typeof provider.base_url === 'string' && provider.base_url.trim().length > 0;
+    if (!hasOverrideBaseUrl && !hasEnvBaseUrl && !hasProviderBaseUrl) return 'base_url';
+  }
+  return 'ok';
 }
 
 /** Open the appropriate configuration dialog for a provider. */
@@ -10225,22 +10286,16 @@ function renderProviders() {
 
 function setActiveProvider(id) {
   const provider = [..._builtinProviders, ..._customProviders].find((p) => p.id === id);
-  if (provider) {
-    // Guard: do not activate a provider that requires an API key but has none configured
-    if (!isProviderConfigured(provider)) {
-      showToast(I18n.t('config.configureToUse'), 'error');
-      openProviderConfigDialog(provider);
-      return;
-    }
-    // Guard: custom providers must have a base URL
-    if (!provider.builtin) {
-      const baseUrl = (provider.base_url || '').trim();
-      if (!baseUrl) {
-        showToast(I18n.t('config.baseUrlRequired') || 'Base URL is required', 'error');
-        openProviderConfigDialog(provider);
-        return;
-      }
-    }
+  if (provider && !isProviderConfigured(provider)) {
+    // Pick a specific message so the user knows WHAT is missing, not just
+    // "configure the provider". Check base URL first because a provider
+    // that needs both a key and a URL typically surfaces URL entry first
+    // in the dialog layout.
+    const reason = providerMissingReason(provider);
+    const toastKey = reason === 'base_url' ? 'config.baseUrlRequired' : 'config.configureToUse';
+    showToast(I18n.t(toastKey), 'error');
+    openProviderConfigDialog(provider);
+    return;
   }
   // Restore the last-configured model for this provider, falling back to the provider's default
   const overrideModel = _builtinOverrides[id] && _builtinOverrides[id].model;
