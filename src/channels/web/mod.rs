@@ -57,13 +57,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use crate::config::GatewayConfig;
+use crate::config::{Config, GatewayConfig};
 use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::Workspace;
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
@@ -574,6 +574,33 @@ impl GatewayChannel {
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<platform::state::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Configure DB-backed workspace access from the resolved runtime config.
+    ///
+    /// Startup should decide multi-tenant mode from explicit config, not from
+    /// current DB contents. This helper keeps the DB-backed workspace pool and
+    /// the `multi_tenant_mode` flag wired together so production startup and
+    /// integration tests exercise the same caller path.
+    pub fn with_db_backing_from_config(
+        mut self,
+        config: &Config,
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        let emb_cache_config = EmbeddingCacheConfig {
+            max_entries: config.embeddings.cache_size,
+        };
+        let pool = Arc::new(platform::state::WorkspacePool::new(
+            db,
+            embeddings,
+            emb_cache_config,
+            config.search.clone(),
+            config.workspace.clone(),
+        ));
+        self = self.with_workspace_pool(pool);
+        self = self.with_multi_tenant_mode(config.is_multi_tenant_deployment());
         self
     }
 

@@ -838,23 +838,11 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_workspace(Arc::clone(ws));
         }
         if let Some(ref db) = components.db {
-            let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
-                max_entries: config.embeddings.cache_size,
-            };
-            // Multi-tenant mode is explicit config (`AGENT_MULTI_TENANT`),
-            // not something the gateway should infer from current DB rows.
-            let is_multi_tenant = config.is_multi_tenant_deployment();
-            let pool = Arc::new(
-                ironclaw::channels::web::platform::state::WorkspacePool::new(
-                    Arc::clone(db),
-                    components.embeddings.clone(),
-                    emb_cache_config,
-                    config.search.clone(),
-                    config.workspace.clone(),
-                ),
+            gw = gw.with_db_backing_from_config(
+                &config,
+                Arc::clone(db),
+                components.embeddings.clone(),
             );
-            gw = gw.with_workspace_pool(pool);
-            gw = gw.with_multi_tenant_mode(is_multi_tenant);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_llm_session_manager(Arc::clone(&components.session));
