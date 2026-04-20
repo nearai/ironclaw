@@ -542,6 +542,26 @@ impl ChannelWorkspaceStore {
         }
     }
 
+    /// Restore a previously-persisted subset of workspace values.
+    pub fn restore_snapshot(&self, snapshot: &std::collections::HashMap<String, String>) {
+        if snapshot.is_empty() {
+            return;
+        }
+        if let Ok(mut data) = self.data.write() {
+            for (path, content) in snapshot {
+                data.insert(path.clone(), content.clone());
+            }
+        }
+    }
+
+    /// Take a point-in-time snapshot of the current workspace store.
+    pub fn snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.data
+            .read()
+            .map(|data| data.clone())
+            .unwrap_or_default()
+    }
+
     /// Append a text frame to a JSON queue stored at `path`.
     ///
     /// The queue is stored as a JSON array of strings and bounded to the most

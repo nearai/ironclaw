@@ -1598,6 +1598,7 @@ impl Agent {
             submission,
             Submission::ExecApproval { .. }
                 | Submission::ApprovalResponse { .. }
+                | Submission::ExternalCallback { .. }
                 | Submission::GateAuthResolution { .. }
         ) {
             message

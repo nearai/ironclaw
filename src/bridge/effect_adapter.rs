@@ -220,6 +220,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
+        paused_lease: Option<CapabilityLease>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -228,6 +229,7 @@ impl EffectBridgeAdapter {
             parameters: Box::new(parameters),
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
+            paused_lease: paused_lease.map(Box::new),
         }
     }
 
@@ -236,6 +238,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         context: &ThreadExecutionContext,
         output_value: &serde_json::Value,
+        lease: &CapabilityLease,
     ) -> Option<EngineError> {
         let status = output_value.get("status").and_then(|v| v.as_str())?;
         let name = output_value.get("name").and_then(|v| v.as_str())?;
@@ -272,6 +275,7 @@ impl EffectBridgeAdapter {
                     ),
                 },
                 None,
+                Some(lease.clone()),
             )),
             _ => None,
         }
@@ -574,6 +578,75 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
+            "mission_get" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name"))
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.get_mission(id).await {
+                        Ok(Some(mission)) => {
+                            // Ownership check: only the mission owner can
+                            // retrieve its details (mirrors fire/pause/resume).
+                            if mission.user_id != context.user_id {
+                                return Some(Err(EngineError::Effect {
+                                    reason: format!("mission {id_str} belongs to another user"),
+                                }));
+                            }
+                            // Load recent threads (last 5) to show results
+                            let store = mgr.store();
+                            let recent_thread_ids: Vec<_> =
+                                mission.thread_history.iter().rev().take(5).collect();
+                            let mut thread_summaries = Vec::new();
+                            for tid in recent_thread_ids {
+                                if let Ok(Some(thread)) = store.load_thread(*tid).await {
+                                    let last_response = thread
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| m.role == ironclaw_engine::MessageRole::Assistant)
+                                        .map(|m| m.content.clone());
+                                    thread_summaries.push(serde_json::json!({
+                                        "thread_id": tid.to_string(),
+                                        "state": format!("{:?}", thread.state),
+                                        "created_at": thread.created_at.to_rfc3339(),
+                                        "completed_at": thread.completed_at.map(|t| t.to_rfc3339()),
+                                        "steps": thread.step_count,
+                                        "tokens_used": thread.total_tokens_used,
+                                        "result": last_response,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::json!({
+                                "id": mission.id.to_string(),
+                                "name": mission.name,
+                                "goal": mission.goal,
+                                "status": format!("{:?}", mission.status),
+                                "current_focus": mission.current_focus,
+                                "approach_history": mission.approach_history.iter().rev().take(10).rev().cloned().collect::<Vec<_>>(),
+                                "success_criteria": mission.success_criteria,
+                                "total_threads": mission.thread_history.len(),
+                                "cadence": format!("{:?}", mission.cadence),
+                                "last_fire_at": mission.last_fire_at.map(|t| t.to_rfc3339()),
+                                "next_fire_at": mission.next_fire_at.map(|t| t.to_rfc3339()),
+                                "recent_threads": thread_summaries,
+                            }))
+                        }
+                        Ok(None) => Err(EngineError::Effect {
+                            reason: format!("mission not found: {id_str}"),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             "mission_fire" => {
                 let id_str = params
                     .get("id")
@@ -777,7 +850,7 @@ impl EffectBridgeAdapter {
         &self,
         action_name: &str,
         parameters: serde_json::Value,
-        _lease: &CapabilityLease,
+        lease: &CapabilityLease,
         context: &ThreadExecutionContext,
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
@@ -877,6 +950,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
@@ -949,6 +1023,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -990,6 +1065,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -1047,6 +1123,7 @@ impl EffectBridgeAdapter {
                                 allow_always: false,
                             },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1062,6 +1139,7 @@ impl EffectBridgeAdapter {
                             parameters,
                             ironclaw_engine::ResumeKind::Approval { allow_always: true },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1214,6 +1292,7 @@ impl EffectBridgeAdapter {
                         parameters.clone(),
                         context,
                         &output_value,
+                        lease,
                     )
                 {
                     return Err(err);
@@ -1253,6 +1332,7 @@ impl EffectBridgeAdapter {
                                     auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
+                                None,
                             ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {
@@ -1332,6 +1412,7 @@ impl EffectBridgeAdapter {
                             auth_url: None,
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
 
@@ -1786,6 +1867,12 @@ fn routine_to_mission_alias(
 
         "routine_delete" => Some(RoutineMissionAlias {
             mission_action: "mission_complete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_history" => Some(RoutineMissionAlias {
+            mission_action: "mission_get",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -3187,6 +3274,19 @@ mod tests {
         assert!(!is_v1_only_tool("routine_pause"));
         assert!(!is_v1_only_tool("routine_resume"));
         assert!(!is_v1_only_tool("routine_update"));
+    }
+
+    // ── routine_to_mission_alias tests ────────────────────────
+
+    /// `routine_history` should map to `mission_get` so the LLM can
+    /// retrieve mission results via either the v1 or v2 action name.
+    #[test]
+    fn routine_history_maps_to_mission_get() {
+        let params = serde_json::json!({"name": "test-mission-id"});
+        let alias = routine_to_mission_alias("routine_history", &params);
+        let alias = alias.expect("routine_history should produce an alias");
+        assert_eq!(alias.mission_action, "mission_get");
+        assert!(alias.post_create_update.is_none());
     }
 
     #[test]

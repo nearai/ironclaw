@@ -4153,6 +4153,7 @@ mod tests {
                         allow_always: false,
                     }),
                     resume_output: None,
+                    paused_lease: None,
                 });
             }
             Ok(ActionResult {

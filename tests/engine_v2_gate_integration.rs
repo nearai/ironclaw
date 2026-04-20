@@ -219,6 +219,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                     instructions: "Authenticate GitHub".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -283,6 +284,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -298,6 +300,7 @@ impl EffectExecutor for GateMockEffects {
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    paused_lease: None,
                     resume_output: None,
                 });
             }
@@ -311,6 +314,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -327,6 +331,7 @@ impl EffectExecutor for GateMockEffects {
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                paused_lease: None,
                 resume_output: None,
             });
         }
@@ -660,6 +665,7 @@ fn sample_pending_gate(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
+        paused_lease: None,
         resume_output: None,
         approval_already_granted: false,
     }

@@ -317,6 +317,7 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
 /// thing.
 async fn resolve_extension_for_action(
     auth_manager: Option<&AuthManager>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
     tools: &crate::tools::ToolRegistry,
     action_name: &str,
     parameters: &serde_json::Value,
@@ -335,14 +336,19 @@ async fn resolve_extension_for_action(
             )
             .await;
     }
-    // No auth manager (bare test harness): try the tool registry's
-    // provider-extension hint, else fall back to the credential-name
-    // string the caller already typed upstream.
-    let fallback = tools
-        .provider_extension_for_tool(action_name)
-        .await
-        .unwrap_or_else(|| credential_fallback.to_string());
-    ironclaw_common::ExtensionName::from_trusted(fallback)
+    // No auth manager (hosted instance without SECRETS_MASTER_KEY, or bare
+    // test harness): delegate to the same canonical resolver used by the
+    // auth-manager path so the extension-manager branch of the precedence
+    // still runs instead of falling through to a stringly credential name.
+    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+        action_name,
+        parameters,
+        credential_fallback,
+        user_id,
+        Some(tools),
+        extension_manager,
+    )
+    .await
 }
 
 /// Resolve the installed extension identifier that owns an authentication
@@ -354,6 +360,7 @@ async fn resolve_extension_for_action(
 /// identity and return `None`.
 async fn resolve_auth_gate_extension_name(
     auth_manager: Option<&AuthManager>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
 ) -> Option<ironclaw_common::ExtensionName> {
@@ -366,6 +373,7 @@ async fn resolve_auth_gate_extension_name(
     Some(
         resolve_extension_for_action(
             auth_manager,
+            extension_manager,
             tools,
             &pending.action_name,
             &pending.parameters,
@@ -609,10 +617,12 @@ async fn notify_pending_gate(
     sse: Option<Arc<SseManager>>,
     tools: &crate::tools::ToolRegistry,
     auth_manager: Option<&AuthManager>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<BridgeOutcome, Error> {
-    let extension_name = resolve_auth_gate_extension_name(auth_manager, tools, pending).await;
+    let extension_name =
+        resolve_auth_gate_extension_name(auth_manager, extension_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -667,6 +677,7 @@ async fn insert_and_notify_pending_gate(
         state.sse.clone(),
         state.effect_adapter.tools(),
         state.auth_manager.as_deref(),
+        state.extension_manager.as_deref(),
         message,
         &pending,
     )
@@ -720,6 +731,7 @@ async fn requeue_auth_pending_gate(
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
         original_message: pending.original_message.clone(),
         resume_output: pending.resume_output.clone(),
+        paused_lease: pending.paused_lease.clone(),
         approval_already_granted: pending.approval_already_granted,
     };
 
@@ -747,6 +759,7 @@ fn pairing_pending_gate_from_auth(pending: &PendingGate, extension_name: &str) -
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
         original_message: pending.original_message.clone(),
         resume_output: pending.resume_output.clone(),
+        paused_lease: pending.paused_lease.clone(),
         approval_already_granted: pending.approval_already_granted,
     }
 }
@@ -898,6 +911,47 @@ async fn revert_always_allow(
     }
 }
 
+/// Validate that a `paused_lease` snapshot recorded when a gate paused
+/// still represents a usable lease at resume time.
+///
+/// A gate can sit in the pending-gate store for hours or across process
+/// restarts; during that window the original lease might have been
+/// revoked, expired, or the pending record could have drifted off its
+/// original thread. Callers that fail this check must NOT use the
+/// snapshot — fall through to `LeaseManager::find_lease_for_action`
+/// (which enforces its own scoping) or fail closed.
+fn snapshot_lease_still_valid(
+    lease: &ironclaw_engine::CapabilityLease,
+    pending: &PendingGate,
+) -> bool {
+    lease.thread_id == pending.thread_id
+        && lease.granted_actions.covers(&pending.action_name)
+        && !lease.revoked
+        && lease
+            .expires_at
+            .map(|exp| exp > chrono::Utc::now())
+            .unwrap_or(true)
+}
+
+/// Pick the lease to use for resuming a pending gate action. Prefers the
+/// `paused_lease` snapshot the gate recorded if it's still valid; falls
+/// back to a live lookup in the `LeaseManager`. Returns `None` if neither
+/// path yields a lease — the caller maps that to a "no active lease"
+/// error.
+async fn resume_lease_for_pending_gate(
+    pending: &PendingGate,
+    leases: &ironclaw_engine::LeaseManager,
+) -> Option<ironclaw_engine::CapabilityLease> {
+    if let Some(snapshot) = pending.paused_lease.clone()
+        && snapshot_lease_still_valid(&snapshot, pending)
+    {
+        return Some(snapshot);
+    }
+    leases
+        .find_lease_for_action(pending.thread_id, &pending.action_name)
+        .await
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -914,10 +968,7 @@ async fn execute_pending_gate_action(
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
-    let lease = state
-        .thread_manager
-        .leases
-        .find_lease_for_action(pending.thread_id, &pending.action_name)
+    let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
         .await
         .ok_or_else(|| {
             engine_err(
@@ -985,6 +1036,7 @@ async fn execute_pending_gate_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let display_parameters = state
                 .effect_adapter
@@ -1021,6 +1073,7 @@ async fn execute_pending_gate_action(
                     .clone()
                     .or_else(|| Some(message.content.clone())),
                 resume_output: resume_output.map(|value| *value),
+                paused_lease: paused_lease.map(|lease| *lease),
                 approval_already_granted: approval_already_granted
                     || matches!(
                         pending.resume_kind,
@@ -1089,6 +1142,8 @@ struct EngineState {
     secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Centralized auth manager for setup instruction lookup and credential checks.
     auth_manager: Option<Arc<AuthManager>>,
+    /// Extension manager for extension-backed auth/setup when no auth manager exists.
+    extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
 }
@@ -1191,6 +1246,24 @@ async fn fail_orphaned_waiting_thread_if_needed(
         return Ok(false);
     }
 
+    fail_waiting_thread(
+        state,
+        user_id,
+        thread_id,
+        "pending gate missing before resume",
+    )
+    .await
+}
+
+/// Transition a Waiting thread owned by `user_id` to Failed with `reason`.
+/// Returns `Ok(false)` when the thread does not exist, is owned by someone
+/// else, or is not in `Waiting`.
+async fn fail_waiting_thread(
+    state: &EngineState,
+    user_id: &str,
+    thread_id: ironclaw_engine::ThreadId,
+    reason: &str,
+) -> Result<bool, Error> {
     let Some(mut thread) = state
         .store
         .load_thread(thread_id)
@@ -1205,10 +1278,7 @@ async fn fail_orphaned_waiting_thread_if_needed(
     }
 
     thread
-        .transition_to(
-            ironclaw_engine::ThreadState::Failed,
-            Some("pending gate missing before resume".into()),
-        )
+        .transition_to(ironclaw_engine::ThreadState::Failed, Some(reason.into()))
         .map_err(|e| engine_err("reconcile waiting thread", e))?;
     state
         .store
@@ -1216,6 +1286,78 @@ async fn fail_orphaned_waiting_thread_if_needed(
         .await
         .map_err(|e| engine_err("save reconciled thread", e))?;
     Ok(true)
+}
+
+/// Outcome of `submit_pending_auth_credential` — distinguishes "a backend
+/// stored the credential" from "no backend is configured to store it." The
+/// caller maps the latter to either thread-fail (prod) or silent continue
+/// (bare-resume test harness), see the match arm in `resolve_gate`.
+#[derive(Debug)]
+enum PendingAuthCredentialSubmission {
+    Stored(Box<crate::extensions::ConfigureResult>),
+    SkippedNoBackend,
+}
+
+/// Try to persist a user-supplied auth credential, falling back across the
+/// three backends in priority order:
+///
+/// 1. `AuthManager::submit_auth_token` — the canonical path (runs the
+///    extension's `configure_token`, validates, and emits a
+///    `ConfigureResult`). Requires a secrets-backed auth manager.
+/// 2. `ExtensionManager::configure_token` — used on hosted instances that
+///    run without `SECRETS_MASTER_KEY`, so no persistent auth manager
+///    exists but the extension manager's in-memory secrets store can still
+///    accept the credential. `NotInstalled` / `NotFound` fall through so
+///    non-extension credentials (plain secrets) are stored in step 3.
+/// 3. Plain `SecretsStore::create` — stores the credential verbatim for
+///    non-extension actions (HTTP tool, skill credentials) when no
+///    extension owns the action.
+///
+/// Returns `SkippedNoBackend` when none of the three is available (bare
+/// test harness with `resume_output` already staged).
+async fn submit_pending_auth_credential(
+    state: &EngineState,
+    submit_target: &str,
+    credential_name: &str,
+    token: &str,
+    user_id: &str,
+) -> Result<PendingAuthCredentialSubmission, crate::extensions::ExtensionError> {
+    if let Some(auth_manager) = state.auth_manager.as_ref() {
+        return auth_manager
+            .submit_auth_token(submit_target, token, user_id)
+            .await
+            .map(Box::new)
+            .map(PendingAuthCredentialSubmission::Stored);
+    }
+
+    if let Some(ext_mgr) = state.extension_manager.as_ref() {
+        match ext_mgr.configure_token(submit_target, token, user_id).await {
+            Ok(result) => return Ok(PendingAuthCredentialSubmission::Stored(Box::new(result))),
+            // Not an extension-backed credential — fall through to secrets_store.
+            Err(crate::extensions::ExtensionError::NotInstalled(_))
+            | Err(crate::extensions::ExtensionError::NotFound(_)) => {}
+            Err(other) => return Err(other),
+        }
+    }
+
+    if let Some(ss) = state.secrets_store.as_ref() {
+        let params = crate::secrets::CreateSecretParams::new(credential_name, token);
+        ss.create(user_id, params).await.map_err(|e| {
+            crate::extensions::ExtensionError::Other(format!("Failed to store credential: {e}"))
+        })?;
+        return Ok(PendingAuthCredentialSubmission::Stored(Box::new(
+            crate::extensions::ConfigureResult {
+                message: format!("Credential '{}' stored.", credential_name),
+                activated: true,
+                pairing_required: false,
+                auth_url: None,
+                onboarding_state: None,
+                onboarding: None,
+            },
+        )));
+    }
+
+    Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
 }
 
 /// Get or initialize the engine state using the agent's dependencies.
@@ -1343,6 +1485,19 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 name: "mission_list".into(),
                 description: "List all missions and routines in the current project.".into(),
                 parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ironclaw_engine::ActionDef {
+                name: "mission_get".into(),
+                description: "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
+                    },
+                    "required": ["id"]
+                }),
                 effects: vec![],
                 requires_approval: false,
             },
@@ -1682,6 +1837,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
         auth_manager,
+        extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
     });
 
@@ -2344,6 +2500,7 @@ pub async fn resolve_gate(
                 // `resolve_extension_for_action` for the full rationale.
                 let submit_target = resolve_extension_for_action(
                     state.auth_manager.as_deref(),
+                    state.extension_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending.action_name,
                     &pending.parameters,
@@ -2369,37 +2526,41 @@ pub async fn resolve_gate(
                         },
                     );
                 }
-                if let Some(ref auth_manager) = state.auth_manager {
-                    match auth_manager
-                        .submit_auth_token(submit_target.as_str(), &token, &message.user_id)
-                        .await
+                match submit_pending_auth_credential(
+                    state,
+                    submit_target.as_str(),
+                    credential_name.as_str(),
+                    &token,
+                    &message.user_id,
+                )
+                .await
+                {
+                    Ok(PendingAuthCredentialSubmission::Stored(result))
+                        if matches!(
+                            crate::channels::web::onboarding::classify_configure_result(&result),
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
+                        ) =>
                     {
-                        Ok(result)
-                            if matches!(
-                                crate::channels::web::onboarding::classify_configure_result(
-                                    &result
-                                ),
-                                crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
-                            ) =>
-                        {
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthCompleted {
-                                        extension_name: display_name.clone(),
-                                        success: true,
-                                        message: format!("{}. Resuming...", result.message),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                        }
-                        Ok(result) => match crate::channels::web::onboarding::classify_configure_result(&result) {
-                            crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
-                                instructions,
-                                onboarding,
-                            } => {
+                        let _ = agent
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: display_name.clone(),
+                                    success: true,
+                                    message: format!("{}. Resuming...", result.message),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+                    Ok(PendingAuthCredentialSubmission::Stored(result)) => match crate::channels::web::onboarding::classify_configure_result(
+                        &result,
+                    ) {
+                        crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
+                            instructions,
+                            onboarding,
+                        } => {
                             let next_pending =
                                 requeue_pairing_pending_gate(state, &pending, display_name.as_str())
                                     .await?;
@@ -2420,10 +2581,10 @@ pub async fn resolve_gate(
                                 );
                             }
                             return Ok(BridgeOutcome::Pending);
-                            }
-                            crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired
-                            | crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
-                                return requeue_auth_pending_gate(
+                        }
+                        crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired
+                        | crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
+                            return requeue_auth_pending_gate(
                                 agent,
                                 state,
                                 message,
@@ -2431,44 +2592,59 @@ pub async fn resolve_gate(
                                 result.message,
                                 result.auth_url,
                             )
-                                .await;
-                            }
-                            crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {}
-                        }
-                        Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
-                            return requeue_auth_pending_gate(
-                                agent,
-                                state,
-                                message,
-                                &pending,
-                                msg,
-                                None,
-                            )
                             .await;
                         }
-                        Err(error) => {
-                            let msg = error.to_string();
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthCompleted {
-                                        extension_name: display_name.clone(),
-                                        success: false,
-                                        message: msg.clone(),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                            return Ok(BridgeOutcome::Respond(msg));
-                        }
+                        crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {}
+                    },
+                    // Bare test-harness path: no backend exists, but the
+                    // gate carries a staged `resume_output` (set when the
+                    // gate was created with a synthetic output), so we can
+                    // proceed with the resume below. Production flows
+                    // always come through the auth-manager or extension-
+                    // manager branch above.
+                    Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
+                        if pending.resume_output.is_some() => {}
+                    Ok(PendingAuthCredentialSubmission::SkippedNoBackend) => {
+                        let msg =
+                            "No auth manager, extension manager, or secrets store available to store credential.".to_string();
+                        fail_waiting_thread(state, &message.user_id, pending.thread_id, &msg)
+                            .await?;
+                        let _ = agent
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: display_name.clone(),
+                                    success: false,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        return Ok(BridgeOutcome::Respond(msg));
                     }
-                } else if let Some(ref ss) = state.secrets_store {
-                    let params =
-                        crate::secrets::CreateSecretParams::new(credential_name.as_str(), &token);
-                    ss.create(&message.user_id, params)
-                        .await
-                        .map_err(|e| engine_err("secrets", e))?;
+                    Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
+                        return requeue_auth_pending_gate(
+                            agent, state, message, &pending, msg, None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let msg = error.to_string();
+                        let _ = agent
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: display_name.clone(),
+                                    success: false,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        return Ok(BridgeOutcome::Respond(msg));
+                    }
                 }
 
                 if pending.action_name == "authentication_fallback"
@@ -3129,12 +3305,14 @@ async fn handle_with_engine_inner(
             let sse = state.sse.clone();
             let tools = Arc::clone(state.effect_adapter.tools());
             let auth_manager = state.auth_manager.clone();
+            let extension_manager = state.extension_manager.clone();
             drop(guard);
             return notify_pending_gate(
                 agent,
                 sse,
                 tools.as_ref(),
                 auth_manager.as_deref(),
+                extension_manager.as_deref(),
                 message,
                 &pending,
             )
@@ -3594,6 +3772,7 @@ async fn await_thread_outcome(
                     expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                     original_message: Some(message.content.clone()),
                     resume_output: None,
+                    paused_lease: None,
                     approval_already_granted: false,
                 };
                 let pending_request_id = pending.request_id.to_string();
@@ -3645,6 +3824,7 @@ async fn await_thread_outcome(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         } => {
             use crate::gate::pending::PendingGate;
 
@@ -3679,6 +3859,10 @@ async fn await_thread_outcome(
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                 original_message: Some(message.content.clone()),
                 resume_output,
+                // Unbox: `ThreadOutcome::GatePaused.paused_lease` is
+                // `Option<Box<CapabilityLease>>` to keep the outcome
+                // enum compact; `PendingGate` stores it unboxed.
+                paused_lease: paused_lease.map(|b| *b),
                 approval_already_granted: false,
             };
 
@@ -3698,6 +3882,7 @@ async fn await_thread_outcome(
             {
                 let extension_name = resolve_auth_gate_extension_name(
                     state.auth_manager.as_deref(),
+                    state.extension_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending,
                 )
@@ -5644,6 +5829,7 @@ mod tests {
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
             original_message: None,
             resume_output: None,
+            paused_lease: None,
             approval_already_granted: false,
         }
     }
@@ -5771,6 +5957,78 @@ mod tests {
         (agent, statuses)
     }
 
+    /// Build a real `ExtensionManager` wired to an in-memory secrets store,
+    /// so tests can exercise the no-`AuthManager` extension-backed auth
+    /// fallback in `submit_pending_auth_credential` without touching the
+    /// real filesystem or catalog. Returns the manager plus the two
+    /// `TempDir` handles so callers can drop a fake WASM channel (see
+    /// `insert_and_notify_pending_gate_uses_extension_manager_for_auth_display_name`).
+    fn test_extension_manager() -> (
+        Arc<crate::extensions::ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "router-test-key-at-least-32-chars!!".to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir)
+    }
+
+    /// Write a minimal fake WASM channel (`<name>.wasm` + capabilities file)
+    /// into `wasm_channels_dir` so `ExtensionManager::configure_token` can
+    /// walk the channel's `required_secrets` without needing a real
+    /// compiled module. Extracted so tests that exercise
+    /// `pending_gate_extension_name`, `insert_and_notify_pending_gate`,
+    /// and `submit_pending_auth_credential` don't duplicate the fixture.
+    fn write_fake_wasm_channel(wasm_channels_dir: &tempfile::TempDir, channel_name: &str) {
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::json!({
+                "type": "channel",
+                "name": channel_name,
+                "setup": {
+                    "required_secrets": [
+                        {"name": format!("{channel_name}_token"), "prompt": "Enter token"}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write capabilities");
+    }
+
     #[tokio::test]
     async fn insert_and_notify_pending_gate_sends_status_no_text() {
         let store = Arc::new(TestStore::new());
@@ -5829,6 +6087,78 @@ mod tests {
                     && extension_name.as_str() == expected_extension_name.as_str()
             ),
             "expected GateRequired auth event, got: {event:?}"
+        );
+    }
+
+    /// A hosted instance without `SECRETS_MASTER_KEY` has no auth manager,
+    /// but a WASM channel installed through `ExtensionManager` should
+    /// still surface as the correct extension name on the auth-gate card
+    /// — not the raw credential name. Covers the extension-manager branch
+    /// of `resolve_auth_gate_extension_name` (via `notify_pending_gate`).
+    #[tokio::test]
+    async fn insert_and_notify_pending_gate_uses_extension_manager_for_auth_display_name() {
+        let store = Arc::new(TestStore::new());
+        let sse = Arc::new(SseManager::new());
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_extension_manager();
+        let channel_name = "test_channel";
+        write_fake_wasm_channel(&wasm_channels_dir, channel_name);
+
+        let mut event_stream = Box::pin(
+            sse.subscribe_raw(Some("alice".to_string()))
+                .expect("subscribe raw"),
+        );
+        let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+        let mut state = make_expected_test_state(store);
+        state.sse = Some(Arc::clone(&sse));
+        state.extension_manager = Some(ext_mgr);
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let credential = ironclaw_common::CredentialName::new("test_channel_token").unwrap();
+        let pending = PendingGate {
+            action_name: channel_name.to_string(),
+            resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                credential_name: credential.clone(),
+                instructions: "Enter token".to_string(),
+                auth_url: None,
+            },
+            ..sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: credential,
+                    instructions: "Enter token".to_string(),
+                    auth_url: None,
+                },
+            )
+        };
+        let mut message = crate::channels::IncomingMessage::new("web", "alice", "use test");
+        message.thread_id = Some(thread_id.to_string());
+
+        let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
+            .await
+            .expect("pending gate inserted");
+
+        assert!(matches!(result, BridgeOutcome::Pending));
+
+        let statuses = statuses.lock().await.clone();
+        assert!(
+            statuses.iter().any(|s| matches!(
+                s,
+                StatusUpdate::AuthRequired { extension_name, .. } if extension_name.as_str() == channel_name
+            )),
+            "expected AuthRequired status with extension-manager-resolved name, got: {statuses:?}"
+        );
+
+        let event = event_stream.next().await.expect("gate event");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::GateRequired {
+                    extension_name: Some(extension_name),
+                    ..
+                } if extension_name.as_str() == channel_name
+            ),
+            "expected GateRequired auth event with extension-manager name, got: {event:?}"
         );
     }
 
@@ -6594,6 +6924,7 @@ mod tests {
             db: None,
             secrets_store: None,
             auth_manager: None,
+            extension_manager: None,
             project_root: resolve_project_root(),
         }
     }
@@ -6733,6 +7064,7 @@ mod tests {
             db: None,
             secrets_store: None,
             auth_manager: None,
+            extension_manager: None,
             project_root: resolve_project_root(),
         }
     }
@@ -7058,6 +7390,350 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router auth resume_output call-id repair test");
+    }
+
+    /// Hosted instance path: no `AuthManager`, but the `ExtensionManager`
+    /// can still configure the token on a WASM channel. After
+    /// `resolve_gate` on `CredentialProvided`, the auth gate should be
+    /// re-queued for the channel's *next* required secret (multi-secret
+    /// channels walk the list on re-configure) and the auth-completed
+    /// status must carry the extension name, not the credential name.
+    #[tokio::test]
+    async fn resolve_gate_uses_extension_manager_without_auth_manager_for_auth_resume() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_extension_manager();
+            let channel_name = "test_channel";
+            write_fake_wasm_channel(&wasm_channels_dir, channel_name);
+
+            let store = Arc::new(TestStore::new());
+
+            let mut thread = ironclaw_engine::Thread::new(
+                "goal",
+                ironclaw_engine::ThreadType::Foreground,
+                ironclaw_engine::ProjectId::new(),
+                "alice",
+                ironclaw_engine::ThreadConfig::default(),
+            );
+            thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+                Some("install channel".to_string()),
+                vec![ironclaw_engine::ActionCall {
+                    id: "call-install".to_string(),
+                    action_name: "tool_install".to_string(),
+                    parameters: serde_json::json!({"name": channel_name}),
+                }],
+            ));
+            thread.state = ironclaw_engine::ThreadState::Waiting;
+            store
+                .save_thread(&thread)
+                .await
+                .expect("save waiting thread");
+
+            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+            conversation.track_thread(thread.id);
+            let conversation_id = conversation.id;
+            store
+                .save_conversation(&conversation)
+                .await
+                .expect("save conversation");
+
+            let mut state = make_expected_test_state(store.clone());
+            state.extension_manager = Some(ext_mgr);
+            state
+                .conversation_manager
+                .bootstrap_user("alice")
+                .await
+                .expect("bootstrap conversations");
+
+            let credential = ironclaw_common::CredentialName::new("test_channel_token").unwrap();
+            let pending = PendingGate {
+                call_id: "call-install".into(),
+                conversation_id,
+                action_name: "tool_install".into(),
+                parameters: serde_json::json!({"name": channel_name}),
+                resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: credential.clone(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+                resume_output: Some(serde_json::json!({"ok": true})),
+                ..sample_pending_gate(
+                    "alice",
+                    thread.id,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: credential,
+                        instructions: "paste token".into(),
+                        auth_url: None,
+                    },
+                )
+            };
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, statuses) = make_router_test_agent(None).await;
+            let message =
+                IncomingMessage::new("web", "alice", "token").with_thread(thread.id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread.id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: "secret-token".into(),
+                },
+            )
+            .await
+            .expect("resolve gate");
+
+            assert!(matches!(result, BridgeOutcome::Pending));
+
+            let statuses = statuses.lock().await.clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::AuthRequired { extension_name, .. }
+                        if extension_name.as_str() == channel_name
+                )),
+                "expected AuthRequired with extension-manager-resolved name, got: {statuses:?}"
+            );
+
+            let pending_gates = lock
+                .read()
+                .await
+                .as_ref()
+                .expect("engine state")
+                .pending_gates
+                .list_for_user("alice")
+                .await;
+            assert_eq!(pending_gates.len(), 1, "expected auth gate to be requeued");
+            let requeued = &pending_gates[0];
+            assert!(matches!(
+                &requeued.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url: None,
+                } if credential_name.as_str() == "test_channel_token"
+                    && instructions.contains("Configuration saved for 'test_channel'.")
+            ));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router extension-manager auth resume test");
+    }
+
+    /// Degenerate case: no auth manager, no extension manager, no secrets
+    /// store, and no `resume_output` staged. The submit helper returns
+    /// `SkippedNoBackend`, the waiting thread must transition to Failed
+    /// with an explicit reason, and the user must get a `BridgeOutcome::Respond`
+    /// carrying the same error — so a misconfigured deploy fails loudly
+    /// instead of silently dropping the user's credential.
+    #[tokio::test]
+    async fn resolve_gate_fails_waiting_thread_when_no_auth_backend_and_no_resume_output() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+
+            let mut thread = ironclaw_engine::Thread::new(
+                "goal",
+                ironclaw_engine::ThreadType::Foreground,
+                ironclaw_engine::ProjectId::new(),
+                "alice",
+                ironclaw_engine::ThreadConfig::default(),
+            );
+            thread.state = ironclaw_engine::ThreadState::Waiting;
+            store
+                .save_thread(&thread)
+                .await
+                .expect("save waiting thread");
+
+            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+            conversation.track_thread(thread.id);
+            let conversation_id = conversation.id;
+            store
+                .save_conversation(&conversation)
+                .await
+                .expect("save conversation");
+
+            let state = make_expected_test_state(store.clone());
+            state
+                .conversation_manager
+                .bootstrap_user("alice")
+                .await
+                .expect("bootstrap conversations");
+
+            let credential = ironclaw_common::CredentialName::new("github_token").unwrap();
+            let pending = PendingGate {
+                conversation_id,
+                action_name: "shell".into(),
+                parameters: serde_json::json!({"cmd": "ls"}),
+                resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: credential.clone(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+                resume_output: None,
+                ..sample_pending_gate(
+                    "alice",
+                    thread.id,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: credential,
+                        instructions: "paste token".into(),
+                        auth_url: None,
+                    },
+                )
+            };
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, statuses) = make_router_test_agent(None).await;
+            let message =
+                IncomingMessage::new("web", "alice", "token").with_thread(thread.id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread.id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: "secret-token".into(),
+                },
+            )
+            .await
+            .expect("resolve gate");
+
+            let expected =
+                "No auth manager, extension manager, or secrets store available to store credential.";
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text) if text == expected
+            ));
+
+            let statuses = statuses.lock().await.clone();
+            assert!(statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::AuthCompleted {
+                    extension_name,
+                    success: false,
+                    message,
+                } if extension_name.as_str() == "github_token" && message == expected
+            )));
+
+            let saved = store
+                .load_thread(thread.id)
+                .await
+                .expect("load thread")
+                .expect("thread exists");
+            assert_eq!(saved.state, ironclaw_engine::ThreadState::Failed);
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router no-auth-backend failure test");
+    }
+
+    /// Unit test for the extension-manager branch of
+    /// `submit_pending_auth_credential`. The caller-level regression is
+    /// `resolve_gate_uses_extension_manager_without_auth_manager_for_auth_resume`;
+    /// this helper test just pins the contract that a WASM channel's
+    /// `configure_token` produces a `Stored` outcome (not `SkippedNoBackend`)
+    /// when only the extension manager is wired up.
+    #[tokio::test]
+    async fn submit_pending_auth_credential_uses_extension_manager_without_auth_manager() {
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_extension_manager();
+        let channel_name = "test_channel";
+        write_fake_wasm_channel(&wasm_channels_dir, channel_name);
+
+        let store = Arc::new(TestStore::new());
+        let mut state = make_expected_test_state(store);
+        state.extension_manager = Some(ext_mgr);
+
+        let result = submit_pending_auth_credential(
+            &state,
+            channel_name,
+            "test_channel_token",
+            "dummy-token",
+            "test",
+        )
+        .await
+        .expect("extension manager fallback should configure token");
+
+        let PendingAuthCredentialSubmission::Stored(result) = result else {
+            panic!("expected stored configure result");
+        };
+
+        assert!(
+            result
+                .message
+                .contains("Configuration saved for 'test_channel'."),
+            "unexpected configure result: {}",
+            result.message
+        );
+    }
+
+    /// If the underlying backend returns `ValidationFailed` (e.g. the
+    /// `AuthManager` rejects an empty token before it ever reaches the
+    /// extension), `submit_pending_auth_credential` must propagate it
+    /// unchanged so `resolve_gate` can route it to
+    /// `requeue_auth_pending_gate` and re-surface the validation message
+    /// on the same auth card. Covers the `Err(ValidationFailed)` match
+    /// arm introduced alongside the new helper.
+    #[tokio::test]
+    async fn submit_pending_auth_credential_propagates_validation_failed() {
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "router-test-key-at-least-32-chars!!".to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let auth_manager = Arc::new(AuthManager::new(secrets, None, None, None));
+
+        let store = Arc::new(TestStore::new());
+        let mut state = make_expected_test_state(store);
+        state.auth_manager = Some(auth_manager);
+
+        // Empty token is rejected with `ValidationFailed` by
+        // `AuthManager::submit_auth_token` before any downstream backend
+        // is touched. The helper must bubble that error variant so the
+        // `Err(ValidationFailed)` arm in `resolve_gate` can re-queue the
+        // gate rather than hard-failing the thread.
+        let err = submit_pending_auth_credential(
+            &state,
+            "test_channel",
+            "test_channel_token",
+            "",
+            "test",
+        )
+        .await
+        .expect_err("empty token must surface as an error");
+
+        assert!(
+            matches!(err, crate::extensions::ExtensionError::ValidationFailed(_)),
+            "expected ValidationFailed, got: {err:?}"
+        );
     }
 
     /// find_most_recent_thread returns the active thread when one exists.
@@ -7599,6 +8275,7 @@ mod tests {
             db,
             secrets_store: None,
             auth_manager: None,
+            extension_manager: None,
             project_root: resolve_project_root(),
         }
     }
@@ -8121,6 +8798,204 @@ mod tests {
             completed_idx < call_idx && call_idx < gate_paused_idx,
             "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
              completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
+        );
+    }
+
+    // ── resume_lease_for_pending_gate tests ────────────────────
+    //
+    // Pins the PR #2631 review ask: when resuming a paused gate, we
+    // prefer the `paused_lease` snapshot the gate recorded. The snapshot
+    // MUST be validated (thread_id match, action coverage, not revoked,
+    // not expired) before use — a stale snapshot falling through silently
+    // would bypass revocation semantics that `find_lease_for_action`
+    // normally enforces. These tests drive the helper end-to-end to pin
+    // every branch of the decision.
+
+    fn sample_lease_for_pending(pending: &PendingGate) -> ironclaw_engine::CapabilityLease {
+        ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: pending.thread_id,
+            capability_name: "tools".into(),
+            granted_actions: ironclaw_engine::GrantedActions::Specific(vec![
+                pending.action_name.clone(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_lease_prefers_snapshot_even_when_lease_manager_empty() {
+        // Reproduces the original bug: the LeaseManager has no active
+        // lease for the paused action (lease evicted or never persisted
+        // through restart), but the pending gate carries a snapshot. The
+        // resume must use the snapshot.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let snapshot = sample_lease_for_pending(&pending);
+        let snapshot_id = snapshot.id;
+        pending.paused_lease = Some(snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        // Intentionally empty — no lease for this thread/action.
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("snapshot must be used when LeaseManager has nothing");
+        assert_eq!(lease.id, snapshot_id, "should return the snapshot lease");
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_revoked_snapshot_and_falls_back() {
+        // A revoked snapshot must NOT resume the action. Fall back to
+        // the LeaseManager; if that has a valid lease, use it.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut revoked_snapshot = sample_lease_for_pending(&pending);
+        revoked_snapshot.revoked = true;
+        revoked_snapshot.revoked_reason = Some("user revoked mid-pause".into());
+        pending.paused_lease = Some(revoked_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let live_lease = leases
+            .grant(
+                thread_id,
+                "tools",
+                ironclaw_engine::GrantedActions::Specific(vec!["shell".into()]),
+                None,
+                None,
+            )
+            .await
+            .expect("grant live lease");
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("fallback lease must be found");
+        assert_eq!(
+            lease.id, live_lease.id,
+            "revoked snapshot must be skipped and LeaseManager fallback used"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_expired_snapshot_and_falls_back() {
+        // An expired snapshot must not be accepted even if all other
+        // fields check out.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut expired_snapshot = sample_lease_for_pending(&pending);
+        expired_snapshot.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        pending.paused_lease = Some(expired_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let live_lease = leases
+            .grant(
+                thread_id,
+                "tools",
+                ironclaw_engine::GrantedActions::Specific(vec!["shell".into()]),
+                None,
+                None,
+            )
+            .await
+            .expect("grant live lease");
+
+        let lease = resume_lease_for_pending_gate(&pending, &leases)
+            .await
+            .expect("fallback lease must be found");
+        assert_eq!(lease.id, live_lease.id, "expired snapshot must be skipped");
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_snapshot_with_wrong_thread_id() {
+        // Defensive: a snapshot whose thread_id doesn't match the pending
+        // gate's thread_id must never be trusted, even if other fields
+        // look valid. Guards against pending-gate-store drift or future
+        // refactors that reuse a snapshot across threads.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut mismatched_snapshot = sample_lease_for_pending(&pending);
+        mismatched_snapshot.thread_id = ironclaw_engine::ThreadId::new(); // different thread
+        pending.paused_lease = Some(mismatched_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        // Empty — no fallback.
+        let result = resume_lease_for_pending_gate(&pending, &leases).await;
+        assert!(
+            result.is_none(),
+            "mismatched-thread snapshot must be skipped and fallback must fail cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_rejects_snapshot_missing_action_coverage() {
+        // A snapshot whose granted_actions does not cover the pending
+        // action name must not be used, even when untargeted.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let mut mismatched_snapshot = sample_lease_for_pending(&pending);
+        mismatched_snapshot.granted_actions =
+            ironclaw_engine::GrantedActions::Specific(vec!["unrelated_tool".into()]);
+        pending.paused_lease = Some(mismatched_snapshot);
+
+        let leases = ironclaw_engine::LeaseManager::new();
+        let result = resume_lease_for_pending_gate(&pending, &leases).await;
+        assert!(
+            result.is_none(),
+            "snapshot must be skipped when it doesn't grant the pending action"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_lease_returns_none_when_no_snapshot_and_no_active_lease() {
+        // Sanity: if there's nothing in either path, the helper returns
+        // None so the caller can map to a clean "no active lease" error.
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "alice",
+            thread_id,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        let leases = ironclaw_engine::LeaseManager::new();
+        assert!(
+            resume_lease_for_pending_gate(&pending, &leases)
+                .await
+                .is_none()
         );
     }
 }
