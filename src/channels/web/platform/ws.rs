@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::submission::Submission;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
 
 /// Tracks active WebSocket connections.
@@ -164,6 +164,7 @@ async fn handle_client_message(
             thread_id,
             timezone,
             images,
+            attachments,
         } => {
             let mut incoming = crate::channels::web::util::web_incoming_message(
                 "gateway",
@@ -175,10 +176,20 @@ async fn handle_client_message(
                 incoming = incoming.with_timezone(tz);
             }
 
-            // Convert uploaded images to IncomingAttachments
-            if !images.is_empty() {
-                let attachments = crate::channels::web::server::images_to_attachments(&images);
-                incoming = incoming.with_attachments(attachments);
+            // Convert uploaded files + images to IncomingAttachments.
+            let incoming_attachments =
+                match crate::channels::web::util::inline_attachments_to_incoming(
+                    &images,
+                    &attachments,
+                ) {
+                    Ok(incoming) => incoming,
+                    Err(message) => {
+                        let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+                        return;
+                    }
+                };
+            if !incoming_attachments.is_empty() {
+                incoming = incoming.with_attachments(incoming_attachments);
             }
 
             // Clone sender to avoid holding RwLock read guard across send().await
@@ -280,7 +291,7 @@ async fn handle_client_message(
                 thread_id,
             };
             if let Err((_, message)) =
-                crate::channels::web::server::handle_legacy_auth_token_submission(
+                crate::channels::web::platform::legacy_auth::handle_legacy_auth_token_submission(
                     state, user_id, req,
                 )
                 .await
@@ -298,7 +309,10 @@ async fn handle_client_message(
                 thread_id,
             };
             if let Err((_, message)) =
-                crate::channels::web::server::handle_legacy_auth_cancel(state, user_id, req).await
+                crate::channels::web::platform::legacy_auth::handle_legacy_auth_cancel(
+                    state, user_id, req,
+                )
+                .await
             {
                 let _ = direct_tx.send(WsServerMessage::Error { message }).await;
             }
@@ -363,6 +377,7 @@ mod tests {
                 thread_id: Some("t1".to_string()),
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -397,6 +412,7 @@ mod tests {
                 thread_id: None,
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -411,6 +427,40 @@ mod tests {
             }
             _ => panic!("Expected Error variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_forwards_attachments() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+
+        handle_client_message(
+            WsClientMessage::Message {
+                content: "check attachment".to_string(),
+                thread_id: None,
+                timezone: None,
+                images: Vec::new(),
+                attachments: vec![crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("notes.txt".to_string()),
+                    data_base64: "aGVsbG8=".to_string(),
+                }],
+            },
+            &state,
+            "user1",
+            &direct_tx,
+        )
+        .await;
+
+        let incoming = agent_rx.recv().await.unwrap();
+        assert_eq!(incoming.attachments.len(), 1);
+        assert_eq!(incoming.attachments[0].mime_type, "text/plain");
+        assert_eq!(
+            incoming.attachments[0].filename.as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(incoming.attachments[0].data, b"hello".to_vec());
     }
 
     #[tokio::test]
@@ -522,17 +572,26 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,

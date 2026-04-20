@@ -1,10 +1,166 @@
 //! Shared utility functions for the web gateway.
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::{GeneratedImageInfo, ToolCallInfo, TurnInfo};
+use crate::channels::web::types::{
+    AttachmentData, GeneratedImageInfo, ImageData, ToolCallInfo, TurnInfo,
+};
+use crate::channels::{
+    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+};
 use crate::generated_images::GeneratedImageSentinel;
 
 pub use ironclaw_common::truncate_preview;
+
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
+fn normalize_attachment_filename(filename: &str) -> Option<&str> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn attachment_ext(mime: &str) -> &str {
+    crate::channels::attachment_extension_for_mime(mime)
+}
+
+/// Convert web gateway `AttachmentData` (generic file upload) to
+/// `IncomingAttachment` objects. Unlike `images_to_attachments`, this path is
+/// strict: a malformed base64 payload is surfaced as an error to the caller so
+/// the client gets a concrete rejection instead of a silent drop.
+pub(crate) fn web_attachments_to_incoming(
+    attachments: &[AttachmentData],
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
+    use base64::Engine;
+    attachments
+        .iter()
+        .enumerate()
+        .map(|(i, attachment)| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&attachment.data_base64)
+                .map_err(|e| format!("Invalid attachment {i}: base64 decode failed: {e}"))?;
+            let filename = attachment
+                .filename
+                .as_deref()
+                .and_then(normalize_attachment_filename)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    format!("attachment-{i}.{}", attachment_ext(&attachment.mime_type))
+                });
+            Ok(crate::channels::IncomingAttachment {
+                id: format!("web-attachment-{i}"),
+                kind: crate::channels::AttachmentKind::from_mime_type(&attachment.mime_type),
+                mime_type: attachment.mime_type.clone(),
+                filename: Some(filename),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+fn validate_inline_attachment_budget(
+    attachments: &[crate::channels::IncomingAttachment],
+) -> Result<(), String> {
+    if attachments.len() > MAX_INLINE_ATTACHMENTS {
+        return Err(format!(
+            "Too many attachments: maximum {} files per message",
+            MAX_INLINE_ATTACHMENTS
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    for attachment in attachments {
+        let size = attachment.data.len();
+        if size > MAX_INLINE_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Attachment '{}' exceeds the {} byte per-file limit",
+                attachment.filename.as_deref().unwrap_or("attachment"),
+                MAX_INLINE_ATTACHMENT_BYTES
+            ));
+        }
+        total_bytes += size;
+    }
+
+    if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Total attachment size exceeds the {} byte per-message limit",
+            MAX_INLINE_TOTAL_ATTACHMENT_BYTES
+        ));
+    }
+
+    Ok(())
+}
+
+/// Combine uploaded images and generic attachments into one batch, validating
+/// the inline budget before returning. Used by both `features/chat::send` and
+/// `platform/ws` so the HTTP and WebSocket paths enforce identical limits.
+pub(crate) fn inline_attachments_to_incoming(
+    images: &[ImageData],
+    attachments: &[AttachmentData],
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
+    let mut incoming = web_attachments_to_incoming(attachments)?;
+    if !images.is_empty() {
+        incoming.extend(images_to_attachments(images));
+    }
+    validate_inline_attachment_budget(&incoming)?;
+    Ok(incoming)
+}
 
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;

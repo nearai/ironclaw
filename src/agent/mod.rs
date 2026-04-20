@@ -34,6 +34,7 @@ pub mod undo;
 
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
+pub(crate) use attachments::augment_with_attachments;
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub(crate) use dispatcher::strip_suggestions;

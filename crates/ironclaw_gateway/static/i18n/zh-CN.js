@@ -121,6 +121,7 @@ I18n.register('zh-CN', {
   'chat.conversations': '对话列表',
   'chat.send': '发送',
   'chat.attachImages': '附加图片',
+  'chat.attachFiles': '附加文件',
   'chat.scrollToBottom': '滚动到底部',
   'chat.empty': '选择文件查看内容',
   'chat.loading': '加载中...',
@@ -701,6 +702,9 @@ I18n.register('zh-CN', {
   'chat.rateLimited': '速率受限，请稍候。',
   'chat.imageTooBig': '图片 "{name}" 超过 5 MB 限制（{size} MB）',
   'chat.maxImages': '每条消息最多允许 {n} 张图片',
+  'chat.fileTooBig': '文件 "{name}" 超过 5 MB 限制（{size} MB）',
+  'chat.maxAttachments': '每条消息最多允许 {n} 个附件',
+  'chat.totalAttachmentsTooBig': '附件总大小超过 {size} MB 限制',
   'chat.readOnlyThread': '只读线程（外部渠道）',
   'chat.threadCreateFailed': '创建线程失败：{message}',
 

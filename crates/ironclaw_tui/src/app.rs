@@ -1145,10 +1145,10 @@ async fn handle_event(
         }
 
         TuiEvent::JobResult { job_id, status } => {
-            let new_status = if status == "failed" {
-                JobStatus::Failed
-            } else {
+            let new_status = if status.is_success() {
                 JobStatus::Completed
+            } else {
+                JobStatus::Failed
             };
             if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                 job.status = new_status;

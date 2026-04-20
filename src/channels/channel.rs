@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use ironclaw_common::{ExtensionName, JobResultStatus};
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -52,6 +53,8 @@ pub struct IncomingAttachment {
     pub source_url: Option<String>,
     /// Opaque key for host-side storage (e.g., after download/caching).
     pub storage_key: Option<String>,
+    /// Relative path to a project-local copy saved on disk, if persisted.
+    pub local_path: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
     /// Raw file bytes (for small files downloaded by the channel).
@@ -377,7 +380,7 @@ pub enum StatusUpdate {
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
@@ -385,7 +388,7 @@ pub enum StatusUpdate {
     },
     /// Extension authentication completed.
     AuthCompleted {
-        extension_name: String,
+        extension_name: ExtensionName,
         success: bool,
         message: String,
     },
@@ -401,7 +404,10 @@ pub enum StatusUpdate {
     /// A sandbox job's status changed.
     JobStatus { job_id: String, status: String },
     /// A sandbox job completed with final result.
-    JobResult { job_id: String, status: String },
+    JobResult {
+        job_id: String,
+        status: JobResultStatus,
+    },
     /// A routine was created, updated, or deleted.
     RoutineUpdate {
         id: String,
@@ -449,7 +455,17 @@ pub enum StatusUpdate {
         cost_usd: String,
     },
     /// Skills activated for this conversation turn.
-    SkillActivated { skill_names: Vec<String> },
+    ///
+    /// `feedback` carries optional human-readable notes about the
+    /// activation — e.g. "chain-loaded from code-review", "ceo-setup
+    /// excluded by setup marker", "budget exhausted". Empty when the
+    /// activation path has nothing to annotate. The UI should render
+    /// each line as a muted sub-bullet under the skill list; channels
+    /// that ignore it should just drop the field.
+    SkillActivated {
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
     /// Thread list for interactive resume picker.
     ThreadList { threads: Vec<ThreadSummary> },
     /// Engine v2 thread list for TUI activity sidebar.

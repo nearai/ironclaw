@@ -17,7 +17,7 @@ use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::recording::HttpInterceptor;
-use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
+use crate::llm::{LlmProvider, LlmReloadHandle, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
@@ -37,6 +37,10 @@ pub struct AppComponents {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
+    /// Hot-reload controller for the LLM provider chain. `None` when the
+    /// LLM was injected via `AppBuilder::with_llm` (test harnesses) so the
+    /// chain was not built from config in the first place.
+    pub llm_reload: Option<Arc<LlmReloadHandle>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
@@ -274,6 +278,36 @@ impl AppBuilder {
         let handles = self.handles.as_ref().unwrap_or(&empty_handles);
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
+        // Safety gate: if we auto-generated a fresh master key this run
+        // but the secrets table already carries rows from a prior key,
+        // those rows are undecryptable and silently continuing would
+        // shadow unrecoverable data. Fail loudly (and fail-closed on
+        // probe error) so the user can restore the original key before
+        // any new writes pile on top.
+        //
+        // Roll back the persistence `auto_generate_and_persist` already
+        // committed: otherwise a subsequent restart would read the
+        // newly-written key as `source = Env/Keychain, generated =
+        // false`, skip this gate, and silently accept the wrong key.
+        // Rollback keeps the gate re-firing on every start until the
+        // user restores the real key or clears the stale rows.
+        if let Some(ref secrets) = store
+            && let Err(gate_err) = crate::secrets::verify_generated_key_safe(
+                self.config.secrets.generated,
+                secrets.as_ref(),
+            )
+            .await
+        {
+            if self.config.secrets.generated {
+                crate::secrets::rollback_generated_key_persistence(
+                    self.config.secrets.source,
+                    &crate::bootstrap::ironclaw_env_path(),
+                )
+                .await;
+            }
+            return Err(gate_err.into());
+        }
+
         if let Some(ref secrets) = store {
             // Migrate any plaintext API keys from the settings table to the
             // encrypted secrets store. Idempotent — safe to run on every startup.
@@ -337,12 +371,13 @@ impl AppBuilder {
             Arc<dyn LlmProvider>,
             Option<Arc<dyn LlmProvider>>,
             Option<Arc<RecordingLlm>>,
+            Arc<LlmReloadHandle>,
         ),
         anyhow::Error,
     > {
-        let (llm, cheap_llm, recording_handle) =
+        let (llm, cheap_llm, recording_handle, reload_handle) =
             crate::llm::build_provider_chain(&self.config.llm, self.session.clone()).await?;
-        Ok((llm, cheap_llm, recording_handle))
+        Ok((llm, cheap_llm, recording_handle, reload_handle))
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
@@ -938,11 +973,13 @@ impl AppBuilder {
             );
         }
 
-        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
-            (llm, None, None)
-        } else {
-            self.init_llm().await?
-        };
+        let (llm, cheap_llm, recording_handle, llm_reload) =
+            if let Some(llm) = self.llm_override.take() {
+                (llm, None, None, None)
+            } else {
+                let (llm, cheap, recording, reload) = self.init_llm().await?;
+                (llm, cheap, recording, Some(reload))
+            };
         let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
             self.init_tools(&llm).await?;
 
@@ -1109,6 +1146,7 @@ impl AppBuilder {
             secrets_store: self.secrets_store,
             llm,
             cheap_llm,
+            llm_reload,
             safety,
             tools,
             embeddings,

@@ -31,8 +31,10 @@ use axum::{
 use sha2::{Digest, Sha256};
 
 use crate::channels::relay::DEFAULT_RELAY_NAME;
+use crate::channels::web::platform::legacy_auth::{
+    clear_auth_mode, clear_session_auth_mode_for_thread,
+};
 use crate::channels::web::platform::state::{GatewayState, rate_limit_key_from_headers};
-use crate::channels::web::server::clear_auth_mode;
 use crate::channels::web::types::AppEvent;
 use crate::channels::web::util::web_incoming_message;
 use crate::extensions::naming::extension_name_candidates;
@@ -61,7 +63,7 @@ fn oauth_error_page(label: &str) -> axum::response::Response {
 fn redact_oauth_state_for_logs(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     let mut short_hash = String::with_capacity(12);
-    for byte in &digest[..6] {
+    for byte in digest.iter().take(6) {
         use std::fmt::Write as _;
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
@@ -311,9 +313,17 @@ pub(crate) async fn oauth_callback_handler(
         }
     }
 
-    // Clear auth mode regardless of outcome so the next user message goes
-    // through to the LLM instead of being intercepted as a token.
-    clear_auth_mode(&state, &flow.user_id).await;
+    // Clear legacy session auth mode regardless of outcome so the next
+    // user message goes through to the LLM instead of being intercepted
+    // as a token.
+    //
+    // Do NOT clear the engine pending-auth gate here: the successful
+    // callback path still needs the pending gate so it can resolve and
+    // replay the paused action (preserving the paused_lease), and failed
+    // callbacks should leave the gate visible for retry from the UI.
+    // The gate is cleared by the engine itself when `ExternalCallback`
+    // resolves (success) or when the user explicitly cancels (failure).
+    let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
 
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.
@@ -322,7 +332,7 @@ pub(crate) async fn oauth_callback_handler(
     let final_message = if success && flow.auto_activate_extension {
         match ext_mgr
             .ensure_extension_ready(
-                &flow.extension_name,
+                flow.extension_name.as_str(),
                 &flow.user_id,
                 crate::extensions::EnsureReadyIntent::ExplicitActivate,
             )
@@ -737,7 +747,7 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
 
     // Broadcast event to notify the web UI.
     state.sse.broadcast(AppEvent::OnboardingState {
-        extension_name: relay_extension_name.clone(),
+        extension_name: ironclaw_common::ExtensionName::from_trusted(relay_extension_name.clone()),
         state: if success {
             crate::channels::web::types::OnboardingStateDto::Ready
         } else {
