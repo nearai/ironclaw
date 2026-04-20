@@ -495,9 +495,13 @@ Revoke one of the authenticated user's tokens. Users can only revoke their own t
 
 Routes through the full agent loop — tools, memory, safety, and server-side conversation state are all active. Compatible with any standard OpenAI SDK via `client.responses.create()`.
 
+**Path prefix:** The canonical path is `/api/v1/responses`, matching the rest of IronClaw's HTTP surface. The older `/v1/responses` path is retained as an alias for backward compatibility with clients that were already configured against it (see [ironclaw#2201](https://github.com/nearai/ironclaw/issues/2201)). Both paths accept identical request bodies and return identical responses; new integrations should target `/api/v1/responses`.
+
 **Auth:** Any authenticated user (`Authorization: Bearer <token>`)
 
-### POST /v1/responses
+### POST /api/v1/responses
+
+Alias: `POST /v1/responses` (legacy; kept for backward compatibility).
 
 Create a response.
 
@@ -608,7 +612,9 @@ The `context` payload is persisted in message metadata for auditability.
 
 ---
 
-### GET /v1/responses/{id}
+### GET /api/v1/responses/{id}
+
+Alias: `GET /v1/responses/{id}` (legacy; kept for backward compatibility).
 
 Retrieve a historical response reconstructed from conversation messages in the database. Users can only retrieve their own responses.
 
