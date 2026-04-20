@@ -12,12 +12,14 @@
 #   5. Multi-step DB operations without transaction wrapping
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
+#   8. CredentialName referenced in web-layer code (wrong identity at boundary)
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 # For check #7, use "// dispatch-exempt: <reason>" instead.
+# For check #8, use "// web-identity-exempt: <reason>" instead.
 
 set -euo pipefail
 
@@ -52,11 +54,11 @@ resolve_base_ref() {
 if git diff --cached --quiet 2>/dev/null; then
     HAS_STAGED_CHANGES=0
     I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
 else
     HAS_STAGED_CHANGES=1
     I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
 fi
 if [ -n "$I18N_CHANGED" ]; then
     # Resolve script location even when invoked via a symlink (the
@@ -82,28 +84,43 @@ if [ -n "$I18N_CHANGED" ]; then
     fi
 fi
 
-# Gateway frontend JS must parse cleanly; a syntax error leaves the auth shell
-# visible and prevents the app bootstrap from running at all.
+# Gateway frontend JS must parse cleanly; a syntax error in any split
+# module leaves the auth shell visible and prevents bootstrap from running.
+# The monolithic `app.js` was split into per-surface/per-concern modules
+# under `static/js/` that are concatenated at compile time into a single
+# `APP_JS` constant (see `crates/ironclaw_gateway/src/assets.rs`). Cuts
+# land on top-level symbol boundaries, so each file is self-parseable —
+# a per-file `node --check` is sufficient.
 if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
     if ! command -v node >/dev/null 2>&1; then
         echo ""
-        echo "Commit blocked: Node.js is required to validate gateway app.js syntax."
+        echo "Commit blocked: Node.js is required to validate gateway JS syntax."
         echo "Install Node.js and rerun the commit, or bypass with git commit --no-verify"
         exit 1
     fi
 
-    GATEWAY_APP_JS_TMP=$(mktemp "${TMPDIR:-/tmp}/gateway-app-js.XXXXXX.js")
-    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_APP_JS_TMP:-}"' EXIT
-    if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
-        git show ":crates/ironclaw_gateway/static/app.js" > "$GATEWAY_APP_JS_TMP"
-    else
-        cp crates/ironclaw_gateway/static/app.js "$GATEWAY_APP_JS_TMP"
-    fi
+    GATEWAY_JS_TMP=$(mktemp "${TMPDIR:-/tmp}/gateway-js.XXXXXX.js")
+    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_JS_TMP:-}"' EXIT
+    FAILED=0
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        # Only validate files still present (skip deletes).
+        if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+            git show ":$f" > "$GATEWAY_JS_TMP" 2>/dev/null || continue
+        else
+            [ -f "$f" ] || continue
+            cp "$f" "$GATEWAY_JS_TMP"
+        fi
+        if ! node --check "$GATEWAY_JS_TMP" >/dev/null 2>&1; then
+            echo "  ✗ syntax error: $f"
+            FAILED=1
+        fi
+    done <<<"$GATEWAY_APP_JS_CHANGED"
 
-    if ! node --check "$GATEWAY_APP_JS_TMP" >/dev/null; then
+    if [ "$FAILED" -eq 1 ]; then
         echo ""
-        echo "Commit blocked: gateway app.js failed syntax validation."
-        echo "Fix the parse error in crates/ironclaw_gateway/static/app.js or bypass with git commit --no-verify"
+        echo "Commit blocked: one or more gateway JS modules failed syntax validation."
+        echo "Fix the parse error(s) above or bypass with git commit --no-verify"
         exit 1
     fi
 fi
@@ -333,10 +350,41 @@ if [ -n "$DISPATCH_DIFF" ]; then
     fi
 fi
 
+# 8. CredentialName referenced in web-layer code.
+#    CredentialName is a backend/secrets-store identity. Web routes and
+#    web DTOs take ExtensionName; the dispatcher and auth_manager resolve
+#    credential identity from the extension name server-side. An explicit
+#    `CredentialName` reference in src/channels/web/** (except inside
+#    `#[cfg(test)] mod tests` blocks) means the wrong identity is reaching
+#    the web boundary. See src/channels/web/CLAUDE.md "Identity types at
+#    the web boundary" and .claude/rules/types.md.
+#
+#    Suppress with "// web-identity-exempt: <reason>" when the reference
+#    is genuinely reading an already-typed value off a backend struct
+#    (e.g., destructuring `ResumeKind::Authentication` to log the name).
+WEB_IDENTITY_DIFF=$(git diff --cached -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
+if [ -z "$WEB_IDENTITY_DIFF" ]; then
+    WEB_IDENTITY_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
+fi
+if [ -n "$WEB_IDENTITY_DIFF" ]; then
+    # Strip lines inside `#[cfg(test)] mod tests` blocks using the same
+    # precomputed boundaries used for other prod-only checks.
+    WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
+    WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
+        | grep -E '\bCredentialName\b' \
+        | grep -vE '// web-identity-exempt:|// safety:|^\+\+\+' \
+        | head -5 || true)
+    if [ -n "$WEB_IDENTITY_HITS" ]; then
+        warn "CREDNAME" "\`CredentialName\` referenced in src/channels/web/** — web code takes \`ExtensionName\`; credential identity stays backend-side. Push the mapping into bridge::auth_manager or annotate with '// web-identity-exempt: <reason>'."
+        echo "$WEB_IDENTITY_HITS" | sed 's/^/    /'
+    fi
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
+    echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
     echo ""
     exit 1
 fi

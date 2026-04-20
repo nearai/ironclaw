@@ -17,6 +17,8 @@
 //! See `src/channels/web/CLAUDE.md` for the staged migration plan.
 
 pub mod auth;
+pub mod engine_dispatch;
+pub mod legacy_auth;
 pub mod router;
 pub mod sse;
 pub mod state;

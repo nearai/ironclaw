@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
-use ironclaw_common::truncate_preview;
+use ironclaw_common::{ExtensionName, truncate_preview};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +172,7 @@ const AUTH_MODE_TTL: TimeDelta = TimeDelta::seconds(AUTH_MODE_TTL_SECS);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingAuth {
     /// Extension name to authenticate.
-    pub extension_name: String,
+    pub extension_name: ExtensionName,
     /// When this auth mode was entered. Used for TTL expiry.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -188,13 +188,22 @@ impl PendingAuth {
 /// Auth prompt captured during a tool turn and persisted if that turn pauses
 /// for approval before the prompt can be surfaced to the user.
 ///
-/// Callers should use [`PendingAuthPrompt::new()`] which trims and validates
-/// that `extension_name` is non-empty. Fields are `pub(crate)` so external
-/// callers cannot bypass the constructor; serde still round-trips them.
+/// Fields are `pub(crate)` so external callers cannot bypass the constructor;
+/// serde still round-trips them. Use [`PendingAuthPrompt::new`] to construct
+/// from an already-typed [`ExtensionName`]. The non-empty / canonical-form
+/// invariant for `extension_name` is carried by the [`ExtensionName`] type
+/// itself — validated at its own construction sites (`ExtensionName::new` /
+/// `TryFrom`). Deserialization uses `#[serde(transparent)]`, which does not
+/// re-validate; callers that rehydrate prompts from persistence (e.g.
+/// `restore_selected_auth_prompt` in `dispatcher.rs`) re-run
+/// `ExtensionName::new` so legacy invalid rows drop the prompt rather than
+/// propagating.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuthPrompt {
-    /// Extension name to authenticate (must be non-empty, trimmed).
-    pub(crate) extension_name: String,
+    /// Installed extension identity for this auth prompt. Canonical at every
+    /// validated construction site; rehydration from persistence re-checks
+    /// via `ExtensionName::new` before the prompt is used.
+    pub(crate) extension_name: ExtensionName,
     /// Optional instructions shown alongside the auth prompt.
     #[serde(default)]
     pub(crate) instructions: Option<String>,
@@ -210,26 +219,23 @@ pub struct PendingAuthPrompt {
 }
 
 impl PendingAuthPrompt {
-    /// Create a new `PendingAuthPrompt`. Trims `extension_name` and returns
-    /// `None` if the trimmed value is empty.
+    /// Create a new `PendingAuthPrompt` from an already-validated
+    /// [`ExtensionName`]. Infallible — the identity type carries the
+    /// non-empty invariant that this constructor used to check.
     pub(crate) fn new(
-        extension_name: String,
+        extension_name: ExtensionName,
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
         awaiting_token: bool,
-    ) -> Option<Self> {
-        let extension_name = extension_name.trim().to_owned();
-        if extension_name.is_empty() {
-            return None;
-        }
-        Some(Self {
+    ) -> Self {
+        Self {
             extension_name,
             instructions,
             auth_url,
             setup_url,
             awaiting_token,
-        })
+        }
     }
 }
 
@@ -471,7 +477,7 @@ impl Thread {
 
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
-    pub fn enter_auth_mode(&mut self, extension_name: String) {
+    pub fn enter_auth_mode(&mut self, extension_name: ExtensionName) {
         self.pending_auth = Some(PendingAuth {
             extension_name,
             created_at: Utc::now(),
@@ -993,10 +999,10 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
         assert!(thread.pending_auth.is_none());
 
-        thread.enter_auth_mode("telegram".to_string());
+        thread.enter_auth_mode(ExtensionName::new("telegram").unwrap());
         assert!(thread.pending_auth.is_some());
         let pending = thread.pending_auth.as_ref().unwrap();
-        assert_eq!(pending.extension_name, "telegram");
+        assert_eq!(pending.extension_name.as_str(), "telegram");
         assert!(pending.created_at >= before);
         assert!(!pending.is_expired());
     }
@@ -1004,12 +1010,12 @@ mod tests {
     #[test]
     fn test_take_pending_auth() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
-        thread.enter_auth_mode("notion".to_string());
+        thread.enter_auth_mode(ExtensionName::new("notion").unwrap());
 
         let pending = thread.take_pending_auth();
         assert!(pending.is_some());
         let pending = pending.unwrap();
-        assert_eq!(pending.extension_name, "notion");
+        assert_eq!(pending.extension_name.as_str(), "notion");
         assert!(!pending.is_expired());
         // Should be cleared after take
         assert!(thread.pending_auth.is_none());
@@ -1019,7 +1025,7 @@ mod tests {
     #[test]
     fn test_pending_auth_serialization() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
-        thread.enter_auth_mode("openai".to_string());
+        thread.enter_auth_mode(ExtensionName::new("openai").unwrap());
 
         let json = serde_json::to_string(&thread).expect("should serialize");
         assert!(json.contains("pending_auth"));
@@ -1029,14 +1035,14 @@ mod tests {
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_some());
         let pending = restored.pending_auth.unwrap();
-        assert_eq!(pending.extension_name, "openai");
+        assert_eq!(pending.extension_name.as_str(), "openai");
         assert!(!pending.is_expired());
     }
 
     #[test]
     fn test_pending_auth_expiry() {
         let mut pending = PendingAuth {
-            extension_name: "test".to_string(),
+            extension_name: ExtensionName::new("test").unwrap(),
             created_at: Utc::now(),
         };
         assert!(!pending.is_expired());
