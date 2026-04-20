@@ -1716,8 +1716,16 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     } else {
         crate::settings::Settings::load()
     };
-    let missions_config =
-        crate::config::MissionsConfig::resolve(&missions_settings).unwrap_or_default();
+    let missions_config = match crate::config::MissionsConfig::resolve(&missions_settings) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "MissionsConfig::resolve failed; falling back to defaults"
+            );
+            crate::config::MissionsConfig::default()
+        }
+    };
     mission_manager_inner =
         mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);

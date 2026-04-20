@@ -563,6 +563,8 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "test".into(),
             }],
             messages: vec![
@@ -610,6 +612,8 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "test".into(),
             }],
             messages: vec![
@@ -693,6 +697,8 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "test".into(),
             }],
             messages: vec![

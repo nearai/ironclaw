@@ -346,7 +346,19 @@ impl Tool for MemorySearchTool {
 
                 match tokio::time::timeout(REASONING_LLM_TIMEOUT, llm.complete(request)).await {
                     Ok(Ok(response)) => {
-                        let synthesis = response.content.trim().to_string();
+                        // Memory chunks may contain attacker-controlled text that
+                        // flows through the synthesis and back into future LLM
+                        // contexts. Match SessionSummaryHook's sanitization.
+                        let sanitizer = ironclaw_safety::Sanitizer::new();
+                        let sanitized = sanitizer.sanitize(response.content.trim());
+                        if sanitized.was_modified {
+                            tracing::debug!(
+                                user_id = %ctx.user_id,
+                                warnings = sanitized.warnings.len(),
+                                "Reasoning synthesis contained suspicious patterns; content was sanitized"
+                            );
+                        }
+                        let synthesis = sanitized.content;
                         let output = serde_json::json!({
                             "query": query,
                             "synthesis": synthesis,
@@ -1843,6 +1855,17 @@ mod tests {
         #[tokio::test]
         async fn reasoning_enabled_fires_llm_and_returns_synthesis() {
             let ws = make_workspace_with_doc("alice").await;
+
+            // Sanity check: FTS must return the seeded doc, otherwise the
+            // synthesis branch below would be unreachable and the test
+            // assertions would silently never run.
+            let preflight = ws.search("Rust backend", 5).await.expect("search");
+            assert!(
+                !preflight.is_empty(),
+                "FTS preflight returned no results — seed data is not indexed; \
+                 the synthesis branch would never execute"
+            );
+
             let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
             let llm = Arc::new(CountingMockLlm::new("Synthesized: use Rust"));
             let tool = MemorySearchTool::with_reasoning(
@@ -1853,20 +1876,28 @@ mod tests {
 
             let ctx = JobContext::with_user("alice", "test", "test");
             let params = serde_json::json!({"query": "Rust backend"});
-            let result = tool.execute(params, &ctx).await;
+            let output = tool
+                .execute(params, &ctx)
+                .await
+                .expect("execute should succeed");
 
-            // Search may return empty (no embeddings in unit test), so the LLM
-            // may or may not be called. We verify the tool doesn't panic and
-            // returns valid output either way.
-            assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
-            let output = result.unwrap();
+            assert_eq!(
+                llm.calls(),
+                1,
+                "synthesis branch must call the LLM exactly once"
+            );
 
-            if llm.calls() > 0 {
-                // LLM was called => output should have synthesis
-                let json = &output.result;
-                assert!(json.get("synthesis").is_some());
-                assert_eq!(json["reasoning_used"], true);
-            }
+            let json = &output.result;
+            assert_eq!(json["reasoning_used"], true);
+            assert_eq!(
+                json["synthesis"].as_str(),
+                Some("Synthesized: use Rust"),
+                "synthesis must be the (sanitized) LLM response"
+            );
+            assert!(
+                json.get("results").and_then(|r| r.as_array()).is_some(),
+                "raw results must still be returned alongside synthesis"
+            );
         }
 
         #[tokio::test]
