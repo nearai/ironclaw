@@ -662,19 +662,30 @@ async fn handle_llm_complete(
                 LlmResponse::Text(text) => {
                     serde_json::json!({"type": "text", "content": text, "usage": usage})
                 }
-                LlmResponse::Code { code, .. } => {
-                    serde_json::json!({"type": "code", "code": code, "usage": usage})
-                }
-                LlmResponse::ActionCalls { calls, content } => {
-                    // Single source of truth for the Python interchange
-                    // shape — must round-trip via `python_json_to_action_calls`.
-                    let calls_json = action_calls_to_python_json(&calls);
+                LlmResponse::Code { code, content } => {
+                    // Pass `content` through so the orchestrator can use the
+                    // model's original prose as the assistant transcript
+                    // entry instead of reconstructing a synthetic fence.
                     serde_json::json!({
-                        "type": "actions",
+                        "type": "code",
+                        "code": code,
                         "content": content,
-                        "calls": calls_json,
-                        "usage": usage
+                        "usage": usage,
                     })
+                }
+                LlmResponse::ActionCalls { .. } => {
+                    // Code-only contract: the LlmBridgeAdapter must never emit
+                    // ActionCalls. Surface the contract violation so traces
+                    // show where the offending adapter lives instead of
+                    // silently losing the response.
+                    return ExtFunctionResult::Error(monty::MontyException::new(
+                        monty::ExcType::RuntimeError,
+                        Some(
+                            "LlmBackend returned ActionCalls under the code-only \
+                             contract — check the bridge adapter or test mock."
+                                .into(),
+                        ),
+                    ));
                 }
             };
 
@@ -2608,11 +2619,10 @@ mod tests {
     // ── Python helper unit tests via Monty ──────────────────────
     //
     // Extracts the helper functions from the default orchestrator and
-    // evaluates `signals_tool_intent(text)` directly, mirroring the V1
-    // Rust unit test suite in src/llm/reasoning.rs.
+    // evaluates small Python expressions against them, for unit-testing
+    // the self-modifiable helpers (e.g. skill normalization, regex host
+    // dispatch) without spinning up a full thread.
 
-    /// Run a Python expression that returns a bool by prepending the
-    /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
     /// Run a Python snippet and drive the Monty VM, returning the FINAL()
     /// value as a `MontyObject`. This is the common core for `eval_python_bool`
     /// and `eval_python_int`.
@@ -2706,156 +2716,6 @@ mod tests {
         // Invalid pattern should return false silently (the host function
         // swallows the compile error).
         assert!(!eval_python_bool(r#"bool(__regex_match__("[", "abc"))"#));
-    }
-
-    // ── True positives (should trigger nudge) ───────────────────
-
-    #[test]
-    fn signals_tool_intent_true_positives() {
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("Let me search for that file.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I'll fetch the data now.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I'm going to check the logs.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("Let me add it now.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I will run the tests to verify.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I'll look up the documentation.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("Let me read the file contents.")"#
-        ));
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I'm going to execute the command.")"#
-        ));
-    }
-
-    // ── True negatives: conversational phrases ──────────────────
-
-    #[test]
-    fn signals_tool_intent_true_negatives_conversational() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me explain how this works.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me know if you need anything.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me think about this.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me summarize the findings.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me clarify what I mean.")"#
-        ));
-    }
-
-    // ── Exclusion takes precedence ──────────────────────────────
-
-    #[test]
-    fn signals_tool_intent_exclusion_takes_precedence() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Let me explain the approach, then I'll search for the file.")"#
-        ));
-    }
-
-    // ── Code blocks are stripped ────────────────────────────────
-
-    #[test]
-    fn signals_tool_intent_ignores_code_blocks() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Here's the code:\n\n```\nfn main() {\n    println!(\"Let me search the database\");\n}\n```")"#
-        ));
-    }
-
-    #[test]
-    fn signals_tool_intent_ignores_indented_code() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Here's the code:\n\n    println!(\"I'll fetch the data\");\n\nThat's it.")"#
-        ));
-    }
-
-    // ── Plain informational text ────────────────────────────────
-
-    #[test]
-    fn signals_tool_intent_ignores_plain_text() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("The task is complete.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Here are the results you asked for.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("I found 3 matching files.")"#
-        ));
-    }
-
-    // ── Quoted strings are stripped ─────────────────────────────
-
-    #[test]
-    fn signals_tool_intent_ignores_quoted_strings() {
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("The button says \"Let me search the database\" to the user.")"#
-        ));
-        // But unquoted intent should still trigger
-        assert!(eval_python_bool(
-            r#"signals_tool_intent("I'll fetch the results for you.")"#
-        ));
-    }
-
-    // ── Shadowed prefix (exclusion cancels all) ─────────────────
-
-    #[test]
-    fn signals_tool_intent_shadowed_prefix() {
-        // "let me think" is an exclusion → entire text returns false
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Sure, let me think about it. Actually, let me search for the file.")"#
-        ));
-    }
-
-    // ── Regression: trace false positive (news content) ─────────
-
-    #[test]
-    fn signals_tool_intent_no_false_positive_news_content() {
-        // "I can" + "call" in news content triggered false positive in old code
-        let news_response = concat!(
-            "The latest headlines suggest this is a fast-moving war.\n",
-            "- Reuters: Iran is calling US peace proposals unrealistic.\n",
-            "If you want, I can do one of these next:\n",
-            "1. give you a 5-bullet update\n",
-            "2. focus just on military developments",
-        );
-        assert!(!eval_python_bool(&format!(
-            "signals_tool_intent({news_response:?})"
-        )));
-    }
-
-    #[test]
-    fn signals_tool_intent_no_false_positive_past_tense() {
-        // "I fetched" / "I already called" should not trigger
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("I already completed the needed action call by fetching current news feeds.")"#
-        ));
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("Current status from the live feeds I fetched:")"#
-        ));
-    }
-
-    #[test]
-    fn signals_tool_intent_no_false_positive_offer() {
-        // "If you want, I can fetch..." uses "I can" which is not a V1 prefix
-        assert!(!eval_python_bool(
-            r#"signals_tool_intent("If you want, I can next fetch a cleaner update.")"#
-        ));
     }
 
     // ── Skill activation: smart-quote / autocorrect resilience ───

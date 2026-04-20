@@ -1,4 +1,10 @@
 //! LLM bridge adapter — wraps `LlmProvider` as `ironclaw_engine::LlmBackend`.
+//!
+//! Code-only contract: the adapter never advertises tool definitions to the
+//! provider. Actions are listed in the system prompt; the model writes Python
+//! that calls them. Responses are always returned as `LlmResponse::Code`
+//! (unless the caller forces `Text` via `LlmCallConfig::force_text` for
+//! compaction/sub-query/etc.).
 
 use std::sync::Arc;
 
@@ -9,10 +15,7 @@ use ironclaw_engine::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::llm::{
-    ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
-    sanitize_tool_messages,
-};
+use crate::llm::{ChatMessage, LlmProvider, Role, ToolCall, sanitize_tool_messages};
 
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
@@ -38,14 +41,9 @@ fn cost_usd_from(
 ) -> f64 {
     let (input_rate, output_rate) = provider.cost_per_token();
 
-    // `input_tokens` is the provider-reported total. Cache tokens are
-    // already counted inside that total, so the uncached remainder is
-    // what's left after subtracting both buckets.
     let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
     let uncached_input = input_tokens.saturating_sub(cached_total);
 
-    // Guard against providers reporting a zero discount — treat zero as
-    // "no discount" rather than attempting a div-by-zero.
     let discount = provider.cache_read_discount();
     let effective_discount = if discount.is_zero() {
         Decimal::ONE
@@ -96,129 +94,47 @@ impl LlmBackend for LlmBridgeAdapter {
     async fn complete(
         &self,
         messages: &[ThreadMessage],
-        actions: &[ActionDef],
+        _actions: &[ActionDef],
         config: &LlmCallConfig,
     ) -> Result<LlmOutput, EngineError> {
         let provider = self.provider_for_depth(config.depth);
 
-        // Convert messages
         let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
         sanitize_tool_messages(&mut chat_messages);
 
-        // Convert actions to tool definitions
-        let tools: Vec<ToolDefinition> = if config.force_text {
-            vec![] // No tools when forcing text
-        } else {
-            actions.iter().map(action_def_to_tool_def).collect()
-        };
-
-        // Build request — match the existing Reasoning.respond_with_tools() defaults
         let max_tokens = config.max_tokens.unwrap_or(4096);
         let temperature = config.temperature.unwrap_or(0.7);
 
-        if tools.is_empty() {
-            // No tools: use plain completion (matches existing no-tools path)
-            let mut request = crate::llm::CompletionRequest::new(chat_messages)
-                .with_max_tokens(max_tokens)
-                .with_temperature(temperature);
-            request.metadata = config.metadata.clone();
-            if let Some(ref model) = config.model {
-                request.model = Some(model.clone());
-            }
-
-            let response = provider
-                .complete(request)
-                .await
-                .map_err(|e| EngineError::Llm {
-                    reason: e.to_string(),
-                })?;
-
-            // Check for code blocks in the response (CodeAct/RLM pattern)
-            let llm_response = match extract_code_block(&response.content) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(response.content),
-                },
-                None => LlmResponse::Text(response.content),
-            };
-
-            return Ok(LlmOutput {
-                response: llm_response,
-                usage: TokenUsage {
-                    input_tokens: u64::from(response.input_tokens),
-                    output_tokens: u64::from(response.output_tokens),
-                    cache_read_tokens: u64::from(response.cache_read_input_tokens),
-                    cache_write_tokens: u64::from(response.cache_creation_input_tokens),
-                    cost_usd: cost_usd_from(
-                        provider,
-                        response.input_tokens,
-                        response.output_tokens,
-                        response.cache_read_input_tokens,
-                        response.cache_creation_input_tokens,
-                    ),
-                },
-            });
-        }
-
-        // With tools: use tool completion (matches existing tools path)
-        let mut request = ToolCompletionRequest::new(chat_messages, tools)
+        let mut request = crate::llm::CompletionRequest::new(chat_messages)
             .with_max_tokens(max_tokens)
-            .with_temperature(temperature)
-            .with_tool_choice("auto");
+            .with_temperature(temperature);
         request.metadata = config.metadata.clone();
         if let Some(ref model) = config.model {
             request.model = Some(model.clone());
         }
 
-        // Call provider
-        let response =
-            provider
-                .complete_with_tools(request)
-                .await
-                .map_err(|e| EngineError::Llm {
-                    reason: e.to_string(),
-                })?;
+        let response = provider
+            .complete(request)
+            .await
+            .map_err(|e| EngineError::Llm {
+                reason: e.to_string(),
+            })?;
 
-        // Convert response — check for code blocks (CodeAct/RLM pattern)
-        let llm_response = if !response.tool_calls.is_empty() {
-            let mut calls: Vec<ironclaw_engine::ActionCall> = response
-                .tool_calls
-                .iter()
-                .map(|tc| ironclaw_engine::ActionCall {
-                    id: tc.id.clone(),
-                    action_name: tc.name.clone(),
-                    parameters: tc.arguments.clone(),
-                })
-                .collect();
-
-            // Resolve `{{call_id.field}}` template references in tool call
-            // parameters. Some models (e.g. Qwen) emit these when making
-            // parallel tool calls that reference results from prior calls.
-            if calls.iter().any(|c| json_has_template_refs(&c.parameters)) {
-                let tool_results = build_tool_result_index(messages);
-                if !tool_results.is_empty() {
-                    for call in &mut calls {
-                        if json_has_template_refs(&call.parameters) {
-                            call.parameters =
-                                resolve_template_refs_in_json(&call.parameters, &tool_results);
-                        }
-                    }
-                }
-            }
-
-            LlmResponse::ActionCalls {
-                calls,
-                content: response.content.clone(),
-            }
+        // Two shapes:
+        // - force_text=true (compaction, llm_query, sub-queries) returns the
+        //   response verbatim so an incidental ```repl fence in the prose
+        //   isn't mistakenly extracted as "the answer".
+        // - Everyone else: extract a fenced code block if present, else treat
+        //   the whole trimmed response as Python. Monty surfaces SyntaxError /
+        //   NameError naturally — the LLM reads the traceback and self-corrects.
+        let llm_response = if config.force_text {
+            LlmResponse::Text(response.content)
         } else {
-            let text = response.content.unwrap_or_default();
-            // Detect ```repl or ```python fenced code blocks
-            match extract_code_block(&text) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(text),
-                },
-                None => LlmResponse::Text(text),
+            let code = extract_code_block(&response.content)
+                .unwrap_or_else(|| response.content.trim().to_string());
+            LlmResponse::Code {
+                code,
+                content: Some(response.content),
             }
         };
 
@@ -245,125 +161,6 @@ impl LlmBackend for LlmBridgeAdapter {
     }
 }
 
-// ── Tool-call template reference resolution ────────────────
-//
-// Some OpenAI-format models (e.g. Qwen) emit template references like
-// `{{chatcmpl-tool-<id>.<field>}}` in parallel tool call arguments,
-// expecting the runtime to resolve them from prior tool results. We
-// resolve these by looking up the referenced call_id in the conversation
-// history and extracting the requested JSON field from the result.
-
-/// Regex-free lightweight scan for `{{<call_id>.<field>}}` patterns.
-/// Resolves references iteratively. If an unresolvable reference is
-/// encountered, resolution stops and earlier successful substitutions
-/// are preserved (partial resolution). Returns the original string
-/// unchanged if no `{{` markers are found.
-fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value)]) -> String {
-    if !value.contains("{{") {
-        return value.to_string();
-    }
-
-    let mut result = value.to_string();
-    let mut search_from = 0;
-    // Iteratively resolve all `{{..}}` patterns (limit iterations to prevent infinite loops)
-    for _ in 0..50 {
-        let Some(rel_start) = result[search_from..].find("{{") else {
-            break;
-        };
-        let start = search_from + rel_start;
-        let Some(rel_end) = result[start..].find("}}") else {
-            break;
-        };
-        let end = start + rel_end;
-        let ref_str = &result[start + 2..end]; // e.g. "chatcmpl-tool-9816a462feb22da1.project_id"
-
-        let resolved = if let Some(dot_pos) = ref_str.rfind('.') {
-            let call_id = &ref_str[..dot_pos];
-            let field = &ref_str[dot_pos + 1..];
-            tool_results
-                .iter()
-                .find(|(id, _)| id == call_id)
-                .and_then(|(_, json)| json.get(field))
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-        } else {
-            None
-        };
-
-        match resolved {
-            Some(val) => {
-                let val_len = val.len();
-                result.replace_range(start..end + 2, &val);
-                // Advance past the replacement to prevent second-order injection:
-                // resolved values containing `{{...}}` must not be re-scanned.
-                search_from = start + val_len;
-            }
-            None => {
-                // Can't resolve — skip past this `{{` to avoid infinite loop on the same pattern
-                search_from = start + 2;
-            }
-        }
-    }
-    result
-}
-
-/// Walk a JSON value and resolve any `{{call_id.field}}` template references
-/// found in string values.
-fn resolve_template_refs_in_json(
-    value: &serde_json::Value,
-    tool_results: &[(String, serde_json::Value)],
-) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(s) => {
-            let resolved = resolve_template_refs(s, tool_results);
-            serde_json::Value::String(resolved)
-        }
-        serde_json::Value::Object(map) => {
-            let resolved: serde_json::Map<String, serde_json::Value> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), resolve_template_refs_in_json(v, tool_results)))
-                .collect();
-            serde_json::Value::Object(resolved)
-        }
-        serde_json::Value::Array(arr) => {
-            let resolved: Vec<serde_json::Value> = arr
-                .iter()
-                .map(|v| resolve_template_refs_in_json(v, tool_results))
-                .collect();
-            serde_json::Value::Array(resolved)
-        }
-        other => other.clone(),
-    }
-}
-
-/// Build a lookup table of (call_id -> parsed JSON) from tool result messages
-/// in the conversation.
-fn build_tool_result_index(messages: &[ThreadMessage]) -> Vec<(String, serde_json::Value)> {
-    messages
-        .iter()
-        .filter(|m| m.role == ironclaw_engine::MessageRole::ActionResult)
-        .filter_map(|m| {
-            let call_id = m.action_call_id.as_deref()?;
-            // Try to parse the content as JSON; fall back to wrapping as a string
-            let json = serde_json::from_str(&m.content)
-                .unwrap_or_else(|_| serde_json::Value::String(m.content.clone()));
-            Some((call_id.to_string(), json))
-        })
-        .collect()
-}
-
-/// Returns true if any string value in the JSON contains `{{` template refs.
-fn json_has_template_refs(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(s) => s.contains("{{"),
-        serde_json::Value::Object(map) => map.values().any(json_has_template_refs),
-        serde_json::Value::Array(arr) => arr.iter().any(json_has_template_refs),
-        _ => false,
-    }
-}
-
 // ── Conversion helpers ──────────────────────────────────────
 
 fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
@@ -385,7 +182,9 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         tool_calls: None,
     };
 
-    // Convert action calls if present (assistant message with tool calls)
+    // Historical messages from pre-simplification threads may still carry
+    // tool_calls; preserve them so provider APIs with strict call/result
+    // pairing don't reject the history.
     if let Some(ref calls) = msg.action_calls {
         chat.tool_calls = Some(
             calls
@@ -403,14 +202,6 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     chat
 }
 
-fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
-    ToolDefinition {
-        name: action.name.clone(),
-        description: action.description.clone(),
-        parameters: action.parameters_schema.clone(),
-    }
-}
-
 /// Extract Python code from fenced code blocks in the LLM response.
 ///
 /// Tries these markers in order: ```repl, ```python, ```py, then bare ```
@@ -420,14 +211,12 @@ fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
 fn extract_code_block(text: &str) -> Option<String> {
     let mut all_code = Vec::new();
 
-    // Try specific markers first, then bare backticks
     for marker in ["```repl", "```python", "```py", "```"] {
         let mut search_from = 0;
         while let Some(start) = text[search_from..].find(marker) {
             let abs_start = search_from + start;
             let after_marker = abs_start + marker.len();
 
-            // For bare ```, skip if it's actually ```someotherlang
             if marker == "```" && text[after_marker..].starts_with(|c: char| c.is_alphabetic()) {
                 let lang: String = text[after_marker..]
                     .chars()
@@ -439,22 +228,14 @@ fn extract_code_block(text: &str) -> Option<String> {
                 }
             }
 
-            // Skip to next line after the marker
             let code_start = text[after_marker..]
                 .find('\n')
                 .map(|i| after_marker + i + 1)
                 .unwrap_or(after_marker);
 
-            // Find closing ```
             if let Some(end) = text[code_start..].find("```") {
                 let code = text[code_start..code_start + end].trim();
                 if !code.is_empty() {
-                    // For bare ``` blocks (no explicit language tag) only
-                    // accept content that actually looks like Python. Without
-                    // this guard, the agent's example markdown blocks
-                    // (lists, tables, plain prose) get misclassified as code
-                    // and explode in the Monty parser with SyntaxError —
-                    // which the LLM then has to recover from.
                     if marker == "```" && !looks_like_python(code) {
                         search_from = code_start + end + 3;
                         continue;
@@ -467,7 +248,6 @@ fn extract_code_block(text: &str) -> Option<String> {
             }
         }
 
-        // If we found code with a specific marker, use it (don't fall through to bare)
         if !all_code.is_empty() {
             break;
         }
@@ -480,17 +260,6 @@ fn extract_code_block(text: &str) -> Option<String> {
     Some(all_code.join("\n\n"))
 }
 
-/// Heuristic check that a bare ``` block contains Python rather than
-/// markdown / prose / a different language.
-///
-/// Accepts: assignments (`x =`), function calls (`name(`), Python keywords
-/// (`import`, `from`, `def`, `class`, `if`, `for`, `while`, `return`,
-/// `print`, `FINAL`, `try`, `with`, `pass`, `raise`, `yield`, `lambda`),
-/// or comments (`#`).
-///
-/// Rejects: lines starting with `-`, `*`, `|`, `>`, `:`, digits followed by
-/// `.` (markdown lists, tables, blockquotes, headings, numbered lists),
-/// bare prose, etc.
 /// Returns true when `line` contains an identifier-style function call
 /// (an identifier or attribute path immediately followed by `(`).
 ///
@@ -517,17 +286,14 @@ fn looks_like_python(code: &str) -> bool {
         "nonlocal", "assert", "break", "continue", "del", "not", "and", "or", "is", "in",
     ];
 
-    // Check the first few non-empty lines — at least one must look Python-y.
     for line in code.lines().take(5) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        // Comments are valid Python.
         if trimmed.starts_with('#') {
             return true;
         }
-        // Markdown markers are NOT Python.
         if trimmed.starts_with('-')
             || trimmed.starts_with('*')
             || trimmed.starts_with('|')
@@ -535,24 +301,15 @@ fn looks_like_python(code: &str) -> bool {
         {
             return false;
         }
-        // Markdown numbered list "1. foo" is NOT Python (a Python statement
-        // starting with a literal int is `123` followed by an operator, not
-        // `123. text`).
         if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ") {
             return false;
         }
-        // Function call: an identifier (or attribute path) followed by `(`,
-        // e.g. `foo(...)`, `obj.method(...)`. We require the `(` to be
-        // preceded by an identifier char so markdown links like `[text](url)`
-        // and prose like "See (docs)" don't get classified as Python.
         if has_identifier_call(trimmed) {
             return true;
         }
-        // Assignment: `name = ...` (but not `==` comparisons in prose).
         if trimmed.contains('=') {
             return true;
         }
-        // First word matches a Python keyword.
         let first_word: String = trimmed
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -575,12 +332,11 @@ mod tests {
     use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
 
     use crate::error::LlmError;
-    use crate::llm::ToolCompletionResponse;
+    use crate::llm::{ToolCompletionRequest, ToolCompletionResponse};
 
     #[derive(Default)]
     struct CapturingProviderState {
         completion_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
-        tool_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
         models: tokio::sync::Mutex<Vec<Option<String>>>,
     }
 
@@ -619,22 +375,13 @@ mod tests {
             })
         }
 
+        // Code-only contract: the adapter must never drive the provider's
+        // tool-call API. If this fires, something regressed.
         async fn complete_with_tools(
             &self,
-            req: ToolCompletionRequest,
+            _req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
-            self.state.models.lock().await.push(req.model.clone());
-            self.state.tool_requests.lock().await.push(req.messages);
-
-            Ok(ToolCompletionResponse {
-                content: Some("ok".to_string()),
-                tool_calls: Vec::new(),
-                input_tokens: 1,
-                output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
+            unreachable!("LlmBridgeAdapter must never call complete_with_tools under code-only")
         }
     }
 
@@ -652,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_with_tools_rewrites_orphaned_action_results_before_provider_call() {
+    async fn complete_rewrites_orphaned_action_results_before_provider_call() {
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
@@ -673,42 +420,11 @@ mod tests {
             .await
             .unwrap();
 
+        // "ok" has no fence, so it becomes the Python body under the code-only
+        // contract (Monty will surface a NameError for the LLM to recover from).
         match output.response {
-            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
-            other => panic!("expected text response, got {other:?}"),
-        }
-
-        let tool_requests = state.tool_requests.lock().await;
-        let sent = tool_requests.last().unwrap();
-
-        assert_eq!(sent.len(), 3);
-        assert_eq!(sent[2].role, Role::User);
-        assert_eq!(sent[2].content, "[Tool `search` returned: result payload]");
-        assert!(sent[2].tool_call_id.is_none());
-        assert!(sent[2].name.is_none());
-    }
-
-    #[tokio::test]
-    async fn complete_without_tools_rewrites_orphaned_action_results_before_provider_call() {
-        let state = Arc::new(CapturingProviderState::default());
-        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
-            state: state.clone(),
-        });
-        let adapter = LlmBridgeAdapter::new(provider, None);
-        let messages = vec![
-            ThreadMessage::user("Find the docs"),
-            ThreadMessage::assistant("I checked a tool earlier."),
-            ThreadMessage::action_result("call_missing", "search", "result payload"),
-        ];
-
-        let output = adapter
-            .complete(&messages, &[], &LlmCallConfig::default())
-            .await
-            .unwrap();
-
-        match output.response {
-            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
-            other => panic!("expected text response, got {other:?}"),
+            LlmResponse::Code { ref code, .. } => assert_eq!(code, "ok"),
+            other => panic!("expected Code response, got {other:?}"),
         }
 
         let completion_requests = state.completion_requests.lock().await;
@@ -722,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_with_tools_preserves_matched_action_results() {
+    async fn complete_preserves_matched_action_results_in_history() {
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
@@ -741,7 +457,7 @@ mod tests {
             ThreadMessage::action_result("call_1", "search", "result payload"),
         ];
 
-        let output = adapter
+        adapter
             .complete(
                 &messages,
                 &[test_action("search")],
@@ -750,13 +466,8 @@ mod tests {
             .await
             .unwrap();
 
-        match output.response {
-            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
-            other => panic!("expected text response, got {other:?}"),
-        }
-
-        let tool_requests = state.tool_requests.lock().await;
-        let sent = tool_requests.last().unwrap();
+        let completion_requests = state.completion_requests.lock().await;
+        let sent = completion_requests.last().unwrap();
 
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2].role, Role::Tool);
@@ -778,13 +489,13 @@ mod tests {
             ..Default::default()
         };
 
-        // Plain completion path (no tools)
         adapter
             .complete(&[ThreadMessage::user("hi")], &[], &config)
             .await
             .unwrap();
 
-        // Tool completion path
+        // Actions are listed in the prompt, not passed to the API — the
+        // completion request must still go through the plain `complete` path.
         adapter
             .complete(
                 &[ThreadMessage::user("hi")],
@@ -828,6 +539,30 @@ mod tests {
         assert_eq!(models[0], None);
     }
 
+    #[tokio::test]
+    async fn force_text_bypasses_code_extraction() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let config = LlmCallConfig {
+            force_text: true,
+            ..Default::default()
+        };
+
+        let output = adapter
+            .complete(&[ThreadMessage::user("summarize")], &[], &config)
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(t) => assert_eq!(t, "ok"),
+            other => panic!("force_text must return Text, got {other:?}"),
+        }
+    }
+
     // ── extract_code_block tests ────────────────────────────
 
     #[test]
@@ -853,11 +588,6 @@ mod tests {
 
     #[test]
     fn extract_bare_backtick_block() {
-        // Bare ``` blocks are accepted ONLY when the content looks like
-        // Python (assignment, function call, keyword, or comment). The
-        // `looks_like_python` heuristic prevents the LLM's example markdown
-        // from being misclassified as code (which used to crash Monty
-        // with a SyntaxError on `- TICKER: SIZE, ...` style content).
         let text = "Here's the code:\n```\nx = 42\nFINAL(x)\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "x = 42\nFINAL(x)");
@@ -892,10 +622,6 @@ mod tests {
 
     #[test]
     fn bare_backtick_markdown_link_is_rejected() {
-        // Regression test for PR #1736 review (Copilot, 3057247912):
-        // `looks_like_python` previously matched any line containing `(`,
-        // which classified markdown links like `[text](url)` and prose
-        // like "See (docs)" as Python and forwarded them to Monty as code.
         let link_text = "Read more:\n```\n[the docs](https://example.com)\n```";
         assert!(
             extract_code_block(link_text).is_none(),
@@ -938,13 +664,11 @@ Now let's process:\n\
         let code = extract_code_block(text).unwrap();
         assert!(code.contains("web_search"));
         assert!(code.contains("FINAL"));
-        // Two blocks joined by double newline
         assert!(code.contains("\n\n"));
     }
 
     #[test]
     fn mixed_thinking_and_code() {
-        // Simulates a model that outputs explanation + code (the Hyperliquid case)
         let text = "\
 Let me help you explore the relationship between Hyperliquid's price and revenue.\n\
 \n\
@@ -963,7 +687,6 @@ And also check the token price:\n\
 
     #[test]
     fn repl_preferred_over_bare() {
-        // If both ```repl and bare ``` exist, prefer ```repl
         let text = "```\nignored\n```\n```repl\nused = True\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "used = True");
@@ -982,13 +705,11 @@ And also check the token price:\n\
     }
 
     /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize
-    /// pipeline must preserve 1:1 correspondence between assistant
+    /// pipeline must preserve 1:1 correspondence between historical assistant
     /// tool_calls and Tool messages. A gap causes the LLM API to reject
     /// with "No tool output found for function call <id>".
     #[test]
     fn tool_call_result_correspondence_after_sanitize() {
-        // Simulate messages that include a "[no output]" placeholder
-        // (the fix for null tool output).
         let messages: Vec<ThreadMessage> = vec![
             ThreadMessage::system("system prompt"),
             ThreadMessage::user("update all tools"),
@@ -1013,7 +734,6 @@ And also check the token price:\n\
                 ],
             ),
             ThreadMessage::action_result("call_AAA", "tool_a", "{\"ok\": true}"),
-            // call_BBB had null output; Python now sends "[no output]"
             ThreadMessage::action_result("call_BBB", "tool_b", "[no output]"),
             ThreadMessage::action_result("call_CCC", "tool_c", "{\"done\": true}"),
         ];
@@ -1021,7 +741,6 @@ And also check the token price:\n\
         let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
         sanitize_tool_messages(&mut chat_messages);
 
-        // Collect tool_call IDs from assistant messages
         let mut expected_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for msg in &chat_messages {
             if msg.role == Role::Assistant
@@ -1033,7 +752,6 @@ And also check the token price:\n\
             }
         }
 
-        // Collect tool_call_ids from Tool messages
         let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for msg in &chat_messages {
             if msg.role == Role::Tool
@@ -1053,256 +771,10 @@ And also check the token price:\n\
         }
     }
 
-    // ── Template reference resolution tests ────────────────────
-
-    #[test]
-    fn resolve_template_refs_simple_field() {
-        let tool_results = vec![(
-            "chatcmpl-tool-abc123".to_string(),
-            serde_json::json!({"project_id": "068f67da-49b6", "name": "My Project"}),
-        )];
-
-        let input = "{{chatcmpl-tool-abc123.project_id}}";
-        assert_eq!(resolve_template_refs(input, &tool_results), "068f67da-49b6");
-    }
-
-    #[test]
-    fn resolve_template_refs_embedded_in_string() {
-        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
-
-        let input = "Project ID is {{call-1.id}} here";
-        assert_eq!(
-            resolve_template_refs(input, &tool_results),
-            "Project ID is proj-42 here"
-        );
-    }
-
-    #[test]
-    fn resolve_template_refs_no_match_unchanged() {
-        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
-
-        let input = "{{call-unknown.id}}";
-        // Can't resolve — returns unchanged
-        assert_eq!(resolve_template_refs(input, &tool_results), input);
-    }
-
-    #[test]
-    fn resolve_template_refs_no_templates_passthrough() {
-        let input = "plain string with no templates";
-        assert_eq!(resolve_template_refs(input, &[]), input);
-    }
-
-    #[test]
-    fn resolve_template_refs_numeric_value() {
-        let tool_results = vec![("call-1".to_string(), serde_json::json!({"count": 42}))];
-
-        let input = "{{call-1.count}}";
-        assert_eq!(resolve_template_refs(input, &tool_results), "42");
-    }
-
-    #[test]
-    fn resolve_template_refs_in_json_deep() {
-        let tool_results = vec![(
-            "chatcmpl-tool-9816".to_string(),
-            serde_json::json!({"project_id": "068f67da"}),
-        )];
-
-        let input = serde_json::json!({
-            "name": "Daily Monitoring",
-            "project_id": "{{chatcmpl-tool-9816.project_id}}",
-            "nested": {
-                "ref": "{{chatcmpl-tool-9816.project_id}}"
-            },
-            "list": ["{{chatcmpl-tool-9816.project_id}}", "static"],
-            "number": 42
-        });
-
-        let resolved = resolve_template_refs_in_json(&input, &tool_results);
-        assert_eq!(resolved["project_id"], "068f67da");
-        assert_eq!(resolved["nested"]["ref"], "068f67da");
-        assert_eq!(resolved["list"][0], "068f67da");
-        assert_eq!(resolved["list"][1], "static");
-        assert_eq!(resolved["number"], 42);
-        assert_eq!(resolved["name"], "Daily Monitoring");
-    }
-
-    #[test]
-    fn resolve_template_refs_no_second_order_injection() {
-        // If a resolved value itself contains {{...}}, it must NOT be resolved.
-        // This prevents second-order template injection from tool output.
-        let tool_results = vec![
-            (
-                "call-1".to_string(),
-                serde_json::json!({"payload": "{{call-2.secret}}"}),
-            ),
-            (
-                "call-2".to_string(),
-                serde_json::json!({"secret": "LEAKED"}),
-            ),
-        ];
-
-        let input = "result: {{call-1.payload}}";
-        let resolved = resolve_template_refs(input, &tool_results);
-        // The resolved value contains {{call-2.secret}} literally — it must NOT be resolved further.
-        assert_eq!(resolved, "result: {{call-2.secret}}");
-    }
-
-    #[test]
-    fn resolve_template_refs_skips_unresolvable_continues_later() {
-        // An unresolvable ref should not prevent resolving later valid refs.
-        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "42"}))];
-
-        let input = "{{unknown.field}} then {{call-1.id}}";
-        let resolved = resolve_template_refs(input, &tool_results);
-        assert_eq!(resolved, "{{unknown.field}} then 42");
-    }
-
-    #[test]
-    fn build_tool_result_index_from_messages() {
-        let messages = vec![
-            ThreadMessage::user("hello"),
-            ThreadMessage::action_result(
-                "call-1",
-                "memory_write",
-                r#"{"project_id": "068f67da", "name": "Test"}"#,
-            ),
-            ThreadMessage::assistant("done"),
-            ThreadMessage::action_result("call-2", "memory_write", "plain text result"),
-        ];
-
-        let index = build_tool_result_index(&messages);
-        assert_eq!(index.len(), 2);
-        assert_eq!(index[0].0, "call-1");
-        assert_eq!(index[0].1["project_id"], "068f67da");
-        assert_eq!(index[1].0, "call-2");
-        // Non-JSON content wrapped as string
-        assert_eq!(
-            index[1].1,
-            serde_json::Value::String("plain text result".to_string())
-        );
-    }
-
-    #[test]
-    fn json_has_template_refs_detection() {
-        assert!(json_has_template_refs(&serde_json::json!("{{call.field}}")));
-        assert!(json_has_template_refs(&serde_json::json!({"a": "{{x.y}}"})));
-        assert!(json_has_template_refs(&serde_json::json!(["{{x.y}}"])));
-        assert!(!json_has_template_refs(&serde_json::json!("no refs")));
-        assert!(!json_has_template_refs(&serde_json::json!(42)));
-        assert!(!json_has_template_refs(&serde_json::json!({"a": "b"})));
-    }
-
-    // ── Caller-level template ref resolution test ────────────
-    //
-    // Per testing rules: "Test Through the Caller, Not Just the Helper".
-    // This test drives LlmBridgeAdapter::complete() with a conversation
-    // that contains tool results and an LLM response referencing them
-    // via {{call_id.field}} patterns. Verifies the resolution happens
-    // at the adapter level, not just in the helper functions.
-
-    /// Mock LLM provider that returns tool calls with template refs in
-    /// their parameters, simulating Qwen-style parallel call behavior.
-    struct TemplateRefProvider;
-
-    #[async_trait]
-    impl LlmProvider for TemplateRefProvider {
-        fn model_name(&self) -> &str {
-            "template-ref-mock"
-        }
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-        async fn complete(
-            &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            unreachable!("should use complete_with_tools")
-        }
-        async fn complete_with_tools(
-            &self,
-            _req: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            // Simulate: LLM returns a mission_create call that references
-            // a prior tool result's project_id via template ref.
-            Ok(ToolCompletionResponse {
-                content: Some("Creating mission in the new project".to_string()),
-                tool_calls: vec![crate::llm::ToolCall {
-                    id: "call-2".to_string(),
-                    name: "mission_create".to_string(),
-                    arguments: serde_json::json!({
-                        "name": "Daily Monitor",
-                        "goal": "Monitor things",
-                        "project_id": "{{call-1.project_id}}"
-                    }),
-                    reasoning: None,
-                }],
-                input_tokens: 10,
-                output_tokens: 10,
-                finish_reason: crate::llm::FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn complete_resolves_template_refs_through_adapter() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(TemplateRefProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
-
-        // Conversation history: user asked to create a project, tool returned
-        // a result with project_id, now the LLM wants to create a mission
-        // referencing that project_id.
-        let messages = vec![
-            ThreadMessage::user("Create a project and a daily mission"),
-            ThreadMessage::assistant_with_actions(
-                Some("I'll create the project first".to_string()),
-                vec![ActionCall {
-                    id: "call-1".into(),
-                    action_name: "memory_write".into(),
-                    parameters: serde_json::json!({"target": "projects/test/AGENTS.md"}),
-                }],
-            ),
-            ThreadMessage::action_result(
-                "call-1",
-                "memory_write",
-                r#"{"project_id": "068f67da-49b6-4f6c-9463-8d243c2cff6c", "status": "ok"}"#,
-            ),
-        ];
-
-        let output = adapter
-            .complete(
-                &messages,
-                &[test_action("mission_create")],
-                &LlmCallConfig::default(),
-            )
-            .await
-            .unwrap();
-
-        // The adapter should have resolved {{call-1.project_id}} to the UUID.
-        match output.response {
-            LlmResponse::ActionCalls { calls, .. } => {
-                assert_eq!(calls.len(), 1);
-                let project_id = calls[0].parameters["project_id"].as_str().unwrap();
-                assert_eq!(
-                    project_id, "068f67da-49b6-4f6c-9463-8d243c2cff6c",
-                    "Template ref should be resolved to actual UUID"
-                );
-                assert_eq!(calls[0].parameters["name"], "Daily Monitor");
-            }
-            other => panic!("Expected ActionCalls, got: {other:?}"),
-        }
-    }
-
     // ── Caller-level cost-tracking test ──────────────────────
     //
     // Per testing rules: "Test Through the Caller, Not Just the Helper".
-    // model_cost() returning the right Decimal is necessary but not
-    // sufficient — the gap that motivated this test was that
-    // LlmBridgeAdapter hardcoded `cost_usd: 0.0` and never consulted the
-    // provider's calculate_cost(), so Thread::total_cost_usd never
-    // accumulated and `max_budget_usd` gates were inert. This test drives
-    // the adapter end-to-end with a provider that has known per-token
+    // Drives the adapter end-to-end with a provider that has known per-token
     // pricing and asserts the populated cost flows out via TokenUsage.
 
     /// Provider with deterministic pricing — Anthropic Sonnet rates
@@ -1337,15 +809,7 @@ And also check the token price:\n\
             &self,
             _req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
-            Ok(ToolCompletionResponse {
-                content: Some("hello".to_string()),
-                tool_calls: Vec::new(),
-                input_tokens: 1000,
-                output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
+            unreachable!("code-only adapter must not drive complete_with_tools")
         }
     }
 
@@ -1353,14 +817,14 @@ And also check the token price:\n\
     const EXPECTED_COST_USD: f64 = 0.0105;
 
     #[tokio::test]
-    async fn complete_no_tools_populates_cost_usd_through_adapter() {
+    async fn complete_populates_cost_usd_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
         let adapter = LlmBridgeAdapter::new(provider, None);
 
         let output = adapter
             .complete(
                 &[ThreadMessage::user("hi")],
-                &[], // no actions => no-tools path
+                &[],
                 &LlmCallConfig::default(),
             )
             .await
@@ -1374,14 +838,17 @@ And also check the token price:\n\
     }
 
     #[tokio::test]
-    async fn complete_with_tools_populates_cost_usd_through_adapter() {
+    async fn complete_with_actions_listed_still_uses_plain_completion_path() {
+        // Passing ActionDef entries must NOT switch the adapter onto the
+        // tool-API path — the code-only contract says actions are listed
+        // in the prompt, never advertised to the provider.
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
         let adapter = LlmBridgeAdapter::new(provider, None);
 
         let output = adapter
             .complete(
                 &[ThreadMessage::user("hi")],
-                &[test_action("noop")], // forces with-tools path
+                &[test_action("noop")],
                 &LlmCallConfig::default(),
             )
             .await
@@ -1396,10 +863,6 @@ And also check the token price:\n\
 
     #[tokio::test]
     async fn complete_routes_subcalls_through_cheap_provider_for_cost() {
-        // Sub-calls (depth > 0) must be priced with the cheap provider, not
-        // the primary. Otherwise nested CodeAct calls inflate the parent
-        // thread's cost by the wrong rate and `max_budget_usd` gates fire
-        // against the wrong total.
         struct ZeroProvider;
         #[async_trait]
         impl LlmProvider for ZeroProvider {
@@ -1452,11 +915,6 @@ And also check the token price:\n\
         );
     }
 
-    /// Subscription-billed providers (e.g. OpenAI Codex via ChatGPT OAuth)
-    /// report `(Decimal::ZERO, Decimal::ZERO)` per token and must
-    /// round-trip through `cost_usd_from` as a clean `0.0` — not panic,
-    /// not NaN. Exercises the fallback `.unwrap_or(0.0)` on a case that
-    /// matters in production.
     #[tokio::test]
     async fn complete_with_subscription_billed_provider_yields_zero_cost() {
         struct SubscriptionProvider;
@@ -1497,27 +955,12 @@ And also check the token price:\n\
             .await
             .unwrap();
 
-        assert_eq!(
-            output.usage.cost_usd, 0.0,
-            "zero cost_per_token must produce exactly 0.0 cost_usd"
-        );
-        assert!(
-            output.usage.cost_usd.is_finite(),
-            "cost_usd must be finite, never NaN/Inf"
-        );
+        assert_eq!(output.usage.cost_usd, 0.0);
+        assert!(output.usage.cost_usd.is_finite());
     }
 
-    /// Providers that expose prompt caching (Anthropic 5m TTL: 10× read
-    /// discount, 1.25× write multiplier) must see cost computed with the
-    /// three-bucket formula, not the flat `input × rate` approximation.
-    /// Pins the fix for the Copilot/Gemini review comment on #2660 —
-    /// before the fix, cost_usd undercounted cache-writes and
-    /// over-counted cache-reads, leaving `max_budget_usd` gates inert
-    /// against heavy-cache workloads.
     #[tokio::test]
     async fn complete_prices_cache_tokens_with_discount_and_multiplier() {
-        /// Anthropic Sonnet 5m-TTL rates: $3/MTok input, $15/MTok output,
-        /// read discount 10, write multiplier 1.25.
         struct AnthropicCachingProvider;
         #[async_trait]
         impl LlmProvider for AnthropicCachingProvider {
@@ -1540,8 +983,6 @@ And also check the token price:\n\
                 &self,
                 _req: crate::llm::CompletionRequest,
             ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                // Total input = 10_000; 2_000 cache-read, 1_000 cache-write,
-                // 7_000 uncached. Output = 500.
                 Ok(crate::llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
@@ -1567,12 +1008,6 @@ And also check the token price:\n\
             .await
             .unwrap();
 
-        // uncached = 10_000 - 2_000 - 1_000 = 7_000
-        // uncached_cost    = 7_000 * 0.000003          = 0.021
-        // cache_read_cost  = 2_000 * 0.000003 / 10     = 0.0006
-        // cache_write_cost = 1_000 * 0.000003 * 1.25   = 0.00375
-        // output_cost      = 500   * 0.000015          = 0.0075
-        // total            = 0.021 + 0.0006 + 0.00375 + 0.0075 = 0.03285
         let expected = 0.032_85_f64;
         assert!(
             (output.usage.cost_usd - expected).abs() < 1e-9,
@@ -1580,10 +1015,6 @@ And also check the token price:\n\
             output.usage.cost_usd
         );
 
-        // The naive `(input+output) × rate` approximation the old helper
-        // computed would have been: 10_000 * 0.000003 + 500 * 0.000015
-        // = 0.0375 — i.e. ~14% over-counted vs. the correct 0.03285.
-        // Pin that we are NOT computing that value.
         let naive = 10_000.0 * 0.000_003 + 500.0 * 0.000_015;
         assert!(
             (output.usage.cost_usd - naive).abs() > 1e-6,

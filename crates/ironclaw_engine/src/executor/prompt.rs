@@ -134,25 +134,37 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    // Layout for prompt caching: the stable-per-deployment prefix
+    // (preamble + platform + postamble) comes first so providers can reuse
+    // the KV cache across turns. "Stable per deployment" not "per session":
+    // PlatformInfo includes version (bumps per release) and model_name
+    // (can change if the user switches mid-session), so turns that straddle
+    // those events will see a cache miss here — but every normal turn
+    // within a single session/deployment hits. Dynamic sections
+    // (learned-rules overlay, per-lease tool list) go last so lease changes
+    // and overlay edits invalidate only the tail.
     let mut prompt = String::from(CODEACT_PREAMBLE);
 
-    // Inject platform identity and runtime metadata
+    // Platform identity and runtime metadata (stable per deployment).
     if let Some(info) = platform {
         prompt.push_str(&info.to_prompt_section());
     }
 
-    // Append runtime prompt overlay if available
+    // Strategy / error-recovery guidance (stable).
+    prompt.push_str(CODEACT_POSTAMBLE);
+
+    // Runtime prompt overlay (dynamic: self-improvement mission edits this).
     if let Some(overlay) = overlay {
         prompt.push_str("\n\n## Learned Rules (from self-improvement)\n\n");
         prompt.push_str(overlay);
     }
 
-    // Add tool documentation
+    // Tool list (dynamic: changes with the lease set). Last so lease
+    // changes invalidate only the tail, not the whole cacheable prefix.
     if !actions.is_empty() {
-        prompt.push_str("\n## Available tools (call as Python functions)\n\n");
+        prompt.push_str("\n\n## Available tools (call as Python functions)\n\n");
         for action in actions {
             prompt.push_str(&format!("- `{}(", action.name));
-            // Extract parameter names from JSON schema
             if let Some(props) = action.parameters_schema.get("properties")
                 && let Some(obj) = props.as_object()
             {
@@ -163,7 +175,6 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
     prompt
 }
 
@@ -200,8 +211,18 @@ mod tests {
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
-        assert!(prompt.contains("Python REPL environment"));
-        assert!(prompt.contains("Strategy"));
+        // Structural markers — if either the preamble or postamble gets
+        // accidentally emptied, these fail. Generic words like "Python" or
+        // "FINAL" would still match a broken include, so check section
+        // headings that exist in exactly one place each.
+        assert!(
+            prompt.contains("## Response shape"),
+            "preamble include appears to be missing its 'Response shape' section"
+        );
+        assert!(
+            prompt.contains("## Reminders"),
+            "postamble include appears to be missing its 'Reminders' section"
+        );
         assert!(!prompt.contains("Learned Rules"));
     }
 

@@ -1653,12 +1653,12 @@ async fn resolve_tool_future(
 ) -> ExtFunctionResult {
     match handle.await {
         Ok((Ok(result), execution_duration_ms)) => {
-            // If the effect adapter wrapped a tool error as an Ok(ActionResult)
-            // with is_error=true (current convention in
-            // `EffectBridgeAdapter::execute_action_internal`), surface it as
-            // ActionFailed so traces, observers, and approval flows see the
-            // failure correctly. Without this, every wrapped error looked like
-            // a successful tool call to downstream consumers.
+            // Code-only contract: failed tool calls raise Python exceptions
+            // (RuntimeError with the underlying error message). The LLM
+            // reads the traceback next turn and self-corrects. Returning the
+            // error payload as a success value was the old "has_error flag"
+            // pattern — the LLM would silently use a dict with "error": "..."
+            // as if it were a real result.
             if result.is_error {
                 let error_msg = result
                     .output
@@ -1671,7 +1671,7 @@ async fn resolve_tool_future(
                     step_id: context.step_id,
                     action_name: action_name.into(),
                     call_id: call_id.into(),
-                    error: error_msg,
+                    error: error_msg.clone(),
                     duration_ms: if duration_ms > 0 {
                         duration_ms
                     } else {
@@ -1679,15 +1679,19 @@ async fn resolve_tool_future(
                     },
                     params_summary,
                 });
-            } else {
-                events.push(EventKind::ActionExecuted {
-                    step_id: context.step_id,
-                    action_name: action_name.into(),
-                    call_id: call_id.into(),
-                    duration_ms: result.duration.as_millis() as u64,
-                    params_summary,
-                });
+                action_results.push(result);
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("{action_name}: {error_msg}")),
+                ));
             }
+            events.push(EventKind::ActionExecuted {
+                step_id: context.step_id,
+                action_name: action_name.into(),
+                call_id: call_id.into(),
+                duration_ms: result.duration.as_millis() as u64,
+                params_summary,
+            });
             let monty_val = json_to_monty(&result.output);
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
