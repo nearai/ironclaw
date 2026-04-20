@@ -16,13 +16,18 @@ use crate::workspace::Workspace;
 
 /// Resolve the workspace for the authenticated user.
 ///
-/// Prefers `workspace_pool` (multi-user mode) when available, falling back
-/// to the single-user `state.workspace`.
+/// In multi-tenant mode, route through `workspace_pool` so each authenticated
+/// user gets their own workspace. In single-user mode, always use the shared
+/// owner workspace even if a pool is present for deeper runtime/tool plumbing;
+/// this keeps authenticated gateway reads/writes aligned with the unauthenticated
+/// bootstrap routes (`/`, `/style.css`), which also read from `state.workspace`.
 pub(crate) async fn resolve_workspace(
     state: &GatewayState,
     user: &UserIdentity,
 ) -> Result<Arc<Workspace>, (StatusCode, String)> {
-    if let Some(ref pool) = state.workspace_pool {
+    if state.multi_tenant_mode
+        && let Some(ref pool) = state.workspace_pool
+    {
         return Ok(pool.get_or_create(user).await);
     }
     state.workspace.as_ref().cloned().ok_or((
