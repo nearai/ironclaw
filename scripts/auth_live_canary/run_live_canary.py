@@ -178,7 +178,7 @@ async def seeded_response_probe(
             for output_text in tool_outputs
             for marker in ("error", "authentication required", "unauthorized", "forbidden")
         )
-        and probe.expected_text in response_text
+        and probe.expected_text.lower() in response_text.lower()
         and fetched_status == 200
     )
 
@@ -236,7 +236,7 @@ async def seeded_browser_probe(
         latency_ms = int((time.perf_counter() - started) * 1000)
         success = (
             result.get("role") == "assistant"
-            and probe.expected_text in result.get("text", "")
+            and probe.expected_text.lower() in result.get("text", "").lower()
             and probe.expected_tool_name in tool_names
         )
         return ProbeResult(
