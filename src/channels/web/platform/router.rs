@@ -8,9 +8,12 @@
 //!
 //! Per ironclaw#2599: route composition is the single coupling point
 //! where platform meets features. Handlers themselves live in either
-//! `handlers/<slice>.rs` (transitional) or `crate::channels::web::server`
-//! (inline, pending migration into `features/<slice>/`). The router
-//! module depends on both; handlers must not depend on the router.
+//! `features/<slice>/` (migrated) or the transitional `handlers/*.rs`
+//! flat folder (not yet sliced). No feature handler lives in
+//! `server.rs` — that file is a backward-compat re-export shim for
+//! external callers and is scheduled for deletion in stage 6. The
+//! router module depends on both; handlers must not depend on the
+//! router.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
