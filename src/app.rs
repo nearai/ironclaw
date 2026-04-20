@@ -261,10 +261,18 @@ impl AppBuilder {
     /// Tools that declare required credentials will then refuse to run via
     /// the fail-closed branch in `resolve_host_credentials`, surfacing a
     /// clear error instead of issuing unauthenticated HTTP requests.
-    fn install_ephemeral_secrets_store(&mut self) {
+    ///
+    /// `reason` names the specific path that triggered the fallback — logged
+    /// at warn so operators diagnosing a TEE deployment can distinguish
+    /// "master key never resolved" from "master key resolved but no DB
+    /// handle" from "crypto init failed" without turning on debug logging.
+    fn install_ephemeral_secrets_store(&mut self, reason: &str) {
         if let Some(store) = build_ephemeral_secrets_store() {
-            tracing::debug!(
-                "Installing ephemeral in-memory secrets store (persistent secrets unavailable)"
+            tracing::warn!(
+                reason = reason,
+                "Persistent secrets store unavailable; installing ephemeral in-memory fallback. \
+                 Credentials saved via `ironclaw tool auth` will not persist across restarts. \
+                 Run `ironclaw doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
             );
             self.secrets_store = Some(store);
         }
@@ -302,7 +310,7 @@ impl AppBuilder {
                     );
                 }
 
-                self.install_ephemeral_secrets_store();
+                self.install_ephemeral_secrets_store("master key resolution produced no key");
                 return Ok(());
             }
         };
@@ -312,7 +320,7 @@ impl AppBuilder {
             Err(e) => {
                 tracing::warn!("Failed to initialize secrets crypto: {}", e);
                 self.handles.take();
-                self.install_ephemeral_secrets_store();
+                self.install_ephemeral_secrets_store("secrets crypto initialization failed");
                 return Ok(());
             }
         };
@@ -408,7 +416,44 @@ impl AppBuilder {
         // credential-injection code path. See `install_ephemeral_secrets_store`
         // for the rationale (#1537).
         if self.secrets_store.is_none() {
-            self.install_ephemeral_secrets_store();
+            let has_libsql_handle = self
+                .handles
+                .as_ref()
+                .map(|h| {
+                    #[cfg(feature = "libsql")]
+                    {
+                        h.libsql_db.is_some()
+                    }
+                    #[cfg(not(feature = "libsql"))]
+                    {
+                        let _ = h;
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            let has_pg_handle = self
+                .handles
+                .as_ref()
+                .map(|h| {
+                    #[cfg(feature = "postgres")]
+                    {
+                        h.pg_pool.is_some()
+                    }
+                    #[cfg(not(feature = "postgres"))]
+                    {
+                        let _ = h;
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            let reason = if self.handles.is_none() {
+                "master key resolved but no database handles available (no_db mode or init_database did not run)"
+            } else if !has_libsql_handle && !has_pg_handle {
+                "master key resolved but neither libsql nor postgres handle is present (likely a feature-flag / backend mismatch)"
+            } else {
+                "master key resolved and DB handles present but create_secrets_store returned None (unexpected)"
+            };
+            self.install_ephemeral_secrets_store(reason);
         }
 
         Ok(())
