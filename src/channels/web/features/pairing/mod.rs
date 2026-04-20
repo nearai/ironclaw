@@ -606,7 +606,10 @@ mod tests {
             .expect("follow-up message");
         assert_eq!(followup.channel, "gateway");
         assert_eq!(followup.user_id, "member-1");
-        assert_eq!(followup.thread_id.as_deref(), Some(thread_id));
+        assert_eq!(
+            followup.thread_id.as_ref().map(|t| t.as_str()),
+            Some(thread_id)
+        );
         assert!(
             followup
                 .content
@@ -678,7 +681,10 @@ mod tests {
                 if rid == request_id
         ));
         assert_eq!(callback.content, "[structured external callback]");
-        assert_eq!(callback.thread_id.as_deref(), Some(thread_id));
+        assert_eq!(
+            callback.thread_id.as_ref().map(|t| t.as_str()),
+            Some(thread_id)
+        );
     }
 
     #[cfg(feature = "libsql")]

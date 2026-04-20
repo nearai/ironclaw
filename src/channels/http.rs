@@ -551,8 +551,18 @@ async fn process_authenticated_request(
         msg = msg.with_attachments(attachments);
     }
 
-    if let Some(thread_id) = &req.thread_id {
-        msg = msg.with_thread(thread_id);
+    if let Some(thread_id) = &req.thread_id
+        && let Err(e) = msg.try_with_thread(thread_id)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(WebhookResponse {
+                message_id: Uuid::nil(),
+                status: "error".to_string(),
+                response: Some(format!("Invalid thread_id: {}", e)),
+            }),
+        )
+            .into_response();
     }
 
     process_message(state, msg, wait_for_response)

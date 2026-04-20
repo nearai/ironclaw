@@ -51,7 +51,9 @@ async fn gateway_respond_without_thread_id_returns_error() {
 async fn gateway_respond_with_thread_id_succeeds() {
     let gw = test_gateway();
     let mut msg = IncomingMessage::new("gateway", "test-user", "hello");
-    msg.thread_id = Some("thread-123".to_string());
+    msg.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+        "thread-123".to_string(),
+    ));
 
     let response = OutgoingResponse::text("reply");
     let result = gw.respond(&msg, response).await;

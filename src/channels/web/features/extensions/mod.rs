@@ -247,22 +247,37 @@ pub(crate) async fn extensions_install_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Validate the JSON-body `name` at the boundary — same rule the four
+    // URL-path handlers (`activate`, `remove`, `setup`, `setup_submit`)
+    // already enforce. Rejects path-traversal, invalid characters, and
+    // malformed slugs with a 400 before the value reaches registry
+    // lookup, filesystem path construction under `~/.ironclaw/extensions/`,
+    // or any downstream extension-manager call. The canonical form
+    // (hyphens folded to underscores) is used everywhere the previous
+    // raw `req.name` was read, keeping the error messages and registry
+    // lookup keyed off the same identity the install pipeline sees.
+    let name = ironclaw_common::ExtensionName::new(&req.name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+    let name_str = name.as_str();
+
     // When extension manager isn't available, check registry entries for a helpful message
     let Some(ext_mgr) = state.extension_manager.as_ref() else {
         // Look up the entry in the catalog to give a specific error
-        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
+        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == name_str) {
             let msg = match &entry.source {
                 crate::extensions::ExtensionSource::WasmBuildable { .. } => {
                     format!(
-                        "'{}' requires building from source. \
-                         Run `ironclaw registry install {}` from the CLI.",
-                        req.name, req.name
+                        "'{name_str}' requires building from source. \
+                         Run `ironclaw registry install {name_str}` from the CLI."
                     )
                 }
                 _ => format!(
                     "Extension manager not available (secrets store required). \
-                     Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
-                    req.name
+                     Configure DATABASE_URL or a secrets backend to enable installation of '{name_str}'."
                 ),
             };
             return Ok(Json(ActionResponse::fail(msg)));
@@ -282,14 +297,14 @@ pub(crate) async fn extensions_install_handler(
     });
 
     match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
+        .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
         .await
     {
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
             match ext_mgr
                 .ensure_extension_ready(
-                    &req.name,
+                    name_str,
                     &user.user_id,
                     crate::extensions::EnsureReadyIntent::PostInstall,
                 )
@@ -298,7 +313,7 @@ pub(crate) async fn extensions_install_handler(
                 Ok(readiness) => apply_extension_readiness_to_response(&mut resp, readiness, true),
                 Err(e) => {
                     tracing::debug!(
-                        extension = %req.name,
+                        extension = %name_str,
                         error = %e,
                         "Post-install readiness follow-through failed"
                     );
@@ -656,8 +671,9 @@ mod tests {
 
     use crate::channels::web::features::extensions::{
         apply_extension_readiness_to_response, extension_phase_for_web,
-        extensions_activate_handler, extensions_list_handler, extensions_readiness_handler,
-        extensions_remove_handler, extensions_setup_handler, extensions_setup_submit_handler,
+        extensions_activate_handler, extensions_install_handler, extensions_list_handler,
+        extensions_readiness_handler, extensions_remove_handler, extensions_setup_handler,
+        extensions_setup_submit_handler,
     };
 
     use crate::channels::web::test_helpers::{
@@ -951,6 +967,52 @@ mod tests {
                     resp.status()
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_install_handler_rejects_malformed_name() {
+        use axum::body::Body;
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions/install", post(extensions_install_handler))
+            .with_state(state);
+
+        // Each of these is the JSON-body `name` the handler now validates
+        // through `ExtensionName::new`. Previously `req.name` was taken
+        // verbatim into `ext_mgr.install(&req.name, ...)` which constructs
+        // filesystem paths under `~/.ironclaw/extensions/` — so path-traversal
+        // / separators / control characters could silently reach the
+        // filesystem layer before failing deep in the install pipeline.
+        for bad in ["..", "../traversal", "slash/name", "BadCase", "has space"] {
+            let req_body = serde_json::json!({ "name": bad });
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .expect("request");
+            req.extensions_mut().insert(UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            });
+
+            let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                .await
+                .expect("response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for install body.name {bad:?}, got {:?}",
+                resp.status()
+            );
         }
     }
 
@@ -1259,6 +1321,151 @@ mod tests {
         assert_eq!(telegram["kind"], "wasm_channel");
         assert_eq!(telegram["active"], false);
         assert_eq!(telegram["activation_status"], "installed");
+    }
+
+    /// Caller-level wire-contract regression for nearai/ironclaw#2235.
+    ///
+    /// The Settings → Extensions UI picks the WASM-channel fallback button
+    /// label ("Setup" vs "Reconfigure") from `ExtensionInfo.authenticated`
+    /// on the `/api/extensions` response. A backend regression that left
+    /// `authenticated=false` after credentials were written — or dropped
+    /// the field off the wire entirely — would silently re-show the
+    /// credential popup on an already-configured install. The unit-level
+    /// classifier tests above cannot catch this because they do not
+    /// exercise the `configure()` → `list()` wire round-trip.
+    ///
+    /// This test drives the real pair of handlers — POST setup then GET
+    /// list — against a stub channel whose WASM binary intentionally
+    /// fails to activate (so `active=false`). The `authenticated` flag
+    /// must still flip to `true` once the required secret lands in the
+    /// secrets store.
+    #[tokio::test]
+    async fn test_extensions_list_reports_authenticated_after_setup_submit() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "telegram";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        // Pre-setup: authenticated must be false.
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("pre-setup response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram entry pre-setup");
+        assert_eq!(
+            telegram["authenticated"], false,
+            "pre-setup: authenticated must start false (the JS Settings card shows \
+             'Setup' in this state — regressing it to true would flip the button to \
+             'Reconfigure' before credentials exist, re-introducing #2235)"
+        );
+
+        // Submit credentials via the real setup-submit handler.
+        let submit_body = serde_json::json!({
+            "secrets": {
+                "BOT_TOKEN": "dummy-token"
+            }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/extensions/{channel_name}/setup"))
+            .header("content-type", "application/json")
+            .body(Body::from(submit_body.to_string()))
+            .expect("setup-submit request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("setup-submit response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Post-setup: the wire contract the Settings UI depends on.
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("post-setup response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram entry post-setup");
+        // A missing field indexes to `Value::Null` and trips this assertion
+        // too, so the single check covers both "field stripped from the wire"
+        // and "field present but wrong value".
+        assert_eq!(
+            telegram["authenticated"], true,
+            "post-setup: the `authenticated` flag must be present and true once \
+             the required secret is written — the Settings card's \
+             Setup/Reconfigure branch reads this field directly, and a regression \
+             here reopens #2235."
+        );
     }
 
     #[test]
