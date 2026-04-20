@@ -2,7 +2,10 @@
 
 ## Secure, Privacy focused AI Agent
 
-<img width="2048" height="2048" alt="darklogo" src="https://github.com/user-attachments/assets/28e6abcb-16fe-43e5-8c44-6d2d734c64f3" />
+### Our website:
+[LunarWing](https://lunarwing.org/)
+
+<img width="512" height="512" alt="darklogo" src="https://github.com/user-attachments/assets/28e6abcb-16fe-43e5-8c44-6d2d734c64f3" />
 
 The LunarWing project is a hard fork of the Ironclaw project originally developed by NearAI. The fork was initially started in Febuary 2026 and continues to expand far beyond what NearAI's project is currently capable of.
 
@@ -42,14 +45,4 @@ LunarWing and its core contributers are not affiliated with NearAI.
 Our scope is large and is mainly concerned with adding many essential features from Upstream which are still missing, including advanced health checking and self-repair mechanisms. The LunarWing team is more interested in providing useful features instead of support for proprietary chinese document editing tools or other crapware. Our vision for LunarWing is expressed in our MANIFESTO.
 
 #### Things to do in the immediate/short term:
-* add ALL the rest of the custom tools, channels, scripts, etc to the repo in proper form
-* Move repository to Organization
-* add proper task tracking
-* Adminstrative Framework required to begin expanding operations and properly allocate funds for external contractors
-* External Security Audits at some point
-* update MANIFESTO
-* introduce more stable, better, codex apc/acpx support. 
-* continue to work on and improve self-healing solution
-* Introduce GPLv3 into deny.toml for rust cargo crate licensing compatibility
-* Further testing of new, enhanced multiservice multitenant features
-* Live release of website
+##### All have already been moved to vikunja now!
