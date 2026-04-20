@@ -346,7 +346,11 @@ document.addEventListener('click', function(e) {
       openMissionDetail(el.dataset.id);
       break;
     case 'close-mission-detail':
-      if (crCurrentProjectId) { document.getElementById('cr-detail').style.display = 'none'; }
+      if (crCurrentProjectId) {
+        document.getElementById('cr-detail').style.display = 'none';
+      } else {
+        closeMissionDetail();
+      }
       break;
     case 'fire-mission':
       e.stopPropagation();
