@@ -523,6 +523,7 @@ pub(crate) async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
+            channel: None,
             pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
             in_progress: None,
         }));
@@ -559,6 +560,7 @@ pub(crate) async fn chat_history_handler(
             turns,
             has_more: false,
             oldest_timestamp: None,
+            channel: None,
             pending_gate,
             in_progress: in_progress_from_thread(thread),
         }));
@@ -588,6 +590,7 @@ pub(crate) async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
+                channel: None,
                 pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
                 in_progress,
             }));
@@ -617,6 +620,7 @@ pub(crate) async fn chat_history_handler(
                 turns,
                 has_more: false,
                 oldest_timestamp,
+                channel: Some("engine".to_string()),
                 pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
                 in_progress: None,
             }));
@@ -639,6 +643,7 @@ pub(crate) async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
+        channel: None,
         pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
         in_progress,
     }))
@@ -2289,6 +2294,7 @@ mod tests {
         let turn = &response.turns[0];
         assert_eq!(turn.user_input, "hello engine");
         assert_eq!(turn.response.as_deref(), Some("hi back"));
+        assert_eq!(response.channel.as_deref(), Some("engine"));
         assert!(!response.has_more);
 
         crate::bridge::test_support::clear_engine_state().await;

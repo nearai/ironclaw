@@ -40,6 +40,10 @@ function loadHistory(before) {
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
 
+    if (!isPaginating && currentThreadId && data.channel) {
+      threadChannelHints.set(currentThreadId, data.channel);
+    }
+
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
@@ -117,6 +121,16 @@ function loadHistory(before) {
       } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
+      const hintedChannel = currentThreadId
+        ? (data.channel || threadChannelHints.get(currentThreadId) || 'gateway')
+        : 'gateway';
+      currentThreadIsReadOnly = isReadOnlyChannel(hintedChannel);
+      if (currentThreadIsReadOnly) {
+        disableChatInputReadOnly();
+      } else {
+        enableChatInput();
+      }
+
       if (data.pending_gate) {
         handleGateRequired({
           ...data.pending_gate,
@@ -467,7 +481,10 @@ function loadThreads() {
       const currentThread = currentThreadId === assistantThreadId
         ? data.assistant_thread
         : threads.find(t => t.id === currentThreadId);
-      const ch = currentThread ? currentThread.channel : 'gateway';
+      const hintedChannel = currentThread
+        ? currentThread.channel
+        : threadChannelHints.get(currentThreadId);
+      const ch = hintedChannel || 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
         disableChatInputReadOnly();
