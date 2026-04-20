@@ -248,7 +248,145 @@ impl ExtensionName {
     }
 }
 
-/// Maximum length for an [`McpServerName`].
+/// Maximum length for an [`ExternalThreadId`], measured in bytes.
+///
+/// Chosen to accommodate Slack's compound `thread_ts` identifiers, web-UI
+/// generated UUID strings, Telegram chat IDs, and comparable channel-specific
+/// thread tokens, while still bounding what we'll accept from an external
+/// system.
+pub const MAX_EXTERNAL_THREAD_ID_LEN: usize = 512;
+
+/// Why a candidate string is not a valid external thread id.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExternalThreadIdError {
+    #[error("external thread id must not be empty")]
+    Empty,
+    #[error("external thread id exceeds {MAX_EXTERNAL_THREAD_ID_LEN} bytes")]
+    TooLong,
+    #[error("external thread id must not contain NUL bytes")]
+    ContainsNul,
+}
+
+/// External (channel-supplied) thread identifier — e.g. a Telegram chat id,
+/// a Slack `thread_ts`, a web-UI-generated UUID string.
+///
+/// **Not** the internal engine `ThreadId(Uuid)`. Channels supply whatever
+/// shape their platform uses; [`crate::identity::ExternalThreadId`] is the
+/// typed boundary representation that carries that raw string safely across
+/// internal module boundaries. Conversion to an internal UUID happens inside
+/// `SessionManager::resolve_thread` and equivalents.
+///
+/// See `.claude/rules/types.md` for why this is a newtype.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExternalThreadId(String);
+
+impl ExternalThreadId {
+    /// Construct from any string-like value, validating length and
+    /// disallowing NUL bytes. Returns [`ExternalThreadIdError`] on failure.
+    ///
+    /// Length is measured in bytes via `str::len`.
+    pub fn new(raw: impl AsRef<str>) -> Result<Self, ExternalThreadIdError> {
+        Self::validate(raw.as_ref())?;
+        Ok(Self(raw.as_ref().to_string()))
+    }
+
+    /// Validate a candidate string without constructing.
+    ///
+    /// Shared by `new` (which allocates) and `TryFrom<String>` (which
+    /// consumes the owned String without reallocating). Length is
+    /// measured in bytes via `str::len`.
+    fn validate(s: &str) -> Result<(), ExternalThreadIdError> {
+        if s.is_empty() {
+            return Err(ExternalThreadIdError::Empty);
+        }
+        if s.len() > MAX_EXTERNAL_THREAD_ID_LEN {
+            return Err(ExternalThreadIdError::TooLong);
+        }
+        if s.contains('\0') {
+            return Err(ExternalThreadIdError::ContainsNul);
+        }
+        Ok(())
+    }
+
+    /// Construct without validation.
+    ///
+    /// Use for values sourced from a typed upstream that the caller already
+    /// trusts — a DB row, a persisted pending-gate payload, or a
+    /// `#[serde(transparent)]` deserialization whose wire contract predates
+    /// the newtype. Prefer [`Self::new`] for anything touching external input.
+    pub fn from_trusted(raw: String) -> Self {
+        Self(raw)
+    }
+
+    /// Borrow the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for ExternalThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// Intentionally no `Deref<Target = str>`, no `From<String>`, no
+// `From<&str>`: the whole point of this newtype is to force callers to
+// make the boundary crossing explicit via `new` (validating) or
+// `from_trusted` (documented opt-out).
+impl AsRef<str> for ExternalThreadId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for ExternalThreadId {
+    type Error = ExternalThreadIdError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for ExternalThreadId {
+    type Error = ExternalThreadIdError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl FromStr for ExternalThreadId {
+    type Err = ExternalThreadIdError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl From<ExternalThreadId> for String {
+    fn from(value: ExternalThreadId) -> String {
+        value.0
+    }
+}
+
+impl PartialEq<str> for ExternalThreadId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ExternalThreadId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// Maximum length for an [`McpServerName`], measured in bytes.
 ///
 /// Alias of [`MAX_NAME_LEN`] to prevent drift between the two limits. MCP
 /// server names are used as tool-name prefixes in LLM providers (which
@@ -261,7 +399,7 @@ pub const MAX_MCP_SERVER_NAME_LEN: usize = MAX_NAME_LEN;
 pub enum McpServerNameError {
     #[error("MCP server name must not be empty")]
     Empty,
-    #[error("MCP server name exceeds {MAX_MCP_SERVER_NAME_LEN} characters")]
+    #[error("MCP server name exceeds {MAX_MCP_SERVER_NAME_LEN} bytes")]
     TooLong,
     #[error(
         "MCP server name '{0}' contains invalid characters \
@@ -292,41 +430,39 @@ pub enum McpServerNameError {
 #[serde(transparent)]
 pub struct McpServerName(String);
 
-/// Validate `s` against the [`McpServerName`] allowlist without allocating.
-///
-/// Shared by [`McpServerName::new`] (which then clones the slice into an
-/// owned `String`) and by `TryFrom<String>` (which consumes the already-
-/// owned buffer). Keeping the check in one place avoids the double-
-/// allocation round-trip that a naive `TryFrom<String> -> new(&value)`
-/// would incur.
-fn validate_mcp_server_name(s: &str) -> Result<(), McpServerNameError> {
-    if s.is_empty() {
-        return Err(McpServerNameError::Empty);
-    }
-    if s.len() > MAX_MCP_SERVER_NAME_LEN {
-        return Err(McpServerNameError::TooLong);
-    }
-    if !s
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(McpServerNameError::InvalidChar(s.to_string()));
-    }
-    Ok(())
-}
-
 impl McpServerName {
     /// Construct from any string-like value, validating the allowlist.
     ///
     /// Rejects empty strings, strings longer than
-    /// [`MAX_MCP_SERVER_NAME_LEN`], and strings containing any character
-    /// outside the allowlist (alphanumeric, `-`, `_`). Path separators,
-    /// shell metacharacters, NUL bytes, and whitespace all fall into the
+    /// [`MAX_MCP_SERVER_NAME_LEN`] bytes (length is measured in bytes
+    /// via `str::len`), and strings containing any character outside the
+    /// allowlist (alphanumeric, `-`, `_`). Path separators, shell
+    /// metacharacters, NUL bytes, and whitespace all fall into the
     /// invalid-character bucket.
     pub fn new(raw: impl AsRef<str>) -> Result<Self, McpServerNameError> {
-        let s = raw.as_ref();
-        validate_mcp_server_name(s)?;
-        Ok(Self(s.to_string()))
+        Self::validate(raw.as_ref())?;
+        Ok(Self(raw.as_ref().to_string()))
+    }
+
+    /// Validate a candidate string without constructing.
+    ///
+    /// Shared by `new` (which allocates) and `TryFrom<String>` (which
+    /// consumes the owned String without reallocating). Length is
+    /// measured in bytes via `str::len`.
+    fn validate(s: &str) -> Result<(), McpServerNameError> {
+        if s.is_empty() {
+            return Err(McpServerNameError::Empty);
+        }
+        if s.len() > MAX_MCP_SERVER_NAME_LEN {
+            return Err(McpServerNameError::TooLong);
+        }
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(McpServerNameError::InvalidChar(s.to_string()));
+        }
+        Ok(())
     }
 
     /// Construct without validation.
@@ -378,10 +514,7 @@ impl TryFrom<&str> for McpServerName {
 impl TryFrom<String> for McpServerName {
     type Error = McpServerNameError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        // Validate borrowing the already-owned buffer, then consume it —
-        // avoids the `&String -> to_string()` round-trip that
-        // `Self::new(&value)` would perform.
-        validate_mcp_server_name(&value)?;
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 }
@@ -586,6 +719,90 @@ mod tests {
         let via_as_ref: &str = ext.as_ref();
         assert_eq!(via_as_str, "gmail");
         assert_eq!(via_as_ref, "gmail");
+    }
+
+    // ---- ExternalThreadId tests ----
+
+    #[test]
+    fn external_thread_id_accepts_common_channel_shapes() {
+        // Telegram-style numeric chat id
+        assert_eq!(
+            ExternalThreadId::new("123456789").unwrap().as_str(),
+            "123456789"
+        );
+        // Web UI UUID
+        assert_eq!(
+            ExternalThreadId::new("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap()
+                .as_str(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        // Slack thread_ts
+        assert_eq!(
+            ExternalThreadId::new("1234567890.123456").unwrap().as_str(),
+            "1234567890.123456"
+        );
+        // Generic text with mixed punctuation — channels define shape
+        assert!(ExternalThreadId::new("room:general").is_ok());
+    }
+
+    #[test]
+    fn external_thread_id_rejects_empty() {
+        assert_eq!(ExternalThreadId::new(""), Err(ExternalThreadIdError::Empty));
+    }
+
+    #[test]
+    fn external_thread_id_rejects_too_long() {
+        let long = "a".repeat(MAX_EXTERNAL_THREAD_ID_LEN + 1);
+        assert_eq!(
+            ExternalThreadId::new(&long),
+            Err(ExternalThreadIdError::TooLong)
+        );
+    }
+
+    #[test]
+    fn external_thread_id_rejects_nul() {
+        assert_eq!(
+            ExternalThreadId::new("abc\0def"),
+            Err(ExternalThreadIdError::ContainsNul)
+        );
+    }
+
+    #[test]
+    fn external_thread_id_serde_is_transparent() {
+        let tid = ExternalThreadId::new("thread-xyz").unwrap();
+        let json = serde_json::to_string(&tid).unwrap();
+        assert_eq!(json, "\"thread-xyz\"");
+
+        let round: ExternalThreadId = serde_json::from_str("\"thread-xyz\"").unwrap();
+        assert_eq!(round.as_str(), "thread-xyz");
+    }
+
+    /// Like the other identity newtypes, `#[serde(transparent)]` means we
+    /// do not re-validate at deserialize time — legacy persisted rows must
+    /// keep loading. Validation happens at construction sites.
+    #[test]
+    fn external_thread_id_serde_does_not_revalidate() {
+        // Even an empty string deserializes — we only reject via `new`.
+        let legacy: ExternalThreadId = serde_json::from_str("\"\"").unwrap();
+        assert_eq!(legacy.as_str(), "");
+    }
+
+    #[test]
+    fn external_thread_id_from_trusted_preserves_raw() {
+        let raw = "unvalidated::value".to_string();
+        let tid = ExternalThreadId::from_trusted(raw.clone());
+        assert_eq!(tid.as_str(), raw);
+    }
+
+    #[test]
+    fn external_thread_id_distinct_from_extension_name() {
+        let ext = ExtensionName::new("telegram").unwrap();
+        let tid = ExternalThreadId::new("telegram").unwrap();
+        // Compile-time distinction — both have the same inner shape but
+        // are different types, so a function signature requiring one will
+        // reject the other at the call site.
+        assert_eq!(ext.as_str(), tid.as_str());
     }
 
     #[test]
