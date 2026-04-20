@@ -95,6 +95,13 @@ const JOB_EVENTS_MAX_JOBS = 50;
 const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+// Non-image attachments staged for the next /api/chat/send submission.
+// Shape matches SendMessageRequest::attachments: { mime_type, filename, data_base64 }.
+let stagedAttachments = [];
+// FileReader promises that have not yet resolved. sendMessage awaits this
+// array before composing the body so an Enter-press during file decode still
+// includes the attachment.
+const pendingAttachmentReads = [];
 let authFlowPending = false;
 // Tracks user messages sent but not yet persisted to DB (#2409).
 // When loadHistory() clears the DOM, pending messages are re-injected

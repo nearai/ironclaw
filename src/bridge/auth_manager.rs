@@ -188,6 +188,37 @@ impl AuthManager {
         }
     }
 
+    async fn ensure_extension_ready_for_execution(
+        ext_mgr: &crate::extensions::ExtensionManager,
+        extension_name: &str,
+        user_id: &str,
+    ) -> Result<crate::extensions::EnsureReadyOutcome, ExtensionError> {
+        match ext_mgr
+            .ensure_extension_ready(
+                extension_name,
+                user_id,
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+        {
+            Err(ExtensionError::NotInstalled(_)) => {
+                tracing::debug!(
+                    extension = %extension_name,
+                    user_id = %user_id,
+                    "Extension not installed for capability use; retrying via explicit activate path"
+                );
+                ext_mgr
+                    .ensure_extension_ready(
+                        extension_name,
+                        user_id,
+                        crate::extensions::EnsureReadyIntent::ExplicitActivate,
+                    )
+                    .await
+            }
+            other => other,
+        }
+    }
+
     fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
         self.tools
             .as_ref()
@@ -338,21 +369,72 @@ impl AuthManager {
                 Err(_) => return ToolReadiness::Ready,
             }
         };
-        match ext_mgr
-            .ensure_extension_ready(
-                &ext_name,
-                user_id,
-                crate::extensions::EnsureReadyIntent::UseCapability,
-            )
+        self.readiness_from_extension_result(
+            &ext_name,
+            user_id,
+            ext_mgr
+                .ensure_extension_ready(
+                    &ext_name,
+                    user_id,
+                    crate::extensions::EnsureReadyIntent::UseCapability,
+                )
+                .await,
+        )
+        .await
+    }
+
+    /// Prepare an extension-backed capability for immediate execution.
+    ///
+    /// Unlike [`check_tool_readiness`], this path may promote a latent
+    /// registry-backed extension into the installed state because the caller
+    /// is handling a concrete user-requested action, not merely listing or
+    /// filtering available actions.
+    pub async fn prepare_tool_for_execution(
+        &self,
+        tool_name: &str,
+        user_id: &str,
+    ) -> ToolReadiness {
+        let ext_mgr = match self.extension_manager.as_ref() {
+            Some(mgr) => mgr,
+            None => return ToolReadiness::Ready,
+        };
+
+        let ext_name = if let Some(tools) = self.tools.as_ref() {
+            if let Some(name) = tools.provider_extension_for_tool(tool_name).await {
+                name
+            } else {
+                match canonicalize_extension_name(tool_name) {
+                    Ok(name) => name,
+                    Err(_) => return ToolReadiness::Ready,
+                }
+            }
+        } else {
+            match canonicalize_extension_name(tool_name) {
+                Ok(name) => name,
+                Err(_) => return ToolReadiness::Ready,
+            }
+        };
+
+        let result = Self::ensure_extension_ready_for_execution(ext_mgr, &ext_name, user_id).await;
+
+        self.readiness_from_extension_result(&ext_name, user_id, result)
             .await
-        {
+    }
+
+    async fn readiness_from_extension_result(
+        &self,
+        ext_name: &str,
+        user_id: &str,
+        result: Result<crate::extensions::EnsureReadyOutcome, ExtensionError>,
+    ) -> ToolReadiness {
+        match result {
             Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => ToolReadiness::Ready,
             Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
                 auth,
                 credential_name,
                 ..
             }) => {
-                let credential_name = credential_name.unwrap_or_else(|| ext_name.clone());
+                let credential_name = credential_name.unwrap_or_else(|| ext_name.to_string());
                 let described = self
                     .describe_missing_credential(&credential_name, user_id)
                     .await;
@@ -446,52 +528,50 @@ impl AuthManager {
         let ext_mgr = self.extension_manager.as_ref()?;
         let latent = ext_mgr.latent_provider_action(action_name, user_id).await?;
 
-        Some(
-            match ext_mgr
-                .ensure_extension_ready(
-                    &latent.provider_extension,
-                    user_id,
-                    crate::extensions::EnsureReadyIntent::UseCapability,
-                )
-                .await
-            {
-                Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
-                    let available_actions = ext_mgr
-                        .provider_action_names(&latent.provider_extension)
-                        .await;
-                    if available_actions.contains(&latent.action_name) {
-                        Ok(LatentActionExecution::RetryRegisteredAction {
-                            resolved_action: latent.action_name,
-                        })
-                    } else {
-                        Ok(LatentActionExecution::ProviderReady {
-                            provider_extension: latent.provider_extension,
-                            available_actions,
-                        })
-                    }
-                }
-                Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
-                    auth,
-                    credential_name,
-                    ..
-                }) => Ok(LatentActionExecution::NeedsAuth {
-                    credential_name: CredentialName::from_trusted(
-                        credential_name.unwrap_or(latent.provider_extension),
-                    ),
-                    instructions: auth
-                        .instructions()
-                        .unwrap_or("Complete authentication to continue.")
-                        .to_string(),
-                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()),
-                }),
-                Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
-                    Ok(LatentActionExecution::NeedsSetup {
-                        message: instructions,
+        let readiness = Self::ensure_extension_ready_for_execution(
+            ext_mgr,
+            &latent.provider_extension,
+            user_id,
+        )
+        .await;
+
+        Some(match readiness {
+            Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
+                let available_actions = ext_mgr
+                    .provider_action_names(&latent.provider_extension)
+                    .await;
+                if available_actions.contains(&latent.action_name) {
+                    Ok(LatentActionExecution::RetryRegisteredAction {
+                        resolved_action: latent.action_name,
+                    })
+                } else {
+                    Ok(LatentActionExecution::ProviderReady {
+                        provider_extension: latent.provider_extension,
+                        available_actions,
                     })
                 }
-                Err(err) => Err(err),
-            },
-        )
+            }
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                auth,
+                credential_name,
+                ..
+            }) => Ok(LatentActionExecution::NeedsAuth {
+                credential_name: CredentialName::from_trusted(
+                    credential_name.unwrap_or(latent.provider_extension),
+                ),
+                instructions: auth
+                    .instructions()
+                    .unwrap_or("Complete authentication to continue.")
+                    .to_string(),
+                auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()),
+            }),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                Ok(LatentActionExecution::NeedsSetup {
+                    message: instructions,
+                })
+            }
+            Err(err) => Err(err),
+        })
     }
 
     async fn describe_missing_credential(

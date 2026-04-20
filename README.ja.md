@@ -279,15 +279,26 @@ WASM ──► 許可リスト ──► リーク    ──► 認証情報 ─
 
 ## 使い方
 
+Engine v2 は現在オプトインです。従来のエージェントループではなく新しいエンジンを使いたい場合は、IronClaw を `ENGINE_V2=true` 付きで起動してください。
+
 ```bash
 # 初回セットアップ（データベース、認証などを設定）
 ironclaw onboard
 
-# インタラクティブREPLを起動
+# インストール済みバイナリを起動
+ironclaw
+
+# Engine v2 でインストール済みバイナリを起動
+ENGINE_V2=true ironclaw
+
+# ソースからインタラクティブREPLを起動
 cargo run
 
-# デバッグログ付き
-RUST_LOG=ironclaw=debug cargo run
+# ソースから Engine v2 のインタラクティブREPLを起動
+ENGINE_V2=true cargo run
+
+# Engine v2 をデバッグログ付きで起動
+ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## 開発

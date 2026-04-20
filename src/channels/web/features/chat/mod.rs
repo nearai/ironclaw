@@ -113,10 +113,15 @@ pub(crate) async fn chat_send_handler(
         msg = msg.with_timezone(tz);
     }
 
-    // Convert uploaded images to IncomingAttachments
-    if !req.images.is_empty() {
-        let attachments = crate::channels::web::util::images_to_attachments(&req.images);
-        msg = msg.with_attachments(attachments);
+    // Convert uploaded images + generic file attachments to IncomingAttachments
+    // through the shared budget-aware helper so HTTP and WS paths enforce
+    // identical limits. Empty-text messages with attachments are still valid
+    // here; the v2 engine router relaxes the empty-input guard downstream.
+    let incoming_attachments =
+        crate::channels::web::util::inline_attachments_to_incoming(&req.images, &req.attachments)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if !incoming_attachments.is_empty() {
+        msg = msg.with_attachments(incoming_attachments);
     }
 
     let msg_id = msg.id;

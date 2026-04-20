@@ -8,6 +8,116 @@
 use crate::identity::ExtensionName;
 use serde::{Deserialize, Serialize};
 
+/// Terminal status of a sandbox job's `JobResult` event.
+///
+/// Previously transported as a `String` (`"completed"` / `"failed"` /
+/// `"cancelled"`) where producers and consumers agreed by convention only,
+/// with no compiler enforcement — see bugs #2570, #2531, #2517 for
+/// variant drift that a typed enum prevents.
+///
+/// Wire format is snake_case, matching the legacy string values so
+/// existing SSE consumers (browser clients, external integrations) need
+/// no changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobResultStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    /// Worker timeout / stuck-state path. Emitted when a job's context
+    /// is transitioned to `JobState::Stuck` (see `worker/job.rs`
+    /// `mark_stuck`). Distinct from `Failed` so the UI and analytics
+    /// can surface recovery-eligible runs separately from hard errors.
+    Stuck,
+}
+
+impl JobResultStatus {
+    /// Returns `true` only for `Completed` — matches the prior
+    /// `status == "completed"` predicate at consumer sites.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// Canonical wire-format string (snake_case), stable for log lines
+    /// and user-facing messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Stuck => "stuck",
+        }
+    }
+}
+
+impl std::fmt::Display for JobResultStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when parsing an untyped string into a
+/// [`JobResultStatus`] fails. Exposed as a typed error so boundaries
+/// (container JSON payloads, legacy persisted rows) can log a warning
+/// and fall back to `Failed` without swallowing the original input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobResultStatusParseError {
+    pub value: String,
+}
+
+impl std::fmt::Display for JobResultStatusParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown JobResultStatus value: {:?}", self.value)
+    }
+}
+
+impl std::error::Error for JobResultStatusParseError {}
+
+/// Parse a wire-format string into a [`JobResultStatus`].
+///
+/// Accepts the canonical snake_case variants (`"completed"`, `"failed"`,
+/// `"cancelled"`, `"stuck"`) plus the legacy alias `"error"` → `Failed`
+/// that pre-refactor producers (`claude_bridge`, `acp_bridge`) still
+/// emit on the wire. Input is trimmed and matched case-insensitively
+/// (ASCII-only) so slightly-varied payloads — `"  COMPLETED  "`,
+/// `"Failed"` — deserialize cleanly instead of falling to the
+/// `Err`-then-default path in consumers.
+///
+/// Empty / whitespace-only input returns `Err` so the caller can log a
+/// distinct warning for "missing status" vs "unknown status".
+impl std::str::FromStr for JobResultStatus {
+    type Err = JobResultStatusParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(JobResultStatusParseError {
+                value: s.to_string(),
+            });
+        }
+        if trimmed.eq_ignore_ascii_case("completed") {
+            Ok(Self::Completed)
+        } else if trimmed.eq_ignore_ascii_case("failed") {
+            Ok(Self::Failed)
+        } else if trimmed.eq_ignore_ascii_case("cancelled") {
+            Ok(Self::Cancelled)
+        } else if trimmed.eq_ignore_ascii_case("stuck") {
+            Ok(Self::Stuck)
+        } else if trimmed.eq_ignore_ascii_case("error") {
+            // Legacy alias — pre-refactor claude_bridge / acp_bridge
+            // producers emit `"error"`. Keep the alias so those wire
+            // payloads deserialize into `Failed` instead of hitting the
+            // consumer's default-on-unknown branch (which also emits a
+            // warn log — spammy for a known, expected value).
+            Ok(Self::Failed)
+        } else {
+            Err(JobResultStatusParseError {
+                value: s.to_string(),
+            })
+        }
+    }
+}
+
 /// A single step in a plan progress update (SSE DTO).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStepDto {
@@ -235,7 +345,7 @@ pub enum AppEvent {
     #[serde(rename = "job_result")]
     JobResult {
         job_id: String,
-        status: String,
+        status: JobResultStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -508,7 +618,7 @@ mod tests {
             },
             AppEvent::JobResult {
                 job_id: String::new(),
-                status: String::new(),
+                status: JobResultStatus::Completed,
                 session_id: None,
                 fallback_deliverable: None,
             },
@@ -653,5 +763,139 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: AppEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.event_type(), "response");
+    }
+
+    // === JobResultStatus: wire format + parsing ===
+    // Regression for the stringly-typed JobResult.status field that
+    // previously admitted arbitrary values and forced consumers to
+    // compare via `status == "completed"`. The enum preserves the
+    // snake_case wire format so SSE/browser clients need no update.
+
+    #[test]
+    fn job_result_status_serializes_as_snake_case() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            serde_json::to_string(&JobResultStatus::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&JobResultStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&JobResultStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&JobResultStatus::Stuck).unwrap(),
+            "\"stuck\""
+        );
+
+        assert_eq!(
+            JobResultStatus::from_str("completed").unwrap(),
+            JobResultStatus::Completed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("failed").unwrap(),
+            JobResultStatus::Failed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("cancelled").unwrap(),
+            JobResultStatus::Cancelled
+        );
+        assert_eq!(
+            JobResultStatus::from_str("stuck").unwrap(),
+            JobResultStatus::Stuck
+        );
+        assert!(JobResultStatus::from_str("unknown_xyz").is_err());
+    }
+
+    #[test]
+    fn job_result_status_accepts_error_alias_as_failed() {
+        use std::str::FromStr;
+
+        // Legacy `claude_bridge` / `acp_bridge` producers emit
+        // `"error"` on the wire. The alias keeps those payloads
+        // deserializing into `Failed` without touching the producers.
+        assert_eq!(
+            JobResultStatus::from_str("error").unwrap(),
+            JobResultStatus::Failed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("ERROR").unwrap(),
+            JobResultStatus::Failed
+        );
+    }
+
+    #[test]
+    fn job_result_status_from_str_is_case_insensitive_and_trims() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            JobResultStatus::from_str("  COMPLETED  ").unwrap(),
+            JobResultStatus::Completed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("Failed").unwrap(),
+            JobResultStatus::Failed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("\tCancelled\n").unwrap(),
+            JobResultStatus::Cancelled
+        );
+        // Empty / whitespace-only inputs are a distinct error so the
+        // caller can distinguish "missing status" from "unknown status".
+        assert!(JobResultStatus::from_str("").is_err());
+        assert!(JobResultStatus::from_str("   ").is_err());
+    }
+
+    #[test]
+    fn job_result_status_parse_error_preserves_original_input() {
+        use std::str::FromStr;
+
+        // Keep whitespace / casing in the error's `value` field for
+        // debugging — trimming is only for matching, not preservation.
+        let err = JobResultStatus::from_str("  GARBAGE  ").unwrap_err();
+        assert_eq!(err.value, "  GARBAGE  ");
+    }
+
+    #[test]
+    fn job_result_event_preserves_snake_case_wire_format() {
+        // Producers wrote `"completed"` / `"failed"` as raw strings
+        // before this refactor. The enum must emit the same wire bytes
+        // for backwards compat with SSE and external consumers.
+        let event = AppEvent::JobResult {
+            job_id: "job-1".to_string(),
+            status: JobResultStatus::Completed,
+            session_id: None,
+            fallback_deliverable: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "job_result");
+        assert_eq!(json["status"], "completed");
+
+        // Round-trip: a wire payload written by an older producer
+        // (still as a JSON string) must deserialize cleanly.
+        let raw = serde_json::json!({
+            "type": "job_result",
+            "job_id": "job-2",
+            "status": "failed",
+        });
+        let parsed: AppEvent = serde_json::from_value(raw).unwrap();
+        match parsed {
+            AppEvent::JobResult { status, .. } => {
+                assert_eq!(status, JobResultStatus::Failed);
+                assert!(!status.is_success());
+            }
+            other => panic!("expected JobResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn job_result_status_is_success_only_for_completed() {
+        assert!(JobResultStatus::Completed.is_success());
+        assert!(!JobResultStatus::Failed.is_success());
+        assert!(!JobResultStatus::Cancelled.is_success());
     }
 }

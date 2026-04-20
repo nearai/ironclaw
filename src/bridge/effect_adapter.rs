@@ -17,8 +17,9 @@ use tracing::debug;
 
 use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, EffectExecutor, EngineError,
-    MountError, ThreadExecutionContext, WorkspaceMounts,
+    MountError, Store, ThreadExecutionContext, WorkspaceMounts,
 };
+use ironclaw_skills::SkillRegistry;
 
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
@@ -58,6 +59,10 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
     /// Optional per-project workspace mount table. When set and a sandbox-eligible
     /// tool call carries a `/project/...` path, the call is dispatched through
     /// the mount backend (passthrough host filesystem in Phase 1; containerized
@@ -89,6 +94,8 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
         }
@@ -121,6 +128,18 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -162,6 +181,38 @@ impl EffectBridgeAdapter {
         self.mission_manager.read().await.clone()
     }
 
+    async fn sync_skill_install_result(
+        &self,
+        output_value: &serde_json::Value,
+        project_id: ironclaw_engine::ProjectId,
+    ) -> Result<(), EngineError> {
+        let Some(skill_name) = output_value.get("name").and_then(|value| value.as_str()) else {
+            return Ok(());
+        };
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Ok(());
+        };
+        let Some(registry) = self.skill_registry.read().await.clone() else {
+            return Ok(());
+        };
+
+        let skill = {
+            let guard = registry.read().map_err(|e| EngineError::Store {
+                reason: format!("skill registry lock poisoned: {e}"),
+            })?;
+            guard.find_by_name(skill_name).cloned()
+        }
+        .ok_or_else(|| EngineError::Skill {
+            reason: format!(
+                "skill_install reported '{}', but the installed skill was not found in the registry",
+                skill_name
+            ),
+        })?;
+
+        crate::bridge::skill_migration::sync_v1_skill_to_store(&skill, &store, project_id).await?;
+        Ok(())
+    }
+
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -169,6 +220,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
+        paused_lease: Option<CapabilityLease>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -177,6 +229,7 @@ impl EffectBridgeAdapter {
             parameters: Box::new(parameters),
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
+            paused_lease: paused_lease.map(Box::new),
         }
     }
 
@@ -185,6 +238,7 @@ impl EffectBridgeAdapter {
         parameters: serde_json::Value,
         context: &ThreadExecutionContext,
         output_value: &serde_json::Value,
+        lease: &CapabilityLease,
     ) -> Option<EngineError> {
         let status = output_value.get("status").and_then(|v| v.as_str())?;
         let name = output_value.get("name").and_then(|v| v.as_str())?;
@@ -221,6 +275,7 @@ impl EffectBridgeAdapter {
                     ),
                 },
                 None,
+                Some(lease.clone()),
             )),
             _ => None,
         }
@@ -523,6 +578,75 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
+            "mission_get" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name"))
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.get_mission(id).await {
+                        Ok(Some(mission)) => {
+                            // Ownership check: only the mission owner can
+                            // retrieve its details (mirrors fire/pause/resume).
+                            if mission.user_id != context.user_id {
+                                return Some(Err(EngineError::Effect {
+                                    reason: format!("mission {id_str} belongs to another user"),
+                                }));
+                            }
+                            // Load recent threads (last 5) to show results
+                            let store = mgr.store();
+                            let recent_thread_ids: Vec<_> =
+                                mission.thread_history.iter().rev().take(5).collect();
+                            let mut thread_summaries = Vec::new();
+                            for tid in recent_thread_ids {
+                                if let Ok(Some(thread)) = store.load_thread(*tid).await {
+                                    let last_response = thread
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| m.role == ironclaw_engine::MessageRole::Assistant)
+                                        .map(|m| m.content.clone());
+                                    thread_summaries.push(serde_json::json!({
+                                        "thread_id": tid.to_string(),
+                                        "state": format!("{:?}", thread.state),
+                                        "created_at": thread.created_at.to_rfc3339(),
+                                        "completed_at": thread.completed_at.map(|t| t.to_rfc3339()),
+                                        "steps": thread.step_count,
+                                        "tokens_used": thread.total_tokens_used,
+                                        "result": last_response,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::json!({
+                                "id": mission.id.to_string(),
+                                "name": mission.name,
+                                "goal": mission.goal,
+                                "status": format!("{:?}", mission.status),
+                                "current_focus": mission.current_focus,
+                                "approach_history": mission.approach_history.iter().rev().take(10).rev().cloned().collect::<Vec<_>>(),
+                                "success_criteria": mission.success_criteria,
+                                "total_threads": mission.thread_history.len(),
+                                "cadence": format!("{:?}", mission.cadence),
+                                "last_fire_at": mission.last_fire_at.map(|t| t.to_rfc3339()),
+                                "next_fire_at": mission.next_fire_at.map(|t| t.to_rfc3339()),
+                                "recent_threads": thread_summaries,
+                            }))
+                        }
+                        Ok(None) => Err(EngineError::Effect {
+                            reason: format!("mission not found: {id_str}"),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             "mission_fire" => {
                 let id_str = params
                     .get("id")
@@ -726,7 +850,7 @@ impl EffectBridgeAdapter {
         &self,
         action_name: &str,
         parameters: serde_json::Value,
-        _lease: &CapabilityLease,
+        lease: &CapabilityLease,
         context: &ThreadExecutionContext,
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
@@ -826,6 +950,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
@@ -898,6 +1023,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -939,6 +1065,7 @@ impl EffectBridgeAdapter {
                             auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -996,6 +1123,7 @@ impl EffectBridgeAdapter {
                                 allow_always: false,
                             },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1011,6 +1139,7 @@ impl EffectBridgeAdapter {
                             parameters,
                             ironclaw_engine::ResumeKind::Approval { allow_always: true },
                             None,
+                            Some(lease.clone()),
                         ));
                     }
                 }
@@ -1163,9 +1292,88 @@ impl EffectBridgeAdapter {
                         parameters.clone(),
                         context,
                         &output_value,
+                        lease,
                     )
                 {
                     return Err(err);
+                }
+
+                if (lookup_name == "tool_install" || lookup_name == "tool-install")
+                    && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+                    && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
+                {
+                    use crate::bridge::auth_manager::ToolReadiness;
+                    match auth_mgr
+                        .check_tool_readiness(ext_name, &context.user_id)
+                        .await
+                    {
+                        ToolReadiness::NeedsAuth {
+                            auth_url,
+                            instructions,
+                            credential_name,
+                        } => {
+                            debug!(
+                                extension = %ext_name,
+                                credential = %credential_name,
+                                "Post-install: extension needs auth — entering auth flow"
+                            );
+                            return Err(Self::gate_paused(
+                                "authentication",
+                                action_name,
+                                context.current_call_id.as_deref(),
+                                parameters,
+                                ironclaw_engine::ResumeKind::Authentication {
+                                    credential_name: credential_name.clone(),
+                                    instructions: instructions.unwrap_or_else(|| {
+                                        auth_mgr.get_setup_instructions_or_default(
+                                            credential_name.as_str(),
+                                        )
+                                    }),
+                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
+                                },
+                                Some(output_value),
+                                None,
+                            ));
+                        }
+                        ToolReadiness::NeedsSetup { ref message } => {
+                            debug!(
+                                extension = %ext_name,
+                                "Post-install: extension needs setup"
+                            );
+                            let mut enriched = output_value.clone();
+                            if let Some(obj) = enriched.as_object_mut() {
+                                obj.insert(
+                                    "auth_status".to_string(),
+                                    serde_json::json!("needs_setup"),
+                                );
+                                obj.insert(
+                                    "setup_message".to_string(),
+                                    serde_json::Value::String(message.clone()),
+                                );
+                            }
+                            return Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: enriched,
+                                is_error: false,
+                                duration,
+                            });
+                        }
+                        ToolReadiness::Ready => {
+                            debug!(
+                                extension = %ext_name,
+                                "Post-install: extension ready — no auth needed"
+                            );
+                        }
+                    }
+                }
+
+                if lookup_name == "skill_install" {
+                    self.sync_skill_install_result(&output_value, context.project_id)
+                        .await?;
                 }
 
                 Ok(ActionResult {
@@ -1204,6 +1412,7 @@ impl EffectBridgeAdapter {
                             auth_url: None,
                         },
                         None,
+                        Some(lease.clone()),
                     ));
                 }
 
@@ -1658,6 +1867,12 @@ fn routine_to_mission_alias(
 
         "routine_delete" => Some(RoutineMissionAlias {
             mission_action: "mission_complete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_history" => Some(RoutineMissionAlias {
+            mission_action: "mission_get",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -3061,6 +3276,19 @@ mod tests {
         assert!(!is_v1_only_tool("routine_update"));
     }
 
+    // ── routine_to_mission_alias tests ────────────────────────
+
+    /// `routine_history` should map to `mission_get` so the LLM can
+    /// retrieve mission results via either the v1 or v2 action name.
+    #[test]
+    fn routine_history_maps_to_mission_get() {
+        let params = serde_json::json!({"name": "test-mission-id"});
+        let alias = routine_to_mission_alias("routine_history", &params);
+        let alias = alias.expect("routine_history should produce an alias");
+        assert_eq!(alias.mission_action, "mission_get");
+        assert!(alias.post_create_update.is_none());
+    }
+
     #[test]
     fn job_and_build_tools_remain_v1_only() {
         assert!(is_v1_only_tool("create_job"));
@@ -3461,6 +3689,117 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    #[tokio::test]
+    async fn skill_install_syncs_installed_skill_into_v2_store() {
+        use ironclaw_skills::v2::V2SkillMetadata;
+
+        struct SkillInstallStub;
+
+        #[async_trait]
+        impl Tool for SkillInstallStub {
+            fn name(&self) -> &str {
+                "skill_install"
+            }
+
+            fn description(&self) -> &str {
+                "stub skill install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "pikastream-video-meeting",
+                        "status": "installed",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut raw_registry = SkillRegistry::new(dir.path().to_path_buf());
+        raw_registry
+            .install_skill(
+                r#"---
+name: pikastream-video-meeting
+version: "1.0.0"
+description: Pika meeting setup
+keywords:
+  - pika
+  - hangouts
+---
+# Pika Skill
+
+Use this skill to set up a Pika meeting.
+"#,
+            )
+            .await
+            .expect("install test skill");
+        let skill_registry = Arc::new(std::sync::RwLock::new(raw_registry));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SkillInstallStub)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+        adapter.set_engine_store(Arc::clone(&store)).await;
+        adapter
+            .set_skill_registry(Arc::clone(&skill_registry))
+            .await;
+
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_skill_install_sync"),
+        );
+        let result = adapter
+            .execute_action("skill_install", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("skill install should succeed");
+        assert!(!result.is_error);
+
+        let docs = store
+            .list_shared_memory_docs(ctx.project_id)
+            .await
+            .expect("list docs");
+        let doc = docs
+            .into_iter()
+            .find(|doc| doc.title == "skill:pikastream-video-meeting")
+            .expect("synced v2 skill doc");
+        assert_eq!(doc.doc_type, ironclaw_engine::DocType::Skill);
+        assert!(
+            doc.content.contains("Pika Skill"),
+            "doc content: {}",
+            doc.content
+        );
+
+        let metadata: V2SkillMetadata =
+            serde_json::from_value(doc.metadata).expect("valid skill metadata");
+        assert_eq!(metadata.name, "pikastream-video-meeting");
+        assert!(
+            metadata
+                .bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
+            "bundle path: {:?}",
+            metadata.bundle_path
+        );
     }
 
     // ── Caller-level mission action tests ─────────────────────

@@ -187,7 +187,8 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
+function createMessageElement(role, content, options) {
+  const opts = options || {};
   const div = document.createElement('div');
   div.className = 'message ' + role;
 
@@ -199,8 +200,22 @@ function createMessageElement(role, content) {
   // Message content
   const contentEl = document.createElement('div');
   contentEl.className = 'message-content';
+  let copyText = opts.copyText || content;
+  let parsedAttachments = opts.attachments || null;
   if (role === 'user' || role === 'system') {
-    contentEl.textContent = content;
+    // User turns can carry an `<attachments>…</attachments>` payload appended
+    // by the backend. Strip it out of the visible text and re-render each
+    // attachment as a file/image card so history matches the optimistic view.
+    // When the caller passed `options.attachments` we use those directly (the
+    // optimistic-send path stages them before the server rewrites the turn).
+    if (!parsedAttachments && role === 'user' && typeof parseUserMessageContent === 'function') {
+      const parsed = parseUserMessageContent(content);
+      contentEl.textContent = parsed.text;
+      parsedAttachments = parsed.attachments;
+      copyText = opts.copyText || parsed.copyText;
+    } else {
+      contentEl.textContent = content;
+    }
   } else {
     div.setAttribute('data-raw', content);
     contentEl.innerHTML = renderMarkdown(content);
@@ -217,9 +232,18 @@ function createMessageElement(role, content) {
   }
   div.appendChild(contentEl);
 
+  if (
+    role === 'user'
+    && parsedAttachments
+    && parsedAttachments.length > 0
+    && typeof renderMessageAttachments === 'function'
+  ) {
+    renderMessageAttachments(div, parsedAttachments);
+  }
+
   if (role === 'assistant' || role === 'user') {
     div.classList.add('has-copy');
-    div.setAttribute('data-copy-text', content);
+    div.setAttribute('data-copy-text', copyText);
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-copy-btn';
     copyBtn.type = 'button';

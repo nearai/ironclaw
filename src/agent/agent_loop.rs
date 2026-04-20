@@ -40,6 +40,8 @@ use ironclaw_skills::SkillRegistry;
 /// `Done` after a pause (e.g. while awaiting tool approval) is incorrect because
 /// the thread is not in a terminal state, and would also trip the web UI's
 /// missing-response safety net (see #2079).
+pub(crate) const BRIDGE_PENDING_SENTINEL: &str = "\u{0}__bridge_pending__";
+
 #[derive(Debug)]
 pub(crate) enum HandleOutcome {
     /// Shutdown signal (e.g. `/quit`). Run loop should break.
@@ -60,6 +62,7 @@ impl HandleOutcome {
     fn from_legacy(opt: Option<String>) -> Self {
         match opt {
             None => HandleOutcome::Shutdown,
+            Some(s) if s == BRIDGE_PENDING_SENTINEL => HandleOutcome::Pending,
             Some(s) if s.is_empty() => HandleOutcome::NoResponse,
             Some(s) => HandleOutcome::Respond(s),
         }
@@ -475,22 +478,22 @@ impl Agent {
     /// [`TenantCtx`] provides a [`TenantScope`] that auto-binds `user_id` on
     /// every database operation and a per-user rate limiter.
     pub(super) async fn tenant_ctx(&self, user_id: &str) -> crate::tenant::TenantCtx {
-        use crate::ownership::{Identity, OwnerId, UserRole};
-        // Bridge: creates Member identity from raw string.
+        use crate::ownership::{UserId, UserRole};
+        // Bridge: creates Regular identity from raw string.
         // Will be replaced by OwnershipCache lookup in Task 9.
-        let identity = Identity::new(OwnerId::from(user_id), UserRole::Member);
+        let identity = UserId::from_trusted(user_id.to_string(), UserRole::Regular);
         self.tenant_ctx_with_identity(identity).await
     }
 
-    /// Build a tenant-scoped execution context from a resolved `Identity`.
+    /// Build a tenant-scoped execution context from a resolved [`crate::ownership::UserId`].
     ///
     /// Preferred over [`tenant_ctx`](Self::tenant_ctx) once the call site has a
-    /// full `Identity` available.
+    /// full `UserId` available.
     pub(super) async fn tenant_ctx_with_identity(
         &self,
-        identity: crate::ownership::Identity,
+        identity: crate::ownership::UserId,
     ) -> crate::tenant::TenantCtx {
-        let user_id = identity.owner_id.as_str();
+        let user_id = identity.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
         let store = self.deps.store.as_ref().map(|db| {
@@ -1595,6 +1598,7 @@ impl Agent {
             submission,
             Submission::ExecApproval { .. }
                 | Submission::ApprovalResponse { .. }
+                | Submission::ExternalCallback { .. }
                 | Submission::GateAuthResolution { .. }
         ) {
             message
