@@ -813,6 +813,8 @@ function refreshMissionView(missionId) {
     openMissionDetail(missionId);
   } else if (crCurrentProjectId) {
     drillIntoProject(crCurrentProjectId);
+  } else if (currentTab === 'missions') {
+    loadMissions();
   }
 }
 

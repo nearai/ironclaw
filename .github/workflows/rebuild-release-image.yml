@@ -34,6 +34,10 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Detected version: ${VERSION}"
 
@@ -108,13 +112,19 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Summary
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+          HAS_RUNTIME_STAGE: ${{ steps.target.outputs.has_runtime_stage }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           {
             echo "## Rebuilt Docker Image"
             echo ""
-            echo "- source ref: \`${{ inputs.source_ref }}\`"
-            echo "- source sha: \`${{ steps.source.outputs.sha }}\`"
-            echo "- version: \`${{ steps.version.outputs.version }}\`"
-            echo "- runtime stage detected: \`${{ steps.target.outputs.has_runtime_stage }}\`"
-            echo "- image: \`${{ env.IMAGE_NAME }}:${{ inputs.tag }}\`"
+            echo "- source ref: \`${SOURCE_REF}\`"
+            echo "- source sha: \`${SOURCE_SHA}\`"
+            echo "- version: \`${VERSION}\`"
+            echo "- runtime stage detected: \`${HAS_RUNTIME_STAGE}\`"
+            echo "- image: \`${IMAGE_NAME}:${INPUT_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"
