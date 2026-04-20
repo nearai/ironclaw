@@ -1101,10 +1101,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        // Emit via the typed enum so the wire string stays in sync with
+        // `JobResultStatus::Stuck::as_str()` — no string-literal drift.
         self.log_event(
             "result",
             serde_json::json!({
-                "status": "stuck",
+                "status": JobResultStatus::Stuck,
                 "success": false,
                 "message": format!("Job stuck: {}", reason),
             }),

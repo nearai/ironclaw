@@ -23,6 +23,11 @@ pub enum JobResultStatus {
     Completed,
     Failed,
     Cancelled,
+    /// Worker timeout / stuck-state path. Emitted when a job's context
+    /// is transitioned to `JobState::Stuck` (see `worker/job.rs`
+    /// `mark_stuck`). Distinct from `Failed` so the UI and analytics
+    /// can surface recovery-eligible runs separately from hard errors.
+    Stuck,
 }
 
 impl JobResultStatus {
@@ -39,6 +44,7 @@ impl JobResultStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Stuck => "stuck",
         }
     }
 }
@@ -66,17 +72,47 @@ impl std::fmt::Display for JobResultStatusParseError {
 
 impl std::error::Error for JobResultStatusParseError {}
 
+/// Parse a wire-format string into a [`JobResultStatus`].
+///
+/// Accepts the canonical snake_case variants (`"completed"`, `"failed"`,
+/// `"cancelled"`, `"stuck"`) plus the legacy alias `"error"` → `Failed`
+/// that pre-refactor producers (`claude_bridge`, `acp_bridge`) still
+/// emit on the wire. Input is trimmed and matched case-insensitively
+/// (ASCII-only) so slightly-varied payloads — `"  COMPLETED  "`,
+/// `"Failed"` — deserialize cleanly instead of falling to the
+/// `Err`-then-default path in consumers.
+///
+/// Empty / whitespace-only input returns `Err` so the caller can log a
+/// distinct warning for "missing status" vs "unknown status".
 impl std::str::FromStr for JobResultStatus {
     type Err = JobResultStatusParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            other => Err(JobResultStatusParseError {
-                value: other.to_string(),
-            }),
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(JobResultStatusParseError {
+                value: s.to_string(),
+            });
+        }
+        if trimmed.eq_ignore_ascii_case("completed") {
+            Ok(Self::Completed)
+        } else if trimmed.eq_ignore_ascii_case("failed") {
+            Ok(Self::Failed)
+        } else if trimmed.eq_ignore_ascii_case("cancelled") {
+            Ok(Self::Cancelled)
+        } else if trimmed.eq_ignore_ascii_case("stuck") {
+            Ok(Self::Stuck)
+        } else if trimmed.eq_ignore_ascii_case("error") {
+            // Legacy alias — pre-refactor claude_bridge / acp_bridge
+            // producers emit `"error"`. Keep the alias so those wire
+            // payloads deserialize into `Failed` instead of hitting the
+            // consumer's default-on-unknown branch (which also emits a
+            // warn log — spammy for a known, expected value).
+            Ok(Self::Failed)
+        } else {
+            Err(JobResultStatusParseError {
+                value: s.to_string(),
+            })
         }
     }
 }
@@ -649,6 +685,10 @@ mod tests {
             serde_json::to_string(&JobResultStatus::Cancelled).unwrap(),
             "\"cancelled\""
         );
+        assert_eq!(
+            serde_json::to_string(&JobResultStatus::Stuck).unwrap(),
+            "\"stuck\""
+        );
 
         assert_eq!(
             JobResultStatus::from_str("completed").unwrap(),
@@ -662,7 +702,60 @@ mod tests {
             JobResultStatus::from_str("cancelled").unwrap(),
             JobResultStatus::Cancelled
         );
-        assert!(JobResultStatus::from_str("unknown").is_err());
+        assert_eq!(
+            JobResultStatus::from_str("stuck").unwrap(),
+            JobResultStatus::Stuck
+        );
+        assert!(JobResultStatus::from_str("unknown_xyz").is_err());
+    }
+
+    #[test]
+    fn job_result_status_accepts_error_alias_as_failed() {
+        use std::str::FromStr;
+
+        // Legacy `claude_bridge` / `acp_bridge` producers emit
+        // `"error"` on the wire. The alias keeps those payloads
+        // deserializing into `Failed` without touching the producers.
+        assert_eq!(
+            JobResultStatus::from_str("error").unwrap(),
+            JobResultStatus::Failed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("ERROR").unwrap(),
+            JobResultStatus::Failed
+        );
+    }
+
+    #[test]
+    fn job_result_status_from_str_is_case_insensitive_and_trims() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            JobResultStatus::from_str("  COMPLETED  ").unwrap(),
+            JobResultStatus::Completed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("Failed").unwrap(),
+            JobResultStatus::Failed
+        );
+        assert_eq!(
+            JobResultStatus::from_str("\tCancelled\n").unwrap(),
+            JobResultStatus::Cancelled
+        );
+        // Empty / whitespace-only inputs are a distinct error so the
+        // caller can distinguish "missing status" from "unknown status".
+        assert!(JobResultStatus::from_str("").is_err());
+        assert!(JobResultStatus::from_str("   ").is_err());
+    }
+
+    #[test]
+    fn job_result_status_parse_error_preserves_original_input() {
+        use std::str::FromStr;
+
+        // Keep whitespace / casing in the error's `value` field for
+        // debugging — trimming is only for matching, not preservation.
+        let err = JobResultStatus::from_str("  GARBAGE  ").unwrap_err();
+        assert_eq!(err.value, "  GARBAGE  ");
     }
 
     #[test]
