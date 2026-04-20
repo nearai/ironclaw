@@ -909,28 +909,39 @@ impl SetupWizard {
     /// diverged checksums (issue #1328), then runs refinery's embedded
     /// migrations. Bundled into a single helper so this call site cannot
     /// drift from `Store::run_migrations` (see PR #2101 review).
+    ///
+    /// Requires `self.db_pool` to be populated by a prior call to
+    /// `test_database_connection_postgres`. Returns an error rather than
+    /// silently no-opping so the coupling between the two calls cannot
+    /// silently regress (see issue #846 / PR #2309 review).
     #[cfg(feature = "postgres")]
     async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
-        if let Some(ref pool) = self.db_pool {
-            if !self.config.quick {
-                print_info("Running migrations...");
-            }
-            tracing::debug!("Running PostgreSQL migrations...");
+        let pool = self.db_pool.as_ref().ok_or_else(|| {
+            SetupError::Database(
+                "run_migrations_postgres called without an established pool; \
+                 test_database_connection_postgres must run first"
+                    .to_string(),
+            )
+        })?;
 
-            let mut client = pool
-                .get()
-                .await
-                .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
-
-            crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client)
-                .await
-                .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
-
-            if !self.config.quick {
-                print_success("Migrations applied");
-            }
-            tracing::debug!("PostgreSQL migrations applied");
+        if !self.config.quick {
+            print_info("Running migrations...");
         }
+        tracing::debug!("Running PostgreSQL migrations...");
+
+        let mut client = pool
+            .get()
+            .await
+            .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
+
+        crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client)
+            .await
+            .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
+
+        if !self.config.quick {
+            print_success("Migrations applied");
+        }
+        tracing::debug!("PostgreSQL migrations applied");
         Ok(())
     }
 
@@ -1148,10 +1159,6 @@ impl SetupWizard {
     #[cfg(feature = "postgres")]
     async fn finish_postgres_auto_setup(&mut self, url: String) -> Result<(), SetupError> {
         self.test_database_connection_postgres(&url).await?;
-        debug_assert!(
-            self.db_pool.is_some(),
-            "test_database_connection_postgres must set db_pool"
-        );
         self.run_migrations_postgres().await?;
         print_info("Using existing PostgreSQL configuration");
         self.settings.database_backend = Some("postgres".to_string());
@@ -4721,8 +4728,9 @@ mod tests {
     }
 
     /// Start a pgvector-enabled Postgres container for integration tests,
-    /// returning `(container, database_url)`. Returns `None` if Docker is
-    /// unreachable, matching `tests/workspace_integration.rs`.
+    /// returning `(container, database_url)`. Returns `None` and prints a
+    /// skip message if Docker/testcontainers is unreachable so the test
+    /// succeeds on hosts without Docker.
     #[cfg(all(feature = "postgres", feature = "integration"))]
     async fn start_pg_container() -> Option<(
         testcontainers_modules::testcontainers::ContainerAsync<
@@ -4827,7 +4835,7 @@ mod tests {
     ///
     /// Gated behind `integration` (requires Docker + testcontainers) so
     /// it runs in the dedicated integration-test job. Skips gracefully
-    /// if Docker is unavailable, matching `tests/workspace_integration.rs`.
+    /// if Docker is unavailable (see `start_pg_container`).
     ///
     /// This test clears `DATABASE_BACKEND` to exercise the fall-through
     /// postgres branch (DATABASE_URL alone). The companion test below
