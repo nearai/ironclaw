@@ -126,7 +126,7 @@ impl McpClient {
                  falling back to canonical 'unknown'"
             );
             McpServerName::new("unknown")
-                .expect("'unknown' is a valid McpServerName (alnum allowlist)")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
 
@@ -167,7 +167,7 @@ impl McpClient {
                  falling back to canonical 'unknown'"
             );
             McpServerName::new("unknown")
-                .expect("'unknown' is a valid McpServerName (alnum allowlist)")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
         let url: String = server_url.into();
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
