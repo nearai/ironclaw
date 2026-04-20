@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(cli)* add opt-in `ironclaw migrate openclaw|hermes` (behind `--features migrate`) for direct assistant migration into IronClaw Engine V2 state, legacy web history, settings, and encrypted secrets.
+
 ### Changed
 
 - *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.

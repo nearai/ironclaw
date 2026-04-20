@@ -14,6 +14,7 @@
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
+//! - Migrating from OpenClaw / Hermes (`migrate`)
 
 pub mod acp;
 mod channels;
@@ -22,11 +23,13 @@ mod config;
 mod doctor;
 pub mod fmt;
 mod hooks;
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 pub mod import;
 mod logs;
 mod mcp;
 pub mod memory;
+#[cfg(feature = "migrate")]
+pub mod migrate;
 mod models;
 mod pairing;
 mod profile;
@@ -43,12 +46,14 @@ pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use hooks::{HooksCommand, run_hooks_command};
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
+#[cfg(feature = "migrate")]
+pub use migrate::{MigrateCommand, run_migrate_command, run_migrate_command_with_services};
 pub use models::{ModelsCommand, run_models_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use profile::{ProfileCommand, run_profile_command};
@@ -311,13 +316,18 @@ pub enum Command {
     )]
     Completion(Completion),
 
-    /// Import data from other AI systems
-    #[cfg(feature = "import")]
+    /// Migrate from external assistants into IronClaw
+    #[cfg(feature = "migrate")]
     #[command(
         subcommand,
-        about = "Import from other AI systems",
-        long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
+        about = "Migrate from external assistants",
+        long_about = "Import data directly from external assistant homes into IronClaw Engine V2 + legacy history surfaces.\n\nExamples:\n  ironclaw migrate openclaw\n  ironclaw migrate hermes --all-profiles"
     )]
+    Migrate(MigrateCommand),
+
+    /// Deprecated alias for `ironclaw migrate`
+    #[cfg(feature = "migrate")]
+    #[command(subcommand, hide = true)]
     Import(ImportCommand),
 
     /// Authenticate with a provider (re-login)
@@ -479,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "import")]
+    #[cfg(feature = "migrate")]
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
@@ -487,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "import"))]
+    #[cfg(not(feature = "migrate"))]
     fn test_help_output_without_import() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
@@ -495,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "import")]
+    #[cfg(feature = "migrate")]
     fn test_long_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
@@ -503,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "import"))]
+    #[cfg(not(feature = "migrate"))]
     fn test_long_help_output_without_import() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();

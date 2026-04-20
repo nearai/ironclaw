@@ -201,7 +201,7 @@ ed25519-dalek = { version = "2.2.0", features = ["std"] }
 bs58 = "0.5"
 hex = "0.4.3"
 
-# OpenClaw import (feature gated)
+# Migration readers (OpenClaw / Hermes)
 json5 = { version = "0.4", optional = true }
 
 # macOS keychain
@@ -253,7 +253,8 @@ replay = ["libsql"]
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 tui = ["dep:ironclaw_tui"]
-import = ["dep:json5", "libsql"]
+# Opt-in migration/import CLI for external assistant homes.
+migrate = ["dep:json5", "libsql"]
 
 [[test]]
 name = "e2e_thread_scheduling"

@@ -60,9 +60,11 @@ pub(crate) mod generated_images;
 pub mod history;
 pub mod hooks;
 pub mod http_intercept;
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 pub mod import;
 pub mod llm;
+#[cfg(feature = "migrate")]
+pub mod migrate;
 pub mod observability;
 pub mod orchestrator;
 pub mod ownership;

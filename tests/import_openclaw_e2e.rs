@@ -3,9 +3,9 @@
 //! These tests verify the complete import pipeline: configuration, settings,
 //! credentials, memory chunks, workspace documents, and conversations.
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod e2e_import_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;

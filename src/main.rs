@@ -220,7 +220,13 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
-        #[cfg(feature = "import")]
+        #[cfg(feature = "migrate")]
+        Some(Command::Migrate(migrate_cmd)) => {
+            init_cli_tracing();
+            let config = ironclaw::config::Config::from_env().await?;
+            return ironclaw::cli::run_migrate_command(migrate_cmd, &config).await;
+        }
+        #[cfg(feature = "migrate")]
         Some(Command::Import(import_cmd)) => {
             init_cli_tracing();
             let config = ironclaw::config::Config::from_env().await?;

@@ -81,7 +81,7 @@ pub struct OpenClawMessage {
 }
 
 /// Open an OpenClaw SQLite database file via libsql for read-only access.
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 async fn open_sqlite(db_path: &Path) -> Result<libsql::Connection, ImportError> {
     let db = libsql::Builder::new_local(db_path)
         .build()
@@ -130,7 +130,7 @@ impl OpenClawReader {
 
         let content = std::fs::read_to_string(&config_path).map_err(ImportError::Io)?;
 
-        #[cfg(feature = "import")]
+        #[cfg(feature = "migrate")]
         {
             let config: serde_json::Value =
                 json5::from_str(&content).map_err(|e| ImportError::ConfigParse(e.to_string()))?;
@@ -194,10 +194,10 @@ impl OpenClawReader {
             })
         }
 
-        #[cfg(not(feature = "import"))]
+        #[cfg(not(feature = "migrate"))]
         {
             Err(ImportError::ConfigParse(
-                "Import feature not enabled (compile with --features import)".to_string(),
+                "Migration feature not enabled (compile with --features migrate)".to_string(),
             ))
         }
     }
@@ -235,7 +235,7 @@ impl OpenClawReader {
     }
 
     /// Read all memory chunks from an OpenClaw SQLite database.
-    #[cfg(feature = "import")]
+    #[cfg(feature = "migrate")]
     pub async fn read_memory_chunks(
         &self,
         db_path: &Path,
@@ -288,7 +288,7 @@ impl OpenClawReader {
     }
 
     /// Read all conversations from an OpenClaw SQLite database.
-    #[cfg(feature = "import")]
+    #[cfg(feature = "migrate")]
     pub async fn read_conversations(
         &self,
         db_path: &Path,

@@ -1,8 +1,8 @@
 //! Comprehensive end-to-end tests for OpenClaw import with synthetic test data.
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod comprehensive_import_tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;

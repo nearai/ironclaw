@@ -7,9 +7,9 @@
 //! - Permission issues
 //! - Edge cases in data
 
-#![cfg(feature = "import")]
+#![cfg(feature = "migrate")]
 
-#[cfg(feature = "import")]
+#[cfg(feature = "migrate")]
 mod error_handling_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
