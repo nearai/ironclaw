@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 
 use crate::channels::web::auth::AdminUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{SystemPromptRequest, SystemPromptResponse};
 use crate::workspace::{ADMIN_SCOPE, Workspace, paths};
 

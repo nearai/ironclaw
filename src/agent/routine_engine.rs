@@ -2099,7 +2099,11 @@ async fn send_notification(
 
     let response = OutgoingResponse {
         content: message,
-        thread_id: thread_id.map(String::from),
+        // Wrap with `from_trusted` — the upstream caller already carried a
+        // routine-scoped identifier, and routines do not originate from
+        // external channel input.
+        thread_id: thread_id
+            .map(|s| ironclaw_common::ExternalThreadId::from_trusted(s.to_string())),
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
@@ -2461,6 +2465,7 @@ mod tests {
             sender_id: user_id.to_string(),
             user_name: None,
             content: content.to_string(),
+            structured_submission: None,
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),

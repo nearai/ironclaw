@@ -39,15 +39,23 @@ def _forward_coverage_env(env: dict):
 
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 async def _start_mock_api():
@@ -186,38 +194,62 @@ async def cancel_server(ironclaw_binary, mock_llm_server, cancel_mock_api):
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+@pytest.fixture(autouse=True)
+async def _pin_mock_github_api_url(mock_llm_server, cancel_mock_api):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": cancel_mock_api["url"]},
+        )
+        response.raise_for_status()
+    yield
+
+
 async def _wait_for_auth_prompt(base_url, thread_id, *, timeout=45.0):
-    indicators = ["paste your token", "token below", "authentication required for"]
+    """Poll until the thread is gate-paused for authentication via pending_gate."""
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
-        turns = r.json().get("turns", [])
-        if turns:
-            resp = (turns[-1].get("response") or "").lower()
-            if resp and any(ind in resp for ind in indicators):
-                return r.json()
+        history = r.json()
+        pending = history.get("pending_gate")
+        if isinstance(pending, dict):
+            resume_kind = pending.get("resume_kind") or {}
+            gate_name = (pending.get("gate_name") or "").lower()
+            if gate_name == "authentication" or (
+                isinstance(resume_kind, dict) and "Authentication" in resume_kind
+            ):
+                return history
         await asyncio.sleep(0.5)
     last = ""
+    pending_snapshot = None
     try:
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        turns = r.json().get("turns", [])
+        payload = r.json()
+        turns = payload.get("turns", [])
         if turns:
             last = turns[-1].get("response") or "(None)"
+        pending_snapshot = payload.get("pending_gate")
     except Exception:
         pass
-    raise AssertionError(f"Timed out waiting for auth prompt. Last: {last[:300]}")
+    raise AssertionError(
+        f"Timed out waiting for auth prompt. Last: {last[:300]}. pending_gate: {pending_snapshot}"
+    )
 
 
 async def _wait_for_approval_prompt(base_url, thread_id, *, timeout=45.0):
-    indicator = "requires approval"
+    """Poll until the thread is gate-paused for approval via pending_gate."""
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
-        turns = r.json().get("turns", [])
-        if turns:
-            resp = (turns[-1].get("response") or "").lower()
-            if indicator in resp:
-                return r.json()
+        history = r.json()
+        pending = history.get("pending_gate")
+        if isinstance(pending, dict):
+            resume_kind = pending.get("resume_kind") or {}
+            gate_name = (pending.get("gate_name") or "").lower()
+            if gate_name == "approval" or (
+                isinstance(resume_kind, dict) and "Approval" in resume_kind
+            ):
+                return history
         await asyncio.sleep(0.5)
     raise AssertionError(f"Timed out waiting for approval prompt in {thread_id}")
 
@@ -298,12 +330,26 @@ class TestV2EngineAuthCancel:
             timeout=30,
         )
 
-        history = await _wait_for_response(cancel_server, thread_id, timeout=30)
-        all_responses = " ".join(
-            (t.get("response") or "") for t in history.get("turns", [])
-        ).lower()
-        assert "cancel" in all_responses, (
-            f"Expected 'cancelled' in response. Got: {all_responses[:300]}"
+        # Cancel is delivered via the `GateResolved` SSE event + a direct
+        # "Cancelled." text response to the channel; neither writes a new
+        # assistant row to the chat history DB (the engine thread was
+        # stop_thread'd rather than resumed). Verify the user-visible
+        # signal the gateway actually emits: the pending_gate is gone.
+        async def _pending_gate_cleared() -> bool:
+            r = await api_get(
+                cancel_server,
+                f"/api/chat/history?thread_id={thread_id}",
+                timeout=15,
+            )
+            r.raise_for_status()
+            return r.json().get("pending_gate") is None
+
+        for _ in range(60):
+            if await _pending_gate_cleared():
+                break
+            await asyncio.sleep(0.5)
+        assert await _pending_gate_cleared(), (
+            "Expected pending_gate to clear after 'cancel'"
         )
 
     async def test_cancel_then_empty_same_thread(self, cancel_server, cancel_mock_api):

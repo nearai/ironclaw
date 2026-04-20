@@ -51,8 +51,23 @@ fn output_from_ensure_ready(outcome: EnsureReadyOutcome) -> serde_json::Value {
             "phase": phase,
             "message": format!("Extension '{}' is ready.", name),
         }),
-        EnsureReadyOutcome::NeedsAuth { auth, .. } => serde_json::to_value(&auth)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        EnsureReadyOutcome::NeedsAuth {
+            auth,
+            credential_name,
+            ..
+        } => {
+            let mut value = serde_json::to_value(&auth)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+            if let Some(credential_name) = credential_name
+                && let Some(obj) = value.as_object_mut()
+            {
+                obj.insert(
+                    "credential_name".to_string(),
+                    serde_json::Value::String(credential_name),
+                );
+            }
+            value
+        }
         EnsureReadyOutcome::NeedsSetup {
             name,
             kind,
@@ -90,8 +105,9 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. Use `tool_install` and \
-         `tool_activate` to install and enable channels; use the `message` tool for proactive \
+         receive and reply there), tools, and MCP servers. Use `tool_install` to install and \
+         continue setup/activation when possible, and `tool_activate` only when an installed \
+         extension still needs an explicit activation step. Use the `message` tool for proactive \
          outbound sends. Use discover:true to search online if the built-in registry has no \
          results."
     }
@@ -163,7 +179,9 @@ impl Tool for ToolInstallTool {
 
     fn description(&self) -> &str {
         "Install an extension (channel, tool, or MCP server). \
-         Use the name from tool_search results, or provide an explicit URL."
+         Use the name from tool_search results, or provide an explicit URL. \
+         Also discovers tool source code in the working directory \
+         (tools-src/, tool-src/, or direct subdirectories with Cargo.toml)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -209,16 +227,21 @@ impl Tool for ToolInstallTool {
                 _ => None,
             });
 
-        let result = self
-            .manager
+        self.manager
             .install(name, url, kind_hint, &ctx.user_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        let output = serde_json::to_value(&result)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+        let result = self
+            .manager
+            .ensure_extension_ready(name, &ctx.user_id, EnsureReadyIntent::PostInstall)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(ToolOutput::success(output, start.elapsed()))
+        Ok(ToolOutput::success(
+            output_from_ensure_ready(result),
+            start.elapsed(),
+        ))
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -888,8 +911,11 @@ mod tests {
         };
 
         let description = tool.description();
-        assert!(description.contains("Use `tool_install` and `tool_activate`"));
-        assert!(description.contains("use the `message` tool for proactive outbound sends"));
+        assert!(
+            description.contains("Use `tool_install` to install and continue setup/activation")
+        );
+        assert!(description.contains("`tool_activate` only when an installed extension still needs an explicit activation step"));
+        assert!(description.contains("Use the `message` tool for proactive outbound sends"));
     }
 
     #[test]
@@ -950,6 +976,26 @@ mod tests {
         assert!(!activation_error_requires_auth(
             "Activation failed: crashed"
         ));
+    }
+
+    #[test]
+    fn output_from_ensure_ready_needs_auth_includes_credential_name() {
+        let output = output_from_ensure_ready(EnsureReadyOutcome::NeedsAuth {
+            name: "web_search".to_string(),
+            kind: ExtensionKind::WasmTool,
+            phase: crate::extensions::ExtensionPhase::NeedsAuth,
+            credential_name: Some("search_api_key".to_string()),
+            auth: crate::extensions::AuthResult::awaiting_token(
+                "web_search",
+                ExtensionKind::WasmTool,
+                "Enter API key".to_string(),
+                None,
+            ),
+        });
+
+        assert_eq!(output["status"], "awaiting_token");
+        assert_eq!(output["name"], "web_search");
+        assert_eq!(output["credential_name"], "search_api_key");
     }
 
     #[test]

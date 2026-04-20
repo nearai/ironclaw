@@ -329,15 +329,20 @@ impl SessionManager {
             return 0;
         }
 
-        // Collect thread IDs from stale sessions for cleanup
+        // Collect thread IDs from stale sessions for cleanup and hook dispatch.
         let mut stale_thread_ids: Vec<Uuid> = Vec::new();
+        // Per-session thread IDs so SessionEnd hooks can target the right conversations.
+        let mut per_session_thread_ids: std::collections::HashMap<String, Vec<Uuid>> =
+            std::collections::HashMap::new();
         {
             let sessions = self.sessions.read().await;
             for user_id in &stale_users {
                 if let Some(session) = sessions.get(user_id)
                     && let Ok(sess) = session.try_lock()
                 {
-                    stale_thread_ids.extend(sess.threads.keys());
+                    let tids: Vec<Uuid> = sess.threads.keys().copied().collect();
+                    stale_thread_ids.extend(&tids);
+                    per_session_thread_ids.insert(sess.id.to_string(), tids);
                 }
             }
         }
@@ -348,11 +353,15 @@ impl SessionManager {
                 let hooks = hooks.clone();
                 let uid = user_id.clone();
                 let sid = session_id.clone();
+                let tids = per_session_thread_ids
+                    .remove(session_id)
+                    .unwrap_or_default();
                 tokio::spawn(async move {
                     use crate::hooks::HookEvent;
                     let event = HookEvent::SessionEnd {
                         user_id: uid,
                         session_id: sid,
+                        thread_ids: tids,
                     };
                     if let Err(e) = hooks.run(&event).await {
                         tracing::warn!("OnSessionEnd hook error: {}", e);
