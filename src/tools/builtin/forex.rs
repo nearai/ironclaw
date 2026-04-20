@@ -684,7 +684,7 @@ pub async fn run_transfer_analysis(
             "dxy_direction": dxy_dir,
             "hit_rate_pct": (hr * 10.0).round() / 10.0,
             "recommend": recommend,
-            "could_save": could_save.map(|s| format!("{s:.2} INR")),
+            "could_save": could_save,
         }
     }))
 }
