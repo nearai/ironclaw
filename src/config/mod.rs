@@ -286,45 +286,8 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Resolution layers (lowest -> highest priority):
-        //   defaults -> deployment profile -> TOML -> admin DB -> per-user DB
-        let mut settings = Settings::default();
-        profile::apply_profile(&mut settings)?;
-        Self::apply_toml_overlay(&mut settings, toml_path)?;
-
-        // Layer admin-scope defaults between TOML and per-user settings.
-        // This lets an admin set instance-wide defaults (e.g. temperature,
-        // model) that members inherit unless they override per-user.
-        // Skip if the user IS the admin scope to avoid a redundant merge.
-        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
-        if user_id != admin_scope
-            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
-            && !admin_map.is_empty()
-        {
-            // Defense-in-depth: even though the admin-scope map is written
-            // by an operator, never let admin-only LLM endpoint settings
-            // (private/loopback URLs) propagate down to non-operators.
-            if !is_operator {
-                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
-            }
-            let admin_settings = Settings::from_db_map(&admin_map);
-            settings.merge_from(&admin_settings);
-        }
-
-        // Overlay per-user DB settings on top (highest priority).
-        match store.get_all_settings(user_id).await {
-            Ok(mut map) => {
-                if !is_operator {
-                    crate::config::helpers::strip_admin_only_llm_keys(&mut map);
-                }
-                let db_settings = Settings::from_db_map(&map);
-                settings.merge_from(&db_settings);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
-            }
-        };
-
+        let settings =
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator).await?;
         Self::build(&settings).await
     }
 
@@ -417,45 +380,81 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<(), ConfigError> {
-        let mut settings = if let Some(store) = store {
-            // Resolution layers: profile -> TOML -> admin DB -> per-user DB.
-            let mut s = Settings::default();
-            profile::apply_profile(&mut s)?;
-            Self::apply_toml_overlay(&mut s, toml_path)?;
-            let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
-            if user_id != admin_scope
-                && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
-                && !admin_map.is_empty()
-            {
-                if !is_operator {
-                    crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
-                }
-                let admin_settings = Settings::from_db_map(&admin_map);
-                s.merge_from(&admin_settings);
+        self.llm =
+            Self::resolve_llm_with_secrets(store, user_id, toml_path, secrets, is_operator).await?;
+        Ok(())
+    }
+
+    /// Build the settings overlay used for DB-backed config reads.
+    ///
+    /// Resolution order is profile -> TOML -> admin DB -> per-user DB.
+    /// This is shared between full config loads and LLM-only hot reloads so
+    /// they read the same owner/admin scopes without duplicating merge logic.
+    async fn load_db_backed_settings(
+        store: &(dyn crate::db::SettingsStore + Sync),
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        is_operator: bool,
+    ) -> Result<Settings, ConfigError> {
+        let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
+        Self::apply_toml_overlay(&mut settings, toml_path)?;
+
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope
+            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
+            && !admin_map.is_empty()
+        {
+            if !is_operator {
+                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
             }
-            if let Ok(mut map) = store.get_all_settings(user_id).await {
+            let admin_settings = Settings::from_db_map(&admin_map);
+            settings.merge_from(&admin_settings);
+        }
+
+        match store.get_all_settings(user_id).await {
+            Ok(mut map) => {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
                 }
                 let db_settings = Settings::from_db_map(&map);
-                s.merge_from(&db_settings);
+                settings.merge_from(&db_settings);
             }
-            s
+            Err(e) => {
+                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
+            }
+        }
+
+        Ok(settings)
+    }
+
+    /// Resolve only the LLM configuration from the current source stack.
+    ///
+    /// This is used by hot reload paths that need the exact owner/admin merge
+    /// semantics from startup without rebuilding unrelated config sections.
+    pub(crate) async fn resolve_llm_with_secrets(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
+
+        let mut settings = if let Some(store) = store {
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator).await?
         } else {
             let mut s = Settings::default();
             profile::apply_profile(&mut s)?;
             s
         };
 
-        // Hydrate API keys from encrypted secrets store into the settings
-        // struct so that LlmConfig::resolve() sees them without any changes
-        // to its synchronous resolution logic.
         if let Some(secrets) = secrets {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
-        self.llm = LlmConfig::resolve(&settings)?;
-        Ok(())
+        LlmConfig::resolve(&settings)
     }
 
     /// Build config from settings (shared by from_env and from_db).
