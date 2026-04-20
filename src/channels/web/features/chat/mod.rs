@@ -611,20 +611,18 @@ pub(crate) async fn chat_history_handler(
             .enumerate()
             .filter_map(|(index, entry)| engine_history_entry_to_message(thread_id, index, entry))
             .collect();
-        if !synthetic.is_empty() {
-            let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
-            let mut turns = build_turns_from_db_messages(&synthetic);
-            enforce_generated_image_history_budget(&mut turns);
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more: false,
-                oldest_timestamp,
-                channel: Some("engine".to_string()),
-                pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
-                in_progress: None,
-            }));
-        }
+        let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
+        let mut turns = build_turns_from_db_messages(&synthetic);
+        enforce_generated_image_history_budget(&mut turns);
+        return Ok(Json(HistoryResponse {
+            thread_id,
+            turns,
+            has_more: false,
+            oldest_timestamp,
+            channel: Some("engine".to_string()),
+            pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+            in_progress: None,
+        }));
     }
 
     // Empty thread (just created, no messages yet)
@@ -2296,6 +2294,40 @@ mod tests {
         assert_eq!(turn.response.as_deref(), Some("hi back"));
         assert_eq!(response.channel.as_deref(), Some("engine"));
         assert!(!response.has_more);
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_engine_channel_hint_without_renderable_messages() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let thread = ironclaw_engine::Thread::new(
+            "empty engine thread",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert!(response.turns.is_empty());
+        assert_eq!(response.channel.as_deref(), Some("engine"));
 
         crate::bridge::test_support::clear_engine_state().await;
     }
