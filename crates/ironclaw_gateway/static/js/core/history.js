@@ -94,7 +94,10 @@ function loadHistory(before) {
             if (count > 0) {
               dbContentsCounts.set(p.content, count - 1);
             } else {
-              const div = addMessage('user', p.content);
+              const div = addMessage('user', p.content, {
+                attachments: Array.isArray(p.attachments) ? p.attachments : [],
+                copyText: p.copyText || p.content,
+              });
               if (p.images && p.images.length > 0) {
                 appendImagesToMessage(div, p.images);
               }
@@ -780,4 +783,3 @@ function updateTabIndicator() {
 window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---
-
