@@ -2148,19 +2148,44 @@ async fn slack_relay_oauth_callback_handler(
 
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
+fn normalize_mime_type(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn has_riff_fourcc(data: &[u8], fourcc: &[u8; 4]) -> bool {
+    data.len() >= 12 && data.starts_with(b"RIFF") && data.get(8..12) == Some(fourcc)
+}
+
+fn has_iso_bmff_ftyp(data: &[u8]) -> bool {
+    data.len() >= 8 && data.get(4..8) == Some(b"ftyp")
+}
+
 /// Returns `true` if the MIME type is in the server-side allowlist of safe
-/// upload types. Rejects executables, scripts, HTML, and other potentially
+/// upload types. Rejects executables, scripts, HTML, SVG, and other potentially
 /// dangerous content even though files are forwarded to the LLM (defense in
 /// depth).
 fn is_allowed_mime_type(mime: &str) -> bool {
-    let base = mime.split(';').next().unwrap_or(mime).trim();
-    // Allow all image/* and audio/* families.
-    if base.starts_with("image/") || base.starts_with("audio/") {
-        return true;
-    }
     matches!(
-        base,
-        "text/plain"
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/wave"
+            | "audio/x-wav"
+            | "audio/mp4"
+            | "audio/x-m4a"
+            | "audio/aac"
+            | "audio/flac"
+            | "audio/webm"
+            | "text/plain"
             | "text/csv"
             | "text/markdown"
             | "text/xml"
@@ -2185,20 +2210,19 @@ fn is_allowed_mime_type(mime: &str) -> bool {
 /// claims, it verifies the content is valid UTF-8. Returns an error message
 /// if the bytes contradict the claimed type.
 fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(), String> {
-    let base = claimed.split(';').next().unwrap_or(claimed).trim();
-
-    if base.starts_with("text/") || base == "application/json" || base == "application/xml" {
+    if claimed.starts_with("text/") || claimed == "application/json" || claimed == "application/xml"
+    {
         // Text-family types must be valid UTF-8.
         if std::str::from_utf8(data).is_err() {
             return Err(format!(
-                "File claimed as {base} but contains invalid UTF-8 — not a text file"
+                "File claimed as {claimed} but contains invalid UTF-8 — not a text file"
             ));
         }
         return Ok(());
     }
 
     // Binary formats: check magic bytes.
-    match base {
+    match claimed {
         "application/pdf" => {
             if !data.starts_with(b"%PDF") {
                 return Err(
@@ -2223,8 +2247,7 @@ fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(
             }
         }
         "image/webp" => {
-            // RIFF....WEBP
-            if data.len() < 12 || !data.starts_with(b"RIFF") || &data[8..12] != b"WEBP" {
+            if !has_riff_fourcc(data, b"WEBP") {
                 return Err("File claimed as image/webp but missing RIFF/WEBP header".to_string());
             }
         }
@@ -2234,13 +2257,15 @@ fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(
         | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
             // OOXML files are ZIP archives: PK\x03\x04
             if !data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-                return Err(format!("File claimed as {base} but missing ZIP/PK header"));
+                return Err(format!(
+                    "File claimed as {claimed} but missing ZIP/PK header"
+                ));
             }
         }
         "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel" => {
             // Legacy Office files are OLE2 Compound Documents: D0 CF 11 E0
             if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
-                return Err(format!("File claimed as {base} but missing OLE2 header"));
+                return Err(format!("File claimed as {claimed} but missing OLE2 header"));
             }
         }
         "application/rtf" | "text/rtf" => {
@@ -2250,7 +2275,7 @@ fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(
         }
         // Audio formats with known signatures.
         "audio/mpeg" => {
-            // MP3: starts with FF FB, FF F3, FF F2, or ID3 tag
+            // MP3: starts with FF FB, FF F3, FF F2, or ID3 tag.
             let is_mp3 = data.starts_with(b"ID3")
                 || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0);
             if !is_mp3 {
@@ -2263,12 +2288,33 @@ fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(
             }
         }
         "audio/wav" | "audio/wave" | "audio/x-wav" => {
-            if data.len() < 12 || !data.starts_with(b"RIFF") || &data[8..12] != b"WAVE" {
+            if !has_riff_fourcc(data, b"WAVE") {
                 return Err("File claimed as audio/wav but missing RIFF/WAVE header".to_string());
             }
         }
-        // For image/* and audio/* families without specific signatures, allow
-        // through — the allowlist already restricts to safe types.
+        "audio/mp4" | "audio/x-m4a" => {
+            if !has_iso_bmff_ftyp(data) {
+                return Err(
+                    "File claimed as audio/mp4 but missing ISO BMFF ftyp header".to_string()
+                );
+            }
+        }
+        "audio/aac" => {
+            let is_aac = data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0;
+            if !is_aac {
+                return Err("File claimed as audio/aac but missing ADTS header".to_string());
+            }
+        }
+        "audio/flac" => {
+            if !data.starts_with(b"fLaC") {
+                return Err("File claimed as audio/flac but missing fLaC header".to_string());
+            }
+        }
+        "audio/webm" => {
+            if !data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+                return Err("File claimed as audio/webm but missing EBML header".to_string());
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -2282,9 +2328,10 @@ pub(crate) fn uploads_to_attachments(
     let mut attachments = Vec::with_capacity(uploads.len());
     let mut total_bytes = 0usize;
     for (i, upload) in uploads.iter().enumerate() {
-        if !is_allowed_mime_type(&upload.media_type) {
+        let normalized_mime = normalize_mime_type(&upload.media_type);
+        if !is_allowed_mime_type(&normalized_mime) {
             return Err(format!(
-                "Unsupported file type: {}. Allowed types: images, audio, PDF, plain text, CSV, Markdown, JSON, XML, RTF, and Office documents.",
+                "Unsupported file type: {}. Allowed types: PNG/JPEG/GIF/WebP images; MP3/Ogg/WAV/AAC/FLAC/MP4/M4A/WebM audio; PDF; plain text; CSV; Markdown; JSON; XML; RTF; and Office documents.",
                 upload.media_type
             ));
         }
@@ -2302,18 +2349,18 @@ pub(crate) fn uploads_to_attachments(
         // Validate that the decoded bytes match the claimed MIME type.
         // This prevents clients from labeling arbitrary payloads (e.g.
         // executables) as safe types to bypass the allowlist.
-        validate_content_matches_claimed_type(&upload.media_type, &data)?;
+        validate_content_matches_claimed_type(&normalized_mime, &data)?;
 
-        let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
+        let kind = crate::channels::AttachmentKind::from_mime_type(&normalized_mime);
         let filename = upload
             .filename
             .clone()
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| default_upload_filename(i, &kind, &upload.media_type));
+            .unwrap_or_else(|| default_upload_filename(i, &kind, &normalized_mime));
         attachments.push(crate::channels::IncomingAttachment {
             id: format!("web-upload-{i}"),
             kind,
-            mime_type: upload.media_type.clone(),
+            mime_type: normalized_mime,
             filename: Some(filename),
             size_bytes: Some(data.len() as u64),
             source_url: None,
@@ -2336,33 +2383,51 @@ fn default_upload_filename(
         crate::channels::AttachmentKind::Image => "image",
         crate::channels::AttachmentKind::Document => "file",
     };
-    format!("{prefix}-{index}.{}", mime_to_ext(mime))
+    match mime_to_ext(mime) {
+        Some(ext) => format!("{prefix}-{index}.{ext}"),
+        None => format!("{prefix}-{index}"),
+    }
 }
 
 /// Map MIME type to file extension.
-fn mime_to_ext(mime: &str) -> &str {
-    match mime {
-        "image/png" => "png",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/svg+xml" => "svg",
-        "image/jpeg" => "jpg",
-        "application/pdf" => "pdf",
-        "text/plain" => "txt",
-        "text/csv" => "csv",
-        "application/json" => "json",
-        "text/markdown" => "md",
-        "application/xml" | "text/xml" => "xml",
-        "application/rtf" | "text/rtf" => "rtf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-        "application/msword" => "doc",
-        "application/vnd.ms-powerpoint" => "ppt",
-        "application/vnd.ms-excel" => "xls",
-        m if m.starts_with("image/") => "jpg",
-        _ => "bin",
+fn mime_to_ext(mime: &str) -> Option<&'static str> {
+    let ext = match mime {
+        "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/jpeg" => Some("jpg"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "text/csv" => Some("csv"),
+        "application/json" => Some("json"),
+        "text/markdown" => Some("md"),
+        "application/xml" | "text/xml" => Some("xml"),
+        "application/rtf" | "text/rtf" => Some("rtf"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
+        "application/msword" => Some("doc"),
+        "application/vnd.ms-powerpoint" => Some("ppt"),
+        "application/vnd.ms-excel" => Some("xls"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/ogg" => Some("ogg"),
+        "audio/wav" | "audio/wave" | "audio/x-wav" => Some("wav"),
+        "audio/mp4" => Some("mp4"),
+        "audio/x-m4a" => Some("m4a"),
+        "audio/aac" => Some("aac"),
+        "audio/flac" => Some("flac"),
+        "audio/webm" => Some("webm"),
+        _ => None,
+    };
+
+    if ext.is_none() {
+        tracing::warn!(
+            mime_type = mime,
+            "Unknown upload MIME type missing default extension"
+        );
     }
+
+    ext
 }
 
 async fn chat_send_handler(
@@ -4156,6 +4221,15 @@ mod tests {
         let jpeg_header: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00];
         // OGG header
         let ogg_header = b"OggS\x00test".to_vec();
+        // ISO BMFF/MP4 header
+        let mp4_header: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'M', b'4', b'A', b' ', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        // FLAC header
+        let flac_header = b"fLaC\x00\x00\x00\x22".to_vec();
+        // EBML/WebM header
+        let webm_header: Vec<u8> = vec![0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81];
 
         let cases: Vec<(&str, Vec<u8>)> = vec![
             ("image/png", png_header),
@@ -4163,6 +4237,9 @@ mod tests {
             ("text/plain", b"hello world".to_vec()),
             ("text/csv", b"a,b,c\n1,2,3".to_vec()),
             ("audio/ogg", ogg_header),
+            ("audio/mp4", mp4_header),
+            ("audio/flac", flac_header),
+            ("audio/webm", webm_header),
         ];
         for (mime, payload) in &cases {
             let uploads = vec![AttachmentData {
@@ -4228,6 +4305,57 @@ mod tests {
         assert!(
             err.contains("invalid UTF-8"),
             "expected UTF-8 validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_normalizes_mime_type_case() {
+        use base64::Engine;
+
+        let uploads = vec![AttachmentData {
+            media_type: "Application/PDF; Charset=UTF-8".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n"),
+            filename: None,
+        }];
+
+        let attachments = uploads_to_attachments(&uploads).expect("uppercase MIME should pass");
+        assert_eq!(attachments[0].mime_type, "application/pdf");
+        assert_eq!(attachments[0].filename.as_deref(), Some("file-0.pdf"));
+    }
+
+    #[test]
+    fn web_upload_rejects_svg_and_unknown_extensions() {
+        use base64::Engine;
+
+        let uploads = vec![AttachmentData {
+            media_type: "image/svg+xml".to_string(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode(br#"<svg xmlns='http://www.w3.org/2000/svg'></svg>"#),
+            filename: None,
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(
+            err.contains("Unsupported file type"),
+            "expected unsupported MIME error, got: {err}"
+        );
+        assert_eq!(mime_to_ext("application/octet-stream"), None);
+    }
+
+    #[test]
+    fn web_upload_rejects_spoofed_audio_mp4() {
+        use base64::Engine;
+
+        let uploads = vec![AttachmentData {
+            media_type: "audio/mp4".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"not-an-mp4"),
+            filename: Some("voice.m4a".to_string()),
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(
+            err.contains("missing ISO BMFF ftyp header"),
+            "expected audio/mp4 signature mismatch, got: {err}"
         );
     }
 
