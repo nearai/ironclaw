@@ -1,0 +1,34 @@
+{
+  "positions": [
+    {
+      "chain": "ethereum",
+      "protocol": "compound_v3",
+      "position_type": "supply",
+      "supply": [
+        {
+          "chain": "ethereum",
+          "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "symbol": "USDC",
+          "amount": "10000.000000",
+          "value_usd": "10000.00"
+        }
+      ],
+      "borrow": [
+        {
+          "chain": "ethereum",
+          "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "symbol": "WETH",
+          "amount": "0.5",
+          "value_usd": "1800.00"
+        }
+      ],
+      "rewards": [],
+      "metadata": {
+        "supply_apy": 0.041,
+        "borrow_apy": 0.062,
+        "borrow_collateralization": 5.55
+      },
+      "block_number": 19500001
+    }
+  ]
+}

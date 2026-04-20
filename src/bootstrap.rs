@@ -294,6 +294,41 @@ pub fn upsert_bootstrap_vars_to(
     Ok(())
 }
 
+/// Remove a single variable from `~/.ironclaw/.env`, preserving other lines.
+///
+/// Used by the secrets safety-gate rollback in `AppBuilder::init_secrets`:
+/// when a freshly-generated `SECRETS_MASTER_KEY` turns out to conflict with
+/// an already-populated secrets store, we strip our write so the next
+/// startup re-triggers the safety gate instead of silently accepting the
+/// stray key.
+pub fn remove_bootstrap_var_to(path: &std::path::Path, key: &str) -> std::io::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
+    let prefix = format!("{}=", key);
+    let mut result = String::new();
+    let mut removed = false;
+    for line in existing.lines() {
+        if line.starts_with(&prefix) {
+            removed = true;
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    if !removed {
+        return Ok(());
+    }
+
+    std::fs::write(path, &result)?;
+    restrict_file_permissions(path)?;
+    Ok(())
+}
+
 /// Update or add a single variable in `~/.ironclaw/.env`, preserving existing content.
 ///
 /// Unlike `save_bootstrap_env` (which overwrites the entire file), this

@@ -66,6 +66,27 @@ async def _wait_for_tool_in_history(
     )
 
 
+async def _wait_for_in_progress_turn(
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 10.0,
+) -> dict | None:
+    """Poll chat history until the thread exposes durable in-progress state."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        resp = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}")
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        if payload.get("in_progress"):
+            return payload
+        turns = payload.get("turns", [])
+        if turns and turns[-1].get("state") == "Completed":
+            return None
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"Timed out waiting for in-progress turn in thread {thread_id}")
+
+
 async def _reload_and_switch_to_thread(page, ironclaw_server, thread_id):
     """Reload the page and navigate back to the given thread."""
     await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}", timeout=15000)
@@ -77,6 +98,55 @@ async def _reload_and_switch_to_thread(page, ironclaw_server, thread_id):
     await page.evaluate("(id) => switchThread(id)", thread_id)
     await page.wait_for_function(
         "(id) => currentThreadId === id", arg=thread_id, timeout=10000,
+    )
+
+
+async def _wait_for_processing_or_response(page, response_text: str) -> None:
+    """Wait until the UI either shows the live processing state or the final answer."""
+    await page.wait_for_function(
+        """(text) => {
+            const thinking = document.querySelector('.activity-thinking');
+            if (thinking) return true;
+            return Array.from(document.querySelectorAll('#chat-messages .message.assistant'))
+                .some((el) => (el.textContent || '').includes(text));
+        }""",
+        arg=response_text,
+        timeout=15000,
+    )
+
+
+async def _start_thread_and_wait_for_in_progress(
+    base_url: str,
+    content: str,
+    *,
+    attempts: int = 3,
+) -> tuple[str, dict]:
+    """Retry until a thread reliably exposes durable in-progress state."""
+    last_thread_id = None
+
+    for _ in range(attempts):
+        resp = await api_post(base_url, "/api/chat/thread/new")
+        assert resp.status_code == 200, resp.text
+        last_thread_id = resp.json()["id"]
+
+        send_resp = await api_post(
+            base_url,
+            "/api/chat/send",
+            json={"content": content, "thread_id": last_thread_id},
+        )
+        # Gateway now returns 202 ACCEPTED (fire-and-forget) instead of the
+        # legacy 200; accept either so the fixture works with both shapes.
+        assert send_resp.status_code in (200, 202), send_resp.text
+
+        payload = await _wait_for_in_progress_turn(base_url, last_thread_id)
+        if payload is not None:
+            return last_thread_id, payload
+
+        await _wait_for_completed_turn(base_url, last_thread_id)
+
+    raise AssertionError(
+        "Expected to observe an in-progress turn before refresh, but the turn "
+        f"completed too quickly in all {attempts} attempts (last thread: {last_thread_id})."
     )
 
 
@@ -374,3 +444,109 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     await page.locator(SEL["message_assistant"]).wait_for(
         state="visible", timeout=15000,
     )
+
+
+async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
+    """Refreshing mid-turn should rebuild the user message and processing state."""
+    thread_id, _payload = await _start_thread_and_wait_for_in_progress(
+        ironclaw_server,
+        "What is 2+2?",
+    )
+
+    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="What is 2+2?"
+    ).wait_for(state="visible", timeout=15000)
+    assert await page.locator(".welcome-card").count() == 0
+    assert (
+        await page.locator(SEL["message_user"]).filter(has_text="What is 2+2?").count()
+    ) == 1
+    await _wait_for_processing_or_response(page, "4")
+
+    await _wait_for_completed_turn(ironclaw_server, thread_id, timeout=30)
+    await page.locator(SEL["message_assistant"]).filter(
+        has_text="4"
+    ).wait_for(state="visible", timeout=15000)
+
+
+async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
+    """Switching away and back mid-turn should rehydrate the running thread."""
+    thread_a, _payload = await _start_thread_and_wait_for_in_progress(
+        ironclaw_server,
+        "What is 2+2?",
+    )
+
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_b = resp.json()["id"]
+
+    await page.evaluate("(id) => switchThread(id)", thread_b)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_b, timeout=10000,
+    )
+
+    await page.evaluate("(id) => switchThread(id)", thread_a)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_a, timeout=10000,
+    )
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="What is 2+2?"
+    ).wait_for(state="visible", timeout=15000)
+    assert await page.locator(".welcome-card").count() == 0
+    assert (
+        await page.locator(SEL["message_user"]).filter(has_text="What is 2+2?").count()
+    ) == 1
+    await _wait_for_processing_or_response(page, "4")
+
+    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await page.locator(SEL["message_assistant"]).filter(
+        has_text="4"
+    ).wait_for(state="visible", timeout=15000)
+
+
+async def test_sidebar_refresh_keeps_active_thread_outside_summary_window(
+    page,
+    ironclaw_server,
+):
+    """Refreshing the sidebar must not retarget an older open thread."""
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_a = resp.json()["id"]
+
+    await page.evaluate("(id) => switchThread(id)", thread_a)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_a, timeout=10000,
+    )
+
+    latest_thread = None
+    for _ in range(55):
+        resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+        assert resp.status_code == 200, resp.text
+        latest_thread = resp.json()["id"]
+
+    await page.evaluate("loadThreads()")
+    await page.wait_for_selector(
+        f'[data-thread-id="{latest_thread}"]', state="visible", timeout=10000,
+    )
+    assert await page.evaluate("() => currentThreadId") == thread_a
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Summary refresh should keep this thread",
+    )
+    assert result["role"] == "assistant"
+
+    turns = await _wait_for_completed_turn(ironclaw_server, thread_a)
+    assert any(
+        "Summary refresh should keep this thread" in (turn.get("user_input") or "")
+        for turn in turns
+    ), turns
+
+    resp = await api_get(ironclaw_server, f"/api/chat/history?thread_id={latest_thread}")
+    assert resp.status_code == 200, resp.text
+    assert not any(
+        "Summary refresh should keep this thread" in (turn.get("user_input") or "")
+        for turn in resp.json()["turns"]
+    ), resp.json()["turns"]

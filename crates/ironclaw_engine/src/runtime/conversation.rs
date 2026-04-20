@@ -747,6 +747,9 @@ mod tests {
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
+        async fn list_memory_docs_by_owner(&self, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
         async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
             Ok(())
         }

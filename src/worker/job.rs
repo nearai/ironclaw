@@ -34,7 +34,7 @@ use crate::worker::autonomous_recovery::{
     AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
-use ironclaw_common::AppEvent;
+use ironclaw_common::{AppEvent, JobResultStatus};
 use ironclaw_safety::SafetyLayer;
 
 /// Shared dependencies for worker execution.
@@ -192,19 +192,31 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "result" => Some(AppEvent::JobResult {
-                    job_id: job_id_str,
-                    status: data
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("completed")
-                        .to_string(),
-                    session_id: data
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    fallback_deliverable: data.get("fallback_deliverable").cloned(),
-                }),
+                "result" => {
+                    // JSON payloads from sandbox containers are a trust
+                    // boundary — parse the wire string into the typed
+                    // enum and fall back to `Failed` (not `Completed`)
+                    // on unknown values so a mis-labeled container run
+                    // cannot silently register as success.
+                    let raw_status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = raw_status.parse::<JobResultStatus>().unwrap_or_else(|_| {
+                        tracing::warn!(
+                            job_id = %job_id,
+                            raw_status = %raw_status,
+                            "unknown job result status from container; defaulting to Failed"
+                        );
+                        JobResultStatus::Failed
+                    });
+                    Some(AppEvent::JobResult {
+                        job_id: job_id_str,
+                        status,
+                        session_id: data
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        fallback_deliverable: data.get("fallback_deliverable").cloned(),
+                    })
+                }
                 "reasoning" => {
                     let narrative = data
                         .get("narrative")
@@ -1089,10 +1101,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        // Emit via the typed enum so the wire string stays in sync with
+        // `JobResultStatus::Stuck::as_str()` — no string-literal drift.
         self.log_event(
             "result",
             serde_json::json!({
-                "status": "stuck",
+                "status": JobResultStatus::Stuck,
                 "success": false,
                 "message": format!("Job stuck: {}", reason),
             }),
