@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::theme::Theme;
 
@@ -58,10 +59,36 @@ impl Default for TuiLayout {
 impl TuiLayout {
     /// Load layout from a JSON file, falling back to defaults on any error.
     pub fn load_from_file(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(&contents) else {
+            return Self::default();
+        };
+
+        let mut layout: Self = serde_json::from_value(parsed.clone()).unwrap_or_default();
+        let conversation = parsed.get("conversation");
+        if let Some(sidebar) = parsed.get("sidebar") {
+            if conversation
+                .and_then(|cfg| cfg.get("show_work_sidebar"))
+                .is_none()
+                && let Some(visible) = sidebar.get("visible").and_then(Value::as_bool)
+            {
+                layout.conversation.show_work_sidebar = visible;
+            }
+            if conversation
+                .and_then(|cfg| cfg.get("work_sidebar_width_percent"))
+                .is_none()
+                && let Some(width) = sidebar
+                    .get("width_percent")
+                    .and_then(Value::as_u64)
+                    .and_then(|width| u16::try_from(width).ok())
+            {
+                layout.conversation.work_sidebar_width_percent = Some(width);
+            }
         }
+
+        layout
     }
 
     /// Resolve the theme from the layout's theme name.
@@ -138,6 +165,11 @@ pub struct ConversationConfig {
     #[serde(default = "default_true")]
     pub show_work_sidebar: bool,
 
+    /// Optional fixed width percentage for the right-side work sidebar.
+    /// When omitted, the TUI uses responsive built-in widths.
+    #[serde(default)]
+    pub work_sidebar_width_percent: Option<u16>,
+
     /// Maximum number of messages to keep in the visible buffer.
     #[serde(default = "default_max_messages")]
     pub max_visible_messages: usize,
@@ -152,6 +184,7 @@ impl Default for ConversationConfig {
         Self {
             show_tool_details: true,
             show_work_sidebar: true,
+            work_sidebar_width_percent: None,
             max_visible_messages: default_max_messages(),
         }
     }
@@ -204,5 +237,55 @@ mod tests {
         };
         let theme = layout.resolve_theme();
         assert_eq!(theme.name, "light");
+    }
+
+    fn unique_test_layout_path(test_name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ironclaw-layout-{test_name}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("layout.json")
+    }
+
+    #[test]
+    fn load_from_file_migrates_legacy_sidebar_settings() {
+        let path = unique_test_layout_path("legacy-sidebar");
+        std::fs::write(
+            &path,
+            r#"{
+                "theme": "light",
+                "sidebar": {"visible": false, "width_percent": 41}
+            }"#,
+        )
+        .expect("write layout");
+
+        let layout = TuiLayout::load_from_file(&path);
+
+        assert_eq!(layout.theme, "light");
+        assert!(!layout.conversation.show_work_sidebar);
+        assert_eq!(layout.conversation.work_sidebar_width_percent, Some(41));
+    }
+
+    #[test]
+    fn load_from_file_prefers_new_conversation_sidebar_settings() {
+        let path = unique_test_layout_path("conversation-sidebar");
+        std::fs::write(
+            &path,
+            r#"{
+                "sidebar": {"visible": false, "width_percent": 41},
+                "conversation": {
+                    "show_work_sidebar": true,
+                    "work_sidebar_width_percent": 28
+                }
+            }"#,
+        )
+        .expect("write layout");
+
+        let layout = TuiLayout::load_from_file(&path);
+
+        assert!(layout.conversation.show_work_sidebar);
+        assert_eq!(layout.conversation.work_sidebar_width_percent, Some(28));
     }
 }

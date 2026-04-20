@@ -11,6 +11,58 @@ use crate::theme::Theme;
 
 use super::{ActiveTab, AppState, TuiWidget};
 
+const TAB_SPECS: [(ActiveTab, &str, &str); 4] = [
+    (ActiveTab::Conversation, "\u{25E6}", "Chat"),
+    (ActiveTab::Dashboard, "\u{25A0}", "Dashboard"),
+    (ActiveTab::Logs, "\u{25B8}", "Logs"),
+    (ActiveTab::Settings, "\u{2699}", "Settings"),
+];
+
+fn tab_badge_count(tab: ActiveTab, state: &AppState) -> usize {
+    match tab {
+        ActiveTab::Conversation => state.messages.len(),
+        ActiveTab::Dashboard => 0,
+        ActiveTab::Logs => state.log_entries.len(),
+        ActiveTab::Settings => 0,
+    }
+}
+
+fn badge_width(badge_count: usize) -> u16 {
+    if badge_count == 0 {
+        0
+    } else if badge_count > 99 {
+        4
+    } else {
+        format!(" {badge_count}").chars().count() as u16
+    }
+}
+
+pub(crate) fn tab_hit_areas(
+    area: Rect,
+    state: &AppState,
+) -> Vec<(ActiveTab, std::ops::Range<u16>)> {
+    if area.height == 0 || area.width < 20 {
+        return Vec::new();
+    }
+
+    let mut cursor = area.x.saturating_add(1);
+    let mut areas = Vec::with_capacity(TAB_SPECS.len());
+    for (i, (tab_id, _icon, label)) in TAB_SPECS.iter().enumerate() {
+        if i > 0 {
+            cursor = cursor.saturating_add(2);
+        }
+        let mut width = 2 + label.chars().count() as u16;
+        if state.active_tab != *tab_id {
+            width = width.saturating_add(badge_width(tab_badge_count(*tab_id, state)));
+        }
+        let start = cursor;
+        let end = start.saturating_add(width);
+        areas.push((*tab_id, start..end));
+        cursor = end;
+    }
+    areas
+}
+
 pub struct TabBarWidget {
     theme: Theme,
 }
@@ -35,35 +87,7 @@ impl TuiWidget for TabBarWidget {
             return;
         }
 
-        // Compose each tab with icon, label, and optional badge
-        let tabs = [
-            (
-                ActiveTab::Conversation,
-                "\u{25E6}", // ◦
-                "Chat",
-                state.messages.len(),
-            ),
-            (
-                ActiveTab::Dashboard,
-                "\u{25A0}", // ■
-                "Dashboard",
-                0,
-            ),
-            (
-                ActiveTab::Logs,
-                "\u{25B8}", // ▸
-                "Logs",
-                state.log_entries.len(),
-            ),
-            (
-                ActiveTab::Settings,
-                "\u{2699}", // ⚙
-                "Settings",
-                0,
-            ),
-        ];
-
-        let mut spans: Vec<Span> = Vec::with_capacity(tabs.len() * 5 + 2);
+        let mut spans: Vec<Span> = Vec::with_capacity(TAB_SPECS.len() * 5 + 2);
 
         // Left margin
         spans.push(Span::raw(" "));
@@ -71,7 +95,8 @@ impl TuiWidget for TabBarWidget {
         // Draw a subtle baseline across the tab bar
         let baseline_style = Style::default().fg(self.theme.border.to_color());
 
-        for (i, (tab_id, icon, label, badge_count)) in tabs.iter().enumerate() {
+        for (i, (tab_id, icon, label)) in TAB_SPECS.iter().enumerate() {
+            let badge_count = tab_badge_count(*tab_id, state);
             let is_active = state.active_tab == *tab_id;
 
             if i > 0 {
@@ -95,8 +120,8 @@ impl TuiWidget for TabBarWidget {
             }
 
             // Badge for non-zero counts on inactive tabs
-            if !is_active && *badge_count > 0 {
-                let badge_text = if *badge_count > 99 {
+            if !is_active && badge_count > 0 {
+                let badge_text = if badge_count > 99 {
                     " 99+".to_string()
                 } else {
                     format!(" {badge_count}")
@@ -170,5 +195,43 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf, &state);
         // Should not panic and should produce empty buffer
+    }
+
+    #[test]
+    fn tab_hit_areas_expand_for_badges() {
+        let mut log_entries = crate::event::LogRingBuffer::new(10);
+        log_entries.push(crate::event::TuiLogEntry {
+            level: "INFO".to_string(),
+            target: "test".to_string(),
+            message: "message".to_string(),
+            timestamp: "now".to_string(),
+        });
+        let state = AppState {
+            active_tab: ActiveTab::Dashboard,
+            messages: vec![
+                super::super::ChatMessage {
+                    role: super::super::MessageRole::User,
+                    content: "msg".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    cost_summary: None,
+                };
+                120
+            ],
+            log_entries,
+            ..Default::default()
+        };
+
+        let hit_areas = tab_hit_areas(Rect::new(0, 0, 80, 1), &state);
+        let (_, logs_range) = hit_areas
+            .iter()
+            .find(|(tab, _)| *tab == ActiveTab::Logs)
+            .expect("logs range");
+        let (_, settings_range) = hit_areas
+            .iter()
+            .find(|(tab, _)| *tab == ActiveTab::Settings)
+            .expect("settings range");
+
+        assert!(logs_range.end > logs_range.start);
+        assert!(settings_range.start >= logs_range.end);
     }
 }

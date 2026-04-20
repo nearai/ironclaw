@@ -1104,6 +1104,29 @@ impl Agent {
             }
         }
 
+        fn is_sensitive_setting_path(path: &str) -> bool {
+            let lower = path.to_ascii_lowercase();
+            lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("api_key")
+                || lower.contains("password")
+                || lower == "database_url"
+        }
+
+        fn protected_chat_setting_message(path: &str) -> Option<&'static str> {
+            if crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&path) {
+                Some(
+                    "Protected LLM/provider settings must be managed from the web Settings UI so admin checks and secret vaulting still apply.",
+                )
+            } else if is_sensitive_setting_path(path) {
+                Some(
+                    "Sensitive settings are not shown or mutated through chat commands. Use the web Settings UI instead.",
+                )
+            } else {
+                None
+            }
+        }
+
         match subcommand {
             Some("list") => {
                 let filter = args.get(1).map(String::as_str);
@@ -1120,7 +1143,9 @@ impl Agent {
                 let max_key_len = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
                 let mut out = "Settings (source: database/defaults):\n".to_string();
                 for (key, value) in rows.into_iter().take(80) {
-                    let display_value = if value.len() > 80 {
+                    let display_value = if protected_chat_setting_message(&key).is_some() {
+                        "[protected; use Settings UI]".to_string()
+                    } else if value.len() > 80 {
                         let end = crate::util::floor_char_boundary(&value, 77);
                         format!("{}...", &value[..end])
                     } else {
@@ -1139,6 +1164,9 @@ impl Agent {
                 let Some(path) = args.get(1) else {
                     return Ok(SubmissionResult::error("Usage: /config get <path>"));
                 };
+                if let Some(message) = protected_chat_setting_message(path) {
+                    return Ok(SubmissionResult::error(message));
+                }
                 let settings = load_settings(store).await;
                 match settings.get(path) {
                     Some(value) => Ok(SubmissionResult::response(format!("{path} = {value}"))),
@@ -1149,6 +1177,9 @@ impl Agent {
                 let Some(path) = args.get(1) else {
                     return Ok(SubmissionResult::error("Usage: /config set <path> <value>"));
                 };
+                if let Some(message) = protected_chat_setting_message(path) {
+                    return Ok(SubmissionResult::error(message));
+                }
                 if args.len() < 3 {
                     return Ok(SubmissionResult::error("Usage: /config set <path> <value>"));
                 }
@@ -1173,6 +1204,9 @@ impl Agent {
                 let Some(path) = args.get(1) else {
                     return Ok(SubmissionResult::error("Usage: /config reset <path>"));
                 };
+                if let Some(message) = protected_chat_setting_message(path) {
+                    return Ok(SubmissionResult::error(message));
+                }
                 let settings = load_settings(store).await;
                 if settings.get(path).is_none() {
                     return Ok(SubmissionResult::error(format!("Unknown setting: {path}")));
@@ -1323,5 +1357,90 @@ mod tests {
         );
 
         assert_eq!(formatted, "Available tools:\n  time\n  shell\n  github");
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_test_agent() -> crate::agent::Agent {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let harness = crate::testing::TestHarnessBuilder::new().build().await;
+        crate::agent::Agent::new(
+            crate::config::AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            harness.deps,
+            Arc::new(crate::channels::ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn config_command_blocks_protected_llm_settings() {
+        let agent = make_test_agent().await;
+        let tenant = agent.tenant_ctx("test-user").await;
+
+        let protected_result = agent
+            .handle_system_command(
+                "config",
+                &[
+                    "set".to_string(),
+                    "llm_builtin_overrides".to_string(),
+                    "{}".to_string(),
+                ],
+                "tui",
+                &tenant,
+            )
+            .await
+            .expect("config command");
+
+        match protected_result {
+            crate::agent::submission::SubmissionResult::Error { message } => {
+                assert!(message.contains("Protected LLM/provider settings"));
+            }
+            other => panic!("expected protected-setting error, got {other:?}"),
+        }
+
+        let sensitive_result = agent
+            .handle_system_command(
+                "config",
+                &["get".to_string(), "database_url".to_string()],
+                "tui",
+                &tenant,
+            )
+            .await
+            .expect("config command");
+
+        match sensitive_result {
+            crate::agent::submission::SubmissionResult::Error { message } => {
+                assert!(message.contains("Sensitive settings"));
+            }
+            other => panic!("expected sensitive-setting error, got {other:?}"),
+        }
     }
 }

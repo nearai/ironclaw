@@ -2321,6 +2321,14 @@ async fn handle_mouse_click(
             }
         }
 
+        if let Some(thread_id) = expanded_dashboard_thread_id_at(terminal, state, column, row) {
+            let _ = msg_tx
+                .send(TuiUserMessage::open_engine_thread_detail(thread_id))
+                .await;
+            state.text_selection = None;
+            return;
+        }
+
         // Allow text selection within the modal
         if let Some(bounds) = selectable_area_at(terminal, layout, state, column, row) {
             state.text_selection = Some(TextSelection {
@@ -2351,7 +2359,7 @@ async fn handle_mouse_click(
     // Click on a tool block toggles inline expansion
     if state.active_tab == ActiveTab::Conversation {
         let (conversation_area, _) =
-            conversation_work_areas(frame_sections(terminal, layout, state)[2], state);
+            conversation_work_areas(frame_sections(terminal, layout, state)[2], state, layout);
         if rect_contains(conversation_area, column, row) {
             if conversation.tool_summary_at_row(row) {
                 state.tool_summary_expanded = !state.tool_summary_expanded;
@@ -2469,21 +2477,9 @@ fn tab_at(
         return None;
     }
 
-    // Tab layout: " ◦ Chat  ■ Dashboard  ▸ Logs [badge]  ⚙ Settings"
-    //              0 1234567 89012345678901 234567890...
-    // Ranges are generous to cover icon + label + optional badge.
-    let relative_x = column.saturating_sub(tab_bar_area.x);
-    if relative_x < 8 {
-        Some(ActiveTab::Conversation)
-    } else if (8..22).contains(&relative_x) {
-        Some(ActiveTab::Dashboard)
-    } else if (22..34).contains(&relative_x) {
-        Some(ActiveTab::Logs)
-    } else if relative_x >= 34 {
-        Some(ActiveTab::Settings)
-    } else {
-        None
-    }
+    crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, state)
+        .into_iter()
+        .find_map(|(tab, range)| range.contains(&column).then_some(tab))
 }
 
 fn selectable_area_at(
@@ -2589,6 +2585,34 @@ fn dashboard_panel_modal_area(size: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+fn expanded_dashboard_thread_id_at(
+    size: Rect,
+    state: &AppState,
+    column: u16,
+    row: u16,
+) -> Option<String> {
+    let modal = state.expanded_dashboard_panel.as_ref()?;
+    let inner = tool_detail_inner_area(dashboard_panel_modal_area(size));
+    if !rect_contains(inner, column, row) {
+        return None;
+    }
+
+    let line_index = usize::from(row.saturating_sub(inner.y)) + usize::from(modal.scroll);
+    match modal.panel {
+        DashboardPanel::Threads => state
+            .engine_threads
+            .get(line_index)
+            .map(|thread| thread.id.clone()),
+        DashboardPanel::Missions => state
+            .engine_threads
+            .iter()
+            .filter(|thread| thread.thread_type == "Mission")
+            .nth(line_index)
+            .map(|thread| thread.id.clone()),
+        _ => None,
+    }
+}
+
 fn dashboard_panel_at(
     theme: &crate::theme::Theme,
     main_area: Rect,
@@ -2633,18 +2657,34 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn conversation_work_areas(main_area: Rect, state: &AppState) -> (Rect, Option<Rect>) {
+fn conversation_work_areas(
+    main_area: Rect,
+    state: &AppState,
+    layout: &TuiLayout,
+) -> (Rect, Option<Rect>) {
     if !state.work_sidebar_visible || main_area.width < 96 {
         return (main_area, None);
     }
 
-    let sidebar_width = if main_area.width >= 140 {
-        42
-    } else if main_area.width >= 115 {
-        36
-    } else {
-        32
-    };
+    let sidebar_width = layout
+        .conversation
+        .work_sidebar_width_percent
+        .map(|percent| percent.clamp(20, 60))
+        .map(|percent| {
+            let requested = ((u32::from(main_area.width) * u32::from(percent)) / 100) as u16;
+            requested
+                .max(24)
+                .min(main_area.width.saturating_sub(40).max(24))
+        })
+        .unwrap_or_else(|| {
+            if main_area.width >= 140 {
+                42
+            } else if main_area.width >= 115 {
+                36
+            } else {
+                32
+            }
+        });
     let areas = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(40), Constraint::Length(sidebar_width)])
@@ -2760,7 +2800,8 @@ fn render_frame(
                 .render(main_area, frame.buffer_mut(), state);
         }
         ActiveTab::Conversation => {
-            let (conversation_area, sidebar_area) = conversation_work_areas(main_area, state);
+            let (conversation_area, sidebar_area) =
+                conversation_work_areas(main_area, state, layout);
             state.conversation_height = conversation_area.height;
             widgets
                 .conversation
@@ -3139,11 +3180,14 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{HistoryMessage, ThreadEntry};
+    use crate::event::{HistoryMessage, ThreadEntry, TuiLogEntry, TuiUiAction};
     use crate::widgets::approval::ApprovalWidget;
     use crate::widgets::registry::create_default_widgets;
     use crate::widgets::thread_picker::ThreadPickerWidget;
-    use crate::widgets::{ActiveTab, ApprovalRequest, MessageRole, SettingEntry, ThreadStatus};
+    use crate::widgets::{
+        ActiveTab, ApprovalRequest, ChatMessage, DashboardPanel, DashboardPanelModal,
+        EngineThreadInfo, MessageRole, SettingEntry, ThreadStatus,
+    };
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
@@ -3353,6 +3397,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_thread_click_requests_engine_thread_detail() {
+        let terminal = terminal_area();
+        let inner = tool_detail_inner_area(dashboard_panel_modal_area(terminal));
+        let mut state = AppState {
+            expanded_dashboard_panel: Some(DashboardPanelModal {
+                panel: DashboardPanel::Threads,
+                scroll: 0,
+            }),
+            engine_threads: vec![EngineThreadInfo {
+                id: "eng-1".to_string(),
+                goal: "Investigate flaky tests".to_string(),
+                thread_type: "Research".to_string(),
+                status: ThreadStatus::Active,
+                step_count: 3,
+                total_tokens: 512,
+                started_at: Some(chrono::Utc::now()),
+                updated_at: Some(chrono::Utc::now()),
+            }],
+            ..Default::default()
+        };
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: inner.x + 1,
+                row: inner.y,
+            },
+        )
+        .await;
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0].ui_action.as_ref(),
+            Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "eng-1"
+        ));
+    }
+
+    #[tokio::test]
     async fn engine_thread_detail_opens_modal() {
         let mut state = AppState::default();
 
@@ -3523,6 +3605,48 @@ mod tests {
         // Column 25 hits "Logs"
         apply_event(&mut state, TuiEvent::MouseClick { column: 25, row: 0 }).await;
         assert_eq!(state.active_tab, ActiveTab::Logs);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_uses_dynamic_tab_hit_areas_for_settings() {
+        let mut log_entries = crate::event::LogRingBuffer::new(10);
+        log_entries.push(TuiLogEntry {
+            level: "INFO".to_string(),
+            target: "test".to_string(),
+            message: "message".to_string(),
+            timestamp: "now".to_string(),
+        });
+        let mut state = AppState {
+            active_tab: ActiveTab::Dashboard,
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "hello".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    cost_summary: None,
+                };
+                120
+            ],
+            log_entries,
+            ..Default::default()
+        };
+        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let settings_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
+            .into_iter()
+            .find_map(|(tab, range)| (tab == ActiveTab::Settings).then_some(range))
+            .expect("settings range");
+        let click_column = settings_range.start;
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: click_column,
+                row: tab_bar_area.y,
+            },
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Settings);
     }
 
     #[tokio::test]

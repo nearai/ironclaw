@@ -629,9 +629,6 @@ impl StatusUpdate {
                     .collect()
             })
             .unwrap_or_default();
-        if steps.is_empty() {
-            return None;
-        }
 
         Some(Self::PlanUpdate {
             plan_id: params
@@ -1059,8 +1056,14 @@ mod tests {
             .into());
 
         assert!(StatusUpdate::plan_update_from_tool_call("memory_write", &ok, &params).is_none());
-        assert!(StatusUpdate::plan_update_from_tool_call("plan_update", &ok, &params).is_none());
         assert!(StatusUpdate::plan_update_from_tool_call("plan_update", &err, &params).is_none());
+
+        let status = StatusUpdate::plan_update_from_tool_call("plan_update", &ok, &params)
+            .expect("empty steps should still produce a clear signal");
+        match status {
+            StatusUpdate::PlanUpdate { steps, .. } => assert!(steps.is_empty()),
+            other => panic!("expected PlanUpdate, got {other:?}"),
+        }
     }
 
     #[test]

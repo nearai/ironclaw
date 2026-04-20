@@ -2557,9 +2557,18 @@ async fn await_thread_outcome_with_rx(
             event = event_rx.recv() => {
                 match event {
                     Ok(ref evt) if evt.thread_id == thread_id => {
-                        forward_event_to_channel(evt, channels, channel_name, metadata).await;
+                        forward_event_to_channel(
+                            evt,
+                            channels,
+                            channel_name,
+                            metadata,
+                            agent.safety().as_ref(),
+                        )
+                        .await;
                         if let Some(sse) = sse {
-                            for app_event in thread_event_to_app_events(evt, &tid_str) {
+                            for app_event in
+                                thread_event_to_app_events(evt, &tid_str, agent.safety().as_ref())
+                            {
                                 sse.broadcast_for_user(&message.user_id, app_event);
                             }
                         }
@@ -2595,9 +2604,17 @@ async fn await_thread_outcome_with_rx(
     // the loop breaking (e.g. thread finished right as events were emitted).
     while let Ok(evt) = event_rx.try_recv() {
         if evt.thread_id == thread_id {
-            forward_event_to_channel(&evt, channels, channel_name, metadata).await;
+            forward_event_to_channel(
+                &evt,
+                channels,
+                channel_name,
+                metadata,
+                agent.safety().as_ref(),
+            )
+            .await;
             if let Some(sse) = sse {
-                for app_event in thread_event_to_app_events(&evt, &tid_str) {
+                for app_event in thread_event_to_app_events(&evt, &tid_str, agent.safety().as_ref())
+                {
                     sse.broadcast_for_user(&message.user_id, app_event);
                 }
             }
@@ -3045,12 +3062,24 @@ async fn handle_mission_notification(
     }
 }
 
+fn sanitize_event_preview(
+    safety: &ironclaw_safety::SafetyLayer,
+    action_name: &str,
+    preview: &str,
+) -> String {
+    let sanitized = safety.sanitize_tool_output(action_name, preview).content;
+    ironclaw_safety::LeakDetector::new()
+        .scan_and_clean(&sanitized)
+        .unwrap_or_else(|_| "[tool preview redacted: contained blocked secret]".to_string())
+}
+
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.
 async fn forward_event_to_channel(
     event: &ironclaw_engine::ThreadEvent,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     channel_name: &str,
     metadata: &serde_json::Value,
+    safety: &ironclaw_safety::SafetyLayer,
 ) {
     use ironclaw_engine::EventKind;
 
@@ -3066,6 +3095,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             output_preview,
@@ -3078,7 +3108,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3089,8 +3119,8 @@ async fn forward_event_to_channel(
                         channel_name,
                         StatusUpdate::ToolResult {
                             name: display_name.clone(),
-                            preview: preview.clone(),
-                            call_id: None,
+                            preview: sanitize_event_preview(safety, action_name, preview),
+                            call_id: Some(call_id.clone()),
                         },
                         metadata,
                     )
@@ -3104,7 +3134,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3112,6 +3142,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3123,7 +3154,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3136,7 +3167,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3221,6 +3252,7 @@ async fn forward_event_to_channel(
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
+    safety: &ironclaw_safety::SafetyLayer,
 ) -> Vec<AppEvent> {
     use ironclaw_engine::EventKind;
 
@@ -3231,6 +3263,7 @@ fn thread_event_to_app_events(
         }],
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             output_preview,
@@ -3240,12 +3273,14 @@ fn thread_event_to_app_events(
             let mut events = vec![AppEvent::ToolStarted {
                 name: display_name.clone(),
                 detail: params_summary.clone(),
+                call_id: Some(call_id.clone()),
                 thread_id: Some(thread_id.into()),
             }];
             if let Some(preview) = output_preview {
                 events.push(AppEvent::ToolResult {
                     name: display_name.clone(),
-                    preview: preview.clone(),
+                    preview: sanitize_event_preview(safety, action_name, preview),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 });
             }
@@ -3254,12 +3289,14 @@ fn thread_event_to_app_events(
                 success: true,
                 error: None,
                 parameters: Some(format!("{duration_ms}ms")),
+                call_id: Some(call_id.clone()),
                 thread_id: Some(thread_id.into()),
             });
             events
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3269,6 +3306,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3276,6 +3314,7 @@ fn thread_event_to_app_events(
                     success: false,
                     error: Some(error.clone()),
                     parameters: None,
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -5268,5 +5307,39 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    #[test]
+    fn thread_event_to_app_events_sanitizes_tool_preview() {
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId(uuid::Uuid::nil()),
+            ironclaw_engine::EventKind::ActionExecuted {
+                step_id: ironclaw_engine::StepId(uuid::Uuid::nil()),
+                action_name: "shell".to_string(),
+                call_id: "call-1".to_string(),
+                duration_ms: 12,
+                params_summary: None,
+                output_preview: Some("sk-proj-test1234567890abcdefghij".to_string()),
+            },
+        );
+
+        let events = thread_event_to_app_events(&event, "thread-1", &safety);
+        let preview = events
+            .into_iter()
+            .find_map(|event| match event {
+                AppEvent::ToolResult { preview, .. } => Some(preview),
+                _ => None,
+            })
+            .expect("tool preview event");
+
+        assert!(
+            preview.contains("blocked") || preview.contains("redacted"),
+            "preview should be sanitized: {preview}"
+        );
+        assert!(!preview.contains("sk-proj-test1234567890abcdefghij"));
     }
 }

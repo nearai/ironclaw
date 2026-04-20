@@ -3647,6 +3647,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_switch_thread_emits_empty_plan_update_to_clear_stale_ui() {
+        use crate::agent::session::Thread;
+        use uuid::Uuid;
+
+        let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+        let session = agent
+            .session_manager
+            .get_or_create_session("test-user")
+            .await;
+        let session_id = session.lock().await.id;
+
+        let other_thread_id = Uuid::new_v4();
+        let target_thread_id = Uuid::new_v4();
+        let mut target_thread = Thread::with_id(target_thread_id, session_id, Some("tui"));
+        target_thread.start_turn("Plan the work");
+        {
+            let turn = target_thread.last_turn_mut().expect("turn exists");
+            turn.record_tool_call_with_reasoning(
+                "plan_update",
+                serde_json::json!({
+                    "plan_id": "twitter-wasm-tool",
+                    "title": "Twitter WASM Tool",
+                    "status": "draft",
+                    "steps": []
+                }),
+                None,
+                Some("call_plan_clear".to_string()),
+            );
+            turn.record_tool_result_for("call_plan_clear", serde_json::json!("cleared"));
+        }
+        target_thread.complete_turn("Plan cleared.");
+
+        {
+            let mut sess = session.lock().await;
+            sess.threads.insert(
+                other_thread_id,
+                Thread::with_id(other_thread_id, session_id, Some("tui")),
+            );
+            sess.threads.insert(target_thread_id, target_thread);
+            sess.active_thread = Some(other_thread_id);
+        }
+
+        let message =
+            IncomingMessage::new("tui", "test-user", format!("/thread {target_thread_id}"));
+        agent
+            .process_switch_thread(&message, target_thread_id)
+            .await
+            .expect("switch thread");
+
+        let statuses = statuses.lock().expect("poisoned").clone();
+        assert!(
+            statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::PlanUpdate { plan_id, steps, .. }
+                    if plan_id == "twitter-wasm-tool" && steps.is_empty()
+            )),
+            "expected empty plan update status, got: {statuses:?}"
+        );
+    }
+
     #[test]
     fn test_queue_cap_rejects_at_capacity() {
         use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};

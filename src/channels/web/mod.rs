@@ -605,9 +605,14 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted {
                 name,
                 detail,
+                call_id,
+            } => AppEvent::ToolStarted {
+                name,
+                detail,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -615,17 +620,23 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
-                ..
+                call_id,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
+                call_id,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult {
                 name,
                 preview,
+                call_id,
+            } => AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::StreamChunk(content) => AppEvent::StreamChunk {
