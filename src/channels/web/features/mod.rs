@@ -12,6 +12,7 @@
 //! ironclaw#2599.
 
 pub(crate) mod chat;
+pub(crate) mod debug;
 pub(crate) mod extensions;
 pub(crate) mod jobs;
 pub(crate) mod logs;

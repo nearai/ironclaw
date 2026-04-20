@@ -423,6 +423,32 @@ pub enum AppEvent {
         decisions: Vec<ToolDecisionDto>,
     },
 
+    /// Full (non-truncated) tool output (verbose/debug mode only).
+    #[serde(rename = "tool_result_full")]
+    ToolResultFull {
+        name: String,
+        output: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncated: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Per-LLM-call metrics with model, tokens, and timing (verbose/debug mode only).
+    #[serde(rename = "turn_metrics")]
+    TurnMetrics {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        model: String,
+        duration_ms: u64,
+        iteration: usize,
+    },
+
     // ── Engine v2 thread lifecycle events ──
     /// Engine thread changed state (e.g. Running → Completed).
     #[serde(rename = "thread_state_changed")]
@@ -538,6 +564,8 @@ impl AppEvent {
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",
+            Self::ToolResultFull { .. } => "tool_result_full",
+            Self::TurnMetrics { .. } => "turn_metrics",
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
@@ -545,6 +573,11 @@ impl AppEvent {
             Self::ShellCommand { .. } => "shell_command",
             Self::ShellOutput { .. } => "shell_output",
         }
+    }
+
+    /// Whether this event should only be delivered to verbose/debug subscribers.
+    pub fn is_verbose_only(&self) -> bool {
+        matches!(self, Self::ToolResultFull { .. } | Self::TurnMetrics { .. })
     }
 }
 
@@ -694,6 +727,22 @@ mod tests {
                 job_id: String::new(),
                 narrative: String::new(),
                 decisions: vec![],
+            },
+            AppEvent::ToolResultFull {
+                name: String::new(),
+                output: String::new(),
+                truncated: None,
+                call_id: None,
+                thread_id: None,
+            },
+            AppEvent::TurnMetrics {
+                thread_id: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                model: String::new(),
+                duration_ms: 0,
+                iteration: 0,
             },
             AppEvent::ThreadStateChanged {
                 thread_id: String::new(),

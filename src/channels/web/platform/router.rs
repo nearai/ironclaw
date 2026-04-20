@@ -61,9 +61,10 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
-    favicon_handler, health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler,
-    i18n_ko_handler, i18n_zh_handler, index_handler, js_handler, project_file_handler,
-    project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
+    debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
+    health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
+    i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
+    project_redirect_handler, theme_css_handler, theme_init_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -419,6 +420,11 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        // Debug inspection (admin-only — handler enforces via AdminUser extractor)
+        .route(
+            "/api/debug/prompt",
+            get(crate::channels::web::features::debug::debug_prompt_handler),
+        )
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -449,6 +455,9 @@ pub async fn start_server(
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/theme-init.js", get(theme_init_handler))
+        .route("/debug-init.js", get(debug_init_handler))
+        .route("/debug-panel.js", get(debug_panel_js_handler))
+        .route("/debug-panel.css", get(debug_panel_css_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))

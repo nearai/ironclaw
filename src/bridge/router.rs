@@ -649,10 +649,7 @@ async fn notify_pending_gate(
                     .unwrap_or_else(|_| display_parameters.to_string()),
                 extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: pending
-                    .scope_thread_id
-                    .clone()
-                    .or_else(|| Some(pending.thread_id.to_string())),
+                thread_id: Some(pending.effective_wire_thread_id()),
             },
         );
     }
@@ -990,6 +987,7 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1279,13 +1277,27 @@ async fn fail_waiting_thread(
 
     thread
         .transition_to(ironclaw_engine::ThreadState::Failed, Some(reason.into()))
-        .map_err(|e| engine_err("reconcile waiting thread", e))?;
+        .map_err(|e| engine_err("fail waiting thread", e))?;
     state
         .store
         .save_thread(&thread)
         .await
-        .map_err(|e| engine_err("save reconciled thread", e))?;
+        .map_err(|e| engine_err("save failed thread", e))?;
     Ok(true)
+}
+
+/// Build the user-facing "<message>. Resuming..." status text for the
+/// auth-completed Ready arm.
+///
+/// `result.message` from `ExtensionManager::configure_token` already ends
+/// with a period (e.g. `"Configuration saved for 'telegram'."`), so a
+/// naive `format!("{}. Resuming...", msg)` produces `"...telegram'.. Resuming..."`
+/// — double period. Strip trailing periods and whitespace from the raw
+/// message before formatting. Other punctuation is intentionally left
+/// alone (no real-world backend message ends in `!`/`?`/etc.).
+fn format_auth_completed_resuming(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    format!("{}. Resuming...", trimmed)
 }
 
 /// Outcome of `submit_pending_auth_credential` — distinguishes "a backend
@@ -1301,17 +1313,50 @@ enum PendingAuthCredentialSubmission {
 /// Try to persist a user-supplied auth credential, falling back across the
 /// three backends in priority order:
 ///
-/// 1. `AuthManager::submit_auth_token` — the canonical path (runs the
-///    extension's `configure_token`, validates, and emits a
+/// 1. `AuthManager::submit_auth_token(submit_target, ...)` — the canonical
+///    path (runs the extension's `configure_token`, validates, and emits a
 ///    `ConfigureResult`). Requires a secrets-backed auth manager.
-/// 2. `ExtensionManager::configure_token` — used on hosted instances that
-///    run without `SECRETS_MASTER_KEY`, so no persistent auth manager
-///    exists but the extension manager's in-memory secrets store can still
-///    accept the credential. `NotInstalled` / `NotFound` fall through so
-///    non-extension credentials (plain secrets) are stored in step 3.
-/// 3. Plain `SecretsStore::create` — stores the credential verbatim for
-///    non-extension actions (HTTP tool, skill credentials) when no
-///    extension owns the action.
+/// 2. `ExtensionManager::configure_token(submit_target, ...)` — used on
+///    hosted instances that run without `SECRETS_MASTER_KEY`, so no
+///    persistent auth manager exists but the extension manager's in-memory
+///    secrets store can still accept the credential. `NotInstalled` /
+///    `NotFound` fall through so non-extension credentials (plain secrets)
+///    are stored in step 3.
+/// 3. Plain `SecretsStore::create(credential_name, ...)` — stores the
+///    credential verbatim for non-extension actions (HTTP tool, skill
+///    credentials) when no extension owns the action.
+///
+/// # Why two keys (`submit_target` + `credential_name`)
+///
+/// Steps 1–2 take the **extension** identity (`submit_target`, e.g.
+/// `"telegram"`). They resolve the actual secret key by walking the
+/// extension's capabilities file — that's the whole point of routing
+/// through `configure_token`, which validates the extension is installed
+/// and picks the correct required-secret slot.
+///
+/// Step 3 takes the **credential** identity (`credential_name`, e.g.
+/// `"telegram_bot_token"` or `"github_token"`) because the secrets store
+/// has no concept of extensions — it stores raw secrets keyed by name.
+/// For flows that reach step 3, there is no extension to resolve against
+/// (builtin HTTP tool, skill credentials), so the credential name *is*
+/// the storage key.
+///
+/// The asymmetry is intentional: the engine's `ResumeKind::Authentication`
+/// only carries `credential_name`, so the caller passes both identities
+/// through and each backend picks the one it operates on.
+///
+/// # Credential-name validation on the step-3 fallback
+///
+/// Steps 1–2 reject unknown credentials via their capabilities lookup
+/// (`auth_manager` through `get_credential_spec`; `extension_manager`
+/// through `determine_installed_kind`). Step 3 is the non-extension
+/// path, so the only validation is the upstream trust chain: the pending
+/// gate's `ResumeKind::Authentication.credential_name` is a typed
+/// `CredentialName` (newtype validated at construction), and the pending
+/// gate itself was inserted by the engine for a specific tool-call whose
+/// auth descriptor produced that credential. The caller here receives
+/// the value as `&str` because `CreateSecretParams` is string-typed at
+/// the boundary, but it originates from a validated newtype upstream.
 ///
 /// Returns `SkippedNoBackend` when none of the three is available (bare
 /// test harness with `resume_output` already staged).
@@ -1341,6 +1386,9 @@ async fn submit_pending_auth_credential(
     }
 
     if let Some(ss) = state.secrets_store.as_ref() {
+        // Non-extension path (builtin HTTP, skill credentials): store under
+        // the raw credential name. See function docs for why steps 1–2
+        // take `submit_target` but step 3 takes `credential_name`.
         let params = crate::secrets::CreateSecretParams::new(credential_name, token);
         ss.create(user_id, params).await.map_err(|e| {
             crate::extensions::ExtensionError::Other(format!("Failed to store credential: {e}"))
@@ -1460,7 +1508,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1658,6 +1706,29 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    // Use the DB-first config system instead of raw std::env::var reads.
+    // Resolve MissionsConfig from DB-backed settings when available, falling
+    // back to local settings.json + env vars.
+    let missions_settings = if let Some(ref store) = agent.deps.store {
+        match store.get_all_settings(&agent.deps.owner_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::load(),
+        }
+    } else {
+        crate::settings::Settings::load()
+    };
+    let missions_config = match crate::config::MissionsConfig::resolve(&missions_settings) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "MissionsConfig::resolve failed; falling back to defaults"
+            );
+            crate::config::MissionsConfig::default()
+        }
+    };
+    mission_manager_inner =
+        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
@@ -1857,7 +1928,7 @@ async fn resolve_pending_gate_for_user(
         .into_iter()
         .filter(|gate| {
             hinted_scope.is_none_or(|hint| {
-                gate.scope_thread_id.as_deref() == Some(hint)
+                gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                     || hinted_uuid.is_none_or(|uuid| {
                         gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                     })
@@ -1975,7 +2046,7 @@ pub async fn resolve_engine_auth_callback(
             let _ = state.pending_gates.discard(&key).await;
             return Ok(AuthCallbackContinuation::ReplayMessage {
                 channel: pending.source_channel,
-                thread_scope: pending.scope_thread_id,
+                thread_scope: pending.scope_thread_id.map(String::from),
                 content,
             });
         }
@@ -1990,7 +2061,7 @@ pub async fn resolve_engine_auth_callback(
 
     Ok(AuthCallbackContinuation::ResolveGateExternal {
         channel: pending.source_channel,
-        thread_scope: pending.scope_thread_id,
+        thread_scope: pending.scope_thread_id.map(String::from),
         request_id: pending.request_id,
     })
 }
@@ -2355,10 +2426,7 @@ pub async fn resolve_gate(
                         }
                         .into(),
                         message: "Gate approved. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2416,10 +2484,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "denied".into(),
                         message: "Gate denied.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2465,10 +2530,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "cancelled".into(),
                         message: "Gate cancelled.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2519,10 +2581,7 @@ pub async fn resolve_gate(
                             tool_name: pending.action_name.clone(),
                             resolution: "credential_provided".into(),
                             message: "Credential received. Resuming execution.".into(),
-                            thread_id: pending
-                                .scope_thread_id
-                                .clone()
-                                .or_else(|| Some(pending.thread_id.to_string())),
+                            thread_id: Some(pending.effective_wire_thread_id()),
                         },
                     );
                 }
@@ -2548,7 +2607,7 @@ pub async fn resolve_gate(
                                 StatusUpdate::AuthCompleted {
                                     extension_name: display_name.clone(),
                                     success: true,
-                                    message: format!("{}. Resuming...", result.message),
+                                    message: format_auth_completed_resuming(&result.message),
                                 },
                                 &message.metadata,
                             )
@@ -2570,10 +2629,7 @@ pub async fn resolve_gate(
                                     ironclaw_common::OnboardingStateDto::pairing_required(
                                         display_name.clone(),
                                         Some(next_pending.request_id.to_string()),
-                                        pending
-                                            .scope_thread_id
-                                            .clone()
-                                            .or_else(|| Some(pending.thread_id.to_string())),
+                                        Some(pending.effective_wire_thread_id()),
                                         Some(result.message.clone()),
                                         instructions,
                                         onboarding,
@@ -2599,11 +2655,23 @@ pub async fn resolve_gate(
                     // Bare test-harness path: no backend exists, but the
                     // gate carries a staged `resume_output` (set when the
                     // gate was created with a synthetic output), so we can
-                    // proceed with the resume below. Production flows
-                    // always come through the auth-manager or extension-
-                    // manager branch above.
+                    // proceed with the resume below. The caller's token
+                    // is intentionally dropped here — the resume_output
+                    // already carries whatever the resumed action needs;
+                    // production flows always come through the
+                    // auth-manager or extension-manager branch above.
+                    // `debug!` (not `info!` — would corrupt the REPL/TUI)
+                    // so operators can still see the drop when tracing.
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
-                        if pending.resume_output.is_some() => {}
+                        if pending.resume_output.is_some() =>
+                    {
+                        tracing::debug!(
+                            user_id = %message.user_id,
+                            thread_id = %pending.thread_id,
+                            request_id = %pending.request_id,
+                            "auth gate resume: no backend, token dropped because resume_output is staged",
+                        );
+                    }
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend) => {
                         let msg =
                             "No auth manager, extension manager, or secrets store available to store credential.".to_string();
@@ -2714,10 +2782,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "external_callback".into(),
                         message: "External callback received. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -3149,7 +3214,7 @@ pub async fn discard_engine_pending_auth_request(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3191,7 +3256,7 @@ pub async fn transition_engine_pending_auth_request_to_pairing(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3753,7 +3818,19 @@ async fn await_thread_outcome(
                     gate_name: "authentication".into(),
                     user_id: message.user_id.clone(),
                     thread_id,
-                    scope_thread_id: message.conversation_scope().map(str::to_string),
+                    scope_thread_id: message.conversation_scope().and_then(|s| {
+                        match ironclaw_common::ExternalThreadId::new(s) {
+                            Ok(tid) => Some(tid),
+                            Err(e) => {
+                                tracing::debug!(
+                                    candidate = %s,
+                                    error = %e,
+                                    "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                                );
+                                None
+                            }
+                        }
+                    }),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
                     action_name: "authentication_fallback".into(),
@@ -3842,7 +3919,19 @@ async fn await_thread_outcome(
                 gate_name: gate_name.clone(),
                 user_id: message.user_id.clone(),
                 thread_id,
-                scope_thread_id: message.conversation_scope().map(str::to_string),
+                scope_thread_id: message.conversation_scope().and_then(|s| {
+                    match ironclaw_common::ExternalThreadId::new(s) {
+                        Ok(tid) => Some(tid),
+                        Err(e) => {
+                            tracing::debug!(
+                                candidate = %s,
+                                error = %e,
+                                "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                            );
+                            None
+                        }
+                    }
+                }),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
@@ -4597,7 +4686,12 @@ pub struct ProjectsOverviewResponse {
 /// Mission summary for list views.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineMissionInfo {
-    pub id: String,
+    /// Typed mission identifier, carried through from the engine rather
+    /// than round-tripped to `String` at the adapter boundary. Serializes
+    /// transparently as a UUID string (via `MissionId`'s derived
+    /// `Serialize`), so the wire shape stays identical to the pre-newtype
+    /// DTO.
+    pub id: ironclaw_engine::MissionId,
     pub name: String,
     pub goal: String,
     pub status: String,
@@ -5445,7 +5539,7 @@ pub async fn list_engine_missions(
     Ok(missions
         .iter()
         .map(|m| EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5500,7 +5594,7 @@ pub async fn get_engine_mission(
 
     Ok(Some(EngineMissionDetail {
         info: EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5661,6 +5755,263 @@ pub async fn engine_retrospectives_for_test()
         }
     }
     out
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Cross-module test helpers for installing a minimal engine state.
+    //!
+    //! `src/channels/web/server.rs` and other callers need to exercise the
+    //! engine-thread ownership and history paths without standing up a full
+    //! `Agent`. This module exposes a shared lock plus a lightweight
+    //! `Thread`-seeding store so caller-level tests can drive
+    //! `get_engine_thread` / `list_engine_threads` deterministically.
+    //!
+    //! The in-file `mod tests` block has its own richer `TestStore` for the
+    //! router's own tests; the two are deliberately kept separate so the
+    //! helper surface exposed here stays minimal.
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock};
+
+    use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+
+    use ironclaw_engine::{
+        CapabilityLease, CapabilityRegistry, ConversationManager, EngineError, LeaseId,
+        LeaseManager, MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project,
+        ProjectId, Step, Store, Thread, ThreadEvent, ThreadId, ThreadManager, ThreadState,
+    };
+
+    use super::{ENGINE_STATE, EngineState};
+
+    /// Shared lock serializing all cross-module engine-state tests.
+    ///
+    /// Every test that mutates `ENGINE_STATE` — regardless of which module it
+    /// lives in — must acquire this before calling `install_engine_state_*`
+    /// so tests don't race on the global `OnceLock`.
+    pub(crate) static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> =
+        LazyLock::new(|| TokioMutex::new(()));
+
+    /// Minimal in-memory `Store` used by caller-level tests.
+    ///
+    /// Only the thread-related methods are meaningfully implemented; every
+    /// other method returns an empty default. That's intentional — these
+    /// tests only ever drive `get_engine_thread` / `list_engine_threads`,
+    /// which touch `load_thread` and `list_threads`.
+    pub(crate) struct ThreadTestStore {
+        threads: TokioRwLock<HashMap<ThreadId, Thread>>,
+    }
+
+    impl ThreadTestStore {
+        pub(crate) fn new() -> Self {
+            Self {
+                threads: TokioRwLock::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Store for ThreadTestStore {
+        async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+            self.threads.write().await.insert(thread.id, thread.clone());
+            Ok(())
+        }
+        async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+            Ok(self.threads.read().await.get(&id).cloned())
+        }
+        async fn list_threads(
+            &self,
+            project_id: ProjectId,
+            user_id: &str,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|t| t.project_id == project_id && t.is_owned_by(user_id))
+                .cloned()
+                .collect())
+        }
+        async fn update_thread_state(
+            &self,
+            _id: ThreadId,
+            _state: ThreadState,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
+            Ok(vec![])
+        }
+        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
+            Ok(vec![])
+        }
+        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
+            Ok(None)
+        }
+        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_memory_doc(
+            &self,
+            _: ironclaw_engine::DocId,
+        ) -> Result<Option<MemoryDoc>, EngineError> {
+            Ok(None)
+        }
+        async fn list_memory_docs(
+            &self,
+            _: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
+        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_active_leases(
+            &self,
+            _: ThreadId,
+        ) -> Result<Vec<CapabilityLease>, EngineError> {
+            Ok(vec![])
+        }
+        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn save_mission(&self, _: &Mission) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn load_mission(&self, _: MissionId) -> Result<Option<Mission>, EngineError> {
+            Ok(None)
+        }
+        async fn list_missions(
+            &self,
+            _: ProjectId,
+            _user_id: &str,
+        ) -> Result<Vec<Mission>, EngineError> {
+            Ok(vec![])
+        }
+        async fn update_mission_status(
+            &self,
+            _: MissionId,
+            _: MissionStatus,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    /// Build an `EngineState` backed by a `ThreadTestStore` and install it
+    /// into the global `ENGINE_STATE`, overwriting any prior state.
+    ///
+    /// Callers must already hold `ENGINE_STATE_TEST_LOCK`. The returned
+    /// project id matches the default project used by
+    /// `list_engine_threads(None, ...)`, so seeded threads are visible
+    /// through the default-project lookup path.
+    pub(crate) async fn install_engine_state_with_threads(threads: Vec<Thread>) -> ProjectId {
+        // The seeded store is sufficient for read-only engine lookups; the
+        // thread_manager/conversation_manager are wired only so the
+        // EngineState is structurally valid — no test here drives execution.
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unreachable!("test engine state is read-only")
+            }
+            async fn available_actions(
+                &self,
+                _: &[CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store = Arc::new(ThreadTestStore::new());
+        for thread in threads {
+            store.save_thread(&thread).await.expect("seed thread"); // safety: cfg(test) fixture
+        }
+        let store_dyn: Arc<dyn Store> = store;
+
+        let effect_adapter = Arc::new(crate::bridge::EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
+
+        let project_id = ProjectId::new();
+        let state = EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: project_id,
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+            extension_manager: None,
+            project_root: super::resolve_project_root(),
+        };
+
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        project_id
+    }
+
+    /// Clear `ENGINE_STATE` after a test so later tests see an empty engine.
+    pub(crate) async fn clear_engine_state() {
+        if let Some(lock) = ENGINE_STATE.get() {
+            *lock.write().await = None;
+        }
+    }
 }
 
 /// Resolve the effective user_id for mission management operations.
@@ -6348,7 +6699,7 @@ mod tests {
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
         let mut event_stream = Box::pin(
-            sse.subscribe_raw(Some("alice".to_string()))
+            sse.subscribe_raw(Some("alice".to_string()), false)
                 .expect("subscribe raw"),
         );
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
@@ -6368,7 +6719,9 @@ mod tests {
             },
         );
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6418,7 +6771,7 @@ mod tests {
         write_fake_wasm_channel(&wasm_channels_dir, channel_name);
 
         let mut event_stream = Box::pin(
-            sse.subscribe_raw(Some("alice".to_string()))
+            sse.subscribe_raw(Some("alice".to_string()), false)
                 .expect("subscribe raw"),
         );
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
@@ -6446,7 +6799,9 @@ mod tests {
             )
         };
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use test");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6501,7 +6856,9 @@ mod tests {
 
         let mut message =
             crate::channels::IncomingMessage::new("web", "alice", "what's happening?");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let response = handle_with_engine(&agent, &message, &message.content)
             .await
@@ -7081,7 +7438,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7119,7 +7478,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7144,7 +7505,7 @@ mod tests {
         assert_eq!(replacement.request_id.to_string(), next_request_id);
         assert_eq!(replacement.gate_name, "pairing");
         assert_eq!(
-            replacement.scope_thread_id.as_deref(),
+            replacement.scope_thread_id.as_ref().map(|t| t.as_str()),
             Some("gateway-thread-123")
         );
         assert_eq!(replacement.thread_id, thread_id);
@@ -8047,6 +8408,34 @@ mod tests {
         assert!(
             matches!(err, crate::extensions::ExtensionError::ValidationFailed(_)),
             "expected ValidationFailed, got: {err:?}"
+        );
+    }
+
+    /// `format_auth_completed_resuming` strips trailing periods and
+    /// whitespace from the upstream backend message before appending
+    /// ". Resuming...". Regression coverage for the double-period bug
+    /// flagged on PR #2622 — `ExtensionManager::configure_token` returns
+    /// "Configuration saved for 'X'." which used to render as
+    /// "...'X'.. Resuming...".
+    #[test]
+    fn format_auth_completed_resuming_strips_trailing_period() {
+        // The motivating case: extension-manager backend message.
+        assert_eq!(
+            format_auth_completed_resuming("Configuration saved for 'telegram'."),
+            "Configuration saved for 'telegram'. Resuming..."
+        );
+        // Multiple trailing periods + whitespace collapse cleanly.
+        assert_eq!(
+            format_auth_completed_resuming("done...  \n"),
+            "done. Resuming..."
+        );
+        // A message with no trailing punctuation gets exactly one period.
+        assert_eq!(format_auth_completed_resuming("ok"), "ok. Resuming...");
+        // Non-period punctuation is intentionally left intact (no backend
+        // currently produces these, but the spec is "trim periods only").
+        assert_eq!(
+            format_auth_completed_resuming("ready!"),
+            "ready!. Resuming..."
         );
     }
 

@@ -31,7 +31,7 @@ async fn gateway_send_status_preserves_tool_event_fields() {
     let mut stream = gw
         .state
         .sse
-        .subscribe_raw(Some("test-user".to_string()))
+        .subscribe_raw(Some("test-user".to_string()), false)
         .expect("subscribe should succeed");
     let metadata = serde_json::json!({
         "user_id": "test-user",

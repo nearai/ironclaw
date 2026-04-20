@@ -65,6 +65,7 @@ pub async fn handle_ws_connection(
     socket: WebSocket,
     state: Arc<GatewayState>,
     user: crate::channels::web::auth::UserIdentity,
+    debug: bool,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
@@ -76,7 +77,7 @@ pub async fn handle_ws_connection(
 
     // Subscribe to broadcast events (same source as SSE), scoped to this user.
     // Reject if we've hit the connection limit.
-    let Some(raw_stream) = state.sse.subscribe_raw(Some(user.user_id.clone())) else {
+    let Some(raw_stream) = state.sse.subscribe_raw(Some(user.user_id.clone()), debug) else {
         tracing::warn!("WebSocket rejected: too many connections");
         // Decrement the WS tracker we already incremented above.
         if let Some(ref tracker) = tracker_for_drop {
@@ -387,7 +388,7 @@ mod tests {
 
         let incoming = agent_rx.recv().await.unwrap();
         assert_eq!(incoming.content, "hello agent");
-        assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
+        assert_eq!(incoming.thread_id.as_ref().map(|t| t.as_str()), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
         assert_eq!(
@@ -486,7 +487,10 @@ mod tests {
         // The content should be a serialized ExecApproval
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
-        assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+        assert_eq!(
+            incoming.thread_id.as_ref().map(|t| t.as_str()),
+            Some("thread-42")
+        );
         assert_eq!(
             incoming.metadata.get("user_id").and_then(|v| v.as_str()),
             Some("user1")

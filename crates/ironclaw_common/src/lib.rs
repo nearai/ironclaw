@@ -10,7 +10,9 @@ pub use event::{
     ToolDecisionDto,
 };
 pub use identity::{
-    CredentialName, ExtensionName, GitHubRepo, GitHubRepoError, IdentityError, MAX_NAME_LEN,
+    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, GitHubRepo,
+    GitHubRepoError, IdentityError, MAX_EXTERNAL_THREAD_ID_LEN, MAX_MCP_SERVER_NAME_LEN,
+    MAX_NAME_LEN, McpServerName, McpServerNameError,
 };
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::truncate_preview;

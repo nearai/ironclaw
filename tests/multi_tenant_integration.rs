@@ -23,9 +23,8 @@ use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use ironclaw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
@@ -316,12 +315,12 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     let manager = SseManager::new();
     let mut alice_stream = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob_stream = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -361,12 +360,12 @@ async fn sse_global_event_delivered_to_all_users() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -394,7 +393,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -426,7 +425,7 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     let manager = SseManager::new();
     // Unscoped subscriber (None user_id) — backwards-compatible single-user mode
-    let mut stream = Box::pin(manager.subscribe_raw(None).expect("subscribe"));
+    let mut stream = Box::pin(manager.subscribe_raw(None, false).expect("subscribe"));
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
@@ -504,14 +503,14 @@ async fn sse_connection_count_tracks_scoped_subscribers() {
 
     let _alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 1);
 
     let _bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 2);
@@ -1078,9 +1077,10 @@ async fn start_multi_user_server_with_db() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("Failed to start server with DB");
+    let bound =
+        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
+            .await
+            .expect("Failed to start server with DB");
 
     (bound, state, db, temp_dir)
 }

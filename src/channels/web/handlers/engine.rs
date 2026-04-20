@@ -16,7 +16,7 @@ pub struct ProjectFilter {
 }
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::tools::builtin::memory::WorkspaceResolver;
 

@@ -37,7 +37,7 @@ impl Default for WasmChannelRuntimeConfig {
             default_limits: ResourceLimits {
                 // Channels may need more memory for message buffering
                 memory_bytes: 50 * 1024 * 1024, // 50 MB
-                fuel: 10_000_000,
+                fuel: 500_000_000,
                 timeout: Duration::from_secs(60),
             },
             fuel_config: FuelConfig::default(),
