@@ -1,0 +1,62 @@
+name: Build t3n MCP Sidecar
+
+# Builds the t3n-mcp-sidecar Docker image and pushes it to GitHub Container
+# Registry (ghcr.io/terminal-3/t3n-mcp-sidecar).  The VPS then pulls this
+# pre-built image — no GITHUB_TOKEN required on the host at deploy time.
+#
+# Image visibility: by default GHCR inherits the repo's visibility (private).
+# To allow unauthenticated pulls on a VPS, make the package public:
+#   github.com/orgs/Terminal-3/packages → t3n-mcp-sidecar → Package settings → Change visibility
+# Otherwise, VPS hosts need a one-time login:
+#   echo $GHCR_TOKEN | docker login ghcr.io -u <github-username> --password-stdin
+# (A classic PAT with read:packages scope is sufficient — no write access needed.)
+
+on:
+  push:
+    branches: [staging]
+    paths:
+      - docker/t3n-mcp-sidecar.Dockerfile
+      - docker/t3n-mcp-bridge.mjs
+  # Allow manual re-builds from the Actions UI (e.g. after a t3n-mcp release).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3
+
+      - name: Build and push
+        uses: docker/build-push-action@67a2d409c0a876cbe4b90a2f88d33be39c236f90 # v6
+        with:
+          context: .
+          file: docker/t3n-mcp-sidecar.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/terminal-3/t3n-mcp-sidecar:latest
+            ghcr.io/terminal-3/t3n-mcp-sidecar:sha-${{ github.sha }}
+          # Pass the Actions GITHUB_TOKEN as a build secret so it is never
+          # baked into an image layer.  It has read:packages on the org, which
+          # is all that npm install @terminal-3/t3n-mcp requires.
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

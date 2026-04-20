@@ -93,12 +93,11 @@ services:
 
   t3n-mcp-sidecar:
     profiles: ["app"]
-    user: "0:0"
-    build:
-      context: .
-      dockerfile: docker/t3n-mcp-sidecar.Dockerfile
-      args:
-        GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    # Pre-built in CI and pushed to GHCR — no GITHUB_TOKEN needed at deploy time.
+    # Run `docker compose pull t3n-mcp-sidecar` to fetch the latest image.
+    # If the GHCR package is private, log in once: `docker login ghcr.io` with a
+    # read:packages PAT before running `make up`.
+    image: ghcr.io/terminal-3/t3n-mcp-sidecar:latest
     restart: unless-stopped
     environment:
       # Defaults to Trinity staging; override in .env when you need a different
