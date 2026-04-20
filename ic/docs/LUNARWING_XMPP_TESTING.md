@@ -143,6 +143,28 @@ systemctl --user start xmpp-bridge-test.service
 systemctl --user start lunarwing-test.service
 ```
 
+The default generated service names are deliberately test-scoped:
+
+- `lunarwing-test.service`
+- `xmpp-bridge-test.service`
+
+To render actual service names, set both names before `render-systemd`:
+
+```bash
+export LUNARWING_TEST_SERVICE_NAME=lunarwing.service
+export LUNARWING_TEST_BRIDGE_SERVICE_NAME=xmpp-bridge.service
+scripts/lunarwing-xmpp-test-env.sh render-systemd
+```
+
+The bridge `PartOf=`, LunarWing `Wants=` / `After=`, and
+`configure-bridge --restart` path all use the same configured bridge/main
+service names, so renaming the main unit does not leave stale
+`ironclaw.service` links in the generated test units.
+
+For generated user services, `configure-bridge --restart` uses `systemctl --user`
+by default. For machine-level services, set
+`LUNARWING_TEST_SYSTEMCTL_SCOPE=system`.
+
 Use read-only diagnostics before restarting anything:
 
 ```bash
@@ -152,32 +174,68 @@ journalctl --user -u xmpp-bridge-test.service -n 100 --no-pager
 scripts/lunarwing-xmpp-test-env.sh bridge-status
 ```
 
-The generated bridge unit has `PartOf=lunarwing-test.service`, so LunarWing
-service stops can also stop the bridge. Do not assume the bridge caused a
-LunarWing stop just because both units changed state together.
+The generated bridge unit has `PartOf=` pointing at the configured LunarWing
+service name, so LunarWing service stops can also stop the bridge. Do not
+assume the bridge caused a LunarWing stop just because both units changed state
+together.
+
+The built-in Rust service manager also uses the LunarWing name now:
+`ironclaw service install` installs `~/.config/systemd/user/lunarwing.service`
+and a companion `xmpp-bridge.service` when the bridge binary is available. During
+install it attempts to disable the legacy user unit `ironclaw.service` if that
+old unit file exists, preventing both daemon names from being enabled together.
 
 ## System Service Method
 
-For a machine-level service, keep secrets in root-readable env files such as:
+Production-ready system service templates live in:
+
+- `systemd/lunarwing.service`
+- `systemd/xmpp-bridge.service`
+
+They assume:
+
+- a dedicated `lunarwing` system user and group
+- binaries at `/usr/local/bin/ironclaw` and `/usr/local/bin/xmpp-bridge`
+- state under `/var/lib/lunarwing`
+- logs under `/var/log/lunarwing`
+- root-readable env files under `/etc/lunarwing`
+
+Create the service account and config directory:
+
+```bash
+sudo useradd --system --home-dir /var/lib/lunarwing --shell /usr/sbin/nologin lunarwing
+sudo install -d -o root -g root -m 0750 /etc/lunarwing
+sudo install -d -o lunarwing -g lunarwing -m 0750 /var/lib/lunarwing /var/log/lunarwing
+```
+
+Keep secrets in root-readable env files:
 
 - `/etc/lunarwing/lunarwing.env`
 - `/etc/lunarwing/xmpp-bridge.env`
 
-Use `EnvironmentFile=` in the unit files instead of inline `Environment=`
-entries for tokens or passwords. The bridge should remain loopback-bound:
+Use `EnvironmentFile=` instead of inline `Environment=` entries for tokens,
+database URLs, provider keys, webhook secrets, or XMPP passwords. The bridge
+should remain loopback-bound:
 
 ```ini
 XMPP_BRIDGE_BIND=127.0.0.1:8787
 ```
 
-When adapting the generated user units for system services:
+Install and start the services:
 
-- Add a dedicated `User=` and `Group=`.
-- Move writable state out of `/tmp`, for example to `/var/lib/lunarwing-test`.
-- Keep the bridge ordered before LunarWing with `Wants=` and `After=`.
-- Keep token auth enabled with `XMPP_BRIDGE_TOKEN`.
-- Inspect `systemctl status`, `systemctl show`, `journalctl`, and
-  `/v1/status` before restarting services.
+```bash
+sudo install -o root -g root -m 0644 systemd/xmpp-bridge.service /etc/systemd/system/xmpp-bridge.service
+sudo install -o root -g root -m 0644 systemd/lunarwing.service /etc/systemd/system/lunarwing.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now xmpp-bridge.service
+sudo systemctl enable --now lunarwing.service
+```
+
+The current app binary is still named `ironclaw`. If you install a renamed
+`lunarwing` binary, change `ExecStart=` in `systemd/lunarwing.service`.
+
+Inspect `systemctl status`, `systemctl show`, `journalctl`, and `/v1/status`
+before restarting services.
 
 ## Troubleshooting
 

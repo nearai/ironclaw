@@ -37,6 +37,12 @@ Commands:
 Environment:
   LUNARWING_TEST_ROOT      default: ${TMPDIR:-/tmp}/lunarwing-xmpp-test
   LUNARWING_TEST_PROFILE   debug or release; default: debug
+  LUNARWING_TEST_SERVICE_NAME
+                           default: lunarwing-test.service
+  LUNARWING_TEST_BRIDGE_SERVICE_NAME
+                           default: xmpp-bridge-test.service
+  LUNARWING_TEST_SYSTEMCTL_SCOPE
+                           user or system for configure-bridge --restart; default: user
   LUNARWING_TEST_KEEP_BRIDGE=1 keeps smoke-test bridge running
 
 Notes:
@@ -194,6 +200,32 @@ bridge_base() {
     port="8787"
   fi
   printf 'http://127.0.0.1:%s' "$port"
+}
+
+normalize_service_name() {
+  local name="$1"
+  if [[ -z "$name" ]]; then
+    die "service name cannot be empty"
+  fi
+  if [[ "$name" == *"/"* || "$name" =~ [[:space:]] ]]; then
+    die "service name must not contain slashes or whitespace: $name"
+  fi
+  case "$name" in
+    *.service)
+      printf '%s' "$name"
+      ;;
+    *)
+      printf '%s.service' "$name"
+      ;;
+  esac
+}
+
+lunarwing_service_name() {
+  normalize_service_name "${LUNARWING_TEST_SERVICE_NAME:-lunarwing-test.service}"
+}
+
+bridge_service_name() {
+  normalize_service_name "${LUNARWING_TEST_BRIDGE_SERVICE_NAME:-xmpp-bridge-test.service}"
 }
 
 require_binary() {
@@ -377,7 +409,10 @@ smoke() {
 configure_bridge() {
   ensure_env
   load_all_envs
-  BASE="$(bridge_base)" "$SCRIPT_DIR/xmpp-configure.sh" "$@"
+  BASE="$(bridge_base)" \
+    XMPP_BRIDGE_SERVICE="$(bridge_service_name)" \
+    XMPP_BRIDGE_SYSTEMCTL_SCOPE="${LUNARWING_TEST_SYSTEMCTL_SCOPE:-user}" \
+    "$SCRIPT_DIR/xmpp-configure.sh" "$@"
 }
 
 rate_limit() {
@@ -440,15 +475,18 @@ lunarwing_status() {
 
 render_systemd() {
   ensure_env
-  local lunarwing_unit="$SYSTEMD_DIR/lunarwing-test.service"
-  local bridge_unit="$SYSTEMD_DIR/xmpp-bridge-test.service"
+  local main_service bridge_service lunarwing_unit bridge_unit
+  main_service="$(lunarwing_service_name)"
+  bridge_service="$(bridge_service_name)"
+  lunarwing_unit="$SYSTEMD_DIR/$main_service"
+  bridge_unit="$SYSTEMD_DIR/$bridge_service"
 
   cat >"$bridge_unit" <<EOF
 [Unit]
 Description=LunarWing XMPP bridge test sidecar
 After=network.target
 Wants=network.target
-PartOf=lunarwing-test.service
+PartOf=$main_service
 
 [Service]
 Type=simple
@@ -466,8 +504,8 @@ EOF
   cat >"$lunarwing_unit" <<EOF
 [Unit]
 Description=LunarWing test daemon
-After=network.target xmpp-bridge-test.service
-Wants=xmpp-bridge-test.service
+After=network.target $bridge_service
+Wants=$bridge_service
 
 [Service]
 Type=simple
@@ -488,7 +526,7 @@ EOF
   say "  mkdir -p ~/.config/systemd/user"
   say "  cp $SYSTEMD_DIR/*.service ~/.config/systemd/user/"
   say "  systemctl --user daemon-reload"
-  say "  systemctl --user start xmpp-bridge-test.service"
+  say "  systemctl --user start $bridge_service"
 }
 
 doctor() {
@@ -541,10 +579,12 @@ doctor() {
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user --no-pager --plain status xmpp-bridge-test.service >/dev/null 2>&1; then
-      say "xmpp-bridge-test.service: active in user systemd"
+    local bridge_service
+    bridge_service="$(bridge_service_name)"
+    if systemctl --user --no-pager --plain status "$bridge_service" >/dev/null 2>&1; then
+      say "$bridge_service: active in user systemd"
     else
-      say "xmpp-bridge-test.service: not active or not installed in user systemd"
+      say "$bridge_service: not active or not installed in user systemd"
     fi
   fi
 }

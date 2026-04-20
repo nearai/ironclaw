@@ -1,1 +1,72 @@
-# systemd level service
+# Production systemd service template for LunarWing.
+#
+# Install notes:
+#   1. Create a dedicated service account:
+#        useradd --system --home-dir /var/lib/lunarwing --shell /usr/sbin/nologin lunarwing
+#   2. Install the current binary. The repo package is still named `ironclaw`;
+#      change ExecStart if your installed binary has been renamed to `lunarwing`.
+#   3. Keep secrets in /etc/lunarwing/lunarwing.env with mode 0600.
+#   4. Install this file as /etc/systemd/system/lunarwing.service.
+
+[Unit]
+Description=LunarWing AI assistant
+Documentation=https://github.com/IronclawCustomTools/ironclaw
+After=network-online.target xmpp-bridge.service
+Wants=network-online.target xmpp-bridge.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lunarwing
+Group=lunarwing
+WorkingDirectory=/var/lib/lunarwing
+
+# Non-secret defaults. EnvironmentFile values can override these.
+Environment=CLI_ENABLED=false
+Environment=IRONCLAW_BASE_DIR=/var/lib/lunarwing
+Environment=RUST_LOG=ironclaw=info,lunarwing=info
+
+# Required production config and secrets. Do not inline tokens, database URLs,
+# provider keys, or webhook secrets in this unit file.
+EnvironmentFile=/etc/lunarwing/lunarwing.env
+
+# Current binary name is still `ironclaw`. If the installed binary is renamed,
+# change this to `/usr/local/bin/lunarwing --no-onboard run`.
+ExecStart=/usr/local/bin/ironclaw --no-onboard run
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+
+StateDirectory=lunarwing
+StateDirectoryMode=0750
+LogsDirectory=lunarwing
+LogsDirectoryMode=0750
+RuntimeDirectory=lunarwing
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lunarwing /var/log/lunarwing /run/lunarwing
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lunarwing
+
+[Install]
+WantedBy=multi-user.target

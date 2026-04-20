@@ -98,6 +98,48 @@ scripts/lunarwing-xmpp-test-env.sh build
 Use the same `LUNARWING_TEST_PROFILE` for later `start-*`, `smoke`, and
 `render-systemd` commands.
 
+## Service Names
+
+The harness intentionally renders test services by default:
+
+```text
+lunarwing-test.service
+xmpp-bridge-test.service
+```
+
+Those names avoid clobbering a real user or system service named
+`lunarwing.service`, `ironclaw.service`, or `xmpp-bridge.service`.
+
+When you want the generated units to use the real LunarWing name, set both
+service-name variables before rendering:
+
+```bash
+export LUNARWING_TEST_SERVICE_NAME=lunarwing.service
+export LUNARWING_TEST_BRIDGE_SERVICE_NAME=xmpp-bridge.service
+scripts/lunarwing-xmpp-test-env.sh render-systemd
+```
+
+The harness uses the same names everywhere it generates dependencies:
+
+- the bridge unit gets `PartOf=$LUNARWING_TEST_SERVICE_NAME`
+- the LunarWing unit gets `Wants=` and `After=` for
+  `$LUNARWING_TEST_BRIDGE_SERVICE_NAME`
+- `configure-bridge --restart` passes the bridge service name through
+  `XMPP_BRIDGE_SERVICE`
+
+For generated user services, `configure-bridge --restart` uses
+`systemctl --user` by default. For a machine-level service, set:
+
+```bash
+export LUNARWING_TEST_SYSTEMCTL_SCOPE=system
+```
+
+If you use the watchdog with a renamed service, point it at the same main unit:
+
+```bash
+IRONCLAW_WATCHDOG_SERVICE=lunarwing.service scripts/ironclaw-watchdog.sh
+```
+
 ## 4. Run the Local Bridge Smoke Test
 
 The bridge does not need live XMPP credentials for API smoke testing.
@@ -287,6 +329,24 @@ systemctl --user stop xmpp-bridge-test.service
 
 The bridge unit has `PartOf=lunarwing-test.service`, so LunarWing service stops
 can also stop the bridge.
+
+The built-in Rust service installer is separate from this test renderer. Running
+`ironclaw service install` now installs the user unit as `lunarwing.service` and
+attempts to disable the legacy `ironclaw.service` user unit when it exists.
+
+For production system services, use the committed templates instead of the
+generated user-service units:
+
+```bash
+sudo install -o root -g root -m 0644 systemd/xmpp-bridge.service /etc/systemd/system/xmpp-bridge.service
+sudo install -o root -g root -m 0644 systemd/lunarwing.service /etc/systemd/system/lunarwing.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now xmpp-bridge.service
+sudo systemctl enable --now lunarwing.service
+```
+
+Those templates expect `/etc/lunarwing/lunarwing.env` and
+`/etc/lunarwing/xmpp-bridge.env` for production config and secrets.
 
 ## 9. Troubleshoot
 

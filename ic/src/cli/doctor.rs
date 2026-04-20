@@ -567,7 +567,7 @@ fn check_secrets(settings: &Settings) -> CheckResult {
 fn check_service_installed() -> CheckResult {
     if cfg!(target_os = "macos") {
         let plist =
-            dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.ironclaw.daemon.plist"));
+            dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.lunarwing.daemon.plist"));
         match plist {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("launchd plist installed ({})", path.display()))
@@ -576,7 +576,7 @@ fn check_service_installed() -> CheckResult {
             None => CheckResult::Skip("cannot determine home directory".into()),
         }
     } else if cfg!(target_os = "linux") {
-        let unit = dirs::home_dir().map(|h| h.join(".config/systemd/user/ironclaw.service"));
+        let unit = dirs::home_dir().map(|h| h.join(".config/systemd/user/lunarwing.service"));
         match unit {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("systemd unit installed ({})", path.display()))

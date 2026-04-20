@@ -1,8 +1,8 @@
-//! OS service management for running IronClaw as a daemon.
+//! OS service management for running LunarWing as a daemon.
 //!
 //! Generates and manages platform-native service definitions:
-//! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.ironclaw.daemon.plist`
-//! - **Linux**: systemd user unit at `~/.config/systemd/user/ironclaw.service`
+//! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.lunarwing.daemon.plist`
+//! - **Linux**: systemd user unit at `~/.config/systemd/user/lunarwing.service`
 //!
 //! The installed service runs `ironclaw run` (the default agent mode) and is
 //! configured to restart automatically on failure.
@@ -14,8 +14,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::bootstrap::ironclaw_base_dir;
 
-const SERVICE_LABEL: &str = "com.ironclaw.daemon";
-const SYSTEMD_UNIT: &str = "ironclaw.service";
+const SERVICE_LABEL: &str = "com.lunarwing.daemon";
+const LEGACY_SERVICE_LABEL: &str = "com.ironclaw.daemon";
+const SYSTEMD_UNIT: &str = "lunarwing.service";
+const LEGACY_SYSTEMD_UNIT: &str = "ironclaw.service";
 const SYSTEMD_XMPP_BRIDGE_UNIT: &str = "xmpp-bridge.service";
 
 // ── Public dispatch ─────────────────────────────────────────────
@@ -73,6 +75,7 @@ fn install_macos() -> Result<()> {
     );
 
     std::fs::write(&file, plist)?;
+    disable_legacy_macos_service().ok();
     println!("Installed launchd service: {}", file.display());
     println!("  Start with: ironclaw service start");
     Ok(())
@@ -130,6 +133,7 @@ fn install_linux() -> Result<()> {
         let bridge_file = linux_xmpp_bridge_unit_path()?;
         std::fs::write(&bridge_file, linux_xmpp_bridge_unit_content(&bridge_exe))?;
     }
+    disable_legacy_linux_unit().ok();
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
     run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
     if linux_xmpp_bridge_unit_path()?.exists() {
@@ -318,6 +322,10 @@ fn linux_xmpp_bridge_unit_path() -> Result<PathBuf> {
     Ok(linux_systemd_unit_dir()?.join(SYSTEMD_XMPP_BRIDGE_UNIT))
 }
 
+fn linux_legacy_unit_path() -> Result<PathBuf> {
+    Ok(linux_systemd_unit_dir()?.join(LEGACY_SYSTEMD_UNIT))
+}
+
 fn linux_systemd_unit_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
     Ok(home.join(".config").join("systemd").join("user"))
@@ -325,6 +333,75 @@ fn linux_systemd_unit_dir() -> Result<PathBuf> {
 
 fn ironclaw_logs_dir() -> PathBuf {
     ironclaw_base_dir().join("logs")
+}
+
+fn disable_legacy_linux_unit() -> Result<()> {
+    if LEGACY_SYSTEMD_UNIT == SYSTEMD_UNIT {
+        return Ok(());
+    }
+
+    let legacy_file = linux_legacy_unit_path()?;
+    if !legacy_file.exists() {
+        return Ok(());
+    }
+
+    match run_checked(Command::new("systemctl").args([
+        "--user",
+        "disable",
+        "--now",
+        LEGACY_SYSTEMD_UNIT,
+    ])) {
+        Ok(()) => println!(
+            "Disabled legacy systemd user service: {}",
+            legacy_file.display()
+        ),
+        Err(e) => println!(
+            "Legacy systemd user service still exists at {}. \
+             Disable it manually to avoid running two daemons: {}",
+            legacy_file.display(),
+            e
+        ),
+    }
+
+    Ok(())
+}
+
+fn disable_legacy_macos_service() -> Result<()> {
+    if LEGACY_SERVICE_LABEL == SERVICE_LABEL {
+        return Ok(());
+    }
+
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let legacy_file = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{LEGACY_SERVICE_LABEL}.plist"));
+    if !legacy_file.exists() {
+        return Ok(());
+    }
+
+    run_checked(
+        Command::new("launchctl")
+            .arg("stop")
+            .arg(LEGACY_SERVICE_LABEL),
+    )
+    .ok();
+    match run_checked(
+        Command::new("launchctl")
+            .arg("unload")
+            .arg("-w")
+            .arg(&legacy_file),
+    ) {
+        Ok(()) => println!("Unloaded legacy launchd service: {}", legacy_file.display()),
+        Err(e) => println!(
+            "Legacy launchd service still exists at {}. \
+             Unload it manually to avoid running two daemons: {}",
+            legacy_file.display(),
+            e
+        ),
+    }
+
+    Ok(())
 }
 
 fn linux_unit_content(exe: &Path, include_xmpp_bridge: bool) -> String {
@@ -340,7 +417,7 @@ fn linux_unit_content(exe: &Path, include_xmpp_bridge: bool) -> String {
 
     format!(
         "[Unit]\n\
-         Description=IronClaw daemon\n\
+         Description=LunarWing daemon\n\
          {bridge_unit_lines}\
          \n\
          [Service]\n\
@@ -361,7 +438,7 @@ fn linux_unit_content(exe: &Path, include_xmpp_bridge: bool) -> String {
 fn linux_xmpp_bridge_unit_content(exe: &Path) -> String {
     format!(
         "[Unit]\n\
-         Description=IronClaw XMPP bridge\n\
+         Description=LunarWing XMPP bridge\n\
          After=network.target\n\
          PartOf={main_unit}\n\
          \n\
@@ -485,7 +562,7 @@ mod tests {
         let path = macos_plist_path().unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.ends_with("Library/LaunchAgents/com.ironclaw.daemon.plist"),
+            s.ends_with("Library/LaunchAgents/com.lunarwing.daemon.plist"),
             "unexpected path: {s}"
         );
     }
@@ -496,7 +573,7 @@ mod tests {
         let path = linux_unit_path().unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.ends_with(".config/systemd/user/ironclaw.service"),
+            s.ends_with(".config/systemd/user/lunarwing.service"),
             "unexpected path: {s}"
         );
     }
@@ -537,8 +614,8 @@ mod tests {
     #[test]
     fn linux_xmpp_bridge_unit_content_points_at_binary() {
         let unit = linux_xmpp_bridge_unit_content(Path::new("/tmp/xmpp-bridge"));
-        assert!(unit.contains("Description=IronClaw XMPP bridge"));
-        assert!(unit.contains("PartOf=ironclaw.service"));
+        assert!(unit.contains("Description=LunarWing XMPP bridge"));
+        assert!(unit.contains("PartOf=lunarwing.service"));
         assert!(unit.contains("ExecStart=\"/tmp/xmpp-bridge\""));
     }
 }

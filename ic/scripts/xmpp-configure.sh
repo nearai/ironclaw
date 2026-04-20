@@ -24,6 +24,8 @@ XMPP_ALLOW_PLAINTEXT_FALLBACK="${XMPP_ALLOW_PLAINTEXT_FALLBACK:-true}"
 XMPP_RESOURCE="${XMPP_RESOURCE:-ironclaw}"
 XMPP_ALLOW_ROOMS_JSON="${XMPP_ALLOW_ROOMS_JSON:-}"
 XMPP_BRIDGE_WAIT_SECONDS="${XMPP_BRIDGE_WAIT_SECONDS:-15}"
+XMPP_BRIDGE_SERVICE="${XMPP_BRIDGE_SERVICE:-xmpp-bridge.service}"
+XMPP_BRIDGE_SYSTEMCTL_SCOPE="${XMPP_BRIDGE_SYSTEMCTL_SCOPE:-system}"
 
 restart_bridge=false
 show_status_after_configure=false
@@ -50,6 +52,8 @@ Environment:
     XMPP_ALLOW_PLAINTEXT_FALLBACK default: true
     XMPP_RESOURCE                 default: ironclaw
     XMPP_BRIDGE_WAIT_SECONDS      default: 15
+    XMPP_BRIDGE_SERVICE           default: xmpp-bridge.service
+    XMPP_BRIDGE_SYSTEMCTL_SCOPE   system or user; default: system
 
 Notes:
   /v1/status does not list plain allow_rooms. It only shows encrypted-room counts.
@@ -121,7 +125,18 @@ else
 fi
 
 if [[ "$restart_bridge" == "true" ]]; then
-  sudo systemctl restart xmpp-bridge.service
+  case "$XMPP_BRIDGE_SYSTEMCTL_SCOPE" in
+    system)
+      sudo systemctl restart "$XMPP_BRIDGE_SERVICE"
+      ;;
+    user)
+      systemctl --user restart "$XMPP_BRIDGE_SERVICE"
+      ;;
+    *)
+      echo "error: XMPP_BRIDGE_SYSTEMCTL_SCOPE must be 'system' or 'user'" >&2
+      exit 1
+      ;;
+  esac
   wait_for_bridge
 fi
 

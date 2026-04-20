@@ -1,1 +1,71 @@
-# add to this file
+# Production systemd service template for the LunarWing XMPP bridge.
+#
+# Install notes:
+#   1. Install the bridge binary as /usr/local/bin/xmpp-bridge.
+#   2. Keep bridge secrets in /etc/lunarwing/xmpp-bridge.env with mode 0600.
+#   3. Install this file as /etc/systemd/system/xmpp-bridge.service.
+#   4. Keep XMPP_BRIDGE_BIND loopback-only unless you have a separate, audited
+#      network/auth boundary in front of it.
+
+[Unit]
+Description=LunarWing XMPP bridge sidecar
+Documentation=https://github.com/IronclawCustomTools/ironclaw/tree/main/bridges/xmpp-bridge
+After=network-online.target
+Wants=network-online.target
+PartOf=lunarwing.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lunarwing
+Group=lunarwing
+WorkingDirectory=/var/lib/lunarwing
+
+# Non-secret defaults. EnvironmentFile values can override these.
+Environment=IRONCLAW_BASE_DIR=/var/lib/lunarwing
+Environment=XMPP_BRIDGE_BIND=127.0.0.1:8787
+Environment=XMPP_BRIDGE_MAX_MESSAGES=1024
+Environment=RUST_LOG=xmpp_bridge=info,info
+
+# Required production config and secrets. At minimum, set XMPP_BRIDGE_TOKEN.
+# Live XMPP tests also need XMPP_JID and XMPP_PASSWORD for configure scripts.
+EnvironmentFile=/etc/lunarwing/xmpp-bridge.env
+
+ExecStart=/usr/local/bin/xmpp-bridge
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+
+StateDirectory=lunarwing
+StateDirectoryMode=0750
+LogsDirectory=lunarwing
+LogsDirectoryMode=0750
+RuntimeDirectory=lunarwing
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lunarwing /var/log/lunarwing /run/lunarwing
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xmpp-bridge
+
+[Install]
+WantedBy=multi-user.target
