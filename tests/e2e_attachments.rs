@@ -248,6 +248,16 @@ mod attachment_tests {
             let _cwd = WorkingDirGuard::enter(cwd.path());
 
             let rig = TestRigBuilder::new().with_engine_v2().build().await;
+            // Redirect attachment persistence into the tempdir so the
+            // assertion on saved_path below sees the real write. The engine
+            // otherwise joins paths against the cached `ironclaw_base_dir()`
+            // (first-caller-wins LazyLock), which is `$HOME/.ironclaw` in a
+            // fresh process and unrelated to the per-test tempdir here.
+            assert!(
+                ironclaw::bridge::override_engine_project_root_for_test(cwd.path().to_path_buf())
+                    .await,
+                "engine state should be installed after build()"
+            );
 
             let attachment_bytes = format!("Attachment from {channel}").into_bytes();
             let mut msg = IncomingMessage::new(channel, "cross-channel-user", "check this file");

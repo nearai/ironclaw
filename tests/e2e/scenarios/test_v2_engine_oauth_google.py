@@ -189,6 +189,12 @@ credentials:
     hosts:
       - "{mock_api_host}"
     setup_instructions: "Paste your Google API key or access token below."
+    oauth:
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
+      scopes:
+        - "https://www.googleapis.com/auth/drive"
 ---
 # Google Drive API Skill
 
@@ -404,7 +410,11 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
         "WASM_TOOLS_DIR": wasm_tools_dir,
         "WASM_CHANNELS_DIR": os.path.join(home_dir, ".ironclaw", "wasm_channels"),
         "ONBOARD_COMPLETED": "true",
-        "GOOGLE_OAUTH_CLIENT_ID": "test-google-client-id",
+        # Match the `hosted-google-client-id` value the mock LLM's
+        # /oauth/refresh handler expects so `refresh_token_via_proxy`
+        # succeeds on the expired-token path. Other E2E fixtures use the
+        # same value (see tests/e2e/conftest.py:600, :901).
+        "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

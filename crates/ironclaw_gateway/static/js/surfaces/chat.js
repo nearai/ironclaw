@@ -305,24 +305,11 @@ function handleImageFiles(files) {
   });
 }
 
-document.getElementById('attach-btn').addEventListener('click', () => {
-  document.getElementById('image-file-input').click();
-});
-
-document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
-  e.target.value = '';
-});
-
-document.getElementById('chat-input').addEventListener('paste', (e) => {
-  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
-      const file = items[i].getAsFile();
-      if (file) handleImageFiles([file]);
-    }
-  }
-});
+// The click/change/paste wiring for #attach-btn + #image-file-input lives in
+// the `wireAttachmentUI` IIFE below (next to the unified handleAttachmentFiles
+// flow). A duplicate set of listeners used to live here and fire first,
+// clearing `e.target.value` before the unified listener ran — which emptied
+// the FileList and silently dropped every uploaded attachment.
 
 const chatMessagesEl = document.getElementById('chat-messages');
 chatMessagesEl.addEventListener('copy', (e) => {
@@ -491,11 +478,40 @@ function updateSlashHighlight() {
   }
 }
 
+// Installed skills merged into the slash-autocomplete menu. Refreshed on
+// demand when the user opens the menu; results arrive asynchronously so
+// the very first `/` press may miss skills, but subsequent ones include
+// them within a render tick.
+let _installedSkillsForSlash = [];
+let _installedSkillsFetchInFlight = false;
+
+function refreshSlashSkillEntries() {
+  if (_installedSkillsFetchInFlight) return;
+  _installedSkillsFetchInFlight = true;
+  const done = () => { _installedSkillsFetchInFlight = false; };
+  apiFetch('/api/skills').then((data) => {
+    const list = (data && Array.isArray(data.skills)) ? data.skills : [];
+    _installedSkillsForSlash = list.map((skill) => ({
+      cmd: '/' + skill.name,
+      desc: skill.description || (skill.usage_hint || ''),
+    }));
+    // Re-filter in place so the menu refreshes with skills without
+    // requiring another keystroke.
+    const input = document.getElementById('chat-input');
+    if (input && input.value.startsWith('/')) {
+      filterSlashCommands(input.value);
+    }
+    done();
+  }).catch(done);
+}
+
 function filterSlashCommands(value) {
   if (!value.startsWith('/')) { hideSlashAutocomplete(); return; }
   // Only show autocomplete when the input is just a slash command prefix (no spaces except /thread new)
   const lower = value.toLowerCase();
-  const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(lower));
+  refreshSlashSkillEntries();
+  const allCommands = SLASH_COMMANDS.concat(_installedSkillsForSlash);
+  const matches = allCommands.filter((c) => c.cmd.startsWith(lower));
   if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === lower.trimEnd())) {
     hideSlashAutocomplete();
   } else {
@@ -693,7 +709,13 @@ function handleAttachmentFiles(files) {
   const fileInput = document.getElementById('image-file-input');
   if (fileInput) {
     fileInput.addEventListener('change', (e) => {
-      handleAttachmentFiles(e.target.files);
+      // Snapshot the FileList into an array *before* clearing the input.
+      // Some drivers (e.g. Playwright's set_input_files) expose a live
+      // FileList that turns empty mid-listener-chain; reading it later
+      // silently loses every file. Array.from fixes this by creating a
+      // stable copy while the FileList is still populated.
+      const files = Array.from(e.target.files || []);
+      handleAttachmentFiles(files);
       e.target.value = '';
     });
   }

@@ -184,7 +184,15 @@ mod tests {
     }
 
     #[tokio::test]
+    // Hold ENV_MUTEX across awaits: the serialization guarantee against sibling
+    // tests reading IRONCLAW_TEST_TELEGRAM_API_BASE_URL outweighs the lint's
+    // concern here — the test is single-threaded tokio and cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
     async fn propagate_approval_restores_runtime_state_when_on_start_fails() {
+        // Hold ENV_MUTEX for the duration so the runtime-env overlay mutation
+        // here cannot race with other tests reading IRONCLAW_TEST_TELEGRAM_API_BASE_URL
+        // (e.g. extensions::manager::tests::test_telegram_token_colon_preserved_in_validation_url).
+        let _env_lock = crate::config::helpers::lock_env();
         let original =
             crate::config::helpers::env_or_override("IRONCLAW_TEST_TELEGRAM_API_BASE_URL");
         crate::config::helpers::set_runtime_env(
