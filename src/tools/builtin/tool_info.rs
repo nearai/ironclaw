@@ -2,7 +2,8 @@
 //!
 //! Three levels of detail:
 //! - Default: name, description, parameter names (compact ~150 bytes)
-//! - `detail: "summary"`: adds curated rules, notes, and examples
+//! - `detail: "summary"`: adds curated rules/notes/examples when a tool provides
+//!   them, otherwise falls back to schema-derived required fields only
 //! - `detail: "schema"` / `include_schema: true`: adds the full typed JSON Schema
 //!
 //! Keeps the tools array compact (WASM tools use permissive schemas)
@@ -21,6 +22,21 @@ enum ToolInfoDetail {
     Names,
     Summary,
     Schema,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummarySource {
+    Curated,
+    SchemaFallback,
+}
+
+impl SummarySource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Curated => "curated",
+            Self::SchemaFallback => "schema_fallback",
+        }
+    }
 }
 
 impl ToolInfoDetail {
@@ -97,7 +113,7 @@ impl Tool for ToolInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get info about any tool: description, parameter names, curated summary guidance, or full discovery schema."
+        "Get info about any tool: description, parameter names, curated summary guidance for selected tools, or the full discovery schema."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -111,7 +127,7 @@ impl Tool for ToolInfoTool {
                 "detail": {
                     "type": "string",
                     "enum": ["names", "summary", "schema"],
-                    "description": "Response detail level. 'names' returns parameter names only. 'summary' adds curated rules/examples. 'schema' returns the full discovery schema.",
+                    "description": "Response detail level. 'names' returns parameter names only. 'summary' adds curated rules/examples when available, otherwise basic schema-derived requirements. 'schema' returns the full discovery schema.",
                     "default": "names"
                 },
                 "include_schema": {
@@ -155,9 +171,12 @@ impl Tool for ToolInfoTool {
         match detail {
             ToolInfoDetail::Names => {}
             ToolInfoDetail::Summary => {
-                let summary = tool
-                    .discovery_summary()
-                    .unwrap_or_else(|| fallback_summary(&schema));
+                let (summary_source, summary) = match tool.discovery_summary() {
+                    Some(summary) => (SummarySource::Curated, summary),
+                    None => (SummarySource::SchemaFallback, fallback_summary(&schema)),
+                };
+                info["summary_source"] =
+                    serde_json::Value::String(summary_source.as_str().to_string());
                 info["summary"] = serde_json::to_value(summary).map_err(|err| {
                     ToolError::ExecutionFailed(format!(
                         "failed to serialize discovery summary: {err}"
@@ -210,7 +229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_info_with_summary() {
+    async fn test_tool_info_with_summary_fallback() {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoTool)).await;
 
@@ -226,10 +245,74 @@ mod tests {
 
         let info = &result.result;
         assert_eq!(info["name"], "echo");
+        assert_eq!(info["summary_source"], "schema_fallback");
         assert!(info["summary"].is_object());
         assert_eq!(
             info["summary"]["always_required"],
             serde_json::json!(["message"])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_with_curated_summary() {
+        #[derive(Debug)]
+        struct SummaryTool;
+
+        #[async_trait::async_trait]
+        impl Tool for SummaryTool {
+            fn name(&self) -> &str {
+                "summary_tool"
+            }
+
+            fn description(&self) -> &str {
+                "Summary-capable test tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" }
+                    },
+                    "required": ["input"]
+                })
+            }
+
+            fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+                Some(ToolDiscoverySummary {
+                    notes: vec!["curated note".into()],
+                    ..ToolDiscoverySummary::default()
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(SummaryTool)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "summary_tool", "detail": "summary"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let info = &result.result;
+        assert_eq!(info["name"], "summary_tool");
+        assert_eq!(info["summary_source"], "curated");
+        assert_eq!(
+            info["summary"]["notes"],
+            serde_json::json!(["curated note"])
         );
     }
 

@@ -1095,6 +1095,11 @@ mod tests {
             "detail: summary should include summary field: {:?}",
             routine_json
         );
+        assert_eq!(
+            routine_json["summary_source"], "curated",
+            "routine_create should report curated summary coverage: {:?}",
+            routine_json
+        );
         assert!(
             routine_json["summary"]["conditional_requirements"]
                 .as_array()

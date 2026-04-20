@@ -904,8 +904,76 @@ mod tests {
             .find(|def| def.name == "discovery_tool")
             .expect("tool definition should be present");
         assert!(
-            def.description.contains("tool_info"),
-            "live tool definition should include schema hint: {}",
+            def.description.contains("detail: \"summary\""),
+            "live tool definition should advertise curated summaries when present: {}",
+            def.description
+        );
+        assert!(
+            def.description.contains("detail: \"schema\""),
+            "live tool definition should advertise full discovery schema when present: {}",
+            def.description
+        );
+        assert!(def.parameters.get("extra").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tool_definition_schema_hint_omits_summary_when_not_curated() {
+        struct SchemaOnlyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for SchemaOnlyTool {
+            fn name(&self) -> &str {
+                "schema_only_tool"
+            }
+
+            fn description(&self) -> &str {
+                "Schema-only discovery test tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "extra": { "type": "string" }
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(SchemaOnlyTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let def = defs
+            .iter()
+            .find(|def| def.name == "schema_only_tool")
+            .expect("tool definition should be present");
+        assert!(
+            def.description.contains("detail: \"schema\""),
+            "schema-only tool should still advertise full discovery schema: {}",
+            def.description
+        );
+        assert!(
+            !def.description.contains("detail: \"summary\""),
+            "schema-only tool should not advertise curated summaries it does not have: {}",
             def.description
         );
         assert!(def.parameters.get("extra").is_none());

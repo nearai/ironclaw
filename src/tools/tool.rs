@@ -263,7 +263,11 @@ impl ToolSchema {
     }
 }
 
-/// Curated discovery guidance surfaced by `tool_info(detail: "summary")`.
+/// Curated discovery guidance surfaced by `tool_info(detail: "summary")` for
+/// tools that opt in.
+///
+/// Tools without a curated summary fall back to schema-derived required fields
+/// only, so callers should not assume summary coverage is universal.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ToolDiscoverySummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -407,7 +411,7 @@ pub trait Tool: Send + Sync {
     /// Curated discovery guidance used by `tool_info(detail: "summary")`.
     ///
     /// Default: no custom summary; callers may derive a minimal fallback from
-    /// `discovery_schema()`.
+    /// `discovery_schema()`. At the moment only a subset of tools override this.
     fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
         None
     }
@@ -415,16 +419,25 @@ pub trait Tool: Send + Sync {
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         let parameters = self.parameters_schema();
-        let has_discovery_hint =
-            self.discovery_summary().is_some() || self.discovery_schema() != parameters;
-        let description = if has_discovery_hint {
-            format!(
-                "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+        let has_curated_summary = self.discovery_summary().is_some();
+        let has_extended_discovery_schema = self.discovery_schema() != parameters;
+        let description = match (has_curated_summary, has_extended_discovery_schema) {
+            (true, true) => format!(
+                "{} (call tool_info(name: \"{}\", detail: \"summary\") for curated rules/examples or detail: \"schema\" for the full discovery schema)",
                 self.description(),
                 self.name()
-            )
-        } else {
-            self.description().to_string()
+            ),
+            (true, false) => format!(
+                "{} (call tool_info(name: \"{}\", detail: \"summary\") for curated rules/examples)",
+                self.description(),
+                self.name()
+            ),
+            (false, true) => format!(
+                "{} (call tool_info(name: \"{}\", detail: \"schema\") for the full discovery schema)",
+                self.description(),
+                self.name()
+            ),
+            (false, false) => self.description().to_string(),
         };
         ToolSchema {
             name: self.name().to_string(),
