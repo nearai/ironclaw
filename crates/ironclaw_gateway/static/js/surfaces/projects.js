@@ -1436,19 +1436,18 @@ function formatRelativeTime(isoString) {
     installShellBadgeListener();
   }
 
-  // Keep chrome in sync when the user switches threads. `switchToThread`
-  // is the existing app.js entry point for thread changes; we piggyback
-  // rather than forking its logic.
+  // Keep chrome in sync when the user switches threads.
+  // `core/history.js::switchThread` + `switchToAssistant` +
+  // `createNewThread` all fire a `threadchange` CustomEvent on
+  // `window` — we listen for it rather than monkey-patching the
+  // source functions (they're file-scoped via script concatenation
+  // and not reassignable through `window`). The prior monkey-patch
+  // targeted a `window.switchToThread` that never existed and was
+  // silently a no-op, so chrome stayed stale after thread switches
+  // and the `!`-mode toast had no visible effect.
   if (typeof window !== 'undefined') {
-    const existingSwitch = window.switchToThread;
-    if (typeof existingSwitch === 'function') {
-      window.switchToThread = function (threadId) {
-        const result = existingSwitch.apply(this, arguments);
-        // The existing function may be sync or return a promise; in
-        // both cases fire the chrome refresh in the background.
-        Promise.resolve(result).then(refreshCurrentThread, refreshCurrentThread);
-        return result;
-      };
-    }
+    window.addEventListener('threadchange', () => {
+      refreshCurrentThread();
+    });
   }
 })();

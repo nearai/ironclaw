@@ -523,6 +523,7 @@ function switchToAssistant() {
   loadHistory();
   loadThreads();
   updateHash();
+  notifyActiveThreadChanged();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -546,6 +547,7 @@ function switchThread(threadId) {
   loadHistory();
   loadThreads();
   updateHash();
+  notifyActiveThreadChanged();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -562,9 +564,28 @@ function createNewThread() {
     enableChatInput();
     loadThreads();
     updateHash();
+    notifyActiveThreadChanged();
   }).catch((err) => {
     showToast(I18n.t('chat.threadCreateFailed', { message: err.message }), 'error');
   });
+}
+
+// Fire a `threadchange` CustomEvent on `window` so surfaces outside
+// core/history can react to thread switches without needing to patch
+// the function directly (each surface lives in its own JS module and
+// `switchThread` / `switchToAssistant` are file-scoped via
+// concatenation — not reassignable through `window`). The event
+// carries the new `currentThreadId`; listeners deduplicate as needed.
+function notifyActiveThreadChanged() {
+  try {
+    window.dispatchEvent(new CustomEvent('threadchange', {
+      detail: { threadId: currentThreadId },
+    }));
+  } catch (err) {
+    // CustomEvent fails in very old browsers; the chrome simply
+    // lags one reload cycle — not worth a polyfill here.
+    console.warn('notifyActiveThreadChanged: dispatchEvent failed', err);
+  }
 }
 
 function toggleThreadSidebar() {

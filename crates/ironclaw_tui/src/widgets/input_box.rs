@@ -154,17 +154,30 @@ impl TuiWidget for InputBoxWidget {
             height: area.height.saturating_sub(attachment_row_height),
         };
 
-        // Render prompt character
+        // Render prompt character. `shell_mode` swaps the normal
+        // `›` arrow for `!` so the user has an unambiguous visual
+        // signal that the next submit will dispatch the buffered
+        // text as a shell command instead of an LLM message —
+        // mirrors the gateway's `!`-prefix badge. Approval still
+        // takes precedence because it's modal.
         let prompt = if state.pending_approval.is_some() {
             "\u{25C6}"
+        } else if state.shell_mode {
+            "!"
         } else {
             "\u{203A}"
         };
 
-        let prompt_span = Span::styled(
-            format!("  {prompt} "),
-            self.theme.accent_style().add_modifier(Modifier::BOLD),
-        );
+        // Pick a colour that differentiates shell mode from a
+        // normal submit so the eye catches the mode change even at
+        // a glance. Warning-yellow matches the gateway CSS badge.
+        let prompt_style = if state.shell_mode {
+            self.theme.warning_style().add_modifier(Modifier::BOLD)
+        } else {
+            self.theme.accent_style().add_modifier(Modifier::BOLD)
+        };
+
+        let prompt_span = Span::styled(format!("  {prompt} "), prompt_style);
         let prompt_line = Line::from(prompt_span);
         let prompt_widget = ratatui::widgets::Paragraph::new(prompt_line);
 

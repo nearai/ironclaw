@@ -448,6 +448,103 @@ impl Agent {
         &self.deps.tools
     }
 
+    /// Dispatch a `!`-prefixed shell-mode message directly through the
+    /// `shell` tool and return a preformatted text block suitable for
+    /// rendering as a channel response. The command runs in the
+    /// user's `$HOME` by default (or the active project's workspace
+    /// path if the gateway wires one through via metadata).
+    ///
+    /// Called from [`Agent::handle_message`] for messages that arrive
+    /// with `metadata.shell_mode = true`. Lives on `Agent` so the
+    /// TUI path can reuse the same dispatcher instance the agent
+    /// already owns.
+    async fn dispatch_shell_mode_message(
+        &self,
+        message: &crate::channels::IncomingMessage,
+    ) -> Result<String, String> {
+        // Strip the leading `!` if the channel didn't already — the
+        // gateway sends the bare command, the TUI strips before
+        // sending, but accepting either keeps this robust.
+        let command = message
+            .content
+            .strip_prefix('!')
+            .unwrap_or(&message.content)
+            .trim();
+        if command.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Optional workspace path from channel metadata — set by the
+        // gateway when a project is active, omitted by the TUI today.
+        let workdir = message
+            .metadata
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        // Build dispatcher params matching the gateway's shell-mode
+        // handler so both surfaces hit the identical safety path.
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "command".into(),
+            serde_json::Value::String(command.to_string()),
+        );
+        if let Some(ref wd) = workdir {
+            params.insert("workdir".into(), serde_json::Value::String(wd.clone()));
+        }
+
+        let tool = self
+            .tools()
+            .get("shell")
+            .await
+            .ok_or_else(|| "shell tool not registered".to_string())?;
+        let ctx = crate::context::JobContext::system(message.user_id.clone(), uuid::Uuid::new_v4());
+        let out = tool
+            .execute(serde_json::Value::Object(params), &ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Flatten the structured ToolOutput into a plain `$ cmd` / body
+        // block — this is what the TUI's `Response` event renders as a
+        // monospace system message. Keep the gateway's SSE-event shape
+        // off this path: TUI doesn't emit ShellCommand/ShellOutput
+        // events (yet), and the plain-text path is good enough for a
+        // terminal user.
+        let result = &out.result;
+        let stdout = result
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stderr = result
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let exit_code = result
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut rendered = format!("$ {command}\n");
+        if !stdout.is_empty() {
+            rendered.push_str(&stdout);
+            if !stdout.ends_with('\n') {
+                rendered.push('\n');
+            }
+        }
+        if !stderr.is_empty() {
+            rendered.push_str(&stderr);
+            if !stderr.ends_with('\n') {
+                rendered.push('\n');
+            }
+        }
+        if exit_code != 0 {
+            rendered.push_str(&format!("[exit {exit_code}]\n"));
+        }
+        Ok(rendered)
+    }
+
     pub(crate) fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
     }
@@ -1397,6 +1494,25 @@ impl Agent {
                 "Forwarding internal message"
             );
             return Ok(HandleOutcome::Respond(message.content.clone()));
+        }
+
+        // Shell-mode interception: when a channel (gateway `!`-prefix,
+        // TUI `!`-prefix) flags the message as a raw shell command,
+        // dispatch the `shell` tool directly and return its output
+        // as a synthetic Respond. The normal agentic pipeline
+        // (LLM + tool loop) is bypassed entirely — shell mode is a
+        // user-driven, explicit action, not an agent decision.
+        let is_shell_mode = message
+            .metadata
+            .get("shell_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_shell_mode {
+            let output = self
+                .dispatch_shell_mode_message(message)
+                .await
+                .unwrap_or_else(|e| format!("shell dispatch failed: {e}"));
+            return Ok(HandleOutcome::Respond(output));
         }
 
         // Set message tool context for this turn (current channel and target)

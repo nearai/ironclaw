@@ -480,12 +480,25 @@ pub async fn resolve_thread_project(
                 })
         }
         _ => None,
-    }?;
+    };
 
-    match crate::bridge::get_engine_project(&active_id, user_id).await {
-        Ok(Some(info)) => Some((info, false)),
-        _ => None,
+    if let Some(id) = active_id
+        && let Ok(Some(info)) = crate::bridge::get_engine_project(&id, user_id).await
+    {
+        return Some((info, false));
     }
+
+    // 3. No per-thread override and no active pointer. Fall back to
+    // the user's shared "default" project (rendered as "General" in
+    // the UI) — this is the per-user bucket the engine auto-creates
+    // on first use, so fresh users without any `project_set_active`
+    // call still get a valid workspace for `!`-mode shell dispatches
+    // and chrome rendering. Without this fallback the very first
+    // `!ls` after login returned 409 and the gateway showed no
+    // output, which is what the user hit.
+    let projects = crate::bridge::list_engine_projects(user_id).await.ok()?;
+    let default_project = projects.into_iter().find(|p| p.name == "default")?;
+    Some((default_project, false))
 }
 
 /// Build a `ThreadProjectContext` for a thread, including any cached
