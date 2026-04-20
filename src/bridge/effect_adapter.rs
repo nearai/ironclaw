@@ -1372,7 +1372,6 @@ impl EffectBridgeAdapter {
                         .await?;
                 }
 
-
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
