@@ -139,9 +139,10 @@ async function sendMessage() {
         : `[Attachment] ${att.filename || 'attachment'}`
     );
   });
+  const pendingCopyText = pendingCopyTextParts.join('\n');
   const userMsg = addMessage('user', displayContent, {
     attachments: pendingAttachmentsForDisplay,
-    copyText: pendingCopyTextParts.join('\n'),
+    copyText: pendingCopyText,
   });
   if (attachedImageDataUrls.length > 0) {
     appendImagesToMessage(userMsg, attachedImageDataUrls);
@@ -167,7 +168,7 @@ async function sendMessage() {
     _pendingUserMessages.get(currentThreadId).push({
       id: pendingId,
       content: displayContent,
-      copyText: pendingCopyTextParts.join('\n'),
+      copyText: pendingCopyText,
       attachments: pendingAttachmentsForDisplay.map((att) => ({ ...att })),
       images: attachedImageDataUrls,
       timestamp: Date.now(),
@@ -322,8 +323,8 @@ document.getElementById('attach-btn').addEventListener('click', () => {
 });
 
 document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
-  e.target.value = '';
+  const files = Array.from(e.target.files || []);
+  handleImageFiles(files);
 });
 
 document.getElementById('chat-input').addEventListener('paste', (e) => {

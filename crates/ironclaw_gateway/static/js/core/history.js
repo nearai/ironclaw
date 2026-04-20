@@ -39,6 +39,22 @@ function loadHistory(before) {
 
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
+    const pending = !isPaginating ? _pendingUserMessages.get(currentThreadId) : null;
+    let freshPending = [];
+    let pendingByContent = null;
+
+    if (!isPaginating && pending && pending.length > 0) {
+      const now = Date.now();
+      freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+      if (freshPending.length > 0) {
+        pendingByContent = new Map();
+        freshPending.forEach((p) => {
+          const key = p.content;
+          if (!pendingByContent.has(key)) pendingByContent.set(key, []);
+          pendingByContent.get(key).push(p);
+        });
+      }
+    }
 
     if (!isPaginating && currentThreadId && data.channel) {
       threadChannelHints.set(currentThreadId, data.channel);
@@ -49,7 +65,33 @@ function loadHistory(before) {
       container.innerHTML = '';
       for (const turn of data.turns) {
         if (turn.user_input) {
-          addMessage('user', turn.user_input);
+          let renderedPending = false;
+          const pendingQueue = pendingByContent && pendingByContent.get(turn.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          if (nextPending) {
+            let persistedAttachments = [];
+            if (typeof parseUserMessageContent === 'function') {
+              persistedAttachments = parseUserMessageContent(turn.user_input).attachments;
+            }
+            const hasPendingVisuals = (
+              (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+              || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+            );
+            if (hasPendingVisuals && persistedAttachments.length === 0) {
+              const div = addMessage('user', nextPending.content, {
+                attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+                copyText: nextPending.copyText || nextPending.content,
+              });
+              if (nextPending.images && nextPending.images.length > 0) {
+                appendImagesToMessage(div, nextPending.images);
+              }
+              renderedPending = true;
+            }
+            pendingQueue.shift();
+          }
+          if (!renderedPending) {
+            addMessage('user', turn.user_input);
+          }
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
@@ -75,54 +117,49 @@ function loadHistory(before) {
           addMessage('assistant', turn.response);
         }
       }
-      // Re-inject pending user messages not yet in DB (#2409)
-      const pending = _pendingUserMessages.get(currentThreadId);
-      let freshPending = [];
-      if (pending && pending.length > 0) {
-        const now = Date.now();
-        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
-        if (freshPending.length > 0) {
-          const dbContentsCounts = new Map();
-          data.turns
-            .map(t => t.user_input)
-            .filter(Boolean)
-            .forEach(content => {
-              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
-            });
-          for (const p of freshPending) {
-            const count = dbContentsCounts.get(p.content) || 0;
-            if (count > 0) {
-              dbContentsCounts.set(p.content, count - 1);
-            } else {
-              const div = addMessage('user', p.content, {
-                attachments: Array.isArray(p.attachments) ? p.attachments : [],
-                copyText: p.copyText || p.content,
-              });
-              if (p.images && p.images.length > 0) {
-                appendImagesToMessage(div, p.images);
-              }
-            }
-          }
-          _pendingUserMessages.set(currentThreadId, freshPending);
-        } else {
-          _pendingUserMessages.delete(currentThreadId);
-        }
-      }
-      container.scrollTop = container.scrollHeight;
-      // Show welcome card when history is empty
-      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
-        showWelcomeCard();
-      }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (data.in_progress) {
         const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
         if (!sameLastTurn && data.in_progress.user_input) {
-          addMessage('user', data.in_progress.user_input);
+          const pendingQueue = pendingByContent && pendingByContent.get(data.in_progress.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          const hasPendingVisuals = nextPending && (
+            (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+            || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+          );
+          if (hasPendingVisuals) {
+            pendingQueue.shift();
+          } else {
+            addMessage('user', data.in_progress.user_input);
+          }
         }
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const remainingPending = freshPending.length > 0 && pendingByContent
+        ? Array.from(pendingByContent.values()).flat()
+        : freshPending;
+      if (remainingPending.length > 0) {
+        for (const p of remainingPending) {
+          const div = addMessage('user', p.content, {
+            attachments: Array.isArray(p.attachments) ? p.attachments : [],
+            copyText: p.copyText || p.content,
+          });
+          if (p.images && p.images.length > 0) {
+            appendImagesToMessage(div, p.images);
+          }
+        }
+        _pendingUserMessages.set(currentThreadId, freshPending);
+      } else {
+        _pendingUserMessages.delete(currentThreadId);
+      }
+      container.scrollTop = container.scrollHeight;
+      // Show welcome card when history is empty
+      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
+        showWelcomeCard();
       }
       const hintedChannel = currentThreadId
         ? (data.channel || threadChannelHints.get(currentThreadId) || 'gateway')
