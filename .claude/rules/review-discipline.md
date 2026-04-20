@@ -64,10 +64,6 @@ Lint/boundary/safety scripts under `scripts/` are enforcement infrastructure. Th
 - **Parse grouped / multiline Rust syntax** when inspecting imports. Line-based regex misses `use crate::channels::web::{handlers::auth::...}` and shim re-exports.
 - **Actually enforce their documented skips** — if the exemption says "skips `#[cfg(test)]` blocks", the scanner must track brace nesting, not match a regex on the first line.
 
-## Doc Absolute Paths
-
-Review convention (not currently enforced by pre-commit, which only scans `.rs` diffs): committed `.md` and `.py` files (outside `tests/` and `scripts/`) must not contain developer-local absolute paths (`/home/<user>/`, `/Users/<user>/`, `/tmp/`). Grep for these before merging a docs-touching PR. Reference: PR #2689.
-
 ## Stale Comments After Refactors
 
 Doc strings and inline comments are part of the contract. A comment that says "strips trailing punctuation + whitespace" while the code only strips periods (#2701 `src/bridge/router.rs`) is a bug report waiting to happen. When you change behavior in a function, re-read its docstring and adjacent comments — update or delete them in the same change.
