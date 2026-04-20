@@ -1261,6 +1261,152 @@ mod tests {
         assert_eq!(telegram["activation_status"], "installed");
     }
 
+    /// Caller-level wire-contract regression for nearai/ironclaw#2235.
+    ///
+    /// The Settings → Extensions UI picks the WASM-channel fallback button
+    /// label ("Setup" vs "Reconfigure") from `ExtensionInfo.authenticated`
+    /// on the `/api/extensions` response. A backend regression that left
+    /// `authenticated=false` after credentials were written — or dropped
+    /// the field off the wire entirely — would silently re-show the
+    /// credential popup on an already-configured install. The unit-level
+    /// classifier tests above cannot catch this because they do not
+    /// exercise the `configure()` → `list()` wire round-trip.
+    ///
+    /// This test drives the real pair of handlers — POST setup then GET
+    /// list — against a stub channel whose WASM binary intentionally
+    /// fails to activate (so `active=false`). The `authenticated` flag
+    /// must still flip to `true` once the required secret lands in the
+    /// secrets store.
+    #[tokio::test]
+    async fn test_extensions_list_reports_authenticated_after_setup_submit() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "telegram";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        // Pre-setup: authenticated must be false.
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("pre-setup response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram entry pre-setup");
+        assert_eq!(
+            telegram["authenticated"], false,
+            "pre-setup: authenticated must start false (the JS Settings card shows \
+             'Setup' in this state — regressing it to true would flip the button to \
+             'Reconfigure' before credentials exist, re-introducing #2235)"
+        );
+
+        // Submit credentials via the real setup-submit handler.
+        let submit_body = serde_json::json!({
+            "secrets": {
+                "BOT_TOKEN": "dummy-token"
+            }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/extensions/{channel_name}/setup"))
+            .header("content-type", "application/json")
+            .body(Body::from(submit_body.to_string()))
+            .expect("setup-submit request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("setup-submit response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Post-setup: the wire contract the Settings UI depends on.
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("post-setup response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == channel_name))
+            .expect("telegram entry post-setup");
+        assert_eq!(
+            telegram["authenticated"], true,
+            "post-setup: the `authenticated` flag must be true once the required \
+             secret is written — the Settings card's Setup/Reconfigure branch reads \
+             this field directly, and a regression here reopens #2235."
+        );
+        // The wire field must also still be present (not serialized away).
+        assert!(
+            telegram.get("authenticated").is_some(),
+            "`authenticated` must remain on the wire for the JS button-label branch"
+        );
+    }
+
     #[test]
     fn apply_extension_readiness_preserves_install_success_for_auth_followup() {
         let mut resp = ActionResponse::ok("Installed notion");

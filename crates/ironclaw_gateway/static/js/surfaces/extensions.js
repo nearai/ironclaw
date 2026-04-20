@@ -322,9 +322,19 @@ function renderExtensionCard(ext) {
     } else if (status === 'failed') {
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
+      // `setup_required` / `installed` keep the legacy label: the inline
+      // setup form below already renders a setup action, so re-labeling
+      // this button would duplicate it. Other fallback states have no
+      // inline form, so pick the label from `authenticated` — closes #2235.
       var reconfigureBtn = document.createElement('button');
       reconfigureBtn.className = 'btn-ext configure';
-      reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      var fallbackStatus = ext.onboarding_state || ext.activation_status || 'installed';
+      var inlineSetupCoversIt = fallbackStatus === 'setup_required' || fallbackStatus === 'installed';
+      if (inlineSetupCoversIt) {
+        reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      } else {
+        reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');
+      }
       reconfigureBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(reconfigureBtn);
     }
