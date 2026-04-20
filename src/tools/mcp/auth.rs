@@ -13,6 +13,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use url::Url;
 
 use crate::auth::oauth::{self, OAUTH_CALLBACK_PORT};
 use crate::auth::resolve_access_token_string_with_refresh;
@@ -901,40 +902,73 @@ pub fn build_authorization_url(
     extra_params: &HashMap<String, String>,
     resource: Option<&str>,
 ) -> String {
-    let mut url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}",
-        base_url,
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri)
-    );
+    // Use the `url` crate for query-string encoding so every value flows
+    // through a single well-tested `application/x-www-form-urlencoded`
+    // serializer. Fall back to the prior hand-rolled path only if
+    // `base_url` cannot be parsed (shouldn't happen for real MCP servers;
+    // see nearai/ironclaw#2391 for the parallel bug in the WASM-tool
+    // OAuth URL builder where manual string concat was dropping the last
+    // character of the final query parameter).
+    match Url::parse(base_url) {
+        Ok(mut url) => {
+            {
+                let mut qp = url.query_pairs_mut();
+                qp.append_pair("client_id", client_id);
+                qp.append_pair("response_type", "code");
+                qp.append_pair("redirect_uri", redirect_uri);
+                if !scopes.is_empty() {
+                    qp.append_pair("scope", &scopes.join(" "));
+                }
+                if let Some(pkce) = pkce {
+                    qp.append_pair("code_challenge", &pkce.challenge);
+                    qp.append_pair("code_challenge_method", "S256");
+                }
+                for (key, value) in extra_params {
+                    qp.append_pair(key, value);
+                }
+                if let Some(resource) = resource {
+                    qp.append_pair("resource", resource);
+                }
+            }
+            url.into()
+        }
+        Err(_) => {
+            let mut url = format!(
+                "{}?client_id={}&response_type=code&redirect_uri={}",
+                base_url,
+                urlencoding::encode(client_id),
+                urlencoding::encode(redirect_uri)
+            );
 
-    if !scopes.is_empty() {
-        url.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&scopes.join(" "))
-        ));
+            if !scopes.is_empty() {
+                url.push_str(&format!(
+                    "&scope={}",
+                    urlencoding::encode(&scopes.join(" "))
+                ));
+            }
+
+            if let Some(pkce) = pkce {
+                url.push_str(&format!(
+                    "&code_challenge={}&code_challenge_method=S256",
+                    urlencoding::encode(&pkce.challenge)
+                ));
+            }
+
+            for (key, value) in extra_params {
+                url.push_str(&format!(
+                    "&{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                ));
+            }
+
+            if let Some(resource) = resource {
+                url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+            }
+
+            url
+        }
     }
-
-    if let Some(pkce) = pkce {
-        url.push_str(&format!(
-            "&code_challenge={}&code_challenge_method=S256",
-            urlencoding::encode(&pkce.challenge)
-        ));
-    }
-
-    for (key, value) in extra_params {
-        url.push_str(&format!(
-            "&{}={}",
-            urlencoding::encode(key),
-            urlencoding::encode(value)
-        ));
-    }
-
-    if let Some(resource) = resource {
-        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
-    }
-
-    url
 }
 
 /// Wait for the authorization callback and extract the code.
@@ -1488,7 +1522,9 @@ mod tests {
         assert!(url.contains("client_id=client-123"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("redirect_uri="));
-        assert!(url.contains("scope=read%20write"));
+        // `url` crate uses `application/x-www-form-urlencoded` encoding for
+        // query parameters, which encodes spaces as `+`.
+        assert!(url.contains("scope=read+write"));
     }
 
     #[test]
@@ -1526,6 +1562,53 @@ mod tests {
 
         assert!(url.contains("owner=user"));
         assert!(url.contains("state=abc123"));
+    }
+
+    /// Regression test for nearai/ironclaw#2391 applied to MCP OAuth: every
+    /// extra_param value must round-trip through URL-encoding intact. The
+    /// sibling bug in the WASM-tool OAuth builder was truncating the final
+    /// character of the last query parameter. Use URL-parse + exact
+    /// compare (not `.contains()`) so a 1-char truncation can't pass.
+    #[test]
+    fn test_build_authorization_url_extra_params_preserve_all_chars() {
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+        extra.insert("audience".to_string(), "api".to_string());
+
+        for iteration in 0..16 {
+            let url = build_authorization_url(
+                "https://auth.example.com/authorize",
+                "client-123",
+                "http://localhost:9876/callback",
+                &["read".to_string()],
+                None,
+                &extra,
+                None,
+            );
+
+            let parsed = url::Url::parse(&url).expect("auth url must be valid");
+            let params: std::collections::HashMap<_, _> =
+                parsed.query_pairs().into_owned().collect();
+
+            assert_eq!(
+                params.get("access_type").map(String::as_str),
+                Some("offline"),
+                "iteration {iteration}: access_type must be exactly 'offline' (got {:?} in {})",
+                params.get("access_type"),
+                url,
+            );
+            assert_eq!(
+                params.get("prompt").map(String::as_str),
+                Some("consent"),
+                "iteration {iteration}: prompt must be exactly 'consent'",
+            );
+            assert_eq!(
+                params.get("audience").map(String::as_str),
+                Some("api"),
+                "iteration {iteration}: audience must be exactly 'api'",
+            );
+        }
     }
 
     #[test]
@@ -1568,10 +1651,21 @@ mod tests {
             None,
         );
 
-        // Spaces and ampersands in client_id must be percent-encoded.
-        assert!(url.contains("client_id=client%20id%26evil%3Dtrue"));
-        // Spaces and question marks in redirect_uri must be percent-encoded.
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A9876%2Fcall%20back%3Fx%3D1"));
+        // `url` crate uses `application/x-www-form-urlencoded` encoding, so
+        // spaces become `+` and reserved characters remain percent-encoded.
+        // Parse the URL back and compare decoded values for robustness.
+        let parsed = url::Url::parse(&url).expect("auth url must be valid");
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("client id&evil=true"),
+            "client_id must round-trip through URL encoding intact",
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://localhost:9876/call back?x=1"),
+            "redirect_uri must round-trip through URL encoding intact",
+        );
     }
 
     #[test]

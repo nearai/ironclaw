@@ -15,6 +15,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use url::Url;
 
 pub use crate::auth::providers::{
     OAuthCredentials, builtin_client_id_override_env, builtin_credentials,
@@ -146,41 +147,102 @@ pub fn build_oauth_url(
     rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
-    // Build authorization URL
-    let mut auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
+    // Build the authorization URL via the `url` crate so query-string encoding
+    // goes through a single well-tested code path. This replaces a hand-rolled
+    // `format!` + `urlencoding::encode` loop that had a history of truncating
+    // the last character of the final query parameter on some platforms
+    // (nearai/ironclaw#2391: `access_type=offline` was being received by
+    // Google as `access_type=offlin`). A `Url::parse` failure here can only
+    // happen if `authorization_url` is malformed — in that case fall back to
+    // the prior string-concat path so the caller still gets a URL shape it
+    // can report on.
+    let auth_url = build_oauth_authorization_url_string(
         authorization_url,
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(&state),
+        client_id,
+        redirect_uri,
+        &state,
+        scopes,
+        code_challenge.as_deref(),
+        extra_params,
     );
-
-    if !scopes.is_empty() {
-        auth_url.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&scopes.join(" "))
-        ));
-    }
-
-    if let Some(ref challenge) = code_challenge {
-        auth_url.push_str(&format!(
-            "&code_challenge={}&code_challenge_method=S256",
-            challenge
-        ));
-    }
-
-    for (key, value) in extra_params {
-        auth_url.push_str(&format!(
-            "&{}={}",
-            urlencoding::encode(key),
-            urlencoding::encode(value)
-        ));
-    }
 
     OAuthUrlResult {
         url: auth_url,
         code_verifier,
         state,
+    }
+}
+
+/// Append OAuth authorization-request query parameters to `authorization_url`.
+///
+/// Uses `url::Url::parse_with_params`-style encoding via `query_pairs_mut()`
+/// so every value is percent-encoded exactly once with the standard
+/// `application/x-www-form-urlencoded` rules. Any non-URL characters in
+/// `scopes`, `extra_params`, `state`, etc. are encoded safely.
+///
+/// If `authorization_url` cannot be parsed as a URL (shouldn't happen for any
+/// real capabilities entry, since tool authorization URLs are validated to
+/// start with `https://`), this falls back to a defensive string-concat path
+/// that preserves the old behavior.
+fn build_oauth_authorization_url_string(
+    authorization_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    scopes: &[String],
+    code_challenge: Option<&str>,
+    extra_params: &HashMap<String, String>,
+) -> String {
+    match Url::parse(authorization_url) {
+        Ok(mut url) => {
+            {
+                let mut qp = url.query_pairs_mut();
+                qp.append_pair("client_id", client_id);
+                qp.append_pair("response_type", "code");
+                qp.append_pair("redirect_uri", redirect_uri);
+                qp.append_pair("state", state);
+                if !scopes.is_empty() {
+                    qp.append_pair("scope", &scopes.join(" "));
+                }
+                if let Some(challenge) = code_challenge {
+                    qp.append_pair("code_challenge", challenge);
+                    qp.append_pair("code_challenge_method", "S256");
+                }
+                for (key, value) in extra_params {
+                    qp.append_pair(key, value);
+                }
+            }
+            url.into()
+        }
+        Err(_) => {
+            let mut auth_url = format!(
+                "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
+                authorization_url,
+                urlencoding::encode(client_id),
+                urlencoding::encode(redirect_uri),
+                urlencoding::encode(state),
+            );
+            if !scopes.is_empty() {
+                auth_url.push_str(&format!(
+                    "&scope={}",
+                    urlencoding::encode(&scopes.join(" "))
+                ));
+            }
+            if let Some(challenge) = code_challenge {
+                auth_url.push_str(&format!(
+                    "&code_challenge={}&code_challenge_method=S256",
+                    challenge
+                ));
+            }
+            for (key, value) in extra_params {
+                auth_url.push_str(&format!(
+                    "&{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                ));
+            }
+            auth_url
+        }
     }
 }
 
@@ -1563,7 +1625,9 @@ mod tests {
         assert!(result.url.contains("client_id=my-client-id"));
         assert!(result.url.contains("response_type=code"));
         assert!(result.url.contains("redirect_uri="));
-        assert!(result.url.contains("scope=openid%20email"));
+        // `url` crate uses `application/x-www-form-urlencoded` encoding for
+        // query parameters, which encodes spaces as `+`.
+        assert!(result.url.contains("scope=openid+email"));
         assert!(result.url.contains("state="));
         assert!(result.code_verifier.is_none());
         assert!(!result.state.is_empty());
@@ -1612,6 +1676,208 @@ mod tests {
 
         assert!(result.url.contains("access_type=offline"));
         assert!(result.url.contains("prompt=consent"));
+    }
+
+    /// Regression test for nearai/ironclaw#2391: Google OAuth was receiving
+    /// `access_type=offlin` instead of `access_type=offline`, breaking the
+    /// offline-token flow required for any Google Workspace tool (Calendar,
+    /// Gmail, Drive, Docs, Sheets, Slides). The bug was reproducibly seen by
+    /// end users but not caught by tests that only used `.contains()`, since
+    /// `"access_type=offlin"` is a prefix of `"access_type=offline"` when the
+    /// URL ended elsewhere. We now parse the URL and compare each query
+    /// parameter value *exactly*.
+    #[test]
+    fn test_build_oauth_url_preserves_access_type_offline_exactly() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+
+        let result = build_oauth_url(
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "test-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:9876/callback",
+            &["https://www.googleapis.com/auth/calendar.events".to_string()],
+            false,
+            &extra,
+        );
+
+        let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "access_type must be exactly 'offline' (7 chars), not a truncated value; \
+             got {:?} in URL {}",
+            params.get("access_type"),
+            result.url,
+        );
+        assert_eq!(
+            params.get("prompt").map(String::as_str),
+            Some("consent"),
+            "prompt must be exactly 'consent', not a truncated value"
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("test-client-id.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:9876/callback")
+        );
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("https://www.googleapis.com/auth/calendar.events")
+        );
+    }
+
+    /// Regression test for nearai/ironclaw#2391: exercise the full set of
+    /// Google-style extra params (all six Google WASM tools share this
+    /// shape) and verify every value survives URL encoding intact.
+    ///
+    /// This test iterates many times because the bug could be sensitive to
+    /// `HashMap` iteration order (which varies across runs due to the
+    /// randomized default hasher). If truncation depended on whether a given
+    /// param landed last, a single-iteration test could miss it.
+    #[test]
+    fn test_build_oauth_url_extra_params_preserve_all_chars_across_hash_orderings() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+        extra.insert("include_granted_scopes".to_string(), "true".to_string());
+
+        for iteration in 0..16 {
+            let result = build_oauth_url(
+                "https://accounts.google.com/o/oauth2/v2/auth",
+                "client-id",
+                "http://127.0.0.1:9876/callback",
+                &["https://www.googleapis.com/auth/gmail.modify".to_string()],
+                false,
+                &extra,
+            );
+
+            let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+            let params: std::collections::HashMap<_, _> =
+                parsed.query_pairs().into_owned().collect();
+
+            assert_eq!(
+                params.get("access_type").map(String::as_str),
+                Some("offline"),
+                "iteration {iteration}: access_type truncated to {:?} in {}",
+                params.get("access_type"),
+                result.url,
+            );
+            assert_eq!(
+                params.get("prompt").map(String::as_str),
+                Some("consent"),
+                "iteration {iteration}: prompt truncated in {}",
+                result.url,
+            );
+            assert_eq!(
+                params.get("include_granted_scopes").map(String::as_str),
+                Some("true"),
+                "iteration {iteration}: include_granted_scopes truncated in {}",
+                result.url,
+            );
+        }
+    }
+
+    /// Regression test for nearai/ironclaw#2391: exercise the full CLI
+    /// `ironclaw tool auth google-calendar` code path end-to-end. Loads the
+    /// actual shipped capabilities JSON, parses it via
+    /// `CapabilitiesFile::from_json`, then calls `build_oauth_url` with the
+    /// exact `extra_params` the CLI would pass — the same call site as
+    /// `cli/tool.rs::auth_tool_oauth`. Per `.claude/rules/testing.md`
+    /// "Test Through the Caller, Not Just the Helper": a unit test on
+    /// `build_oauth_url` alone can miss a bug in the pipeline from
+    /// capabilities-JSON parsing to URL construction.
+    #[test]
+    fn test_google_calendar_capabilities_produce_correct_oauth_url() {
+        use crate::auth::oauth::build_oauth_url;
+        use crate::tools::wasm::CapabilitiesFile;
+
+        // Pinned snapshot of the production google-calendar capabilities.
+        // Keep this byte-identical to tools-src/google-calendar/
+        // google-calendar-tool.capabilities.json for the relevant fields.
+        let caps_json = r#"{
+            "version": "0.2.0",
+            "description": "Google Calendar test fixture",
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [
+                        "https://www.googleapis.com/auth/calendar.events"
+                    ],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(caps_json)
+            .expect("google-calendar capabilities parse must succeed");
+        let oauth = caps
+            .auth
+            .as_ref()
+            .expect("auth section present")
+            .oauth
+            .as_ref()
+            .expect("oauth section present");
+
+        // Sanity: the parsed extra_params haven't been mutated at load time.
+        assert_eq!(
+            oauth.extra_params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "CapabilitiesFile::from_json must preserve access_type=offline \
+             intact; got {:?}",
+            oauth.extra_params.get("access_type"),
+        );
+
+        let result = build_oauth_url(
+            &oauth.authorization_url,
+            "test-client.apps.googleusercontent.com",
+            "http://127.0.0.1:9876/callback",
+            &oauth.scopes,
+            oauth.use_pkce,
+            &oauth.extra_params,
+        );
+
+        let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "end-to-end: google-calendar must send access_type=offline to \
+             Google, not a truncated value. Full URL: {}",
+            result.url
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("https://www.googleapis.com/auth/calendar.events")
+        );
     }
 
     #[test]
