@@ -624,6 +624,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
+        let llm_call_start = std::time::Instant::now();
         let output = match reasoning.respond_with_tools(reason_ctx).await {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
@@ -696,6 +697,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             output.usage.output_tokens,
             call_cost,
         );
+
+        // Emit per-LLM-call metrics for debug subscribers.
+        let _ = self
+            .agent
+            .channels
+            .send_status(
+                &self.message.channel,
+                StatusUpdate::TurnMetrics {
+                    input_tokens: output.usage.input_tokens as u64,
+                    output_tokens: output.usage.output_tokens as u64,
+                    cache_read_tokens: output.usage.cache_read_input_tokens as u64,
+                    model: model_name.clone(),
+                    duration_ms: llm_call_start.elapsed().as_millis() as u64,
+                    iteration,
+                },
+                &self.message.metadata,
+            )
+            .await;
 
         // Persist LLM call to DB so usage stats survive restarts.
         // Chat turns don't create agent_jobs, so job_id is None.
@@ -1186,6 +1205,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
                                     preview: output.clone(),
+                                    call_id: Some(tc.id.clone()),
+                                },
+                                &self.message.metadata,
+                            )
+                            .await;
+
+                        // Send full (non-truncated) output for debug subscribers.
+                        const MAX_TOOL_OUTPUT_BYTES: usize = 50_000;
+                        let truncated = output.len() > MAX_TOOL_OUTPUT_BYTES;
+                        let capped = if truncated {
+                            let boundary =
+                                crate::util::floor_char_boundary(output, MAX_TOOL_OUTPUT_BYTES);
+                            output[..boundary].to_string() // safety: floor_char_boundary returns a char boundary
+                        } else {
+                            output.clone()
+                        };
+                        let _ = self
+                            .agent
+                            .channels
+                            .send_status(
+                                &self.message.channel,
+                                StatusUpdate::ToolResultFull {
+                                    name: tc.name.clone(),
+                                    output: capped,
+                                    truncated,
                                     call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,

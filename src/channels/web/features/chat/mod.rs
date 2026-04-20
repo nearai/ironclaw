@@ -356,9 +356,17 @@ pub(crate) async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Verbose/debug stream is admin-only — non-admin clients silently
+    // get the normal stream so query-param tampering can't leak verbose
+    // events. Matches the AdminUser gate on /api/debug/prompt.
+    let verbose = params.debug && user.role == "admin";
     let sse = state
         .sse
-        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
+        .subscribe(
+            Some(user.user_id),
+            verbose,
+            extract_last_event_id(&params, &headers),
+        )
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many connections".to_string(),
@@ -372,6 +380,7 @@ pub(crate) async fn chat_events_handler(
 pub(crate) async fn chat_ws_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
+    Query(params): Query<ChatEventsQuery>,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -395,8 +404,9 @@ pub(crate) async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+    let verbose = params.debug && user.role == "admin";
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::platform::ws::handle_ws_connection(socket, state, user)
+        crate::channels::web::platform::ws::handle_ws_connection(socket, state, user, verbose)
     }))
 }
 
@@ -441,19 +451,42 @@ pub(crate) async fn chat_history_handler(
     let thread_scope = Some(thread_id_str.as_str());
 
     // Verify the thread belongs to the authenticated user before returning any data.
-    // In-memory threads are already scoped by user via session_manager, but DB
-    // lookups could expose another user's conversation if the UUID is guessed.
-    if query.thread_id.is_some()
-        && let Some(ref store) = state.store
-    {
-        let owned = store
-            .conversation_belongs_to_user(thread_id, &user.user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
-            })?;
-        if !owned && !sess.threads.contains_key(&thread_id) {
+    // Three ownership sources, in order: v1 conversation row, in-memory v1 session,
+    // engine v2 thread store. An engine v2 thread ID will only match the last one
+    // because the v1 dual-write uses the *assistant* conversation id, not the
+    // engine thread id, so the first two will miss.
+    if query.thread_id.is_some() {
+        let mut owned = false;
+        if let Some(ref store) = state.store {
+            owned = match store
+                .conversation_belongs_to_user(thread_id, &user.user_id)
+                .await
+            {
+                Ok(owned) => owned,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id = %thread_id,
+                        user_id = %user.user_id,
+                        %error,
+                        "Failed to verify conversation ownership"
+                    );
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Database error".to_string(),
+                    ));
+                }
+            };
+        }
+        if !owned && sess.threads.contains_key(&thread_id) {
+            owned = true;
+        }
+        if !owned
+            && let Ok(Some(_)) =
+                crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
+        {
+            owned = true;
+        }
+        if !owned {
             return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
@@ -546,6 +579,35 @@ pub(crate) async fn chat_history_handler(
         }
     }
 
+    // Engine v2 fallback: an engine thread owns its own messages and does not
+    // always dual-write them into the v1 conversation table (the assistant
+    // flow writes into the *assistant* conversation id, so deep-linking
+    // by engine thread id gets a v1 miss). Surface them here so
+    // `#/chat/<engine-thread-id>` renders the thread instead of going empty.
+    if let Ok(Some(detail)) =
+        crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
+    {
+        let synthetic: Vec<crate::history::ConversationMessage> = detail
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| engine_history_entry_to_message(thread_id, index, entry))
+            .collect();
+        if !synthetic.is_empty() {
+            let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
+            let mut turns = build_turns_from_db_messages(&synthetic);
+            enforce_generated_image_history_budget(&mut turns);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp,
+                pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+                in_progress: None,
+            }));
+        }
+    }
+
     // Empty thread (just created, no messages yet)
     let in_progress = if let Some(ref store) = state.store {
         let metadata = store
@@ -593,8 +655,13 @@ pub(crate) async fn chat_threads_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // 50 used to be the cap here; threads past that silently disappeared
+        // from the sidebar, which also broke hash-based deep links because
+        // the UI verified membership before switching. 500 is cheap for a
+        // single-user demo and large enough that sliding off the end is
+        // rare in practice.
         match store
-            .list_conversations_all_channels(&user.user_id, 50)
+            .list_conversations_all_channels(&user.user_id, 500)
             .await
         {
             Ok(summaries) => {
@@ -639,6 +706,46 @@ pub(crate) async fn chat_threads_handler(
                         thread_type: Some("assistant".to_string()),
                         channel: Some("gateway".to_string()),
                     });
+                }
+
+                // Engine v2 threads for this user in the default project. These
+                // don't always get a matching v1 conversation row (the assistant
+                // flow dual-writes into the single assistant conv id, not the
+                // engine thread id), so without this merge they'd be invisible
+                // in the sidebar even though the chat history endpoint can now
+                // render them by id.
+                if let Ok(engine_threads) =
+                    crate::bridge::list_engine_threads(None, &user.user_id).await
+                {
+                    let existing_ids: std::collections::HashSet<uuid::Uuid> = threads
+                        .iter()
+                        .map(|t| t.id)
+                        .chain(assistant_thread.as_ref().map(|a| a.id))
+                        .collect();
+                    for eng in engine_threads {
+                        let Ok(uuid) = uuid::Uuid::parse_str(&eng.id) else {
+                            continue;
+                        };
+                        if existing_ids.contains(&uuid) {
+                            continue;
+                        }
+                        threads.push(ThreadInfo {
+                            id: uuid,
+                            state: eng.state,
+                            turn_count: eng.step_count,
+                            created_at: eng.created_at,
+                            updated_at: eng.updated_at.clone(),
+                            // Engine threads carry their goal as the only
+                            // human-readable label; reuse it as the sidebar
+                            // title so the user can tell threads apart.
+                            title: Some(eng.goal),
+                            thread_type: Some(eng.thread_type),
+                            channel: Some("engine".to_string()),
+                        });
+                    }
+                    // Re-sort by updated_at descending so engine threads interleave
+                    // chronologically with v1 conversations.
+                    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 }
 
                 let active_thread = session.lock().await.active_thread;
@@ -738,6 +845,8 @@ pub(crate) async fn chat_new_thread_handler(
 
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct ChatEventsQuery {
+    #[serde(default)]
+    pub debug: bool,
     pub last_event_id: Option<String>,
 }
 
@@ -755,9 +864,9 @@ pub(crate) fn extract_last_event_id(
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQuery {
-    thread_id: Option<String>,
-    limit: Option<usize>,
-    before: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) before: Option<String>,
 }
 
 /// Check whether an Origin header value points to a local address.
@@ -818,6 +927,66 @@ pub(crate) async fn pending_gate_extension_name(
         )
         .await,
     )
+}
+
+fn stable_engine_history_message_id(
+    thread_id: Uuid,
+    index: usize,
+    role: &str,
+    timestamp: &chrono::DateTime<chrono::Utc>,
+    content: &str,
+) -> Uuid {
+    let seed = format!(
+        "engine-v2-history\x1f{thread_id}\x1f{index}\x1f{role}\x1f{}\x1f{content}",
+        timestamp.to_rfc3339()
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
+}
+
+fn engine_history_entry_to_message(
+    thread_id: Uuid,
+    index: usize,
+    entry: &serde_json::Value,
+) -> Option<crate::history::ConversationMessage> {
+    let role_raw = entry.get("role").and_then(|v| v.as_str())?;
+    let role = match role_raw {
+        "User" => "user",
+        "Assistant" => "assistant",
+        _ => return None,
+    };
+    let Some(timestamp_raw) = entry.get("timestamp").and_then(|v| v.as_str()) else {
+        tracing::warn!(
+            thread_id = %thread_id,
+            index,
+            "Skipping engine v2 history message without a valid timestamp"
+        );
+        return None;
+    };
+    let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp_raw) {
+        Ok(dt) => dt.with_timezone(&chrono::Utc),
+        Err(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                index,
+                timestamp = timestamp_raw,
+                %error,
+                "Skipping engine v2 history message with malformed timestamp"
+            );
+            return None;
+        }
+    };
+    let content = entry
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(crate::history::ConversationMessage {
+        id: stable_engine_history_message_id(thread_id, index, role, &timestamp, &content),
+        role: role.to_string(),
+        content,
+        created_at: timestamp,
+    })
 }
 
 async fn engine_pending_gate_info(
@@ -1061,6 +1230,7 @@ mod tests {
 
     use axum::{
         Router,
+        extract::{Query, State},
         http::StatusCode,
         routing::{get, post},
     };
@@ -1074,9 +1244,11 @@ mod tests {
         chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
         pending_gate_extension_name,
     };
+    use crate::db::Database;
 
     use crate::channels::web::test_helpers::{
-        test_gateway_state, test_gateway_state_with_store_and_session_manager,
+        test_gateway_state, test_gateway_state_with_dependencies,
+        test_gateway_state_with_store_and_session_manager,
     };
     use crate::channels::web::types::*;
 
@@ -1084,6 +1256,41 @@ mod tests {
     use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
 
     use super::*;
+
+    #[test]
+    fn test_engine_history_entry_skips_malformed_timestamp() {
+        let thread_id = Uuid::new_v4();
+        let entry = serde_json::json!({
+            "role": "User",
+            "content": "hello",
+            "timestamp": "not-a-timestamp",
+        });
+
+        let message = engine_history_entry_to_message(thread_id, 0, &entry);
+
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn test_engine_history_entry_uses_stable_id() {
+        let thread_id = Uuid::new_v4();
+        let entry = serde_json::json!({
+            "role": "Assistant",
+            "content": "stable response",
+            "timestamp": "2026-04-17T09:30:00Z",
+        });
+
+        let first = engine_history_entry_to_message(thread_id, 3, &entry).expect("first message");
+        let second = engine_history_entry_to_message(thread_id, 3, &entry).expect("second message");
+        let shifted =
+            engine_history_entry_to_message(thread_id, 4, &entry).expect("shifted message");
+
+        assert_eq!(first.id, second.id);
+        assert_ne!(first.id, shifted.id);
+        assert_eq!(first.role, "assistant");
+        assert_eq!(first.content, "stable response");
+        assert_eq!(first.created_at.to_rfc3339(), "2026-04-17T09:30:00+00:00");
+    }
 
     #[test]
     fn test_in_memory_turn_info_unwraps_wrapped_tool_error_for_display() {
@@ -1579,6 +1786,206 @@ mod tests {
 
         assert!(payload.get("in_progress").is_none());
         assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_returns_500_when_ownership_lookup_errors() {
+        use crate::db::libsql::LibSqlBackend;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("broken.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create backend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrate backend");
+        let conn = backend.connect().await.expect("connect backend");
+        conn.execute(
+            "ALTER TABLE conversations RENAME TO conversations_broken",
+            (),
+        )
+        .await
+        .expect("break ownership lookup");
+
+        let store: Arc<dyn Database> = Arc::new(backend);
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&store), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={}", Uuid::new_v4()))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(std::str::from_utf8(&body).unwrap_or(""), "Database error");
+    }
+
+    fn history_request(
+        state: Arc<GatewayState>,
+        user_id: &str,
+        thread_id: Uuid,
+    ) -> (
+        State<Arc<GatewayState>>,
+        AuthenticatedUser,
+        Query<HistoryQuery>,
+    ) {
+        (
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: user_id.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Query(HistoryQuery {
+                thread_id: Some(thread_id.to_string()),
+                limit: None,
+                before: None,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_engine_v2_messages_for_owner() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "demo goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::user("hello engine"));
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("hi back"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(
+            response.turns.len(),
+            1,
+            "one user+assistant pair collapses into a single turn"
+        );
+        let turn = &response.turns[0];
+        assert_eq!(turn.user_input, "hello engine");
+        assert_eq!(turn.response.as_deref(), Some("hi back"));
+        assert!(!response.has_more);
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_404_for_cross_user_engine_thread() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "bob's secret",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "bob",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("private reply"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let result = chat_history_handler(s, u, q).await;
+
+        match result {
+            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Ok(resp) => panic!(
+                "alice must not see bob's engine thread but got {} turns",
+                resp.turns.len()
+            ),
+        }
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_accepts_session_owned_thread_without_db() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        // Ensure neither engine state nor v1 DB can claim ownership — the
+        // only remaining source must be the in-memory v1 session, which
+        // this test exercises.
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let session_manager = Arc::new(SessionManager::new());
+        let thread_uuid = Uuid::new_v4();
+        {
+            let session = session_manager.get_or_create_session("alice").await;
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread_with_id(thread_uuid, Some("web"));
+            thread.start_turn("from session");
+            thread.conclude_turn(crate::agent::session::TurnOutcome::Completed(
+                "session reply".to_string(),
+            ));
+        }
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(session_manager);
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(response.turns.len(), 1);
+        assert_eq!(response.turns[0].user_input, "from session");
+        assert_eq!(response.turns[0].response.as_deref(), Some("session reply"));
     }
 
     fn test_auth_manager(

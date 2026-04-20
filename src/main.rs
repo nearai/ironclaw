@@ -970,6 +970,7 @@ async fn async_main() -> anyhow::Result<()> {
                     llm_backend: config.llm.backend.to_string(),
                     llm_model: active_model,
                     enabled_channels: enabled,
+                    default_timezone: config.agent.default_timezone.clone(),
                 },
             );
         }

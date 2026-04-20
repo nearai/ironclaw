@@ -974,9 +974,15 @@ mod tests {
         }
     }
 
-    fn expired_flow_created_at() -> Option<std::time::Instant> {
+    fn expired_flow_created_at() -> std::time::Instant {
+        // Panics on systems whose monotonic clock started less than
+        // `OAUTH_FLOW_EXPIRY + 1s` ago. That only happens on a just-booted
+        // CI host, and on that path we want a loud failure rather than a
+        // silent test skip that quietly loses coverage of the expired-flow
+        // branch — see the Gemini review on PR #2706.
         std::time::Instant::now()
             .checked_sub(oauth::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+            .expect("monotonic clock must have run long enough for expired_flow_created_at") // safety: cfg(test) fixture
     }
 
     #[tokio::test]
@@ -1077,10 +1083,7 @@ mod tests {
                 .expect("crypto"),
             )));
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
-        let Some(created_at) = expired_flow_created_at() else {
-            eprintln!("Skipping expired OAuth flow test: monotonic uptime below expiry window");
-            return;
-        };
+        let created_at = expired_flow_created_at();
 
         // Insert an expired flow.
         let flow = crate::auth::oauth::PendingOAuthFlow {
@@ -1151,10 +1154,7 @@ mod tests {
 
         let sse_mgr = Arc::new(SseManager::new());
         let mut receiver = sse_mgr.sender().subscribe();
-        let Some(created_at) = expired_flow_created_at() else {
-            eprintln!("Skipping expired OAuth flow SSE test: monotonic uptime below expiry window");
-            return;
-        };
+        let created_at = expired_flow_created_at();
         let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
@@ -1264,10 +1264,7 @@ mod tests {
         // Use an expired flow so the handler exits before attempting a real HTTP
         // token exchange — we only need to verify that the instance prefix was
         // stripped and the flow was found by the raw nonce.
-        let Some(created_at) = expired_flow_created_at() else {
-            eprintln!("Skipping OAuth state-prefix test: monotonic uptime below expiry window");
-            return;
-        };
+        let created_at = expired_flow_created_at();
         let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
@@ -1354,10 +1351,7 @@ mod tests {
             )));
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
 
-        let Some(created_at) = expired_flow_created_at() else {
-            eprintln!("Skipping versioned OAuth state test: monotonic uptime below expiry window");
-            return;
-        };
+        let created_at = expired_flow_created_at();
         let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
@@ -1436,12 +1430,7 @@ mod tests {
             )));
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
 
-        let Some(created_at) = expired_flow_created_at() else {
-            eprintln!(
-                "Skipping versioned OAuth state without instance test: monotonic uptime below expiry window"
-            );
-            return;
-        };
+        let created_at = expired_flow_created_at();
         let flow = crate::auth::oauth::PendingOAuthFlow {
             extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
