@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_common::ExternalThreadId;
-use ironclaw_engine::{ResumeKind, ThreadId};
+use ironclaw_engine::{CapabilityLease, ResumeKind, ThreadId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -71,6 +71,10 @@ pub struct PendingGate {
     /// Completed action output to inject on resume after auth finishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_output: Option<serde_json::Value>,
+    /// Lease snapshot to reuse when resuming a paused action whose original
+    /// lease use was already consumed before the gate fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_lease: Option<CapabilityLease>,
     /// Whether approval has already been granted for this paused action.
     #[serde(default)]
     pub approval_already_granted: bool,
@@ -161,6 +165,7 @@ mod tests {
             expires_at: Utc::now() + Duration::seconds(expires_in_secs),
             original_message: None,
             resume_output: None,
+            paused_lease: None,
             approval_already_granted: false,
         }
     }

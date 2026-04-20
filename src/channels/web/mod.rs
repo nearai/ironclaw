@@ -163,6 +163,9 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
@@ -173,7 +176,9 @@ impl GatewayChannel {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                server::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -223,6 +228,9 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            llm_reload: self.state.llm_reload.clone(),
+            llm_session_manager: self.state.llm_session_manager.clone(),
+            config_toml_path: self.state.config_toml_path.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             auth_manager: self.state.auth_manager.clone(),
@@ -233,7 +241,7 @@ impl GatewayChannel {
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
-            active_config: self.state.active_config.clone(),
+            active_config: Arc::clone(&self.state.active_config),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
             pairing_store: self.state.pairing_store.clone(),
@@ -372,6 +380,26 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the LLM hot-reload controller for the settings handlers.
+    pub fn with_llm_reload(mut self, reload: Arc<crate::llm::LlmReloadHandle>) -> Self {
+        self.rebuild_state(|s| s.llm_reload = Some(reload));
+        self
+    }
+
+    /// Inject the LLM session manager so a hot-reload can rebuild the
+    /// provider chain without dropping the current auth session.
+    pub fn with_llm_session_manager(mut self, sm: Arc<crate::llm::SessionManager>) -> Self {
+        self.rebuild_state(|s| s.llm_session_manager = Some(sm));
+        self
+    }
+
+    /// Inject the TOML config path so `Config::from_db_with_toml` can be
+    /// replayed identically during a hot-reload.
+    pub fn with_config_toml_path(mut self, path: std::path::PathBuf) -> Self {
+        self.rebuild_state(|s| s.config_toml_path = Some(path));
+        self
+    }
+
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
         self.rebuild_state(|s| s.registry_entries = entries);
@@ -392,7 +420,9 @@ impl GatewayChannel {
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
     pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.rebuild_state(|s| s.active_config = config);
+        self.rebuild_state(|s| {
+            s.active_config = Arc::new(tokio::sync::RwLock::new(config));
+        });
         self
     }
 
