@@ -536,10 +536,22 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
     home_dir = _RESTART_HOME_TMPDIR.name
     os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    gateway_port = sock.getsockname()[1]
-    sock.close()
+    # Allocate a free gateway port AND a free HTTP channel port. The
+    # HTTP channel (`webhook_server`) binds at startup and defaults to
+    # `127.0.0.1:8080`; without explicit `HTTP_HOST`/`HTTP_PORT`, this
+    # fixture would race every other e2e server (and anything else on
+    # 8080) and the ironclaw binary would exit with "Address already
+    # in use". The sibling `v2_approval_server` fixture at the top of
+    # this file already allocates both — mirror that.
+    socks = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+    gateway_port = socks[0].getsockname()[1]
+    http_port = socks[1].getsockname()[1]
+    for s in socks:
+        s.close()
 
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -554,6 +566,8 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
         "GATEWAY_USER_ID": "e2e-v2-restart-tester",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
@@ -572,6 +586,28 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
 
     base_url = f"http://127.0.0.1:{gateway_port}"
     proc = None
+    # Drain child stdout/stderr into the background. With
+    # `RUST_LOG=ironclaw=debug` startup output exceeds the default
+    # 64 KiB pipe buffer; without a drainer the child blocks on its
+    # next write, `/api/health` never responds, and the fixture times
+    # out with a confusing "server not ready" that is actually
+    # back-pressure on our own pipes. Mirror the last 32 KiB of stderr
+    # so a genuine startup failure (bind error, panic) surfaces in the
+    # timeout message instead of being silently swallowed.
+    drain_tasks: list[asyncio.Task] = []
+    stderr_tail = bytearray()
+
+    async def _drain(stream, mirror):
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                return
+            if mirror is not None:
+                mirror.extend(chunk)
+                if len(mirror) > 32 * 1024:
+                    del mirror[: len(mirror) - 32 * 1024]
 
     async def start():
         nonlocal proc
@@ -582,7 +618,15 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        drain_tasks.append(asyncio.create_task(_drain(proc.stdout, None)))
+        drain_tasks.append(asyncio.create_task(_drain(proc.stderr, stderr_tail)))
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        except TimeoutError:
+            raise TimeoutError(
+                f"restartable_v2_server did not become ready at {base_url}/api/health.\n"
+                f"stderr tail:\n{bytes(stderr_tail).decode('utf-8', errors='replace')}"
+            )
 
     async def stop():
         nonlocal proc
@@ -590,6 +634,10 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+        for task in drain_tasks:
+            if not task.done():
+                task.cancel()
+        drain_tasks.clear()
 
     await start()
     try:
