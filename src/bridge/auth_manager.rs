@@ -762,7 +762,8 @@ impl AuthManager {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             auto_activate_extension: false,
-        });
+        })
+        .ok()?;
         let pending_flow = launch.flow;
 
         if use_gateway {

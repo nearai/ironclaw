@@ -122,6 +122,14 @@ pub enum AuthError {
 
     #[error("Secrets error: {0}")]
     Secrets(String),
+
+    /// The server-advertised `authorization_endpoint` is not a parseable URL.
+    /// We reject malformed endpoints rather than concat-normalizing them so a
+    /// broken OAuth-server discovery document can't be silently "fixed up"
+    /// into a half-formed authorization request (gemini-code-assist review
+    /// on #2746).
+    #[error("Malformed OAuth configuration: {0}")]
+    MalformedConfig(String),
 }
 
 /// OAuth protected resource metadata.
@@ -830,7 +838,7 @@ pub async fn authorize_mcp_server(
         pkce.as_ref(),
         &extra_params,
         Some(&resource),
-    );
+    )?;
 
     // Open browser
     println!("  Opening browser for {} login...", server_config.name);
@@ -893,6 +901,11 @@ pub async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
 }
 
 /// Build the authorization URL with all required parameters.
+///
+/// Returns `Err(AuthError::MalformedConfig)` if `base_url` cannot be parsed.
+/// A malformed authorization endpoint is a server/config bug that must be
+/// surfaced to the operator, not concat-normalized into a half-valid URL
+/// (gemini-code-assist review on #2746).
 pub fn build_authorization_url(
     base_url: &str,
     client_id: &str,
@@ -901,74 +914,37 @@ pub fn build_authorization_url(
     pkce: Option<&PkceChallenge>,
     extra_params: &HashMap<String, String>,
     resource: Option<&str>,
-) -> String {
+) -> Result<String, AuthError> {
     // Use the `url` crate for query-string encoding so every value flows
     // through a single well-tested `application/x-www-form-urlencoded`
-    // serializer. Fall back to the prior hand-rolled path only if
-    // `base_url` cannot be parsed (shouldn't happen for real MCP servers;
-    // see nearai/ironclaw#2391 for the parallel bug in the WASM-tool
-    // OAuth URL builder where manual string concat was dropping the last
-    // character of the final query parameter).
-    match Url::parse(base_url) {
-        Ok(mut url) => {
-            {
-                let mut qp = url.query_pairs_mut();
-                qp.append_pair("client_id", client_id);
-                qp.append_pair("response_type", "code");
-                qp.append_pair("redirect_uri", redirect_uri);
-                if !scopes.is_empty() {
-                    qp.append_pair("scope", &scopes.join(" "));
-                }
-                if let Some(pkce) = pkce {
-                    qp.append_pair("code_challenge", &pkce.challenge);
-                    qp.append_pair("code_challenge_method", "S256");
-                }
-                for (key, value) in extra_params {
-                    qp.append_pair(key, value);
-                }
-                if let Some(resource) = resource {
-                    qp.append_pair("resource", resource);
-                }
-            }
-            url.into()
+    // serializer. See nearai/ironclaw#2391 for the parallel bug in the
+    // WASM-tool OAuth URL builder where manual string concat was dropping
+    // the last character of the final query parameter.
+    let mut url = Url::parse(base_url).map_err(|e| {
+        AuthError::MalformedConfig(format!(
+            "could not parse authorization URL {base_url:?}: {e}"
+        ))
+    })?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("client_id", client_id);
+        qp.append_pair("response_type", "code");
+        qp.append_pair("redirect_uri", redirect_uri);
+        if !scopes.is_empty() {
+            qp.append_pair("scope", &scopes.join(" "));
         }
-        Err(_) => {
-            let mut url = format!(
-                "{}?client_id={}&response_type=code&redirect_uri={}",
-                base_url,
-                urlencoding::encode(client_id),
-                urlencoding::encode(redirect_uri)
-            );
-
-            if !scopes.is_empty() {
-                url.push_str(&format!(
-                    "&scope={}",
-                    urlencoding::encode(&scopes.join(" "))
-                ));
-            }
-
-            if let Some(pkce) = pkce {
-                url.push_str(&format!(
-                    "&code_challenge={}&code_challenge_method=S256",
-                    urlencoding::encode(&pkce.challenge)
-                ));
-            }
-
-            for (key, value) in extra_params {
-                url.push_str(&format!(
-                    "&{}={}",
-                    urlencoding::encode(key),
-                    urlencoding::encode(value)
-                ));
-            }
-
-            if let Some(resource) = resource {
-                url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
-            }
-
-            url
+        if let Some(pkce) = pkce {
+            qp.append_pair("code_challenge", &pkce.challenge);
+            qp.append_pair("code_challenge_method", "S256");
+        }
+        for (key, value) in extra_params {
+            qp.append_pair(key, value);
+        }
+        if let Some(resource) = resource {
+            qp.append_pair("resource", resource);
         }
     }
+    Ok(url.into())
 }
 
 /// Wait for the authorization callback and extract the code.
@@ -1516,7 +1492,8 @@ mod tests {
             None,
             &HashMap::new(),
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(url.starts_with("https://auth.example.com/authorize?"));
         assert!(url.contains("client_id=client-123"));
@@ -1538,7 +1515,8 @@ mod tests {
             Some(&pkce),
             &HashMap::new(),
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(url.contains(&format!("code_challenge={}", pkce.challenge)));
         assert!(url.contains("code_challenge_method=S256"));
@@ -1558,7 +1536,8 @@ mod tests {
             None,
             &extra,
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(url.contains("owner=user"));
         assert!(url.contains("state=abc123"));
@@ -1569,45 +1548,69 @@ mod tests {
     /// sibling bug in the WASM-tool OAuth builder was truncating the final
     /// character of the last query parameter. Use URL-parse + exact
     /// compare (not `.contains()`) so a 1-char truncation can't pass.
+    ///
+    /// A single `HashMap` instance's iteration order is stable — reusing the
+    /// same map in a loop would not actually exercise different orderings
+    /// (Copilot review on #2746). We therefore rebuild `extra` on every
+    /// iteration so the randomized default hasher produces a fresh seed per
+    /// map, *and* explicitly drive every key-insertion permutation so each
+    /// param lands last at least once regardless of hasher behavior.
     #[test]
     fn test_build_authorization_url_extra_params_preserve_all_chars() {
-        let mut extra = HashMap::new();
-        extra.insert("access_type".to_string(), "offline".to_string());
-        extra.insert("prompt".to_string(), "consent".to_string());
-        extra.insert("audience".to_string(), "api".to_string());
+        let entries: [(&str, &str); 3] = [
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("audience", "api"),
+        ];
 
-        for iteration in 0..16 {
-            let url = build_authorization_url(
-                "https://auth.example.com/authorize",
-                "client-123",
-                "http://localhost:9876/callback",
-                &["read".to_string()],
-                None,
-                &extra,
-                None,
-            );
+        // Every permutation of insertion order (3! = 6), with a few
+        // fresh-map iterations per permutation so the randomized hasher
+        // also contributes variation.
+        let permutations: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
 
-            let parsed = url::Url::parse(&url).expect("auth url must be valid");
-            let params: std::collections::HashMap<_, _> =
-                parsed.query_pairs().into_owned().collect();
+        let mut case = 0usize;
+        for perm in &permutations {
+            for _ in 0..3 {
+                let mut extra: HashMap<String, String> = HashMap::new();
+                for &idx in perm {
+                    let (k, v) = entries[idx];
+                    extra.insert(k.to_string(), v.to_string());
+                }
 
-            assert_eq!(
-                params.get("access_type").map(String::as_str),
-                Some("offline"),
-                "iteration {iteration}: access_type must be exactly 'offline' (got {:?} in {})",
-                params.get("access_type"),
-                url,
-            );
-            assert_eq!(
-                params.get("prompt").map(String::as_str),
-                Some("consent"),
-                "iteration {iteration}: prompt must be exactly 'consent'",
-            );
-            assert_eq!(
-                params.get("audience").map(String::as_str),
-                Some("api"),
-                "iteration {iteration}: audience must be exactly 'api'",
-            );
+                let url = build_authorization_url(
+                    "https://auth.example.com/authorize",
+                    "client-123",
+                    "http://localhost:9876/callback",
+                    &["read".to_string()],
+                    None,
+                    &extra,
+                    None,
+                )
+                .expect("well-formed authorization URL");
+
+                let parsed = url::Url::parse(&url).expect("auth url must be valid");
+                let params: std::collections::HashMap<_, _> =
+                    parsed.query_pairs().into_owned().collect();
+
+                for (k, v) in entries {
+                    assert_eq!(
+                        params.get(k).map(String::as_str),
+                        Some(v),
+                        "case {case} (perm {perm:?}): {k} must be exactly {v:?} \
+                         (got {:?} in {})",
+                        params.get(k),
+                        url,
+                    );
+                }
+                case += 1;
+            }
         }
     }
 
@@ -1633,7 +1636,8 @@ mod tests {
             None,
             &HashMap::new(),
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // With no scopes, the URL must not contain a scope parameter at all.
         assert!(!url.contains("scope="));
@@ -1649,7 +1653,8 @@ mod tests {
             None,
             &HashMap::new(),
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // `url` crate uses `application/x-www-form-urlencoded` encoding, so
         // spaces become `+` and reserved characters remain percent-encoded.
@@ -2158,7 +2163,8 @@ mod tests {
             None,
             &HashMap::new(),
             Some("https://mcp.example.com/v1"),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(url.contains("resource=https%3A%2F%2Fmcp.example.com%2Fv1"));
     }
@@ -2173,9 +2179,32 @@ mod tests {
             None,
             &HashMap::new(),
             None,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(!url.contains("resource="));
+    }
+
+    /// Malformed `base_url` values must be rejected with
+    /// `AuthError::MalformedConfig`, not silently normalized through string
+    /// concatenation (gemini-code-assist review on #2746).
+    #[test]
+    fn test_build_authorization_url_rejects_malformed_base_url() {
+        let err = build_authorization_url(
+            "not a url",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+        )
+        .expect_err("malformed base URL must be rejected");
+
+        assert!(
+            matches!(err, AuthError::MalformedConfig(_)),
+            "expected MalformedConfig, got {err:?}",
+        );
     }
 
     /// Regression test: MCP OAuth authorization URLs must include a `state`
@@ -2215,7 +2244,8 @@ mod tests {
             Some(&pkce),
             &extra_params,
             Some("https://mcp.attio.com/mcp"),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // State must be present in the URL
         assert!(

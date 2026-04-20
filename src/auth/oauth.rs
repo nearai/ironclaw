@@ -114,11 +114,31 @@ pub struct OAuthUrlResult {
     pub state: String,
 }
 
+/// Errors returned while constructing an OAuth authorization URL.
+///
+/// The only currently-modeled variant is `MalformedConfig`, returned when the
+/// provided `authorization_url` cannot be parsed by the `url` crate. That
+/// indicates a misconfigured descriptor / capabilities entry; the caller
+/// should surface it to the operator rather than attempting to "fix up" the
+/// URL through string concatenation, which is what gemini-code-assist flagged
+/// on #2746 as a security-posture issue.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum OAuthUrlError {
+    /// The `authorization_url` could not be parsed as a valid URL.
+    #[error("Malformed OAuth authorization URL: {0}")]
+    MalformedConfig(String),
+}
+
 /// Build an OAuth 2.0 authorization URL with optional PKCE and CSRF state.
 ///
 /// Returns an `OAuthUrlResult` containing the authorization URL, optional PKCE
 /// code verifier, and a random `state` parameter for CSRF protection. The caller
 /// must validate the `state` value in the callback before exchanging the code.
+///
+/// Returns `Err(OAuthUrlError::MalformedConfig)` if `authorization_url` cannot
+/// be parsed. We deliberately do not try to normalize a malformed URL through
+/// manual string concatenation — rejecting a bad config is the only secure
+/// response (see gemini-code-assist review on #2746).
 pub fn build_oauth_url(
     authorization_url: &str,
     client_id: &str,
@@ -126,7 +146,7 @@ pub fn build_oauth_url(
     scopes: &[String],
     use_pkce: bool,
     extra_params: &HashMap<String, String>,
-) -> OAuthUrlResult {
+) -> Result<OAuthUrlResult, OAuthUrlError> {
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
@@ -152,10 +172,10 @@ pub fn build_oauth_url(
     // `format!` + `urlencoding::encode` loop that had a history of truncating
     // the last character of the final query parameter on some platforms
     // (nearai/ironclaw#2391: `access_type=offline` was being received by
-    // Google as `access_type=offlin`). A `Url::parse` failure here can only
-    // happen if `authorization_url` is malformed — in that case fall back to
-    // the prior string-concat path so the caller still gets a URL shape it
-    // can report on.
+    // Google as `access_type=offlin`). A `Url::parse` failure here means the
+    // descriptor/capabilities config is malformed; we reject rather than
+    // concat-normalize (gemini-code-assist review on #2746) so a bad config
+    // cannot silently produce a half-formed URL.
     let auth_url = build_oauth_authorization_url_string(
         authorization_url,
         client_id,
@@ -164,13 +184,13 @@ pub fn build_oauth_url(
         scopes,
         code_challenge.as_deref(),
         extra_params,
-    );
+    )?;
 
-    OAuthUrlResult {
+    Ok(OAuthUrlResult {
         url: auth_url,
         code_verifier,
         state,
-    }
+    })
 }
 
 /// Append OAuth authorization-request query parameters to `authorization_url`.
@@ -180,10 +200,11 @@ pub fn build_oauth_url(
 /// `application/x-www-form-urlencoded` rules. Any non-URL characters in
 /// `scopes`, `extra_params`, `state`, etc. are encoded safely.
 ///
-/// If `authorization_url` cannot be parsed as a URL (shouldn't happen for any
-/// real capabilities entry, since tool authorization URLs are validated to
-/// start with `https://`), this falls back to a defensive string-concat path
-/// that preserves the old behavior.
+/// Returns `Err(OAuthUrlError::MalformedConfig)` if `authorization_url` cannot
+/// be parsed as a URL. We deliberately do not fall back to a manual
+/// string-concat path: a malformed authorization URL is a config error that
+/// the operator should see, not something the agent should try to paper over
+/// (gemini-code-assist review on #2746).
 fn build_oauth_authorization_url_string(
     authorization_url: &str,
     client_id: &str,
@@ -192,58 +213,30 @@ fn build_oauth_authorization_url_string(
     scopes: &[String],
     code_challenge: Option<&str>,
     extra_params: &HashMap<String, String>,
-) -> String {
-    match Url::parse(authorization_url) {
-        Ok(mut url) => {
-            {
-                let mut qp = url.query_pairs_mut();
-                qp.append_pair("client_id", client_id);
-                qp.append_pair("response_type", "code");
-                qp.append_pair("redirect_uri", redirect_uri);
-                qp.append_pair("state", state);
-                if !scopes.is_empty() {
-                    qp.append_pair("scope", &scopes.join(" "));
-                }
-                if let Some(challenge) = code_challenge {
-                    qp.append_pair("code_challenge", challenge);
-                    qp.append_pair("code_challenge_method", "S256");
-                }
-                for (key, value) in extra_params {
-                    qp.append_pair(key, value);
-                }
-            }
-            url.into()
+) -> Result<String, OAuthUrlError> {
+    let mut url = Url::parse(authorization_url).map_err(|e| {
+        OAuthUrlError::MalformedConfig(format!(
+            "could not parse authorization URL {authorization_url:?}: {e}"
+        ))
+    })?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("client_id", client_id);
+        qp.append_pair("response_type", "code");
+        qp.append_pair("redirect_uri", redirect_uri);
+        qp.append_pair("state", state);
+        if !scopes.is_empty() {
+            qp.append_pair("scope", &scopes.join(" "));
         }
-        Err(_) => {
-            let mut auth_url = format!(
-                "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
-                authorization_url,
-                urlencoding::encode(client_id),
-                urlencoding::encode(redirect_uri),
-                urlencoding::encode(state),
-            );
-            if !scopes.is_empty() {
-                auth_url.push_str(&format!(
-                    "&scope={}",
-                    urlencoding::encode(&scopes.join(" "))
-                ));
-            }
-            if let Some(challenge) = code_challenge {
-                auth_url.push_str(&format!(
-                    "&code_challenge={}&code_challenge_method=S256",
-                    challenge
-                ));
-            }
-            for (key, value) in extra_params {
-                auth_url.push_str(&format!(
-                    "&{}={}",
-                    urlencoding::encode(key),
-                    urlencoding::encode(value)
-                ));
-            }
-            auth_url
+        if let Some(challenge) = code_challenge {
+            qp.append_pair("code_challenge", challenge);
+            qp.append_pair("code_challenge_method", "S256");
+        }
+        for (key, value) in extra_params {
+            qp.append_pair(key, value);
         }
     }
+    Ok(url.into())
 }
 
 /// Exchange an OAuth authorization code for tokens.
@@ -1615,7 +1608,8 @@ mod tests {
             &["openid".to_string(), "email".to_string()],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(
             result
@@ -1646,7 +1640,8 @@ mod tests {
             &[],
             true,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(result.url.contains("code_challenge="));
         assert!(result.url.contains("code_challenge_method=S256"));
@@ -1672,7 +1667,8 @@ mod tests {
             &["read".to_string()],
             false,
             &extra,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(result.url.contains("access_type=offline"));
         assert!(result.url.contains("prompt=consent"));
@@ -1703,7 +1699,8 @@ mod tests {
             &["https://www.googleapis.com/auth/calendar.events".to_string()],
             false,
             &extra,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
         let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -1743,54 +1740,70 @@ mod tests {
     /// Google-style extra params (all six Google WASM tools share this
     /// shape) and verify every value survives URL encoding intact.
     ///
-    /// This test iterates many times because the bug could be sensitive to
-    /// `HashMap` iteration order (which varies across runs due to the
-    /// randomized default hasher). If truncation depended on whether a given
-    /// param landed last, a single-iteration test could miss it.
+    /// A single `HashMap` instance's iteration order is stable — reusing the
+    /// same map in a loop would not actually exercise different orderings
+    /// (Copilot review on #2746). We therefore rebuild `extra` on every
+    /// iteration so the randomized default hasher produces a fresh seed per
+    /// map, *and* explicitly drive every key-insertion permutation so each
+    /// param lands last at least once regardless of hasher behavior.
     #[test]
     fn test_build_oauth_url_extra_params_preserve_all_chars_across_hash_orderings() {
         use std::collections::HashMap;
 
         use crate::auth::oauth::build_oauth_url;
 
-        let mut extra = HashMap::new();
-        extra.insert("access_type".to_string(), "offline".to_string());
-        extra.insert("prompt".to_string(), "consent".to_string());
-        extra.insert("include_granted_scopes".to_string(), "true".to_string());
+        let entries: [(&str, &str); 3] = [
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("include_granted_scopes", "true"),
+        ];
 
-        for iteration in 0..16 {
-            let result = build_oauth_url(
-                "https://accounts.google.com/o/oauth2/v2/auth",
-                "client-id",
-                "http://127.0.0.1:9876/callback",
-                &["https://www.googleapis.com/auth/gmail.modify".to_string()],
-                false,
-                &extra,
-            );
+        // Every permutation of insertion order (3! = 6), plus a few
+        // fresh-map iterations per permutation so the randomized hasher
+        // also contributes variation.
+        let permutations: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
 
-            let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
-            let params: std::collections::HashMap<_, _> =
-                parsed.query_pairs().into_owned().collect();
+        let mut case = 0usize;
+        for perm in &permutations {
+            for _ in 0..3 {
+                let mut extra: HashMap<String, String> = HashMap::new();
+                for &idx in perm {
+                    let (k, v) = entries[idx];
+                    extra.insert(k.to_string(), v.to_string());
+                }
 
-            assert_eq!(
-                params.get("access_type").map(String::as_str),
-                Some("offline"),
-                "iteration {iteration}: access_type truncated to {:?} in {}",
-                params.get("access_type"),
-                result.url,
-            );
-            assert_eq!(
-                params.get("prompt").map(String::as_str),
-                Some("consent"),
-                "iteration {iteration}: prompt truncated in {}",
-                result.url,
-            );
-            assert_eq!(
-                params.get("include_granted_scopes").map(String::as_str),
-                Some("true"),
-                "iteration {iteration}: include_granted_scopes truncated in {}",
-                result.url,
-            );
+                let result = build_oauth_url(
+                    "https://accounts.google.com/o/oauth2/v2/auth",
+                    "client-id",
+                    "http://127.0.0.1:9876/callback",
+                    &["https://www.googleapis.com/auth/gmail.modify".to_string()],
+                    false,
+                    &extra,
+                )
+                .expect("well-formed authorization URL");
+
+                let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+                let params: std::collections::HashMap<_, _> =
+                    parsed.query_pairs().into_owned().collect();
+
+                for (k, v) in entries {
+                    assert_eq!(
+                        params.get(k).map(String::as_str),
+                        Some(v),
+                        "case {case} (perm {perm:?}): {k} truncated to {:?} in {}",
+                        params.get(k),
+                        result.url,
+                    );
+                }
+                case += 1;
+            }
         }
     }
 
@@ -1861,7 +1874,8 @@ mod tests {
             &oauth.scopes,
             oauth.use_pkce,
             &oauth.extra_params,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
         let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -1893,7 +1907,8 @@ mod tests {
             &[],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
         let result2 = build_oauth_url(
             "https://auth.example.com/authorize",
             "client",
@@ -1901,10 +1916,37 @@ mod tests {
             &[],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // State should be different each time (random)
         assert_ne!(result1.state, result2.state);
+    }
+
+    /// Malformed `authorization_url` values must be rejected with
+    /// `OAuthUrlError::MalformedConfig`, not silently normalized through
+    /// string concatenation (gemini-code-assist review on #2746).
+    #[test]
+    fn test_build_oauth_url_rejects_malformed_authorization_url() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::{OAuthUrlError, build_oauth_url};
+
+        let err = build_oauth_url(
+            "not a url",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .err()
+        .expect("malformed authorization URL must be rejected");
+
+        assert!(
+            matches!(err, OAuthUrlError::MalformedConfig(_)),
+            "expected MalformedConfig, got {err:?}",
+        );
     }
 
     #[test]
@@ -2182,7 +2224,8 @@ mod tests {
             &["read".to_string()],
             true,
             &extra,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // The resource parameter should be URL-encoded in the auth URL
         assert!(
