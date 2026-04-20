@@ -8,6 +8,7 @@ via TOOL_CALL_PATTERNS.
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -1470,6 +1471,19 @@ async def oauth_exchange(request: web.Request) -> web.Response:
         if not data.get("resource"):
             return web.json_response({"error": "missing_resource"}, status=400)
 
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them instead of mock tokens so the extension gets real credentials.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+    if live_access and not code.startswith("mock_mcp_code"):
+        resp = {
+            access_token_field: live_access,
+            "expires_in": 3600,
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
+
     return web.json_response({
         access_token_field: f"mock-token-{code}",
         "refresh_token": "mock-refresh-token",
@@ -1491,6 +1505,22 @@ async def oauth_refresh(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid_gateway_auth"}, status=401)
 
     provider = data.get("provider", "")
+
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them for non-MCP refreshes instead of validating mock client_id.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    if live_access and not provider.startswith("mcp:"):
+        live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+        resp = {
+            "access_token": live_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "mock-scope",
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
+
     if provider.startswith("mcp:"):
         if data.get("client_id") != "mock-mcp-client-id":
             return web.json_response({"error": "invalid_mcp_client_id"}, status=400)

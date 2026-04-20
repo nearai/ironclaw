@@ -44,6 +44,7 @@ from scripts.live_canary.auth_registry import (
 )
 from scripts.live_canary.auth_runtime import (
     activate_extension,
+    complete_oauth_flow,
     create_responses_probe,
     install_extension,
     put_secret,
@@ -268,48 +269,56 @@ async def seeded_browser_probe(
             await context.close()
 
 
-async def seed_live_credentials(base_url: str, token: str, db_path: Path, owner_user_id: str) -> None:
+async def seed_google_via_oauth(
+    base_url: str, token: str, db_path: Path, owner_user_id: str,
+) -> bool:
+    """Authenticate Google extensions via the OAuth callback flow.
+
+    Returns True if Google credentials were configured and the OAuth flow
+    completed, False if no Google credentials are available (skipped).
+    """
     google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
     google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
     if google_refresh and not google_access:
         raise CanaryError(
             "AUTH_LIVE_GOOGLE_ACCESS_TOKEN is required when AUTH_LIVE_GOOGLE_REFRESH_TOKEN is set"
         )
-    if google_access or google_refresh:
-        if google_access:
-            await put_secret(
-                base_url,
-                token,
-                user_id=owner_user_id,
-                name="google_oauth_token",
-                value=google_access,
-                provider="google",
-            )
-        if google_refresh:
-            await put_secret(
-                base_url,
-                token,
-                user_id=owner_user_id,
-                name="google_oauth_token_refresh_token",
-                value=google_refresh,
-                provider="google",
-            )
-        await put_secret(
-            base_url,
-            token,
-            user_id=owner_user_id,
-            name="google_oauth_token_scopes",
-            value=env_str("AUTH_LIVE_GOOGLE_SCOPES") or GOOGLE_SCOPE_DEFAULT,
-            provider="google",
-        )
-        if google_refresh and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
-            expire_secret_in_db(db_path, owner_user_id, "google_oauth_token")
+    if not google_access:
+        return False
 
+    # Install Gmail and complete OAuth flow. The mock_llm exchange endpoint
+    # reads AUTH_LIVE_GOOGLE_* env vars and returns the real tokens.
+    await install_extension(
+        base_url, token,
+        name="gmail",
+        expected_display_name="Gmail",
+    )
+    await complete_oauth_flow(base_url, token, extension_name="gmail")
+
+    # Ensure combined scopes cover all Google extensions (Gmail + Calendar).
+    await put_secret(
+        base_url, token,
+        user_id=owner_user_id,
+        name="google_oauth_token_scopes",
+        value=env_str("AUTH_LIVE_GOOGLE_SCOPES") or GOOGLE_SCOPE_DEFAULT,
+        provider="google",
+    )
+
+    # Optionally expire the access token to exercise the refresh path.
+    if google_refresh and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
+        expire_secret_in_db(db_path, owner_user_id, "google_oauth_token")
+
+    return True
+
+
+async def seed_non_oauth_credentials(
+    base_url: str, token: str, owner_user_id: str,
+) -> None:
+    """Seed non-OAuth credentials (GitHub PAT, Notion tokens) directly."""
     github_token = env_str("AUTH_LIVE_GITHUB_TOKEN")
     if github_token:
         await put_secret(
-            base_url,
-            token,
+            base_url, token,
             user_id=owner_user_id,
             name="github_token",
             value=github_token,
@@ -324,8 +333,7 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path, owner_
         )
     if notion_access:
         await put_secret(
-            base_url,
-            token,
+            base_url, token,
             user_id=owner_user_id,
             name="mcp_notion_access_token",
             value=notion_access,
@@ -333,8 +341,7 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path, owner_
         )
     if notion_refresh:
         await put_secret(
-            base_url,
-            token,
+            base_url, token,
             user_id=owner_user_id,
             name="mcp_notion_access_token_refresh_token",
             value=notion_refresh,
@@ -349,14 +356,23 @@ async def run_seeded_mode(args: argparse.Namespace, stack: Any) -> list[ProbeRes
             "No live provider cases are configured. Set at least one AUTH_LIVE_* credential env var."
         )
 
-    await seed_live_credentials(
-        stack.base_url,
-        stack.gateway_token,
-        stack.db_path,
-        MODE_CONFIG["seeded"]["owner_user_id"],
+    owner_user_id = MODE_CONFIG["seeded"]["owner_user_id"]
+
+    # Phase 1: Google extensions — authenticate via OAuth flow so ironclaw
+    # marks them as properly authenticated (direct DB seeding doesn't work).
+    google_oauth_done = await seed_google_via_oauth(
+        stack.base_url, stack.gateway_token, stack.db_path, owner_user_id,
     )
 
+    # Phase 2: Non-OAuth credentials (GitHub PAT, Notion tokens) — seed directly.
+    await seed_non_oauth_credentials(stack.base_url, stack.gateway_token, owner_user_id)
+
+    # Phase 3: Install and activate all extensions.
     for probe in probes:
+        is_google = probe.shared_secret_name == "google_oauth_token"
+        if is_google and google_oauth_done and probe.extension_install_name == "gmail":
+            # Already installed and authenticated via OAuth flow above.
+            continue
         ext = await install_extension(
             stack.base_url,
             stack.gateway_token,
@@ -888,6 +904,7 @@ async def async_main(args: argparse.Namespace) -> int:
         temp_prefix=mode_cfg["temp_prefix"],
         gateway_token_prefix=mode_cfg["gateway_token_prefix"],
         extra_gateway_env=extra_gateway_env,
+        oauth_proxy=(args.mode == "seeded"),
     )
     try:
         if args.mode == "seeded":

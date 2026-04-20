@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from scripts.live_canary.common import CanaryError, ProbeResult, api_request
 
@@ -140,6 +141,71 @@ async def activate_extension(
         raise CanaryError(
             f"Activation unexpectedly required interactive auth for {extension_name}: {body['auth_url']}"
         )
+    return await wait_for_extension_state(
+        base_url,
+        token,
+        extension_name,
+        authenticated=True,
+        active=True,
+        timeout=timeout,
+    )
+
+
+async def complete_oauth_flow(
+    base_url: str,
+    token: str,
+    *,
+    extension_name: str,
+    code: str = "mock_auth_code",
+    timeout: float = 90.0,
+) -> dict[str, Any]:
+    """Complete OAuth setup for an extension via the callback flow.
+
+    Calls /api/extensions/{name}/setup to get an auth_url, extracts the
+    state parameter, and completes the OAuth callback. The mock_llm
+    exchange endpoint returns real or mock tokens depending on env vars.
+    """
+    import httpx
+
+    setup_response = await api_request(
+        "POST",
+        base_url,
+        f"/api/extensions/{extension_name}/setup",
+        token=token,
+        json_body={"secrets": {}},
+        timeout=30,
+    )
+    if setup_response.status_code != 200:
+        raise CanaryError(
+            f"Setup failed for {extension_name}: {setup_response.status_code} {setup_response.text}"
+        )
+    auth_url = setup_response.json().get("auth_url")
+    if not auth_url:
+        raise CanaryError(f"No auth_url from setup for {extension_name}: {setup_response.json()}")
+
+    state = parse_qs(urlparse(auth_url).query).get("state", [None])[0]
+    if not state:
+        raise CanaryError(f"auth_url missing state parameter: {auth_url}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        callback_response = await client.get(
+            f"{base_url}/oauth/callback",
+            params={"code": code, "state": state},
+            follow_redirects=True,
+        )
+
+    if callback_response.status_code != 200:
+        raise CanaryError(
+            f"OAuth callback failed for {extension_name}: "
+            f"{callback_response.status_code} {callback_response.text[:500]}"
+        )
+    body_text = callback_response.text.lower()
+    if "connected" not in body_text and "success" not in body_text:
+        raise CanaryError(
+            f"OAuth callback did not indicate success for {extension_name}: "
+            f"{callback_response.text[:500]}"
+        )
+
     return await wait_for_extension_state(
         base_url,
         token,

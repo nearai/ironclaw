@@ -268,6 +268,7 @@ async def start_gateway_stack(
     temp_prefix: str,
     gateway_token_prefix: str,
     extra_gateway_env: dict[str, str] | None = None,
+    oauth_proxy: bool = False,
 ) -> GatewayStack:
     secrets_master_key = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
@@ -297,6 +298,14 @@ async def start_gateway_stack(
         )
         mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
         await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
+
+        if oauth_proxy:
+            proxy_env = {
+                "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_url,
+                "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
+                "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
+            }
+            extra_gateway_env = {**(extra_gateway_env or {}), **proxy_env}
 
         gateway_port = reserve_loopback_port()
         http_port = reserve_loopback_port()
