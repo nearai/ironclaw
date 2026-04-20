@@ -6,7 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
-use ironclaw_common::ExtensionName;
+use ironclaw_common::{ExtensionName, JobResultStatus};
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -53,6 +53,8 @@ pub struct IncomingAttachment {
     pub source_url: Option<String>,
     /// Opaque key for host-side storage (e.g., after download/caching).
     pub storage_key: Option<String>,
+    /// Relative path to a project-local copy saved on disk, if persisted.
+    pub local_path: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
     /// Raw file bytes (for small files downloaded by the channel).
@@ -402,7 +404,10 @@ pub enum StatusUpdate {
     /// A sandbox job's status changed.
     JobStatus { job_id: String, status: String },
     /// A sandbox job completed with final result.
-    JobResult { job_id: String, status: String },
+    JobResult {
+        job_id: String,
+        status: JobResultStatus,
+    },
     /// A routine was created, updated, or deleted.
     RoutineUpdate {
         id: String,
@@ -448,6 +453,23 @@ pub enum StatusUpdate {
         input_tokens: u64,
         output_tokens: u64,
         cost_usd: String,
+    },
+    /// Full (non-truncated) tool output (verbose/debug mode only).
+    ToolResultFull {
+        name: String,
+        output: String,
+        truncated: bool,
+        /// Stable tool-call ID when available.
+        call_id: Option<String>,
+    },
+    /// Per-LLM-call metrics with model, tokens, and timing (verbose/debug mode only).
+    TurnMetrics {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        model: String,
+        duration_ms: u64,
+        iteration: usize,
     },
     /// Skills activated for this conversation turn.
     ///
@@ -564,6 +586,13 @@ fn truncate_detail(s: &str) -> String {
 }
 
 impl StatusUpdate {
+    /// Whether this status update is verbose/debug-only (e.g. full tool output,
+    /// per-LLM-call metrics). Used to short-circuit expensive cloning when no
+    /// debug subscribers are connected.
+    pub fn is_verbose_only(&self) -> bool {
+        matches!(self, Self::ToolResultFull { .. } | Self::TurnMetrics { .. })
+    }
+
     /// Build a `ToolStarted` status with a derived contextual detail.
     pub fn tool_started(name: String, arguments: &serde_json::Value) -> Self {
         Self::tool_started_with_id(name, arguments, None)
@@ -584,9 +613,11 @@ impl StatusUpdate {
 
     /// Build a `ToolCompleted` status with redacted parameters.
     ///
-    /// On failure, serializes the tool's input parameters as pretty JSON after
-    /// replacing any keys listed in the tool's `sensitive_params()` with
-    /// `"[REDACTED]"`. On success, no parameters or error are included.
+    /// Serializes the tool's input parameters as pretty JSON after replacing
+    /// any keys listed in the tool's `sensitive_params()` with `"[REDACTED]"`.
+    /// Parameters are only included on failure; verbose clients see full output
+    /// via the `ToolResultFull` event instead.
+    /// Error message is populated only on failure.
     ///
     /// Pass the resolved `Tool` reference (if available) so this method can
     /// query `sensitive_params()` directly — callers don't need to manage the
@@ -601,16 +632,17 @@ impl StatusUpdate {
     ) -> Self {
         let success = result.is_ok();
         let sensitive = tool.map(|t| t.sensitive_params()).unwrap_or(&[]);
+        let parameters = if !success {
+            let safe = crate::tools::redact_params(params, sensitive);
+            Some(serde_json::to_string_pretty(&safe).unwrap_or_else(|_| safe.to_string()))
+        } else {
+            None
+        };
         Self::ToolCompleted {
             name,
             success,
             error: result.as_ref().err().map(|e| e.to_string()),
-            parameters: if !success {
-                let safe = crate::tools::redact_params(params, sensitive);
-                Some(serde_json::to_string_pretty(&safe).unwrap_or_else(|_| safe.to_string()))
-            } else {
-                None
-            },
+            parameters,
             call_id,
             duration_ms,
         }
@@ -935,7 +967,12 @@ mod tests {
         {
             assert!(success);
             assert!(error.is_none());
-            assert!(parameters.is_none(), "no params should be sent on success");
+            // Parameters are only included on failure; verbose clients see full
+            // output via the ToolResultFull event instead.
+            assert!(
+                parameters.is_none(),
+                "params should not be included on success"
+            );
         } else {
             panic!("expected ToolCompleted variant");
         }

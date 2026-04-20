@@ -316,12 +316,12 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     let manager = SseManager::new();
     let mut alice_stream = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob_stream = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -361,12 +361,12 @@ async fn sse_global_event_delivered_to_all_users() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -394,7 +394,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -426,7 +426,7 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     let manager = SseManager::new();
     // Unscoped subscriber (None user_id) — backwards-compatible single-user mode
-    let mut stream = Box::pin(manager.subscribe_raw(None).expect("subscribe"));
+    let mut stream = Box::pin(manager.subscribe_raw(None, false).expect("subscribe"));
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
@@ -504,14 +504,14 @@ async fn sse_connection_count_tracks_scoped_subscribers() {
 
     let _alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 1);
 
     let _bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 2);

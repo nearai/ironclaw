@@ -113,10 +113,15 @@ pub(crate) async fn chat_send_handler(
         msg = msg.with_timezone(tz);
     }
 
-    // Convert uploaded images to IncomingAttachments
-    if !req.images.is_empty() {
-        let attachments = crate::channels::web::util::images_to_attachments(&req.images);
-        msg = msg.with_attachments(attachments);
+    // Convert uploaded images + generic file attachments to IncomingAttachments
+    // through the shared budget-aware helper so HTTP and WS paths enforce
+    // identical limits. Empty-text messages with attachments are still valid
+    // here; the v2 engine router relaxes the empty-input guard downstream.
+    let incoming_attachments =
+        crate::channels::web::util::inline_attachments_to_incoming(&req.images, &req.attachments)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if !incoming_attachments.is_empty() {
+        msg = msg.with_attachments(incoming_attachments);
     }
 
     let msg_id = msg.id;
@@ -351,9 +356,17 @@ pub(crate) async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Verbose/debug stream is admin-only — non-admin clients silently
+    // get the normal stream so query-param tampering can't leak verbose
+    // events. Matches the AdminUser gate on /api/debug/prompt.
+    let verbose = params.debug && user.role == "admin";
     let sse = state
         .sse
-        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
+        .subscribe(
+            Some(user.user_id),
+            verbose,
+            extract_last_event_id(&params, &headers),
+        )
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many connections".to_string(),
@@ -367,6 +380,7 @@ pub(crate) async fn chat_events_handler(
 pub(crate) async fn chat_ws_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
+    Query(params): Query<ChatEventsQuery>,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -390,8 +404,9 @@ pub(crate) async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+    let verbose = params.debug && user.role == "admin";
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::platform::ws::handle_ws_connection(socket, state, user)
+        crate::channels::web::platform::ws::handle_ws_connection(socket, state, user, verbose)
     }))
 }
 
@@ -436,19 +451,42 @@ pub(crate) async fn chat_history_handler(
     let thread_scope = Some(thread_id_str.as_str());
 
     // Verify the thread belongs to the authenticated user before returning any data.
-    // In-memory threads are already scoped by user via session_manager, but DB
-    // lookups could expose another user's conversation if the UUID is guessed.
-    if query.thread_id.is_some()
-        && let Some(ref store) = state.store
-    {
-        let owned = store
-            .conversation_belongs_to_user(thread_id, &user.user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
-            })?;
-        if !owned && !sess.threads.contains_key(&thread_id) {
+    // Three ownership sources, in order: v1 conversation row, in-memory v1 session,
+    // engine v2 thread store. An engine v2 thread ID will only match the last one
+    // because the v1 dual-write uses the *assistant* conversation id, not the
+    // engine thread id, so the first two will miss.
+    if query.thread_id.is_some() {
+        let mut owned = false;
+        if let Some(ref store) = state.store {
+            owned = match store
+                .conversation_belongs_to_user(thread_id, &user.user_id)
+                .await
+            {
+                Ok(owned) => owned,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id = %thread_id,
+                        user_id = %user.user_id,
+                        %error,
+                        "Failed to verify conversation ownership"
+                    );
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Database error".to_string(),
+                    ));
+                }
+            };
+        }
+        if !owned && sess.threads.contains_key(&thread_id) {
+            owned = true;
+        }
+        if !owned
+            && let Ok(Some(_)) =
+                crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
+        {
+            owned = true;
+        }
+        if !owned {
             return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
@@ -541,6 +579,35 @@ pub(crate) async fn chat_history_handler(
         }
     }
 
+    // Engine v2 fallback: an engine thread owns its own messages and does not
+    // always dual-write them into the v1 conversation table (the assistant
+    // flow writes into the *assistant* conversation id, so deep-linking
+    // by engine thread id gets a v1 miss). Surface them here so
+    // `#/chat/<engine-thread-id>` renders the thread instead of going empty.
+    if let Ok(Some(detail)) =
+        crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
+    {
+        let synthetic: Vec<crate::history::ConversationMessage> = detail
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| engine_history_entry_to_message(thread_id, index, entry))
+            .collect();
+        if !synthetic.is_empty() {
+            let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
+            let mut turns = build_turns_from_db_messages(&synthetic);
+            enforce_generated_image_history_budget(&mut turns);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp,
+                pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+                in_progress: None,
+            }));
+        }
+    }
+
     // Empty thread (just created, no messages yet)
     let in_progress = if let Some(ref store) = state.store {
         let metadata = store
@@ -588,8 +655,13 @@ pub(crate) async fn chat_threads_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // 50 used to be the cap here; threads past that silently disappeared
+        // from the sidebar, which also broke hash-based deep links because
+        // the UI verified membership before switching. 500 is cheap for a
+        // single-user demo and large enough that sliding off the end is
+        // rare in practice.
         match store
-            .list_conversations_all_channels(&user.user_id, 50)
+            .list_conversations_all_channels(&user.user_id, 500)
             .await
         {
             Ok(summaries) => {
@@ -634,6 +706,46 @@ pub(crate) async fn chat_threads_handler(
                         thread_type: Some("assistant".to_string()),
                         channel: Some("gateway".to_string()),
                     });
+                }
+
+                // Engine v2 threads for this user in the default project. These
+                // don't always get a matching v1 conversation row (the assistant
+                // flow dual-writes into the single assistant conv id, not the
+                // engine thread id), so without this merge they'd be invisible
+                // in the sidebar even though the chat history endpoint can now
+                // render them by id.
+                if let Ok(engine_threads) =
+                    crate::bridge::list_engine_threads(None, &user.user_id).await
+                {
+                    let existing_ids: std::collections::HashSet<uuid::Uuid> = threads
+                        .iter()
+                        .map(|t| t.id)
+                        .chain(assistant_thread.as_ref().map(|a| a.id))
+                        .collect();
+                    for eng in engine_threads {
+                        let Ok(uuid) = uuid::Uuid::parse_str(&eng.id) else {
+                            continue;
+                        };
+                        if existing_ids.contains(&uuid) {
+                            continue;
+                        }
+                        threads.push(ThreadInfo {
+                            id: uuid,
+                            state: eng.state,
+                            turn_count: eng.step_count,
+                            created_at: eng.created_at,
+                            updated_at: eng.updated_at.clone(),
+                            // Engine threads carry their goal as the only
+                            // human-readable label; reuse it as the sidebar
+                            // title so the user can tell threads apart.
+                            title: Some(eng.goal),
+                            thread_type: Some(eng.thread_type),
+                            channel: Some("engine".to_string()),
+                        });
+                    }
+                    // Re-sort by updated_at descending so engine threads interleave
+                    // chronologically with v1 conversations.
+                    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 }
 
                 let active_thread = session.lock().await.active_thread;
@@ -733,6 +845,8 @@ pub(crate) async fn chat_new_thread_handler(
 
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct ChatEventsQuery {
+    #[serde(default)]
+    pub debug: bool,
     pub last_event_id: Option<String>,
 }
 
@@ -750,9 +864,9 @@ pub(crate) fn extract_last_event_id(
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQuery {
-    thread_id: Option<String>,
-    limit: Option<usize>,
-    before: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) before: Option<String>,
 }
 
 /// Check whether an Origin header value points to a local address.
@@ -813,6 +927,66 @@ pub(crate) async fn pending_gate_extension_name(
         )
         .await,
     )
+}
+
+fn stable_engine_history_message_id(
+    thread_id: Uuid,
+    index: usize,
+    role: &str,
+    timestamp: &chrono::DateTime<chrono::Utc>,
+    content: &str,
+) -> Uuid {
+    let seed = format!(
+        "engine-v2-history\x1f{thread_id}\x1f{index}\x1f{role}\x1f{}\x1f{content}",
+        timestamp.to_rfc3339()
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
+}
+
+fn engine_history_entry_to_message(
+    thread_id: Uuid,
+    index: usize,
+    entry: &serde_json::Value,
+) -> Option<crate::history::ConversationMessage> {
+    let role_raw = entry.get("role").and_then(|v| v.as_str())?;
+    let role = match role_raw {
+        "User" => "user",
+        "Assistant" => "assistant",
+        _ => return None,
+    };
+    let Some(timestamp_raw) = entry.get("timestamp").and_then(|v| v.as_str()) else {
+        tracing::warn!(
+            thread_id = %thread_id,
+            index,
+            "Skipping engine v2 history message without a valid timestamp"
+        );
+        return None;
+    };
+    let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp_raw) {
+        Ok(dt) => dt.with_timezone(&chrono::Utc),
+        Err(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                index,
+                timestamp = timestamp_raw,
+                %error,
+                "Skipping engine v2 history message with malformed timestamp"
+            );
+            return None;
+        }
+    };
+    let content = entry
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(crate::history::ConversationMessage {
+        id: stable_engine_history_message_id(thread_id, index, role, &timestamp, &content),
+        role: role.to_string(),
+        content,
+        created_at: timestamp,
+    })
 }
 
 async fn engine_pending_gate_info(
@@ -1042,16 +1216,52 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
 // validation, turn-info construction, and live-state summarization.
 // Caller-level tests (`test_chat_history_handler_*`,
 // `test_chat_approval_handler*`, `test_chat_auth_*_handler*`,
-// `test_chat_gate_resolve_handler*`) stay in `server.rs::tests` for now
-// because they rely on shared `GatewayState` builders
-// (`test_gateway_state`, `test_gateway_state_with_store_and_session_manager`,
-// `test_gateway_state_with_dependencies`) that construct state for multiple
-// slices, not just chat. Promoting those builders to the public
-// `src/channels/web/test_helpers.rs` surface is a follow-up.
+// `test_chat_gate_resolve_handler*`) still live in `server.rs::tests`;
+// the shared `GatewayState` builders they depend on (`test_gateway_state`,
+// `test_gateway_state_with_store_and_session_manager`,
+// `test_gateway_state_with_dependencies`) now live in
+// `crate::channels::web::test_helpers` as `pub(crate)` functions, so
+// stage 6 of ironclaw#2599 can migrate the caller-level tests into this
+// module alongside the helpers without an API change.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_engine_history_entry_skips_malformed_timestamp() {
+        let thread_id = Uuid::new_v4();
+        let entry = serde_json::json!({
+            "role": "User",
+            "content": "hello",
+            "timestamp": "not-a-timestamp",
+        });
+
+        let message = engine_history_entry_to_message(thread_id, 0, &entry);
+
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn test_engine_history_entry_uses_stable_id() {
+        let thread_id = Uuid::new_v4();
+        let entry = serde_json::json!({
+            "role": "Assistant",
+            "content": "stable response",
+            "timestamp": "2026-04-17T09:30:00Z",
+        });
+
+        let first = engine_history_entry_to_message(thread_id, 3, &entry).expect("first message");
+        let second = engine_history_entry_to_message(thread_id, 3, &entry).expect("second message");
+        let shifted =
+            engine_history_entry_to_message(thread_id, 4, &entry).expect("shifted message");
+
+        assert_eq!(first.id, second.id);
+        assert_ne!(first.id, shifted.id);
+        assert_eq!(first.role, "assistant");
+        assert_eq!(first.content, "stable response");
+        assert_eq!(first.created_at.to_rfc3339(), "2026-04-17T09:30:00+00:00");
+    }
 
     #[test]
     fn test_in_memory_turn_info_unwraps_wrapped_tool_error_for_display() {

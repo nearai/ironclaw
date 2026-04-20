@@ -35,11 +35,15 @@ pub use platform::auth;
 pub use platform::sse;
 pub use platform::ws;
 
-/// Test helpers for gateway integration tests.
+/// Test helpers for gateway tests.
 ///
 /// Always compiled (not behind `#[cfg(test)]`) so that integration tests in
 /// `tests/` -- which import this crate as a regular dependency -- can use
-/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder).
+/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder). The
+/// cross-slice `pub(crate)` builders inside the module
+/// (`test_gateway_state`, `test_gateway_state_with_dependencies`,
+/// `test_gateway_state_with_store_and_session_manager`) are individually
+/// `#[cfg(test)]`-gated since they only have in-crate unit-test callers.
 pub mod test_helpers;
 
 #[cfg(test)]
@@ -645,6 +649,17 @@ impl Channel for GatewayChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        // Skip verbose-only events (ToolResultFull, TurnMetrics) entirely
+        // when no debug subscriber is connected — avoids cloning up to 50 KB
+        // of tool output and allocating model-name strings on every tool
+        // call. Gating on `has_verbose_receivers()` (not just
+        // `has_receivers()`) keeps the short-circuit active even when
+        // ordinary non-debug subscribers are present, which is the common
+        // case for non-admin browser tabs.
+        if status.is_verbose_only() && !self.state.sse.has_verbose_receivers() {
+            return Ok(());
+        }
+
         let thread_id = metadata
             .get("thread_id")
             .and_then(|v| v.as_str())
@@ -795,6 +810,34 @@ impl Channel for GatewayChannel {
                 output_tokens,
                 cost_usd,
                 thread_id,
+            },
+            StatusUpdate::ToolResultFull {
+                name,
+                output,
+                truncated,
+                call_id,
+            } => AppEvent::ToolResultFull {
+                name,
+                output,
+                truncated: if truncated { Some(true) } else { None },
+                call_id,
+                thread_id,
+            },
+            StatusUpdate::TurnMetrics {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                model,
+                duration_ms,
+                iteration,
+            } => AppEvent::TurnMetrics {
+                thread_id,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                model,
+                duration_ms,
+                iteration,
             },
             StatusUpdate::JobStatus { job_id, status } => AppEvent::JobStatus {
                 job_id,

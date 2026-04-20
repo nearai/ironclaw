@@ -144,6 +144,19 @@ pub const I18N_KO_JS: &str = include_str!("../static/i18n/ko.js");
 /// i18n integration with the app.
 pub const I18N_APP_JS: &str = include_str!("../static/i18n-app.js");
 
+// ==================== Debug Panel ====================
+
+/// Debug-mode bootstrap script — runs in `<head>` so `window.isDebugMode`
+/// is set before `connectSSE()` builds its URL. Tiny on purpose; keeps
+/// theme bootstrap and debug bootstrap as separate concerns.
+pub const DEBUG_INIT_JS: &str = include_str!("../static/debug-init.js");
+
+/// Debug panel JavaScript.
+pub const DEBUG_PANEL_JS: &str = include_str!("../static/debug-panel.js");
+
+/// Debug panel stylesheet.
+pub const DEBUG_PANEL_CSS: &str = include_str!("../static/debug-panel.css");
+
 // ==================== Admin Panel ====================
 
 /// Shared theme tokens (CSS custom properties).

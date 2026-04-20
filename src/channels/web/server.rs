@@ -1,31 +1,11 @@
-//! Feature handlers for the web gateway that have not yet migrated to
-//! domain modules under `handlers/` or `features/<slice>/`.
+//! Backward-compatibility shim for the ironclaw#2599 migration.
 //!
-//! The platform-level pieces (shared state, rate limiters, CSP/static
-//! serving, route composition, `start_server`) live under
-//! `crate::channels::web::platform::*`. This file re-exports them so
-//! existing `crate::channels::web::server::*` call sites continue to
-//! resolve while the ironclaw#2599 migration is in progress.
+//! All feature handlers have moved to `crate::channels::web::features::<slice>/`.
+//! This module now only re-exports platform types so external callers
+//! (`src/main.rs`, `src/app.rs`, integration tests) keep resolving
+//! `crate::channels::web::server::*`. Stage 6 deletes this file entirely
+//! after those callers flip to `platform::*`.
 
-use std::sync::Arc;
-
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-    http::StatusCode,
-};
-use uuid::Uuid;
-
-use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::types::*;
-
-// --- Backward-compat re-exports for the ironclaw#2599 migration ---
-//
-// The platform-level state types, rate limiters, and `start_server` moved
-// to `crate::channels::web::platform::*`. External callers (handlers,
-// integration tests, `src/main.rs`, `src/app.rs`) still reach them via
-// `crate::channels::web::server::*`; re-export until follow-up PRs update
-// every call site.
 pub use crate::channels::web::platform::router::start_server;
 pub(crate) use crate::channels::web::platform::state::rate_limit_key_from_headers;
 pub use crate::channels::web::platform::state::{
@@ -33,622 +13,32 @@ pub use crate::channels::web::platform::state::{
     PromptQueue, RateLimiter, RoutineEngineSlot, WorkspacePool,
 };
 
-// Job handlers moved to handlers/jobs.rs
-// Logs handlers moved to features/logs/
-
-// --- Extension handlers ---
-
-pub(crate) async fn extensions_list_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    let installed = ext_mgr
-        .list(None, false, &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let mut owner_bound_channels = std::collections::HashSet::new();
-    let mut paired_channels = std::collections::HashSet::new();
-    for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
-                owner_bound_channels.insert(ext.name.clone());
-            }
-            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
-                paired_channels.insert(ext.name.clone());
-            }
-        }
-    }
-    let extensions = installed
-        .into_iter()
-        .map(|ext| {
-            let activation_status =
-                crate::channels::web::handlers::extensions::derive_activation_status(
-                    &ext,
-                    paired_channels.contains(&ext.name),
-                    owner_bound_channels.contains(&ext.name),
-                );
-            let (onboarding_state, onboarding) =
-                crate::channels::web::handlers::extensions::derive_onboarding(
-                    &ext.name,
-                    activation_status,
-                );
-            ExtensionInfo {
-                name: ext.name,
-                display_name: ext.display_name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                has_auth: ext.has_auth,
-                activation_status,
-                activation_error: ext.activation_error,
-                version: ext.version,
-                onboarding_state,
-                onboarding,
-            }
-        })
-        .collect();
-
-    Ok(Json(ExtensionListResponse { extensions }))
-}
-
-fn extension_phase_for_web(
-    ext: &crate::extensions::InstalledExtension,
-) -> crate::extensions::ExtensionPhase {
-    if ext.activation_error.is_some() {
-        crate::extensions::ExtensionPhase::Error
-    } else if ext.needs_setup {
-        crate::extensions::ExtensionPhase::NeedsSetup
-    } else if ext.has_auth && !ext.authenticated {
-        crate::extensions::ExtensionPhase::NeedsAuth
-    } else if ext.active
-        || matches!(
-            ext.kind,
-            crate::extensions::ExtensionKind::WasmChannel
-                | crate::extensions::ExtensionKind::ChannelRelay
-        )
-    {
-        crate::extensions::ExtensionPhase::Ready
-    } else {
-        crate::extensions::ExtensionPhase::NeedsActivation
-    }
-}
-
-pub(crate) async fn extensions_readiness_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<ExtensionReadinessResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    let installed = ext_mgr
-        .list(None, false, &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let extensions = installed
-        .into_iter()
-        .map(|ext| {
-            let phase = match extension_phase_for_web(&ext) {
-                crate::extensions::ExtensionPhase::Installed => "installed",
-                crate::extensions::ExtensionPhase::NeedsSetup => "needs_setup",
-                crate::extensions::ExtensionPhase::NeedsAuth => "needs_auth",
-                crate::extensions::ExtensionPhase::NeedsActivation => "needs_activation",
-                crate::extensions::ExtensionPhase::Activating => "activating",
-                crate::extensions::ExtensionPhase::Ready => "ready",
-                crate::extensions::ExtensionPhase::Error => "error",
-            }
-            .to_string();
-            ExtensionReadinessInfo {
-                name: ext.name,
-                kind: ext.kind.to_string(),
-                phase,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                activation_error: ext.activation_error,
-            }
-        })
-        .collect();
-
-    Ok(Json(ExtensionReadinessResponse { extensions }))
-}
-
-pub(crate) async fn extensions_tools_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
-) -> Result<Json<ToolListResponse>, (StatusCode, String)> {
-    let registry = state.tool_registry.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Tool registry not available".to_string(),
-    ))?;
-
-    let definitions = registry.tool_definitions().await;
-    let tools = definitions
-        .into_iter()
-        .map(|td| ToolInfo {
-            name: td.name,
-            description: td.description,
-        })
-        .collect();
-
-    Ok(Json(ToolListResponse { tools }))
-}
-
-pub(crate) async fn extensions_install_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(req): Json<InstallExtensionRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    // When extension manager isn't available, check registry entries for a helpful message
-    let Some(ext_mgr) = state.extension_manager.as_ref() else {
-        // Look up the entry in the catalog to give a specific error
-        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
-            let msg = match &entry.source {
-                crate::extensions::ExtensionSource::WasmBuildable { .. } => {
-                    format!(
-                        "'{}' requires building from source. \
-                         Run `ironclaw registry install {}` from the CLI.",
-                        req.name, req.name
-                    )
-                }
-                _ => format!(
-                    "Extension manager not available (secrets store required). \
-                     Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
-                    req.name
-                ),
-            };
-            return Ok(Json(ActionResponse::fail(msg)));
-        }
-        return Ok(Json(ActionResponse::fail(
-            "Extension manager not available (secrets store required)".to_string(),
-        )));
-    };
-
-    let kind_hint = req.kind.as_deref().and_then(|k| match k {
-        "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
-        "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
-        "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
-        "acp_agent" => Some(crate::extensions::ExtensionKind::AcpAgent),
-        _ => None,
-    });
-
-    match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
-        .await
-    {
-        Ok(result) => {
-            let mut resp = ActionResponse::ok(result.message);
-            match ext_mgr
-                .ensure_extension_ready(
-                    &req.name,
-                    &user.user_id,
-                    crate::extensions::EnsureReadyIntent::PostInstall,
-                )
-                .await
-            {
-                Ok(readiness) => apply_extension_readiness_to_response(&mut resp, readiness, true),
-                Err(e) => {
-                    tracing::debug!(
-                        extension = %req.name,
-                        error = %e,
-                        "Post-install readiness follow-through failed"
-                    );
-                }
-            }
-
-            Ok(Json(resp))
-        }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
-    }
-}
-
-fn apply_extension_readiness_to_response(
-    resp: &mut ActionResponse,
-    readiness: crate::extensions::EnsureReadyOutcome,
-    preserve_success: bool,
-) {
-    match readiness {
-        crate::extensions::EnsureReadyOutcome::Ready { activation, .. } => {
-            if let Some(activation) = activation {
-                resp.message = activation.message;
-                resp.activated = Some(true);
-            }
-        }
-        crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. } => {
-            let fallback = format!("'{}' requires authentication.", auth.name);
-            if !preserve_success {
-                resp.success = false;
-                resp.message = auth
-                    .instructions()
-                    .map(String::from)
-                    .unwrap_or_else(|| fallback.clone());
-            } else if let Some(instructions) = auth.instructions() {
-                resp.message = format!("{}. {}", resp.message, instructions);
-            }
-            resp.auth_url = auth.auth_url().map(String::from);
-            resp.awaiting_token = Some(auth.is_awaiting_token());
-            resp.instructions = auth.instructions().map(String::from);
-        }
-        crate::extensions::EnsureReadyOutcome::NeedsSetup {
-            instructions,
-            setup_url,
-            ..
-        } => {
-            if !preserve_success {
-                resp.success = false;
-                resp.message = instructions.clone();
-            } else {
-                resp.message = format!("{}. {}", resp.message, instructions);
-            }
-            resp.instructions = Some(instructions);
-            resp.auth_url = setup_url;
-        }
-    }
-}
-
-pub(crate) async fn extensions_activate_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    // The URL path segment is user input — validate at the boundary via
-    // `ExtensionName::new` and use the canonical form for all downstream
-    // extension-manager calls and response formatting.
-    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid extension name: {e}"),
-        )
-    })?;
-    tracing::trace!(
-        extension = %name.as_str(),
-        user_id = %user.user_id,
-        "extensions_activate_handler: received activate request"
-    );
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    match ext_mgr
-        .ensure_extension_ready(
-            name.as_str(),
-            &user.user_id,
-            crate::extensions::EnsureReadyIntent::ExplicitActivate,
-        )
-        .await
-    {
-        Ok(readiness) => {
-            let mut resp = ActionResponse::ok(format!("Extension '{}' is ready.", name.as_str()));
-            apply_extension_readiness_to_response(&mut resp, readiness, false);
-            Ok(Json(resp))
-        }
-        Err(err) => Ok(Json(ActionResponse::fail(err.to_string()))),
-    }
-}
-
-pub(crate) async fn extensions_remove_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    // Validate user-controlled path segment before it reaches the extension
-    // manager — rejects path-traversal, invalid characters, and malformed
-    // slugs with a 400.
-    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid extension name: {e}"),
-        )
-    })?;
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    match ext_mgr.remove(name.as_str(), &user.user_id).await {
-        Ok(message) => Ok(Json(ActionResponse::ok(message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
-    }
-}
-
-pub(crate) async fn extensions_registry_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Query(params): Query<RegistrySearchQuery>,
-) -> Json<RegistrySearchResponse> {
-    let query = params.query.unwrap_or_default();
-    let query_lower = query.to_lowercase();
-    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
-
-    // Filter registry entries by query (or return all if empty)
-    let matching: Vec<&crate::extensions::RegistryEntry> = if tokens.is_empty() {
-        state.registry_entries.iter().collect()
-    } else {
-        state
-            .registry_entries
-            .iter()
-            .filter(|e| {
-                let name = e.name.to_lowercase();
-                let display = e.display_name.to_lowercase();
-                let desc = e.description.to_lowercase();
-                tokens.iter().any(|t| {
-                    name.contains(t)
-                        || display.contains(t)
-                        || desc.contains(t)
-                        || e.keywords.iter().any(|k| k.to_lowercase().contains(t))
-                })
-            })
-            .collect()
-    };
-
-    // Cross-reference with installed extensions by (name, kind) to avoid
-    // false positives when the same name exists as different kinds.
-    let installed: std::collections::HashSet<(String, String)> =
-        if let Some(ext_mgr) = state.extension_manager.as_ref() {
-            ext_mgr
-                .list(None, false, &user.user_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|ext| (ext.name, ext.kind.to_string()))
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-
-    let entries = matching
-        .into_iter()
-        .map(|e| {
-            let kind_str = e.kind.to_string();
-            RegistryEntryInfo {
-                name: e.name.clone(),
-                display_name: e.display_name.clone(),
-                installed: installed.contains(&(e.name.clone(), kind_str.clone())),
-                kind: kind_str,
-                description: e.description.clone(),
-                keywords: e.keywords.clone(),
-                version: e.version.clone(),
-            }
-        })
-        .collect();
-
-    Json(RegistrySearchResponse { entries })
-}
-
-pub(crate) async fn extensions_setup_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(name): Path<String>,
-) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
-    // Validate user-controlled path segment at entry. Downstream lookups
-    // (`get_setup_schema`, `list().find(...)`) consume the canonical form.
-    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid extension name: {e}"),
-        )
-    })?;
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    let setup = ext_mgr
-        .get_setup_schema(name.as_str(), &user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let kind = ext_mgr
-        .list(None, false, &user.user_id)
-        .await
-        .ok()
-        .and_then(|list| list.into_iter().find(|e| e.name == name.as_str()))
-        .map(|e| e.kind.to_string())
-        .unwrap_or_default();
-
-    Ok(Json(ExtensionSetupResponse {
-        name: name.as_str().to_string(),
-        kind,
-        secrets: setup.secrets,
-        fields: setup.fields,
-        onboarding_state: None,
-        onboarding: None,
-    }))
-}
-
-pub(crate) async fn extensions_setup_submit_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(name): Path<String>,
-    Json(req): Json<ExtensionSetupRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    // The URL path segment is user input — validate at the boundary via
-    // `ExtensionName::new`. Reject path-traversal, invalid characters, or
-    // malformed slugs with a 400 before the value reaches extension
-    // lookup, SSE broadcast, or any `from_trusted` wrap below.
-    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid extension name: {e}"),
-        )
-    })?;
-
-    // Clear auth mode regardless of outcome so the next user message goes
-    // through to the LLM instead of being intercepted as a token.
-    crate::channels::web::platform::legacy_auth::clear_auth_mode(&state, &user.user_id).await;
-
-    match ext_mgr
-        .configure(name.as_str(), &req.secrets, &req.fields, &user.user_id)
-        .await
-    {
-        Ok(result) => {
-            // Return ok when activated OR when an OAuth auth_url is present
-            // (activation is expected to be false until OAuth completes).
-            let mut resp = if result.activated || result.auth_url.is_some() {
-                ActionResponse::ok(result.message.clone())
-            } else {
-                ActionResponse::fail(result.message.clone())
-            };
-            resp.activated = Some(result.activated);
-            resp.auth_url = result.auth_url.clone();
-            resp.onboarding_state = result.onboarding_state;
-            resp.onboarding = result.onboarding.clone();
-            let outcome = crate::channels::web::onboarding::classify_configure_result(&result);
-            let mut onboarding_event =
-                crate::channels::web::onboarding::event_from_configure_result(
-                    name.clone(),
-                    &result,
-                    req.thread_id.clone(),
-                );
-            if let (Some(request_id), Some(thread_id)) =
-                (req.request_id.as_deref(), req.thread_id.as_deref())
-            {
-                match outcome {
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired => {}
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
-                        instructions,
-                        onboarding,
-                    } => {
-                        let request_id = Uuid::parse_str(request_id).map_err(|_| {
-                            (
-                                StatusCode::BAD_REQUEST,
-                                "Invalid request_id (expected UUID)".to_string(),
-                            )
-                        })?;
-                        if let Some(next_request_id) =
-                            crate::bridge::transition_engine_pending_auth_request_to_pairing(
-                                &user.user_id,
-                                request_id,
-                                Some(thread_id),
-                                name.as_str(),
-                            )
-                            .await
-                            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                        {
-                            onboarding_event =
-                                crate::channels::web::types::OnboardingStateDto::pairing_required(
-                                    name.clone(),
-                                    Some(next_request_id),
-                                    Some(thread_id.to_string()),
-                                    Some(result.message.clone()),
-                                    instructions,
-                                    onboarding,
-                                );
-                        }
-                    }
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {
-                        crate::channels::web::platform::engine_dispatch::dispatch_engine_external_callback(
-                            &state,
-                            &user.user_id,
-                            thread_id,
-                            request_id,
-                        )
-                        .await?;
-                    }
-                    crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {}
-                }
-            }
-            // Broadcast the canonical onboarding state so the chat UI can
-            // dismiss or advance any in-progress onboarding UI.
-            state
-                .sse
-                .broadcast_for_user(&user.user_id, onboarding_event);
-            Ok(Json(resp))
-        }
-        Err(e) => {
-            // Preserve the `activated` field on the failure path so clients
-            // (and regression tests) see an explicit `false` rather than
-            // `null`. `ActionResponse::fail` leaves `activated` as `None`,
-            // which serializes to `null` and makes "did activation fail?"
-            // ambiguous from the wire.
-            let mut resp = ActionResponse::fail(e.to_string());
-            resp.activated = Some(false);
-            Ok(Json(resp))
-        }
-    }
-}
-
-// Pairing handlers moved to features/pairing/
-
-pub(crate) async fn routines_runs_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    // Verify ownership before listing runs.
-    let routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if routine.user_id != user.user_id {
-        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
-    }
-
-    let runs = store
-        .list_routine_runs(routine_id, 50)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let run_infos: Vec<RoutineRunInfo> = runs
-        .iter()
-        .map(|run| RoutineRunInfo {
-            id: run.id,
-            trigger_type: run.trigger_type.clone(),
-            started_at: run.started_at.to_rfc3339(),
-            completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
-            status: run.status.to_string(),
-            result_summary: run.result_summary.clone(),
-            tokens_used: run.tokens_used,
-            job_id: run.job_id,
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({
-        "routine_id": routine_id,
-        "runs": run_infos,
-    })))
-}
-
-// Gateway status handler moved to features/status/
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::{
+        Json,
+        extract::{Query, State},
+        http::StatusCode,
+    };
+
+    use uuid::Uuid;
+
     use crate::agent::SessionManager;
     use crate::auth::oauth;
     use crate::channels::relay::DEFAULT_RELAY_NAME;
-    use crate::channels::web::auth::{CombinedAuthState, UserIdentity};
+    use crate::channels::web::auth::{AuthenticatedUser, CombinedAuthState, UserIdentity};
     use crate::channels::web::features::chat::{
-        IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler, chat_auth_cancel_handler,
-        chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
-        pending_gate_extension_name,
+        HistoryQuery, IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler,
+        chat_auth_cancel_handler, chat_auth_token_handler, chat_gate_resolve_handler,
+        chat_history_handler, pending_gate_extension_name,
+    };
+    use crate::channels::web::features::extensions::{
+        apply_extension_readiness_to_response, extension_phase_for_web,
+        extensions_activate_handler, extensions_list_handler, extensions_readiness_handler,
+        extensions_remove_handler, extensions_setup_handler, extensions_setup_submit_handler,
     };
     use crate::channels::web::features::oauth::{
         oauth_callback_handler, slack_relay_oauth_callback_handler,
@@ -663,6 +53,11 @@ mod tests {
         css_handler, generate_csp_nonce, stamp_nonce_into_html,
     };
     use crate::channels::web::sse::SseManager;
+    use crate::channels::web::test_helpers::{
+        test_gateway_state, test_gateway_state_with_dependencies,
+        test_gateway_state_with_store_and_session_manager,
+    };
+    use crate::channels::web::types::*;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
     };
@@ -777,119 +172,6 @@ mod tests {
     }
 
     // --- OAuth callback handler tests ---
-
-    /// Build a minimal `GatewayState` for handler tests.
-    fn test_gateway_state_with_dependencies(
-        ext_mgr: Option<Arc<ExtensionManager>>,
-        store: Option<Arc<dyn Database>>,
-        db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
-        pairing_store: Option<Arc<crate::pairing::PairingStore>>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: ext_mgr,
-            tool_registry: None,
-            store,
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth,
-            pairing_store,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
-
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
-        test_gateway_state_with_dependencies(ext_mgr, None, None, None)
-    }
-
-    fn test_gateway_state_with_store_and_session_manager(
-        store: Arc<dyn Database>,
-        session_manager: Arc<SessionManager>,
-    ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: Some(session_manager),
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: Some(store),
-            settings_cache: None,
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            llm_reload: None,
-            llm_session_manager: None,
-            config_toml_path: None,
-            skill_registry: None,
-            skill_catalog: None,
-            auth_manager: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
-            secrets_store: None,
-            db_auth: None,
-            pairing_store: None,
-            oauth_providers: None,
-            oauth_state_store: None,
-            oauth_base_url: None,
-            oauth_allowed_domains: Vec::new(),
-            near_nonce_store: None,
-            near_rpc_url: None,
-            near_network: None,
-            oauth_sweep_shutdown: None,
-            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            tool_dispatcher: None,
-        })
-    }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
@@ -1095,6 +377,206 @@ mod tests {
 
         assert!(payload.get("in_progress").is_none());
         assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_returns_500_when_ownership_lookup_errors() {
+        use crate::db::libsql::LibSqlBackend;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("broken.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create backend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrate backend");
+        let conn = backend.connect().await.expect("connect backend");
+        conn.execute(
+            "ALTER TABLE conversations RENAME TO conversations_broken",
+            (),
+        )
+        .await
+        .expect("break ownership lookup");
+
+        let store: Arc<dyn Database> = Arc::new(backend);
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&store), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={}", Uuid::new_v4()))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(std::str::from_utf8(&body).unwrap_or(""), "Database error");
+    }
+
+    fn history_request(
+        state: Arc<GatewayState>,
+        user_id: &str,
+        thread_id: Uuid,
+    ) -> (
+        State<Arc<GatewayState>>,
+        AuthenticatedUser,
+        Query<HistoryQuery>,
+    ) {
+        (
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: user_id.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Query(HistoryQuery {
+                thread_id: Some(thread_id.to_string()),
+                limit: None,
+                before: None,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_engine_v2_messages_for_owner() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "demo goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::user("hello engine"));
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("hi back"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(
+            response.turns.len(),
+            1,
+            "one user+assistant pair collapses into a single turn"
+        );
+        let turn = &response.turns[0];
+        assert_eq!(turn.user_input, "hello engine");
+        assert_eq!(turn.response.as_deref(), Some("hi back"));
+        assert!(!response.has_more);
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_404_for_cross_user_engine_thread() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "bob's secret",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "bob",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::assistant("private reply"));
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let result = chat_history_handler(s, u, q).await;
+
+        match result {
+            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Ok(resp) => panic!(
+                "alice must not see bob's engine thread but got {} turns",
+                resp.turns.len()
+            ),
+        }
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_accepts_session_owned_thread_without_db() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        // Ensure neither engine state nor v1 DB can claim ownership — the
+        // only remaining source must be the in-memory v1 session, which
+        // this test exercises.
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let session_manager = Arc::new(SessionManager::new());
+        let thread_uuid = Uuid::new_v4();
+        {
+            let session = session_manager.get_or_create_session("alice").await;
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread_with_id(thread_uuid, Some("web"));
+            thread.start_turn("from session");
+            thread.conclude_turn(crate::agent::session::TurnOutcome::Completed(
+                "session reply".to_string(),
+            ));
+        }
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(session_manager);
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert_eq!(response.turns.len(), 1);
+        assert_eq!(response.turns[0].user_input, "from session");
+        assert_eq!(response.turns[0].response.as_deref(), Some("session reply"));
     }
 
     /// Build a minimal `AuthManager` backed by an in-memory secrets store.
@@ -1720,7 +1202,7 @@ mod tests {
             .await
             .expect("resolve identity")
             .expect("claimed identity");
-        assert_eq!(identity.owner_id.as_str(), "member-1");
+        assert_eq!(identity.as_str(), "member-1");
         assert!(
             pairing_store
                 .list_pending("telegram")
@@ -1981,7 +1463,10 @@ mod tests {
             .approve(
                 "telegram",
                 &request.code,
-                &crate::ownership::OwnerId::from("member-1"),
+                &crate::ownership::UserId::from_trusted(
+                    "member-1".into(),
+                    crate::ownership::UserRole::Regular,
+                ),
             )
             .await
             .expect("approve pairing");

@@ -937,7 +937,13 @@ impl ExtensionManager {
         let rt_guard = self.channel_runtime.read().await;
         let rt = (*rt_guard).as_ref()?;
         rt.pairing_store
-            .external_id_for_owner(name, &crate::ownership::OwnerId::from(self.user_id.clone()))
+            .external_id_for_owner(
+                name,
+                &crate::ownership::UserId::from_trusted(
+                    self.user_id.clone(),
+                    crate::ownership::UserRole::Regular,
+                ),
+            )
             .await
             .ok()
             .flatten()
@@ -7353,7 +7359,7 @@ impl ExtensionManager {
                     && !self.has_wasm_channel_pairing(&name).await;
 
                 if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
-                    let onboarding = crate::channels::web::handlers::extensions::derive_onboarding(
+                    let onboarding = crate::channels::web::features::extensions::derive_onboarding(
                         &name,
                         Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                     );
@@ -7398,7 +7404,7 @@ impl ExtensionManager {
                         None
                     },
                     onboarding: if needs_pairing {
-                        crate::channels::web::handlers::extensions::derive_onboarding(
+                        crate::channels::web::features::extensions::derive_onboarding(
                             &name,
                             Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                         )
@@ -9971,7 +9977,7 @@ mod tests {
     #[tokio::test]
     async fn test_has_wasm_channel_pairing_reflects_db_backed_identities() -> Result<(), String> {
         use crate::db::{Database, UserStore};
-        use crate::ownership::{OwnerId, OwnershipCache};
+        use crate::ownership::{OwnershipCache, UserId, UserRole};
         use crate::pairing::PairingStore;
 
         let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
@@ -10075,7 +10081,11 @@ mod tests {
             .await
             .map_err(|e| format!("upsert_request failed: {e}"))?;
         pairing_store
-            .approve("telegram", &request.code, &OwnerId::from("owner-1921"))
+            .approve(
+                "telegram",
+                &request.code,
+                &UserId::from_trusted("owner-1921".into(), UserRole::Regular),
+            )
             .await
             .map_err(|e| format!("approve failed: {e}"))?;
 
