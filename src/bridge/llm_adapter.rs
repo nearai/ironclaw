@@ -14,6 +14,8 @@ use crate::llm::{
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
 
+const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
+
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
 /// `src/agent/cost_guard.rs::CostGuard::record_llm_call` so engine v2's
@@ -137,13 +139,7 @@ impl LlmBackend for LlmBridgeAdapter {
 
             // Check for code blocks in the response (CodeAct/RLM pattern)
             // after stripping provider-flattened internal markers from visible text.
-            let llm_response = match extract_code_block(&cleaned_text) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(cleaned_text),
-                },
-                None => LlmResponse::Text(cleaned_text),
-            };
+            let llm_response = text_response_from_cleaned_text(cleaned_text);
 
             return Ok(LlmOutput {
                 response: llm_response,
@@ -236,13 +232,7 @@ impl LlmBackend for LlmBridgeAdapter {
             } else {
                 // Detect ```repl or ```python fenced code blocks after stripping
                 // provider-flattened tool markers from visible text.
-                match extract_code_block(&cleaned_text) {
-                    Some(code) => LlmResponse::Code {
-                        code,
-                        content: Some(cleaned_text),
-                    },
-                    None => LlmResponse::Text(cleaned_text),
-                }
+                text_response_from_cleaned_text(cleaned_text)
             }
         };
 
@@ -502,6 +492,19 @@ fn extract_code_block(text: &str) -> Option<String> {
     }
 
     Some(all_code.join("\n\n"))
+}
+
+fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    match extract_code_block(&cleaned_text) {
+        Some(code) => LlmResponse::Code {
+            code,
+            content: Some(cleaned_text),
+        },
+        None if cleaned_text.trim().is_empty() => {
+            LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string())
+        }
+        None => LlmResponse::Text(cleaned_text),
+    }
 }
 
 /// Heuristic check that a bare ``` block contains Python rather than
@@ -937,6 +940,54 @@ mod tests {
                 assert_eq!(text, "Let me check.");
             }
             other => panic!("expected sanitized text response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_falls_back_when_cleaned_text_is_empty() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "[Called tool `unknown_tool` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, EMPTY_CLEANED_RESPONSE_FALLBACK);
+            }
+            other => panic!("expected fallback text response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_falls_back_when_cleaned_text_is_empty() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
+            content: "[Called tool `shell` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, EMPTY_CLEANED_RESPONSE_FALLBACK);
+            }
+            other => panic!("expected fallback text response, got {other:?}"),
         }
     }
 
