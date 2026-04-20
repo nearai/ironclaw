@@ -187,6 +187,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            project_context_cache: None,
         });
 
         Self {
@@ -249,6 +250,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            project_context_cache: self.state.project_context_cache.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -312,6 +314,20 @@ impl GatewayChannel {
         dispatcher: Arc<crate::tools::dispatch::ToolDispatcher>,
     ) -> Self {
         self.rebuild_state(|s| s.tool_dispatcher = Some(dispatcher));
+        self
+    }
+
+    /// Inject the project-context cache that the conversation chrome
+    /// uses to render per-project branch / dirty / PR state without
+    /// blocking the thread-list endpoint on `gh`.
+    ///
+    /// Must be called after `with_tool_dispatcher` (the cache refreshes
+    /// via the dispatcher's shell tool).
+    pub fn with_project_context_cache(
+        mut self,
+        cache: Arc<crate::channels::web::platform::project_context_cache::ProjectContextCache>,
+    ) -> Self {
+        self.rebuild_state(|s| s.project_context_cache = Some(cache));
         self
     }
 

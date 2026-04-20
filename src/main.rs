@@ -832,7 +832,13 @@ async fn async_main() -> anyhow::Result<()> {
                 Arc::clone(&components.safety),
                 Arc::clone(db),
             ));
+            let project_context_cache = Arc::new(
+                ironclaw::channels::web::platform::project_context_cache::ProjectContextCache::new(
+                    Arc::clone(&dispatcher),
+                ),
+            );
             gw = gw.with_tool_dispatcher(dispatcher);
+            gw = gw.with_project_context_cache(project_context_cache);
         }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend

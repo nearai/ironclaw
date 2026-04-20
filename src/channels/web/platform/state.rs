@@ -440,6 +440,11 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// TTL'd cache for per-project branch / dirty-state / PR that the
+    /// conversation chrome renders. Lazily populated from `shell` tool
+    /// dispatches so the thread-list endpoint never blocks on `gh`.
+    pub project_context_cache:
+        Option<Arc<crate::channels::web::platform::project_context_cache::ProjectContextCache>>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace

@@ -50,15 +50,16 @@ pub mod registry;
 
 // Re-export core types at crate root for convenience.
 pub use types::{
-    ActivationCriteria, GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE,
-    ProviderRefreshStrategy, SkillCredentialLocation, SkillCredentialSpec, SkillManifest,
-    SkillOAuthConfig, SkillSource, SkillTrust,
+    ActivationCriteria, ContextCriteria, GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE,
+    ProviderRefreshStrategy, SkillActivationContext, SkillCredentialLocation, SkillCredentialSpec,
+    SkillManifest, SkillOAuthConfig, SkillSource, SkillTrust,
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, extract_skill_mentions, prefilter_skills,
+    prefilter_skills_with_context,
 };
 pub use validation::{
     escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,

@@ -6,7 +6,9 @@ mod timezone;
 mod util;
 
 pub use event::{AppEvent, OnboardingStateDto, PlanStepDto, ToolDecisionDto};
-pub use identity::{CredentialName, ExtensionName, IdentityError, MAX_NAME_LEN};
+pub use identity::{
+    CredentialName, ExtensionName, GitHubRepo, GitHubRepoError, IdentityError, MAX_NAME_LEN,
+};
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::truncate_preview;
 

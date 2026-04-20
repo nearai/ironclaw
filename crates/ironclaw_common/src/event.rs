@@ -340,6 +340,41 @@ pub enum AppEvent {
         mission_name: String,
     },
 
+    /// Gateway "!" shell mode: the user-supplied command, broadcast so the
+    /// UI can render the command line immediately before the tool runs.
+    ///
+    /// Paired with a subsequent [`AppEvent::ShellOutput`] carrying stdout,
+    /// stderr, and exit code once the shell tool returns.
+    #[serde(rename = "shell_command")]
+    ShellCommand {
+        thread_id: String,
+        /// ID that links this command with its matching [`Self::ShellOutput`].
+        turn_id: String,
+        /// Raw command, as typed by the user (with the leading `!` stripped).
+        command: String,
+        /// Host path the command will run in, surfaced to the UI so the user
+        /// can confirm the project folder is what they expected.
+        workdir: String,
+    },
+
+    /// Gateway "!" shell mode: command output + exit code.
+    ///
+    /// Payload is intentionally flat so the UI can render it as a single
+    /// turn card without stitching multiple events together. `truncated`
+    /// is `true` when the shell tool clipped the output past its
+    /// `MAX_OUTPUT_SIZE`.
+    #[serde(rename = "shell_output")]
+    ShellOutput {
+        thread_id: String,
+        turn_id: String,
+        /// Combined stdout/stderr when the tool did not split them, or just
+        /// stdout when `stderr` is also emitted separately.
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        truncated: bool,
+    },
+
     /// Plan progress update — full checklist snapshot.
     ///
     /// Emitted when a plan is created, approved, or when any step changes
@@ -397,6 +432,8 @@ impl AppEvent {
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
             Self::PlanUpdate { .. } => "plan_update",
+            Self::ShellCommand { .. } => "shell_command",
+            Self::ShellOutput { .. } => "shell_output",
         }
     }
 }
@@ -571,6 +608,20 @@ mod tests {
                 steps: vec![],
                 mission_id: None,
                 thread_id: None,
+            },
+            AppEvent::ShellCommand {
+                thread_id: String::new(),
+                turn_id: String::new(),
+                command: String::new(),
+                workdir: String::new(),
+            },
+            AppEvent::ShellOutput {
+                thread_id: String::new(),
+                turn_id: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                truncated: false,
             },
         ];
 

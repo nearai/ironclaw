@@ -255,6 +255,7 @@ impl GatewayWorkflowHarness {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            project_context_cache: None,
         });
 
         let mut agent = Agent::new(

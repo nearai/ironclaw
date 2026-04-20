@@ -590,6 +590,25 @@ impl ToolRegistry {
         tracing::debug!("Registered 4 memory tools");
     }
 
+    /// Register project-administration tools (create/update/set-active/assign-thread).
+    ///
+    /// Call after `register_memory_tools_with_resolver` so the set-active
+    /// tool can share the same `WorkspaceResolver` for its active-pointer
+    /// MemoryDoc write at `projects/_active.json`.
+    pub fn register_project_admin_tools(
+        &self,
+        resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+    ) {
+        use crate::tools::builtin::{
+            ProjectAssignThreadTool, ProjectCreateTool, ProjectSetActiveTool, ProjectUpdateTool,
+        };
+        self.register_sync(Arc::new(ProjectCreateTool));
+        self.register_sync(Arc::new(ProjectUpdateTool));
+        self.register_sync(Arc::new(ProjectSetActiveTool::new(resolver)));
+        self.register_sync(Arc::new(ProjectAssignThreadTool));
+        tracing::debug!("Registered 4 project-administration tools");
+    }
+
     /// Register memory tools with a fixed workspace (backward compatibility).
     ///
     /// Memory tools require a workspace for persistence. Call this after

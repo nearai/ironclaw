@@ -248,6 +248,138 @@ impl ExtensionName {
     }
 }
 
+/// Why a candidate string is not a valid GitHub repo slug.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GitHubRepoError {
+    #[error("github repo must be 'owner/repo', got '{0}'")]
+    WrongShape(String),
+    #[error(
+        "github repo owner '{0}': must be 1-39 chars of letters, digits, or hyphens, not starting or ending with hyphen"
+    )]
+    InvalidOwner(String),
+    #[error(
+        "github repo name '{0}': must be 1-100 chars of letters, digits, '-', '_', or '.', and not '.' or '..'"
+    )]
+    InvalidRepo(String),
+}
+
+/// A GitHub repository slug in `owner/repo` form.
+///
+/// Flows from the project-modal UI into the gateway, into `Project.metadata`,
+/// and into the coding-skill git-context injector. A stringly-typed value at
+/// any of those layers would be a regression of the #2561/#2574 class of
+/// identity-confusion bugs — hence the newtype. See `.claude/rules/types.md`.
+///
+/// Validation follows GitHub's own rules:
+///
+/// - Owner: 1-39 chars of ASCII letters, digits, or hyphens. May not start
+///   or end with a hyphen.
+/// - Repo: 1-100 chars of ASCII letters, digits, hyphen, underscore, or dot.
+///   May not be exactly `.` or `..`.
+///
+/// Wire format is `#[serde(transparent)]` so persisted rows predating the
+/// newtype (raw JSON strings in `Project.metadata`) continue to deserialize.
+/// Invalid stored values surface only when a later code path reconstructs
+/// through [`Self::new`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GitHubRepo(String);
+
+impl GitHubRepo {
+    /// Construct from any string-like value, validating.
+    pub fn new(raw: impl AsRef<str>) -> Result<Self, GitHubRepoError> {
+        let trimmed = raw.as_ref().trim();
+        let (owner, repo) = trimmed
+            .split_once('/')
+            .ok_or_else(|| GitHubRepoError::WrongShape(trimmed.to_string()))?;
+        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+            return Err(GitHubRepoError::WrongShape(trimmed.to_string()));
+        }
+        if !is_valid_owner(owner) {
+            return Err(GitHubRepoError::InvalidOwner(owner.to_string()));
+        }
+        if !is_valid_repo(repo) {
+            return Err(GitHubRepoError::InvalidRepo(repo.to_string()));
+        }
+        Ok(Self(format!("{owner}/{repo}")))
+    }
+
+    /// Construct without validation. See `CredentialName::from_trusted`.
+    pub fn from_trusted(raw: String) -> Self {
+        Self(raw)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn owner(&self) -> &str {
+        self.0.split_once('/').map(|(o, _)| o).unwrap_or(&self.0)
+    }
+
+    pub fn repo(&self) -> &str {
+        self.0.split_once('/').map(|(_, r)| r).unwrap_or("")
+    }
+}
+
+impl fmt::Display for GitHubRepo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for GitHubRepo {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for GitHubRepo {
+    type Error = GitHubRepoError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for GitHubRepo {
+    type Error = GitHubRepoError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl FromStr for GitHubRepo {
+    type Err = GitHubRepoError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl From<GitHubRepo> for String {
+    fn from(value: GitHubRepo) -> String {
+        value.0
+    }
+}
+
+fn is_valid_owner(s: &str) -> bool {
+    if s.is_empty() || s.len() > 39 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn is_valid_repo(s: &str) -> bool {
+    if s.is_empty() || s.len() > 100 || s == "." || s == ".." {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +555,100 @@ mod tests {
         let via_as_ref: &str = ext.as_ref();
         assert_eq!(via_as_str, "gmail");
         assert_eq!(via_as_ref, "gmail");
+    }
+
+    #[test]
+    fn github_repo_accepts_standard_shape() {
+        let r = GitHubRepo::new("nearai/ironclaw").unwrap();
+        assert_eq!(r.as_str(), "nearai/ironclaw");
+        assert_eq!(r.owner(), "nearai");
+        assert_eq!(r.repo(), "ironclaw");
+    }
+
+    #[test]
+    fn github_repo_trims_whitespace() {
+        let r = GitHubRepo::new("  nearai/ironclaw  ").unwrap();
+        assert_eq!(r.as_str(), "nearai/ironclaw");
+    }
+
+    #[test]
+    fn github_repo_accepts_repo_with_dots_hyphens_underscores() {
+        assert!(GitHubRepo::new("owner/my-repo").is_ok());
+        assert!(GitHubRepo::new("owner/my_repo").is_ok());
+        assert!(GitHubRepo::new("owner/my.repo").is_ok());
+        assert!(GitHubRepo::new("owner/repo.js").is_ok());
+    }
+
+    #[test]
+    fn github_repo_rejects_wrong_shape() {
+        assert!(matches!(
+            GitHubRepo::new("just-owner"),
+            Err(GitHubRepoError::WrongShape(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("owner/"),
+            Err(GitHubRepoError::WrongShape(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("/repo"),
+            Err(GitHubRepoError::WrongShape(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("a/b/c"),
+            Err(GitHubRepoError::WrongShape(_))
+        ));
+    }
+
+    #[test]
+    fn github_repo_rejects_invalid_owner() {
+        assert!(matches!(
+            GitHubRepo::new("-bad/repo"),
+            Err(GitHubRepoError::InvalidOwner(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("bad-/repo"),
+            Err(GitHubRepoError::InvalidOwner(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("owner_with_underscore/repo"),
+            Err(GitHubRepoError::InvalidOwner(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("Owner With Space/repo"),
+            Err(GitHubRepoError::InvalidOwner(_))
+        ));
+    }
+
+    #[test]
+    fn github_repo_rejects_invalid_repo() {
+        assert!(matches!(
+            GitHubRepo::new("owner/."),
+            Err(GitHubRepoError::InvalidRepo(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("owner/.."),
+            Err(GitHubRepoError::InvalidRepo(_))
+        ));
+        assert!(matches!(
+            GitHubRepo::new("owner/has space"),
+            Err(GitHubRepoError::InvalidRepo(_))
+        ));
+    }
+
+    #[test]
+    fn github_repo_serde_is_transparent() {
+        let r = GitHubRepo::new("nearai/ironclaw").unwrap();
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, "\"nearai/ironclaw\"");
+        let back: GitHubRepo = serde_json::from_str("\"nearai/ironclaw\"").unwrap();
+        assert_eq!(back.as_str(), "nearai/ironclaw");
+    }
+
+    #[test]
+    fn github_repo_serde_does_not_revalidate() {
+        // Legacy persisted values must continue to deserialize.
+        let legacy: GitHubRepo = serde_json::from_str("\"Bad Shape\"").unwrap();
+        assert_eq!(legacy.as_str(), "Bad Shape");
     }
 
     #[test]

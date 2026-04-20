@@ -56,6 +56,7 @@ HEADED=1 pytest scenarios/
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, and verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret` |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
+| `test_coding_project_flow.py` | Coding-agent UX: project chrome renders after create+active, `!` prefix toggles the shell-mode input badge, `!echo hello` dispatches through `/api/chat/send mode=shell`, renders a shell turn card with exit-code badge, persists across reload, rejects 409 when the thread has no project, and the `github_repo` newtype rejects malformed slugs at the HTTP boundary |
 
 ## `helpers.py`
 

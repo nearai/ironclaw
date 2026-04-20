@@ -231,6 +231,7 @@ pub fn build_turns_from_db_messages(
                 tool_calls: Vec::new(),
                 generated_images: Vec::new(),
                 narrative: None,
+                shell: None,
             };
 
             // Check if next message is a tool_calls record
@@ -322,6 +323,76 @@ pub fn build_turns_from_db_messages(
                 tool_calls: Vec::new(),
                 generated_images: Vec::new(),
                 narrative: None,
+                shell: None,
+            });
+            turn_number += 1;
+        } else if msg.role == "shell_command" {
+            // Gateway `!`-mode turn: pair the command with its matching
+            // `shell_output` if present. Always render, even if the output
+            // row is missing (e.g. gateway crashed mid-dispatch) — the UI
+            // then shows the command with no output card, which is
+            // diagnostically more useful than silently dropping it.
+            let command = msg
+                .content
+                .strip_prefix('!')
+                .unwrap_or(&msg.content)
+                .to_string();
+            let (stdout, stderr, exit_code, truncated, completed_at) = if let Some(next) =
+                iter.peek()
+                && next.role == "shell_output"
+            {
+                // safety: peeked `Some` two lines up; this next() cannot be None.
+                let Some(out) = iter.next() else {
+                    continue;
+                };
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&out.content).unwrap_or(serde_json::Value::Null);
+                (
+                    parsed
+                        .get("stdout")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    parsed
+                        .get("stderr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    parsed
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0) as i32,
+                    parsed
+                        .get("truncated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    Some(out.created_at.to_rfc3339()),
+                )
+            } else {
+                (String::new(), String::new(), 0, false, None)
+            };
+            turns.push(TurnInfo {
+                turn_number,
+                user_message_id: Some(msg.id),
+                user_input: msg.content.clone(),
+                response: None,
+                state: if exit_code == 0 {
+                    "Completed".to_string()
+                } else {
+                    "Failed".to_string()
+                },
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at,
+                tool_calls: Vec::new(),
+                generated_images: Vec::new(),
+                narrative: None,
+                shell: Some(crate::channels::web::types::ShellTurnInfo {
+                    command,
+                    stdout,
+                    stderr,
+                    exit_code,
+                    truncated,
+                }),
             });
             turn_number += 1;
         }
@@ -814,6 +885,7 @@ mod tests {
                     path: None,
                 }],
                 narrative: None,
+                shell: None,
             },
             TurnInfo {
                 turn_number: 1,
@@ -837,6 +909,7 @@ mod tests {
                     },
                 ],
                 narrative: None,
+                shell: None,
             },
         ];
 

@@ -571,6 +571,7 @@ impl Agent {
         &self,
         message_content: &str,
         user_id: &str,
+        activation_context: &ironclaw_skills::SkillActivationContext,
     ) -> (Vec<ironclaw_skills::LoadedSkill>, String, Vec<String>) {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string(), vec![]);
@@ -633,12 +634,13 @@ impl Agent {
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
-        let outcome = ironclaw_skills::prefilter_skills(
+        let outcome = ironclaw_skills::prefilter_skills_with_context(
             &rewritten,
             &available,
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
             &satisfied,
+            activation_context,
         );
 
         // Feedback notes: start with the selector's own notes (chain-load,

@@ -1454,6 +1454,23 @@ function connectSSE(lastEventIdOverride) {
     setToolCardOutput(data);
   });
 
+  // "!" shell mode — paired events, one per "$ cmd" header and one per
+  // stdout/stderr/exit-code body. We pre-create the card on `shell_command`
+  // so the user sees their command immediately; `shell_output` fills in
+  // the body. Two events keeps the render ordering robust to interleaving
+  // with other SSE traffic on the same thread.
+  addTrackedEventListener('shell_command', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    renderShellCommand(data);
+  });
+
+  addTrackedEventListener('shell_output', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    fillShellOutput(data);
+  });
+
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
@@ -1809,6 +1826,22 @@ function sendMessage() {
   if (_sendCooldown) return;
   const content = input.value.trim();
   if (!content && stagedImages.length === 0) return;
+
+  // "!" shell mode: strip the prefix and route through /api/chat/send with
+  // mode=shell. The backend dispatches the shell tool in the thread's
+  // active-project folder, persists command+output as a shell turn, and
+  // broadcasts shell_command/shell_output SSE events that the renderer
+  // below pairs into a distinct monospace card. Bare "!" is a no-op so
+  // users can discard a mis-prefix without firing a shell.
+  if (content.startsWith('!')) {
+    const command = content.slice(1).trimStart();
+    if (!command) return;
+    input.value = '';
+    autoResizeTextarea(input);
+    input.focus();
+    sendShellCommand(command);
+    return;
+  }
 
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
@@ -4037,6 +4070,14 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
+        // Shell turns ("!"-mode commands) render as a single combined card —
+        // the command line plus the output — rather than separate
+        // user/assistant bubbles. `turn.shell` is only populated when the
+        // backend paired a `shell_command` + `shell_output` message pair.
+        if (turn.shell) {
+          renderShellTurn(turn.shell);
+          continue;
+        }
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
@@ -11187,3 +11228,559 @@ if (window.__IRONCLAW_LAYOUT__
     && !window.location.hash) {
   switchTab(window.__IRONCLAW_LAYOUT__.tabs.default_tab);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Project UI — active-project selector, conversation chrome, "!" shell
+// mode rendering. Kept at the tail of app.js so it can reference
+// already-defined helpers (apiFetch, showToast, I18n, escapeHtml,
+// currentThreadId, addTrackedEventListener, ...) without forward
+// declarations. Surface is intentionally small — one public object on
+// `window.ProjectUI` so future widget-layout hooks can call into it.
+// ─────────────────────────────────────────────────────────────────────
+(function () {
+  const state = {
+    projects: [],
+    activeProjectId: null,
+    currentThreadProject: null,
+    loaded: false,
+  };
+
+  function t(key, fallback, params) {
+    if (typeof I18n !== 'undefined' && typeof I18n.t === 'function') {
+      try {
+        const s = I18n.t(key, params || {});
+        if (s && s !== key) return s;
+      } catch (_err) { /* fall through to fallback */ }
+    }
+    if (fallback && params) {
+      return Object.keys(params).reduce(
+        (out, k) => out.replace('{' + k + '}', params[k]),
+        fallback,
+      );
+    }
+    return fallback || key;
+  }
+
+  function contractHome(path) {
+    if (!path) return '';
+    // Purely cosmetic — we don't know the user's real $HOME from the
+    // browser. Strip the common ~/.ironclaw prefix so the chrome shows
+    // a short label for default-folder projects.
+    return path.replace(/^\/home\/[^/]+\//, '~/').replace(/^\/Users\/[^/]+\//, '~/');
+  }
+
+  function ensureChrome() {
+    let bar = document.getElementById('project-chrome');
+    if (bar) return bar;
+    const tabChat = document.getElementById('tab-chat');
+    if (!tabChat) return null;
+    const chatContainer = tabChat.querySelector('.chat-container');
+    if (!chatContainer) return null;
+    bar = document.createElement('div');
+    bar.id = 'project-chrome';
+    bar.className = 'project-chrome';
+    bar.hidden = true;
+    bar.innerHTML = ''
+      + '<div class="project-chrome-inner">'
+      + '  <button class="project-chrome-button" id="project-chrome-button" type="button">'
+      + '    <span class="project-chrome-icon">📁</span>'
+      + '    <span class="project-chrome-name" id="project-chrome-name"></span>'
+      + '    <span class="project-chrome-caret">▾</span>'
+      + '  </button>'
+      + '  <span class="project-chrome-folder" id="project-chrome-folder"></span>'
+      + '  <span class="project-chrome-branch" id="project-chrome-branch" hidden></span>'
+      + '  <a class="project-chrome-pr" id="project-chrome-pr" target="_blank" rel="noopener" hidden></a>'
+      + '  <span class="project-chrome-empty" id="project-chrome-empty" hidden></span>'
+      + '</div>';
+    chatContainer.insertBefore(bar, chatContainer.firstChild);
+    bar.querySelector('#project-chrome-button').addEventListener('click', openProjectModal);
+    return bar;
+  }
+
+  function refreshChromeFromThread(threadProject) {
+    const bar = ensureChrome();
+    if (!bar) return;
+    state.currentThreadProject = threadProject || null;
+    const empty = bar.querySelector('#project-chrome-empty');
+    if (!threadProject) {
+      bar.hidden = false;
+      bar.classList.add('project-chrome-empty-state');
+      bar.querySelector('#project-chrome-name').textContent = t(
+        'project.chrome.none',
+        'No project',
+      );
+      bar.querySelector('#project-chrome-folder').textContent = '';
+      const branchEl = bar.querySelector('#project-chrome-branch');
+      branchEl.hidden = true;
+      const prEl = bar.querySelector('#project-chrome-pr');
+      prEl.hidden = true;
+      empty.hidden = false;
+      empty.textContent = t(
+        'project.chrome.noneHint',
+        '→ Manage projects to create or select one',
+      );
+      return;
+    }
+    bar.hidden = false;
+    bar.classList.remove('project-chrome-empty-state');
+    empty.hidden = true;
+    bar.querySelector('#project-chrome-name').textContent = threadProject.name || '';
+    const folderEl = bar.querySelector('#project-chrome-folder');
+    folderEl.textContent = contractHome(threadProject.workspace_path || '');
+    folderEl.title = threadProject.workspace_path || '';
+    const branchEl = bar.querySelector('#project-chrome-branch');
+    if (threadProject.branch) {
+      branchEl.hidden = false;
+      branchEl.textContent = (threadProject.dirty ? '● ' : '') + threadProject.branch;
+      branchEl.className =
+        'project-chrome-branch' + (threadProject.dirty ? ' dirty' : '');
+      branchEl.title = threadProject.dirty_summary || '';
+    } else {
+      branchEl.hidden = true;
+    }
+    const prEl = bar.querySelector('#project-chrome-pr');
+    if (threadProject.pr) {
+      prEl.hidden = false;
+      prEl.textContent = '#' + threadProject.pr.number + ' ' + (threadProject.pr.state || 'open');
+      prEl.href = threadProject.pr.url || '#';
+      prEl.title = threadProject.pr.title || '';
+    } else {
+      prEl.hidden = true;
+    }
+  }
+
+  async function fetchProjectList() {
+    try {
+      const data = await apiFetch('/api/engine/projects');
+      state.projects = (data && data.projects) || [];
+      return state.projects;
+    } catch (e) {
+      showToast(t('project.loadFailed', 'Failed to load projects'), 'error');
+      return [];
+    }
+  }
+
+  async function fetchActive() {
+    try {
+      const data = await apiFetch('/api/engine/projects/active');
+      state.activeProjectId = (data && data.project_id) || null;
+      return data;
+    } catch (e) {
+      state.activeProjectId = null;
+      return null;
+    }
+  }
+
+  async function loadProjectsIfNeeded() {
+    if (state.loaded) return;
+    await Promise.all([fetchProjectList(), fetchActive()]);
+    state.loaded = true;
+  }
+
+  async function setActive(projectId) {
+    try {
+      await apiFetch('/api/engine/projects/active', {
+        method: 'POST',
+        body: { project_id: projectId },
+      });
+      state.activeProjectId = projectId;
+      showToast(t('project.activeSet', 'Active project updated'), 'info');
+      // Refresh the chrome for the current thread so inherited chrome
+      // reflects the new active project immediately.
+      refreshCurrentThread();
+    } catch (e) {
+      showToast(
+        t('project.setActiveFailed', 'Failed to set active project: {message}', {
+          message: e.message || '',
+        }),
+        'error',
+      );
+    }
+  }
+
+  async function assignToCurrentThread(projectId) {
+    if (!currentThreadId) return;
+    try {
+      await apiFetch('/api/chat/threads/' + currentThreadId + '/project', {
+        method: 'POST',
+        body: projectId ? { project_id: projectId } : {},
+      });
+      refreshCurrentThread();
+    } catch (e) {
+      showToast(
+        t('project.assignFailed', 'Failed to assign project: {message}', {
+          message: e.message || '',
+        }),
+        'error',
+      );
+    }
+  }
+
+  async function createProject(fields) {
+    try {
+      const data = await apiFetch('/api/engine/projects', {
+        method: 'POST',
+        body: fields,
+      });
+      await fetchProjectList();
+      return data && data.project;
+    } catch (e) {
+      showToast(
+        t('project.createFailed', 'Failed to create project: {message}', {
+          message: e.message || '',
+        }),
+        'error',
+      );
+      throw e;
+    }
+  }
+
+  async function updateProject(id, fields) {
+    try {
+      const data = await apiFetch('/api/engine/projects/' + encodeURIComponent(id), {
+        method: 'PATCH',
+        body: fields,
+      });
+      await fetchProjectList();
+      return data && data.project;
+    } catch (e) {
+      showToast(
+        t('project.updateFailed', 'Failed to update project: {message}', {
+          message: e.message || '',
+        }),
+        'error',
+      );
+      throw e;
+    }
+  }
+
+  function refreshCurrentThread() {
+    // Fetch history for the current thread; its ThreadInfo.project is
+    // already enriched by the backend. We don't need to round-trip —
+    // the history endpoint is the cheapest thing that returns it.
+    if (!currentThreadId) {
+      refreshChromeFromThread(null);
+      return;
+    }
+    apiFetch('/api/chat/threads')
+      .then((data) => {
+        const all = []
+          .concat(data.assistant_thread ? [data.assistant_thread] : [])
+          .concat(data.threads || []);
+        const match = all.find((th) => th && th.id === currentThreadId);
+        refreshChromeFromThread((match && match.project) || null);
+      })
+      .catch(() => { /* chrome stays in its last state */ });
+  }
+
+  function openProjectModal() {
+    let modal = document.getElementById('project-modal');
+    if (modal) {
+      modal.hidden = false;
+      renderModal();
+      return;
+    }
+    modal = document.createElement('div');
+    modal.id = 'project-modal';
+    modal.className = 'project-modal';
+    modal.innerHTML = ''
+      + '<div class="project-modal-backdrop" id="project-modal-backdrop"></div>'
+      + '<div class="project-modal-dialog" role="dialog" aria-modal="true">'
+      + '  <div class="project-modal-header">'
+      + '    <h3>' + escapeHtml(t('project.modal.title', 'Projects')) + '</h3>'
+      + '    <button class="project-modal-close" id="project-modal-close" aria-label="Close">✕</button>'
+      + '  </div>'
+      + '  <div class="project-modal-body" id="project-modal-body"></div>'
+      + '</div>';
+    document.body.appendChild(modal);
+    modal.querySelector('#project-modal-close').addEventListener('click', closeProjectModal);
+    modal.querySelector('#project-modal-backdrop').addEventListener('click', closeProjectModal);
+    renderModal();
+  }
+
+  function closeProjectModal() {
+    const modal = document.getElementById('project-modal');
+    if (modal) modal.hidden = true;
+  }
+
+  function renderModal() {
+    const body = document.getElementById('project-modal-body');
+    if (!body) return;
+    loadProjectsIfNeeded().then(() => {
+      body.innerHTML = '';
+      const list = document.createElement('div');
+      list.className = 'project-modal-list';
+      if (state.projects.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'project-modal-empty';
+        empty.textContent = t(
+          'project.modal.empty',
+          'No projects yet — create one below.',
+        );
+        list.appendChild(empty);
+      } else {
+        for (const p of state.projects) {
+          list.appendChild(renderProjectRow(p));
+        }
+      }
+      body.appendChild(list);
+      body.appendChild(renderCreateForm());
+    });
+  }
+
+  function renderProjectRow(p) {
+    const row = document.createElement('div');
+    row.className =
+      'project-modal-row' + (p.id === state.activeProjectId ? ' active' : '');
+    const repo = (p.metadata && p.metadata.github_repo) || '';
+    const defBranch = (p.metadata && p.metadata.default_branch) || '';
+    row.innerHTML = ''
+      + '<div class="project-modal-row-main">'
+      + '  <div class="project-modal-row-name">' + escapeHtml(p.name) + '</div>'
+      + '  <div class="project-modal-row-meta">'
+      +      (p.workspace_path
+                ? '<code>' + escapeHtml(contractHome(p.workspace_path)) + '</code>'
+                : '')
+      +      (repo ? ' · <span class="gh">' + escapeHtml(repo) + '</span>' : '')
+      +      (defBranch ? ' · ' + escapeHtml(defBranch) : '')
+      + '  </div>'
+      + '</div>'
+      + '<div class="project-modal-row-actions">'
+      + '  <button data-action="activate" ' + (p.id === state.activeProjectId ? 'disabled' : '') + '>'
+      +      escapeHtml(p.id === state.activeProjectId
+                         ? t('project.modal.active', 'Active')
+                         : t('project.modal.setActive', 'Set active'))
+      + '  </button>'
+      + '  <button data-action="assign-thread">'
+      +      escapeHtml(t('project.modal.assignThread', 'Use in this thread'))
+      + '  </button>'
+      + '  <button data-action="edit">'
+      +      escapeHtml(t('project.modal.edit', 'Edit'))
+      + '  </button>'
+      + '</div>';
+    row.querySelector('[data-action="activate"]').addEventListener('click', async () => {
+      await setActive(p.id);
+      renderModal();
+    });
+    row.querySelector('[data-action="assign-thread"]').addEventListener('click', async () => {
+      await assignToCurrentThread(p.id);
+      closeProjectModal();
+    });
+    row.querySelector('[data-action="edit"]').addEventListener('click', () => {
+      showEditForm(p);
+    });
+    return row;
+  }
+
+  function renderCreateForm() {
+    const wrap = document.createElement('div');
+    wrap.className = 'project-modal-form';
+    wrap.innerHTML = ''
+      + '<h4>' + escapeHtml(t('project.modal.createTitle', 'New project')) + '</h4>'
+      + '<label>' + escapeHtml(t('project.modal.name', 'Name')) + '<input type="text" id="pm-name" required></label>'
+      + '<label>' + escapeHtml(t('project.modal.description', 'Description')) + '<input type="text" id="pm-description"></label>'
+      + '<label>' + escapeHtml(t('project.modal.githubRepo', 'GitHub repo (owner/repo)')) + '<input type="text" id="pm-github" placeholder="nearai/ironclaw"></label>'
+      + '<label>' + escapeHtml(t('project.modal.defaultBranch', 'Default branch')) + '<input type="text" id="pm-branch" placeholder="staging"></label>'
+      + '<label>' + escapeHtml(t('project.modal.workspacePath', 'Workspace path (optional)')) + '<input type="text" id="pm-workspace" placeholder="/home/user/my-repo"></label>'
+      + '<button class="project-modal-create" id="pm-create">' + escapeHtml(t('project.modal.create', 'Create')) + '</button>';
+    wrap.querySelector('#pm-create').addEventListener('click', async () => {
+      const name = wrap.querySelector('#pm-name').value.trim();
+      if (!name) {
+        showToast(t('project.modal.nameRequired', 'Project name is required'), 'error');
+        return;
+      }
+      const fields = { name };
+      const desc = wrap.querySelector('#pm-description').value.trim();
+      if (desc) fields.description = desc;
+      const repo = wrap.querySelector('#pm-github').value.trim();
+      if (repo) fields.github_repo = repo;
+      const br = wrap.querySelector('#pm-branch').value.trim();
+      if (br) fields.default_branch = br;
+      const wp = wrap.querySelector('#pm-workspace').value.trim();
+      if (wp) fields.workspace_path = wp;
+      try {
+        const project = await createProject(fields);
+        if (project && project.id) {
+          await setActive(project.id);
+        }
+        renderModal();
+      } catch (_e) {
+        /* toast shown in createProject */
+      }
+    });
+    return wrap;
+  }
+
+  function showEditForm(p) {
+    const body = document.getElementById('project-modal-body');
+    if (!body) return;
+    body.innerHTML = '';
+    const form = document.createElement('div');
+    form.className = 'project-modal-form';
+    form.innerHTML = ''
+      + '<h4>' + escapeHtml(t('project.modal.editTitle', 'Edit project')) + '</h4>'
+      + '<label>Name<input type="text" id="pe-name" value="' + escapeHtml(p.name) + '"></label>'
+      + '<label>Description<input type="text" id="pe-description" value="'
+      +     escapeHtml(p.description || '') + '"></label>'
+      + '<label>GitHub repo<input type="text" id="pe-github" value="'
+      +     escapeHtml((p.metadata && p.metadata.github_repo) || '') + '"></label>'
+      + '<label>Default branch<input type="text" id="pe-branch" value="'
+      +     escapeHtml((p.metadata && p.metadata.default_branch) || '') + '"></label>'
+      + '<label>Workspace path<input type="text" id="pe-workspace" value="'
+      +     escapeHtml(p.workspace_path || '') + '"></label>'
+      + '<div class="project-modal-form-actions">'
+      + '  <button id="pe-save">' + escapeHtml(t('project.modal.save', 'Save')) + '</button>'
+      + '  <button id="pe-cancel">' + escapeHtml(t('project.modal.cancel', 'Cancel')) + '</button>'
+      + '</div>';
+    body.appendChild(form);
+    form.querySelector('#pe-save').addEventListener('click', async () => {
+      const fields = {
+        name: form.querySelector('#pe-name').value.trim(),
+        description: form.querySelector('#pe-description').value.trim(),
+        github_repo: form.querySelector('#pe-github').value.trim(),
+        default_branch: form.querySelector('#pe-branch').value.trim(),
+        workspace_path: form.querySelector('#pe-workspace').value.trim(),
+      };
+      try {
+        await updateProject(p.id, fields);
+        renderModal();
+      } catch (_e) { /* toast shown in updateProject */ }
+    });
+    form.querySelector('#pe-cancel').addEventListener('click', renderModal);
+  }
+
+  // ── Shell turn rendering ─────────────────────────────────────────
+
+  function renderShellCard(turnId) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return null;
+    let card = container.querySelector('[data-turn-id="' + turnId + '"]');
+    if (card) return card;
+    card = document.createElement('div');
+    card.className = 'shell-turn';
+    card.setAttribute('data-turn-id', turnId || '');
+    card.innerHTML = ''
+      + '<div class="shell-turn-header">'
+      + '  <span class="shell-turn-dollar">$</span>'
+      + '  <span class="shell-turn-cmd"></span>'
+      + '  <span class="shell-turn-status" hidden></span>'
+      + '</div>'
+      + '<pre class="shell-turn-body" hidden></pre>';
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    return card;
+  }
+
+  window.renderShellCommand = function (data) {
+    const card = renderShellCard(data.turn_id || ('inline-' + Date.now()));
+    if (!card) return;
+    card.querySelector('.shell-turn-cmd').textContent = data.command || '';
+    if (data.workdir) card.title = data.workdir;
+  };
+
+  window.fillShellOutput = function (data) {
+    const card = renderShellCard(data.turn_id || ('inline-' + Date.now()));
+    if (!card) return;
+    const body = card.querySelector('.shell-turn-body');
+    body.textContent = [data.stdout || '', data.stderr || '']
+      .filter(Boolean)
+      .join('\n');
+    body.hidden = false;
+    const status = card.querySelector('.shell-turn-status');
+    status.hidden = false;
+    status.textContent = 'exit ' + (typeof data.exit_code === 'number' ? data.exit_code : '?');
+    status.classList.toggle('success', data.exit_code === 0);
+    status.classList.toggle('failure', data.exit_code !== 0);
+    const container = document.getElementById('chat-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+  };
+
+  window.renderShellTurn = function (shell) {
+    // History-replay path — no turn_id to pair command and output; just
+    // render a fresh card with both halves filled in at once.
+    const turnId = 'hist-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const card = renderShellCard(turnId);
+    if (!card) return;
+    card.querySelector('.shell-turn-cmd').textContent = shell.command || '';
+    const body = card.querySelector('.shell-turn-body');
+    body.textContent = [shell.stdout || '', shell.stderr || '']
+      .filter(Boolean)
+      .join('\n');
+    body.hidden = false;
+    const status = card.querySelector('.shell-turn-status');
+    status.hidden = false;
+    status.textContent = 'exit ' + shell.exit_code;
+    status.classList.toggle('success', shell.exit_code === 0);
+    status.classList.toggle('failure', shell.exit_code !== 0);
+  };
+
+  // ── sendShellCommand ─────────────────────────────────────────────
+
+  window.sendShellCommand = function (command) {
+    const body = {
+      content: command,
+      thread_id: currentThreadId || undefined,
+      mode: 'shell',
+    };
+    apiFetch('/api/chat/send', { method: 'POST', body })
+      .catch((err) => {
+        const msg = err && err.message ? err.message : String(err);
+        showToast(
+          t('project.shell.dispatchFailed', 'Shell command failed: {message}', {
+            message: msg,
+          }),
+          'error',
+        );
+      });
+  };
+
+  // Expose a compact surface for hooks + tests.
+  window.ProjectUI = {
+    refreshCurrentThread,
+    openModal: openProjectModal,
+    fetchList: fetchProjectList,
+    fetchActive,
+    setActive,
+  };
+
+  function installShellBadgeListener() {
+    const input = document.getElementById('chat-input');
+    const wrapper = input ? input.closest('.chat-input-wrapper') : null;
+    if (!input || !wrapper) return;
+    const sync = () => {
+      const starts = input.value.startsWith('!');
+      wrapper.classList.toggle('shell-mode', starts);
+    };
+    input.addEventListener('input', sync);
+    // Run once at install time so the badge reflects any state the
+    // existing app.js restored before we attached the listener.
+    sync();
+  }
+
+  // Kick off once DOM is ready.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      loadProjectsIfNeeded().then(refreshCurrentThread);
+      installShellBadgeListener();
+    });
+  } else {
+    loadProjectsIfNeeded().then(refreshCurrentThread);
+    installShellBadgeListener();
+  }
+
+  // Keep chrome in sync when the user switches threads. `switchToThread`
+  // is the existing app.js entry point for thread changes; we piggyback
+  // rather than forking its logic.
+  if (typeof window !== 'undefined') {
+    const existingSwitch = window.switchToThread;
+    if (typeof existingSwitch === 'function') {
+      window.switchToThread = function (threadId) {
+        const result = existingSwitch.apply(this, arguments);
+        // The existing function may be sync or return a promise; in
+        // both cases fire the chrome refresh in the background.
+        Promise.resolve(result).then(refreshCurrentThread, refreshCurrentThread);
+        return result;
+      };
+    }
+  }
+})();

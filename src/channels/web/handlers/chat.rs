@@ -118,6 +118,12 @@ pub async fn chat_threads_handler(
             let mut threads = Vec::new();
 
             for s in &summaries {
+                let project = crate::channels::web::handlers::engine::thread_project_context(
+                    state.as_ref(),
+                    &identity.user_id,
+                    s.id,
+                )
+                .await;
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
@@ -127,6 +133,7 @@ pub async fn chat_threads_handler(
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
                     channel: Some(s.channel.clone()),
+                    project,
                 };
 
                 if s.id == assistant_id {
@@ -147,6 +154,7 @@ pub async fn chat_threads_handler(
                     title: None,
                     thread_type: Some("assistant".to_string()),
                     channel: Some("gateway".to_string()),
+                    project: None,
                 });
             }
 
@@ -179,6 +187,7 @@ pub async fn chat_threads_handler(
             title: None,
             thread_type: None,
             channel: Some("gateway".to_string()),
+            project: None,
         })
         .collect();
 
@@ -204,7 +213,7 @@ pub async fn chat_new_thread_handler(
     let session = session_manager
         .get_or_create_session(&identity.user_id)
         .await;
-    let (thread_id, info) = {
+    let (thread_id, mut info) = {
         let mut sess = session.lock().await;
         let thread = sess.create_thread(Some("web"));
         let id = thread.id;
@@ -217,6 +226,7 @@ pub async fn chat_new_thread_handler(
             title: None,
             thread_type: Some("thread".to_string()),
             channel: Some("gateway".to_string()),
+            project: None,
         };
         (id, info)
     };
@@ -250,6 +260,15 @@ pub async fn chat_new_thread_handler(
             tracing::warn!("Failed to set thread_type metadata: {}", e);
         }
     }
+
+    // Populate the active-project chrome on the fresh thread so the UI
+    // doesn't have to wait for a full thread-list refresh to show context.
+    info.project = crate::channels::web::handlers::engine::thread_project_context(
+        state.as_ref(),
+        &identity.user_id,
+        thread_id,
+    )
+    .await;
 
     Ok(Json(info))
 }

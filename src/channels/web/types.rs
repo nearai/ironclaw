@@ -22,6 +22,25 @@ pub struct SendMessageRequest {
     /// Optional images attached to the message.
     #[serde(default)]
     pub images: Vec<ImageData>,
+    /// Submission mode. Defaults to [`ChatSendMode::Llm`] — a normal
+    /// message that flows into the agent loop. `Shell` bypasses the LLM
+    /// and runs `content` as a shell command inside the thread's
+    /// active-project folder, persisting the command + output as a
+    /// "shell" turn so subsequent LLM turns see the context.
+    #[serde(default)]
+    pub mode: ChatSendMode,
+}
+
+/// How a `POST /api/chat/send` request should be dispatched.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSendMode {
+    /// Normal message — queues into the agent loop.
+    #[default]
+    Llm,
+    /// Run the content as a shell command in the active-project folder
+    /// and broadcast `shell_command` + `shell_output` SSE events.
+    Shell,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +62,45 @@ pub struct ThreadInfo {
     pub thread_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// Active project context for this thread, resolved from the per-thread
+    /// override in `conversations.metadata.project_id` or the user-level
+    /// active pointer at `projects/_active.json`. Populated with cached
+    /// git state (branch, dirty, PR) when the cache has fresh values;
+    /// missing fields simply omit from the wire payload rather than
+    /// blocking the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ThreadProjectContext>,
+}
+
+/// Per-thread project context surfaced to the conversation chrome.
+///
+/// Assembled from three sources: the engine `Project` (id, name,
+/// workspace_path), the typed `metadata` view (github_repo, default_branch),
+/// and the `ProjectContextCache` (branch, dirty, dirty_summary, pr).
+/// Anything the cache has not yet fetched is `None`; the chrome hides
+/// the corresponding chip rather than blocking the list endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadProjectContext {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<std::path::PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<ironclaw_common::GitHubRepo>,
+    pub default_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<crate::channels::web::platform::project_context_cache::PrSummary>,
+    /// Whether this project is assigned to the thread via an explicit
+    /// per-thread override (`true`) versus inherited from the user's
+    /// active project (`false`). The chrome uses this to decide whether
+    /// to render an "override" indicator next to the selector.
+    pub is_override: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +128,24 @@ pub struct TurnInfo {
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
+    /// Shell-turn payload — present only for `!`-prefixed gateway turns
+    /// persisted with roles `shell_command` / `shell_output`. When set,
+    /// the UI renders a distinct monospace card instead of the normal
+    /// user/assistant turn layout, and `tool_calls` / `response` can be
+    /// ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellTurnInfo>,
+}
+
+/// The shell-mode turn payload paired with [`TurnInfo::shell`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellTurnInfo {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1562,6 +1638,7 @@ mod tests {
             title: None,
             thread_type: None,
             channel: Some("telegram".to_string()),
+            project: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1579,6 +1656,7 @@ mod tests {
             title: None,
             thread_type: None,
             channel: None,
+            project: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();

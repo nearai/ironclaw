@@ -4004,8 +4004,46 @@ pub struct EngineStepInfo {
     pub completed_at: Option<String>,
 }
 
+/// Gateway-facing view of coding-agent fields stashed in [`ironclaw_engine::Project::metadata`].
+///
+/// The engine stores project-scoped extras as opaque JSON; the gateway
+/// surfaces a small typed subset so the project-header chrome, coding
+/// skill, and shell-mode dispatch all agree on shape. Unknown metadata
+/// keys pass through the engine unchanged.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProjectMetadataView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<ironclaw_common::GitHubRepo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+}
+
+impl ProjectMetadataView {
+    /// Extract the typed subset from an engine `Project.metadata` blob.
+    ///
+    /// Invalid or unparseable values (e.g. a stored `github_repo` that no
+    /// longer satisfies `owner/repo`) silently drop to `None` — the chrome
+    /// just hides the affected chip and the user can fix via the manage
+    /// modal. Raw metadata is preserved on the engine side.
+    pub fn from_metadata(metadata: &serde_json::Value) -> Self {
+        let github_repo = metadata
+            .get("github_repo")
+            .and_then(|v| v.as_str())
+            .and_then(|s| ironclaw_common::GitHubRepo::new(s).ok());
+        let default_branch = metadata
+            .get("default_branch")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Self {
+            github_repo,
+            default_branch,
+        }
+    }
+}
+
 /// Project summary.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EngineProjectInfo {
     pub id: String,
     pub name: String,
@@ -4014,7 +4052,39 @@ pub struct EngineProjectInfo {
     pub goals: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<ironclaw_engine::ProjectMetric>,
+    /// Host-filesystem workspace path — where code and worktrees live.
+    /// When unset, [`crate::bridge::sandbox::workspace_path::project_workspace_path`]
+    /// resolves it to the default `~/.ironclaw/projects/<user_id>/<project_id>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<std::path::PathBuf>,
+    /// Gateway-facing typed view of coding-agent metadata (github_repo, default_branch).
+    #[serde(default)]
+    pub metadata: ProjectMetadataView,
     pub created_at: String,
+}
+
+impl EngineProjectInfo {
+    /// Project → DTO. Single construction path so `list_engine_projects`
+    /// and `get_engine_project` can't drift on fields as we add more
+    /// coding-agent surface to `Project.metadata`.
+    ///
+    /// Public because the live-tier tests in `tests/live_coding_flow.rs`
+    /// exercise the DTO construction against a locally built `Project`
+    /// without spinning up the full engine state. Keeping it private
+    /// would force those tests to duplicate the field-mapping logic
+    /// and drift over time.
+    pub fn from_project(p: &ironclaw_engine::Project) -> Self {
+        Self {
+            id: p.id.to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            goals: p.goals.clone(),
+            metrics: p.metrics.clone(),
+            workspace_path: p.workspace_path.clone(),
+            metadata: ProjectMetadataView::from_metadata(&p.metadata),
+            created_at: p.created_at.to_rfc3339(),
+        }
+    }
 }
 
 /// Attention item surfaced in the projects overview.
@@ -4411,14 +4481,7 @@ pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo
 
     Ok(projects
         .iter()
-        .map(|p| EngineProjectInfo {
-            id: p.id.to_string(),
-            name: p.name.clone(),
-            description: p.description.clone(),
-            goals: p.goals.clone(),
-            metrics: p.metrics.clone(),
-            created_at: p.created_at.to_rfc3339(),
-        })
+        .map(EngineProjectInfo::from_project)
         .collect())
 }
 
@@ -4444,14 +4507,257 @@ pub async fn get_engine_project(
 
     Ok(project
         .filter(|p| p.is_owned_by(user_id))
-        .map(|p| EngineProjectInfo {
-            id: p.id.to_string(),
-            name: p.name,
-            description: p.description,
-            goals: p.goals,
-            metrics: p.metrics,
-            created_at: p.created_at.to_rfc3339(),
-        }))
+        .as_ref()
+        .map(EngineProjectInfo::from_project))
+}
+
+/// Fields a gateway-side project create/update can carry. All optional so
+/// partial updates are expressible; `None` means "leave unchanged" on update.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectUpsertFields {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub workspace_path: Option<Option<std::path::PathBuf>>,
+    pub github_repo: Option<Option<ironclaw_common::GitHubRepo>>,
+    pub default_branch: Option<Option<String>>,
+}
+
+fn apply_upsert_fields_to_project(
+    project: &mut ironclaw_engine::Project,
+    fields: ProjectUpsertFields,
+) {
+    if let Some(name) = fields.name {
+        project.name = name;
+    }
+    if let Some(description) = fields.description {
+        project.description = description;
+    }
+    if let Some(path) = fields.workspace_path {
+        project.workspace_path = path;
+    }
+    // Metadata keys round-trip through serde_json::Value so unknown keys
+    // set by other surfaces (engine-native tools, future coding extras)
+    // pass through undisturbed. `Project::new` always initializes
+    // `metadata` to an object, but a malformed row from an older DB
+    // could theoretically deserialize as a scalar or array. Replace with
+    // an empty object rather than panicking — losing a stray
+    // non-object value is better than crashing a handler mid-request.
+    if fields.github_repo.is_some() || fields.default_branch.is_some() {
+        if !project.metadata.is_object() {
+            project.metadata = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(obj) = project.metadata.as_object_mut() {
+            if let Some(repo) = fields.github_repo {
+                match repo {
+                    Some(r) => {
+                        obj.insert("github_repo".into(), serde_json::Value::String(r.into()));
+                    }
+                    None => {
+                        obj.remove("github_repo");
+                    }
+                }
+            }
+            if let Some(branch) = fields.default_branch {
+                match branch {
+                    Some(b) => {
+                        obj.insert("default_branch".into(), serde_json::Value::String(b));
+                    }
+                    None => {
+                        obj.remove("default_branch");
+                    }
+                }
+            }
+        }
+    }
+    project.updated_at = chrono::Utc::now();
+}
+
+/// Create a new project owned by `user_id` with the supplied fields.
+///
+/// `name` and `description` are required (via `fields.name` / `fields.description`).
+/// On success, ensures the project's workspace directory exists on disk so
+/// subsequent `shell` tool dispatches with `workdir = project_workspace_path`
+/// have a real directory to operate in.
+pub async fn create_engine_project(
+    user_id: &str,
+    fields: ProjectUpsertFields,
+) -> Result<EngineProjectInfo, Error> {
+    let name = fields.name.clone().ok_or_else(|| {
+        engine_err(
+            "create engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "project name is required".into(),
+            },
+        )
+    })?;
+    let description = fields.description.clone().unwrap_or_default();
+
+    let lock = ENGINE_STATE.get().ok_or_else(|| {
+        engine_err(
+            "create engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine not initialized".into(),
+            },
+        )
+    })?;
+    let guard = lock.read().await;
+    let state = guard.as_ref().ok_or_else(|| {
+        engine_err(
+            "create engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine state unavailable".into(),
+            },
+        )
+    })?;
+
+    let mut project = ironclaw_engine::Project::new(user_id, name, description);
+    // Apply the optional fields after construction. Name/description are
+    // already set by `Project::new`; re-applying is idempotent.
+    apply_upsert_fields_to_project(&mut project, fields);
+
+    state
+        .store
+        .save_project(&project)
+        .await
+        .map_err(|e| engine_err("save project", e))?;
+
+    // Best-effort: ensure the host workspace directory exists so shell
+    // dispatches with `workdir = project_workspace_path(&project)` have
+    // somewhere to run. Failure here does not abort project creation —
+    // the directory can be (re)created on next access — but log it.
+    if let Err(e) = crate::bridge::sandbox::workspace_path::ensure_project_workspace_dir(&project) {
+        tracing::warn!(project_id = %project.id.0, error = %e, "failed to ensure project workspace dir");
+    }
+
+    Ok(EngineProjectInfo::from_project(&project))
+}
+
+/// Update an existing project owned by `user_id`. Only fields set on
+/// `fields` are changed; others are preserved.
+pub async fn update_engine_project(
+    project_id: &str,
+    user_id: &str,
+    fields: ProjectUpsertFields,
+) -> Result<EngineProjectInfo, Error> {
+    let lock = ENGINE_STATE.get().ok_or_else(|| {
+        engine_err(
+            "update engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine not initialized".into(),
+            },
+        )
+    })?;
+    let guard = lock.read().await;
+    let state = guard.as_ref().ok_or_else(|| {
+        engine_err(
+            "update engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine state unavailable".into(),
+            },
+        )
+    })?;
+
+    let pid = uuid::Uuid::parse_str(project_id).map_err(|e| engine_err("parse project_id", e))?;
+    let mut project = state
+        .store
+        .load_project(ironclaw_engine::ProjectId(pid))
+        .await
+        .map_err(|e| engine_err("load project", e))?
+        .ok_or_else(|| {
+            engine_err(
+                "update engine project",
+                ironclaw_engine::EngineError::Store {
+                    reason: format!("project '{project_id}' not found"),
+                },
+            )
+        })?;
+
+    if !project.is_owned_by(user_id) {
+        return Err(engine_err(
+            "update engine project",
+            ironclaw_engine::EngineError::Store {
+                reason: "project is owned by a different user".into(),
+            },
+        ));
+    }
+
+    apply_upsert_fields_to_project(&mut project, fields);
+
+    state
+        .store
+        .save_project(&project)
+        .await
+        .map_err(|e| engine_err("save project", e))?;
+
+    if let Err(e) = crate::bridge::sandbox::workspace_path::ensure_project_workspace_dir(&project) {
+        tracing::warn!(project_id = %project.id.0, error = %e, "failed to ensure project workspace dir");
+    }
+
+    Ok(EngineProjectInfo::from_project(&project))
+}
+
+/// Write (or clear) the per-thread `project_id` override in
+/// `conversations.metadata`.
+///
+/// When `project_id` is `Some`, the thread's conversation row's metadata
+/// gains `{"project_id": "<uuid>"}`. When `None`, the key is cleared.
+/// The gateway's thread-read path resolves `metadata.project_id` → engine
+/// project → otherwise falls back to the workspace-stored active pointer.
+///
+/// This is the `project_assign_thread` / `project_clear_thread` bridge
+/// function; the corresponding tool variants dispatch through it.
+pub async fn set_conversation_project(
+    conversation_id: uuid::Uuid,
+    project_id: Option<&str>,
+) -> Result<(), Error> {
+    let lock = ENGINE_STATE.get().ok_or_else(|| {
+        engine_err(
+            "set conversation project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine not initialized".into(),
+            },
+        )
+    })?;
+    let guard = lock.read().await;
+    let state = guard.as_ref().ok_or_else(|| {
+        engine_err(
+            "set conversation project",
+            ironclaw_engine::EngineError::Store {
+                reason: "engine state unavailable".into(),
+            },
+        )
+    })?;
+    let db = state.db.as_ref().ok_or_else(|| {
+        engine_err(
+            "set conversation project",
+            ironclaw_engine::EngineError::Store {
+                reason: "v1 database unavailable".into(),
+            },
+        )
+    })?;
+
+    // Validate the project id resolves to an extant UUID before writing
+    // anything; we allow an explicit clear (None) to pass through.
+    let value = match project_id {
+        Some(id) => {
+            let pid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
+            serde_json::Value::String(pid.to_string())
+        }
+        None => serde_json::Value::Null,
+    };
+
+    db.update_conversation_metadata_field(conversation_id, "project_id", &value)
+        .await
+        .map_err(|e| {
+            engine_err(
+                "update conversation metadata",
+                ironclaw_engine::EngineError::Store {
+                    reason: e.to_string(),
+                },
+            )
+        })?;
+
+    Ok(())
 }
 
 /// Projects overview — health, stats, attention items for all projects.

@@ -491,10 +491,11 @@ impl AppBuilder {
                 self.config.search.clone(),
                 self.config.workspace.clone(),
             ));
-            tools.register_memory_tools_with_resolver(pool);
+            tools.register_memory_tools_with_resolver(Arc::clone(&pool) as _);
+            tools.register_project_admin_tools(Arc::clone(&pool) as _);
             tracing::debug!(
                 multi_tenant = is_multi_tenant,
-                "Memory tools configured with per-user workspace resolver"
+                "Memory + project-admin tools configured with per-user workspace resolver"
             );
 
             Some(ws)

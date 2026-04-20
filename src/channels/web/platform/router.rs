@@ -31,9 +31,11 @@ use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
-    engine_project_detail_handler, engine_projects_handler, engine_projects_overview_handler,
-    engine_thread_detail_handler, engine_thread_events_handler, engine_thread_steps_handler,
-    engine_threads_handler,
+    engine_project_create_handler, engine_project_detail_handler,
+    engine_project_get_active_handler, engine_project_set_active_handler,
+    engine_project_update_handler, engine_projects_handler, engine_projects_overview_handler,
+    engine_thread_assign_project_handler, engine_thread_detail_handler,
+    engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
 };
 use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
@@ -250,18 +252,29 @@ pub async fn start_server(
             "/api/engine/threads/{id}/events",
             get(engine_thread_events_handler),
         )
-        .route("/api/engine/projects", get(engine_projects_handler))
+        .route(
+            "/api/engine/projects",
+            get(engine_projects_handler).post(engine_project_create_handler),
+        )
         .route(
             "/api/engine/projects/overview",
             get(engine_projects_overview_handler),
         )
         .route(
+            "/api/engine/projects/active",
+            get(engine_project_get_active_handler).post(engine_project_set_active_handler),
+        )
+        .route(
             "/api/engine/projects/{id}",
-            get(engine_project_detail_handler),
+            get(engine_project_detail_handler).patch(engine_project_update_handler),
         )
         .route(
             "/api/engine/projects/{id}/widgets",
             get(crate::channels::web::handlers::frontend::project_widgets_handler),
+        )
+        .route(
+            "/api/chat/threads/{id}/project",
+            post(engine_thread_assign_project_handler),
         )
         .route("/api/engine/missions", get(engine_missions_handler))
         .route(
