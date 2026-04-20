@@ -212,18 +212,32 @@ impl McpClient {
                     .to_string(),
             ));
         }
+        // Validate the config-supplied name once and thread the canonical
+        // form into both the transport and the client's typed field so the
+        // two can never diverge (e.g. transport falling back to "unknown"
+        // while the client still holds the raw invalid value, which would
+        // desync session-manager lookups against transport writes).
+        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
+        // `McpServerName` so this shared canonicalization moves upstream.
+        let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %config.name,
+                error = %e,
+                "McpClient::new_with_config: config server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let transport = Arc::new(HttpMcpTransport::new(
             config.url.clone(),
-            config.name.clone(),
+            validated_name.as_str(),
         ));
 
         Ok(Self {
             transport,
             server_url: config.url.clone(),
-            // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name`
-            // to `McpServerName` so we can move this through without
-            // `from_trusted`. See PR description for deferred sites.
-            server_name: McpServerName::from_trusted(config.name.clone()),
+            server_name: validated_name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
@@ -248,8 +262,26 @@ impl McpClient {
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
     ) -> Self {
+        // Validate the config-supplied name once and pass the canonical
+        // form into both the transport and the client's typed field. If
+        // the two sides derived the name independently, an invalid config
+        // would leave the transport's `server_name` as "unknown" while
+        // the client's `server_name` held the raw value — session IDs
+        // would then be written under one key and looked up under another.
+        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
+        // `McpServerName` so this shared canonicalization moves upstream.
+        let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %config.name,
+                error = %e,
+                "McpClient::new_authenticated: config server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let transport = Arc::new(
-            HttpMcpTransport::new(config.url.clone(), config.name.clone())
+            HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
                 .with_session_manager(session_manager.clone()),
         );
 
@@ -258,10 +290,7 @@ impl McpClient {
         Self {
             transport,
             server_url: config.url.clone(),
-            // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name`
-            // to `McpServerName` so we can move this through without
-            // `from_trusted`.
-            server_name: McpServerName::from_trusted(config.name.clone()),
+            server_name: validated_name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
@@ -286,11 +315,26 @@ impl McpClient {
         user_id: impl Into<String>,
         server_config: Option<McpServerConfig>,
     ) -> Self {
-        // Caller (factory) already canonicalized and validated the name
-        // via `McpServerConfig::validate`; `from_trusted` preserves the
-        // hyphen-folded form. TODO(type-safety PR 4 of 4): accept
-        // `McpServerName` here directly.
-        let name = McpServerName::from_trusted(server_name.into());
+        // The production caller (factory) hands us an already-validated
+        // name, but the signature accepts `impl Into<String>` which means
+        // any other caller (tests, future call sites) could pass something
+        // that hasn't been through the allowlist. Re-validate here with the
+        // same canonical `"unknown"` fallback used in `new`, `new_with_name`,
+        // `new_with_config`, `new_authenticated`, and `HttpMcpTransport::new`
+        // so this constructor can't quietly produce an unchecked `McpServerName`.
+        // TODO(type-safety PR 4 of 4): accept `McpServerName` here directly
+        // and drop this fallback.
+        let raw: String = server_name.into();
+        let name = McpServerName::new(&raw).unwrap_or_else(|e| {
+            tracing::debug!(
+                candidate = %raw,
+                error = %e,
+                "McpClient::new_with_transport: caller-provided server name failed allowlist validation; \
+                 falling back to canonical 'unknown'"
+            );
+            McpServerName::new("unknown")
+                .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
+        });
         let url = server_config
             .as_ref()
             .map(|c| c.url.clone())
@@ -1465,6 +1509,104 @@ mod tests {
         let obj = result.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert!(obj["outer"]["inner"].is_null());
+    }
+
+    // --- Regression: constructors validate caller-provided server names ---
+    //
+    // Copilot review comments on PR nearai/ironclaw#2681 flagged that
+    // `new_with_transport`, `new_with_config`, and `new_authenticated`
+    // used `McpServerName::from_trusted` on caller-provided input,
+    // allowing invalid names to enter the typed field and diverge from
+    // the transport's independently-validated `server_name`. These tests
+    // pin the safe-fallback behavior and the no-divergence invariant.
+
+    #[test]
+    fn new_with_transport_falls_back_on_invalid_server_name() {
+        let transport = Arc::new(MockTransport::new(false, vec![]));
+        // Slashes are outside the `McpServerName` allowlist, so the
+        // fallback path must engage rather than storing the raw value.
+        let client =
+            McpClient::new_with_transport("bad/name", transport, None, None, "default", None);
+        let name = McpServerName::new(client.server_name())
+            .expect("stored server_name must satisfy the allowlist after the fix");
+        assert_eq!(
+            name.as_str(),
+            "unknown",
+            "invalid caller-supplied name should fall back to canonical 'unknown'"
+        );
+    }
+
+    #[test]
+    fn new_with_transport_preserves_valid_server_name() {
+        let transport = Arc::new(MockTransport::new(false, vec![]));
+        let client =
+            McpClient::new_with_transport("good_name123", transport, None, None, "default", None);
+        assert_eq!(client.server_name(), "good_name123");
+    }
+
+    #[test]
+    fn new_with_config_falls_back_on_invalid_server_name() {
+        // `McpServerConfig::new` does not pre-validate the name, so the
+        // constructor receives a value that would fail the allowlist.
+        let config = McpServerConfig::new("bad name", "http://localhost:8080");
+        let client = McpClient::new_with_config(config).expect("HTTP transport accepted");
+        assert_eq!(
+            client.server_name(),
+            "unknown",
+            "invalid config name must fall back to canonical 'unknown'"
+        );
+    }
+
+    /// Divergence regression: the client's `server_name` field and the
+    /// value used when constructing the transport must agree. If the
+    /// client stored the raw invalid value and the transport fell back
+    /// to "unknown", session-manager writes (from the transport) would
+    /// use a different key than session-manager lookups (keyed off the
+    /// client's name), silently breaking `Mcp-Session-Id` tracking.
+    #[test]
+    fn new_with_config_client_and_transport_server_name_agree() {
+        let invalid = McpServerConfig::new("bad name", "http://localhost:8080");
+        let client = McpClient::new_with_config(invalid).expect("HTTP transport accepted");
+        // The client surface is the single source of truth for tests;
+        // the transport validates the same input the client just
+        // canonicalized, so parity here proves no divergence exists.
+        assert_eq!(client.server_name(), "unknown");
+
+        let valid = McpServerConfig::new("good_name123", "http://localhost:8080");
+        let client = McpClient::new_with_config(valid).expect("HTTP transport accepted");
+        assert_eq!(client.server_name(), "good_name123");
+    }
+
+    #[tokio::test]
+    async fn new_authenticated_falls_back_on_invalid_server_name() {
+        let session_manager = Arc::new(McpSessionManager::new());
+        let key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(key).expect("test crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+
+        let config = McpServerConfig::new("bad name", "https://api.example.com");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        assert_eq!(
+            client.server_name(),
+            "unknown",
+            "invalid config name must fall back to canonical 'unknown' in the OAuth path too"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_authenticated_preserves_valid_server_name() {
+        let session_manager = Arc::new(McpSessionManager::new());
+        let key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(key).expect("test crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+
+        let config = McpServerConfig::new("good_name123", "https://api.example.com");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        assert_eq!(client.server_name(), "good_name123");
     }
 
     // --- Issue 1 regression: new_with_config rejects non-HTTP transport ---
