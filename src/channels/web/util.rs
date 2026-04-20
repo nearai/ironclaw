@@ -130,97 +130,69 @@ fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(
         return Ok(());
     }
 
+    // ADTS sync for AAC: byte[0] = 0xFF, byte[1] = 1111_ID LL P (LL = layer bits,
+    // must be 00 for AAC). Mask 0xF6 = sync-bits + layer-bits; expected 0xF0. MP3
+    // frames share the 0xFFF sync but use layer != 00, so the mask distinguishes.
+    let aac_is_adts = data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xF6) == 0xF0;
+    let mp3_sync = data.starts_with(b"ID3")
+        || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0);
+
     match claimed {
-        "application/pdf" => {
-            if !data.starts_with(b"%PDF") {
-                return Err(
-                    "File claimed as application/pdf but does not start with %PDF header"
-                        .to_string(),
-                );
-            }
+        "application/pdf" if !data.starts_with(b"%PDF") => {
+            Err("File claimed as application/pdf but does not start with %PDF header".to_string())
         }
-        "image/png" => {
-            if !data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-                return Err("File claimed as image/png but missing PNG header".to_string());
-            }
+        "image/png" if !data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) => {
+            Err("File claimed as image/png but missing PNG header".to_string())
         }
-        "image/jpeg" | "image/jpg" => {
-            if !data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                return Err("File claimed as image/jpeg but missing JPEG header".to_string());
-            }
+        "image/jpeg" | "image/jpg" if !data.starts_with(&[0xFF, 0xD8, 0xFF]) => {
+            Err("File claimed as image/jpeg but missing JPEG header".to_string())
         }
-        "image/gif" => {
-            if !data.starts_with(b"GIF87a") && !data.starts_with(b"GIF89a") {
-                return Err("File claimed as image/gif but missing GIF header".to_string());
-            }
+        "image/gif" if !data.starts_with(b"GIF87a") && !data.starts_with(b"GIF89a") => {
+            Err("File claimed as image/gif but missing GIF header".to_string())
         }
-        "image/webp" => {
-            if !has_riff_fourcc(data, b"WEBP") {
-                return Err("File claimed as image/webp but missing RIFF/WEBP header".to_string());
-            }
+        "image/webp" if !has_riff_fourcc(data, b"WEBP") => {
+            Err("File claimed as image/webp but missing RIFF/WEBP header".to_string())
         }
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
-            if !data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-                return Err(format!(
-                    "File claimed as {claimed} but missing ZIP/PK header"
-                ));
-            }
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if !data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) =>
+        {
+            Err(format!(
+                "File claimed as {claimed} but missing ZIP/PK header"
+            ))
         }
-        "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel" => {
-            if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
-                return Err(format!("File claimed as {claimed} but missing OLE2 header"));
-            }
+        "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel"
+            if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) =>
+        {
+            Err(format!("File claimed as {claimed} but missing OLE2 header"))
         }
-        "application/rtf" | "text/rtf" => {
-            if !data.starts_with(b"{\\rtf") {
-                return Err("File claimed as RTF but missing {\\rtf header".to_string());
-            }
+        "application/rtf" | "text/rtf" if !data.starts_with(b"{\\rtf") => {
+            Err("File claimed as RTF but missing {\\rtf header".to_string())
         }
-        "audio/mpeg" => {
-            let is_mp3 = data.starts_with(b"ID3")
-                || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0);
-            if !is_mp3 {
-                return Err("File claimed as audio/mpeg but missing MP3/ID3 header".to_string());
-            }
+        "audio/mpeg" if !mp3_sync => {
+            Err("File claimed as audio/mpeg but missing MP3/ID3 header".to_string())
         }
-        "audio/ogg" => {
-            if !data.starts_with(b"OggS") {
-                return Err("File claimed as audio/ogg but missing OggS header".to_string());
-            }
+        "audio/ogg" if !data.starts_with(b"OggS") => {
+            Err("File claimed as audio/ogg but missing OggS header".to_string())
         }
-        "audio/wav" | "audio/wave" | "audio/x-wav" => {
-            if !has_riff_fourcc(data, b"WAVE") {
-                return Err("File claimed as audio/wav but missing RIFF/WAVE header".to_string());
-            }
+        "audio/wav" | "audio/wave" | "audio/x-wav" if !has_riff_fourcc(data, b"WAVE") => {
+            Err("File claimed as audio/wav but missing RIFF/WAVE header".to_string())
         }
-        "audio/mp4" | "audio/x-m4a" => {
-            if !has_iso_bmff_ftyp(data) {
-                return Err(
-                    "File claimed as audio/mp4 but missing ISO BMFF ftyp header".to_string()
-                );
-            }
+        "audio/mp4" | "audio/x-m4a" if !has_iso_bmff_ftyp(data) => {
+            Err("File claimed as audio/mp4 but missing ISO BMFF ftyp header".to_string())
         }
-        "audio/aac" => {
-            let is_aac = data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0;
-            if !is_aac {
-                return Err("File claimed as audio/aac but missing ADTS header".to_string());
-            }
+        "audio/aac" if !aac_is_adts && !data.starts_with(b"ADIF") => {
+            Err("File claimed as audio/aac but missing ADTS/ADIF header".to_string())
         }
-        "audio/flac" => {
-            if !data.starts_with(b"fLaC") {
-                return Err("File claimed as audio/flac but missing fLaC header".to_string());
-            }
+        "audio/flac" if !data.starts_with(b"fLaC") => {
+            Err("File claimed as audio/flac but missing fLaC header".to_string())
         }
-        "audio/webm" => {
-            if !data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-                return Err("File claimed as audio/webm but missing EBML header".to_string());
-            }
+        "audio/webm" if !data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) => {
+            Err("File claimed as audio/webm but missing EBML header".to_string())
         }
-        _ => {}
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn normalize_attachment_filename(filename: &str) -> Option<&str> {
@@ -297,9 +269,20 @@ pub(crate) fn web_attachments_to_incoming(
                 .as_deref()
                 .and_then(normalize_attachment_filename)
                 .map(str::to_owned)
-                .unwrap_or_else(|| match web_attachment_ext(&normalized_mime) {
-                    Some(ext) => format!("attachment-{i}.{ext}"),
-                    None => format!("attachment-{i}"),
+                .unwrap_or_else(|| {
+                    // `is_allowed_attachment_mime` and `web_attachment_ext` are the
+                    // same set by construction, so the extension is always resolvable.
+                    // The `None` fallback is defence-in-depth: if the two lists ever
+                    // drift, we emit an extensionless filename rather than panicking
+                    // in production.
+                    debug_assert!(
+                        web_attachment_ext(&normalized_mime).is_some(),
+                        "allow-list and extension map diverged for MIME {normalized_mime}"
+                    );
+                    match web_attachment_ext(&normalized_mime) {
+                        Some(ext) => format!("attachment-{i}.{ext}"),
+                        None => format!("attachment-{i}"),
+                    }
                 });
             Ok(crate::channels::IncomingAttachment {
                 id: format!("web-attachment-{i}"),
@@ -1223,5 +1206,58 @@ mod tests {
 
         let err = images_to_attachments(&images).unwrap_err();
         assert!(err.contains("Unsupported image type"));
+    }
+
+    #[test]
+    fn web_upload_rejects_pdf_with_non_pdf_body() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("invoice.pdf".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(b"<html>not a pdf</html>"),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(
+            err.contains("%PDF"),
+            "expected %PDF-header rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_rejects_mp3_spoofed_as_aac() {
+        use base64::Engine;
+
+        // Layer III MP3 frame: byte[0]=0xFF, byte[1]=0xFB (1111_1011). Layer bits
+        // (mask 0x06) = 0b10 != 0b00, so ADTS check rejects it. Sync-only check
+        // (byte[1] & 0xF0 == 0xF0) would incorrectly accept.
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/aac".to_string(),
+            filename: Some("song.aac".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0xFB, 0, 0]),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(
+            err.contains("ADTS/ADIF"),
+            "expected ADTS/ADIF rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_accepts_valid_adts_aac() {
+        use base64::Engine;
+
+        // Valid ADTS: byte[0]=0xFF, byte[1]=0xF1 (1111_0001: sync+ID=0+layer=00+P=1).
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/aac".to_string(),
+            filename: Some("song.aac".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0xF1, 0, 0]),
+        }];
+
+        let incoming = web_attachments_to_incoming(&attachments).expect("valid ADTS should pass");
+        assert_eq!(incoming[0].mime_type, "audio/aac");
     }
 }

@@ -802,9 +802,9 @@ async fn full_server_chat_send_accepts_document_attachment_for_alice() {
         .json(&serde_json::json!({
             "content": "parse this invoice",
             "attachments": [{
-                "media_type": "application/pdf",
+                "mime_type": "application/pdf",
                 "filename": "invoice.pdf",
-                "data": "JVBERi0xLjQKaW52b2ljZQ=="
+                "data_base64": "JVBERi0xLjQKaW52b2ljZQ=="
             }]
         }))
         .send()
@@ -846,9 +846,9 @@ async fn full_server_chat_send_rejects_malformed_attachment_for_alice() {
         .json(&serde_json::json!({
             "content": "parse this invoice",
             "attachments": [{
-                "media_type": "application/pdf",
+                "mime_type": "application/pdf",
                 "filename": "invoice.pdf",
-                "data": "not valid base64"
+                "data_base64": "not valid base64"
             }]
         }))
         .send()
