@@ -39,8 +39,16 @@ _WASM_CHANNEL_BASE = {
 }
 
 
-async def _mock_and_go(page, *, installed):
-    """Mock /api/extensions with the given installed list and open the tab."""
+async def _mock_and_go(page, *, installed, setup_secrets=None):
+    """Mock /api/extensions with the given installed list and open the tab.
+
+    `setup_secrets` is the `secrets` array returned by
+    `/api/extensions/{name}/setup`. Defaults to empty — that makes
+    `showConfigureModal` short-circuit with a toast and skip rendering
+    the configure modal, which is fine for tests that only assert button
+    labels. Pass a non-empty list to exercise the full
+    `renderConfigureModal` path.
+    """
     ext_body = json.dumps({"extensions": installed})
 
     async def handle_ext(route):
@@ -61,9 +69,8 @@ async def _mock_and_go(page, *, installed):
 
     await page.route("**/api/extensions/registry", handle_registry)
 
-    # The setup-fetch fires from the inline setup form in `setup_required`
-    # state. Return a no-secrets payload so the form collapses and does not
-    # interfere with the action-area button assertions.
+    secrets_payload = setup_secrets if setup_secrets is not None else []
+
     async def handle_setup_fetch(route):
         await route.fulfill(
             status=200,
@@ -72,7 +79,7 @@ async def _mock_and_go(page, *, installed):
                 {
                     "name": _WASM_CHANNEL_BASE["name"],
                     "kind": "wasm_channel",
-                    "secrets": [],
+                    "secrets": secrets_payload,
                     "fields": [],
                     "onboarding_state": None,
                     "onboarding": None,
@@ -161,6 +168,51 @@ async def test_fallback_button_says_reconfigure_when_authenticated(page):
     )
 
 
+async def test_fallback_button_says_setup_on_production_installed_wire_shape(page):
+    """Exact #2235 production wire shape: `activation_status='installed'`,
+    `onboarding_state=null` — `derive_onboarding` only emits a non-null
+    onboarding state for the `Pairing` variant, so real clients never
+    receive `setup_required` alongside `activation_status='installed'`.
+
+    The inline setup form only renders when the effective status is
+    `setup_required`, so this card shows no inline form — the action-area
+    button is the ONLY setup affordance. Under the bug the label read
+    'Reconfigure' here, which is the precise shape Copilot flagged and
+    the precise shape the QA bug-bash repro hit.
+    """
+    await _mock_and_go(
+        page,
+        installed=[
+            _channel_with(
+                active=False,
+                authenticated=False,
+                activation_status="installed",
+                onboarding_state=None,
+                onboarding=None,
+            )
+        ],
+    )
+    card = page.locator(
+        SEL["channels_ext_card"], has_text=_WASM_CHANNEL_BASE["display_name"]
+    ).first
+    await card.wait_for(state="visible", timeout=5000)
+
+    assert await card.locator(SEL["ext_onboarding"]).count() == 0, (
+        "production `installed` wire shape must not render an inline setup "
+        "form — if this ever changes, revisit the `inlineSetupCoversIt` rule"
+    )
+    setup_btn = card.locator(SEL["ext_configure_btn"], has_text="Setup")
+    reconfig_btn = card.locator(SEL["ext_configure_btn"], has_text="Reconfigure")
+    assert await setup_btn.count() == 1, (
+        "fallback button must say 'Setup' for an unauthenticated channel in "
+        "the default `installed` state — this is the exact wire shape of #2235"
+    )
+    assert await reconfig_btn.count() == 0, (
+        "fallback button must not say 'Reconfigure' when credentials are not "
+        "yet on file and no inline setup form covers the action"
+    )
+
+
 async def test_fallback_button_preserves_no_duplicate_setup_invariant(page):
     """`setup_required` + unauthenticated keeps the legacy label so the action
     button does not duplicate the inline setup form's call-to-action.
@@ -202,6 +254,9 @@ async def test_reconfigure_click_does_not_send_auth_event(page):
     open the configure modal locally, not fire a handshake that the backend
     would translate into a credential popup again.
     """
+    # Pass a non-empty `secrets` so `showConfigureModal` actually renders
+    # `.configure-modal` — with an empty list it short-circuits with a
+    # "no config needed" toast and the modal selector never appears.
     await _mock_and_go(
         page,
         installed=[
@@ -212,6 +267,15 @@ async def test_reconfigure_click_does_not_send_auth_event(page):
                 onboarding_state="ready",
                 onboarding=None,
             )
+        ],
+        setup_secrets=[
+            {
+                "name": "BOT_TOKEN",
+                "prompt": "Bot token",
+                "provided": True,
+                "optional": False,
+                "auto_generate": False,
+            }
         ],
     )
 
