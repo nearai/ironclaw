@@ -391,46 +391,38 @@ pub(crate) async fn chat_ws_handler(
     // whether they sent upgrade headers, which is a more accurate
     // security signal than the protocol-level 426.
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Result<axum::response::Response, (StatusCode, String)> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
     // Validate Origin header to prevent cross-site WebSocket hijacking.
     // Require the header outright; browsers always send it for WS upgrades,
     // so a missing Origin means a non-browser client trying to bypass the check.
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::FORBIDDEN,
-                "WebSocket Origin header required".to_string(),
-            )
-        })?;
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return (StatusCode::FORBIDDEN, "WebSocket Origin header required").into_response();
+    };
 
-    let is_local = is_local_origin(origin);
-    if !is_local {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "WebSocket origin not allowed".to_string(),
-        ));
+    if !is_local_origin(origin) {
+        return (StatusCode::FORBIDDEN, "WebSocket origin not allowed").into_response();
     }
 
     // Origin accepted — now require the upgrade to succeed. A caller
     // hitting `/api/chat/ws` from a trusted origin but without
     // `Connection: Upgrade` / `Upgrade: websocket` / `Sec-WebSocket-*`
     // (or via a test harness that can't supply hyper's `OnUpgrade`
-    // extension) falls into this branch — pass through whatever status
-    // axum's `WebSocketUpgradeRejection` chose (426 Upgrade Required,
-    // 400 Bad Request, etc).
-    let ws = ws.map_err(|rej| {
-        use axum::response::IntoResponse;
-        let resp = rej.into_response();
-        let status = resp.status();
-        (status, "WebSocket upgrade failed".to_string())
-    })?;
+    // extension) falls into this branch. Return axum's own
+    // `WebSocketUpgradeRejection::into_response()` verbatim so RFC 7231
+    // §6.5.15 metadata (notably the `Upgrade` header on a 426) is
+    // preserved — flagged by PR #2712 review (Copilot + Gemini).
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rej) => return rej.into_response(),
+    };
 
     let verbose = params.debug && user.role == "admin";
-    Ok(ws.on_upgrade(move |socket| {
+    ws.on_upgrade(move |socket| {
         crate::channels::web::platform::ws::handle_ws_connection(socket, state, user, verbose)
-    }))
+    })
+    .into_response()
 }
 
 pub(crate) async fn chat_history_handler(
@@ -1666,10 +1658,12 @@ mod tests {
         // The whole point of the test: the side effect actually fired.
         // Prior regression shape: a wrapper dropped the message silently
         // and returned 202 anyway — caller test catches it, helper test
-        // on web_incoming_message alone does not.
-        let received = rx
-            .recv()
+        // on web_incoming_message alone does not. The timeout prevents
+        // such a regression from hanging the whole suite; flagged by
+        // PR #2712 review (Copilot).
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
             .await
+            .expect("accepted send must enqueue a message promptly")
             .expect("msg_tx must receive the message the handler just accepted");
         assert_eq!(received.content, "hello agent");
         assert_eq!(received.user_id, "alice");
@@ -1738,8 +1732,14 @@ mod tests {
             .await
             .expect("within-budget call must succeed");
             assert_eq!(status, StatusCode::ACCEPTED);
-            // Drain so the channel doesn't block sender.
-            let _ = rx.recv().await;
+            // Drain so the channel doesn't block the sender. Wrapped in
+            // a timeout so a regression that returns 202 without actually
+            // enqueueing can't hang the loop — flagged by PR #2712 review
+            // (Copilot).
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .expect("accepted send must enqueue a message promptly")
+                .expect("channel closed before queued message was received");
         }
 
         let req = crate::channels::web::types::SendMessageRequest {
