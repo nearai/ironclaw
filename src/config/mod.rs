@@ -28,6 +28,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+mod missions;
 pub mod oauth;
 pub mod profile;
 pub mod relay;
@@ -60,6 +61,7 @@ pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
+pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
@@ -119,6 +121,7 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
+    pub missions: MissionsConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
     /// OAuth/social login configuration (Google, GitHub, etc.).
@@ -215,6 +218,7 @@ impl Config {
                 master_key: Some(generate_test_master_key()),
                 enabled: true,
                 source: crate::settings::KeySource::Env,
+                generated: false,
             },
             builder: BuilderModeConfig {
                 enabled: false,
@@ -240,6 +244,7 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
+            missions: MissionsConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             oauth: OAuthConfig::default(),
@@ -490,6 +495,7 @@ impl Config {
             skills: SkillsConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve(settings)?,
+            missions: MissionsConfig::resolve(settings)?,
             workspace,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
@@ -640,6 +646,24 @@ pub fn inject_single_var(key: &str, value: &str) {
             poisoned
                 .into_inner()
                 .insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
         }
     }
 }
@@ -1034,6 +1058,15 @@ mod tests {
         cfg
     }
 
+    /// Return a path to a temporary empty TOML file so that tests do not
+    /// accidentally load the user's real `~/.ironclaw/config.toml`.
+    fn empty_toml_path() -> tempfile::NamedTempFile {
+        tempfile::Builder::new()
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp toml")
+    }
+
     #[tokio::test]
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
@@ -1049,11 +1082,12 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.path()),
             None,
             false, // <- non-operator: admin-only keys must be stripped
         )
@@ -1085,13 +1119,14 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         // is_operator=true: admin/operator may legitimately configure
         // builtin overrides, so the resolve path must keep them.
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "operator-user",
-            None,
+            Some(toml.path()),
             None,
             true,
         )
@@ -1119,11 +1154,12 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.path()),
             None,
             false,
         )
@@ -1154,16 +1190,12 @@ mod tests {
             )
             .await;
 
-        // Use an empty TOML file to isolate from the host's config.toml
-        // (which may contain a selected_model that overrides the DB value).
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), b"").unwrap();
-
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "another-operator",
-            Some(tmp.path()),
+            Some(toml.path()),
             None,
             true,
         )

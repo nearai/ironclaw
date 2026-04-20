@@ -568,12 +568,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                         };
                         println!("    • {}{}", tool.name, approval);
                         if !tool.description.is_empty() {
-                            // Truncate long descriptions
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
-                            } else {
-                                tool.description.clone()
-                            };
+                            let desc = truncate_description(&tool.description);
                             println!("      {}", desc);
                         }
                     }
@@ -681,6 +676,16 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     crate::cli::init_secrets_store().await
 }
 
+/// Truncate a description to at most 57 display chars, appending "..." if needed.
+/// Uses char-safe boundary to avoid panicking on multi-byte UTF-8.
+fn truncate_description(s: &str) -> String {
+    if s.len() <= 60 {
+        return s.to_string();
+    }
+    let end = crate::util::floor_char_boundary(s, 57);
+    format!("{}...", &s[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +745,48 @@ mod tests {
         let result = parse_env_var("no-equals-here");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid env var format"));
+    }
+
+    #[test]
+    fn test_truncate_description_ascii() {
+        let short = "short description";
+        assert_eq!(truncate_description(short), short);
+
+        let exactly_60 = "a".repeat(60);
+        assert_eq!(truncate_description(&exactly_60), exactly_60);
+
+        let long = "a".repeat(80);
+        let truncated = truncate_description(&long);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 60);
+    }
+
+    #[test]
+    fn test_truncate_description_cjk_no_panic() {
+        // CJK chars are 3 bytes each; 20 chars = 60 bytes
+        let cjk = "这是一个很长的工具描述用来测试多字节字符截断是否会导致恐慌问题的文本";
+        assert!(cjk.len() > 60);
+        let truncated = truncate_description(cjk);
+        assert!(truncated.ends_with("..."));
+        // Must be valid UTF-8 (no panic, no split char)
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn test_truncate_description_emoji_no_panic() {
+        // Emoji are 4 bytes each; 16 emojis = 64 bytes
+        let emoji = "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥";
+        assert!(emoji.len() > 60);
+        let truncated = truncate_description(emoji);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_description_mixed_boundary() {
+        // ASCII + CJK boundary at exactly byte 57
+        let mixed = format!("{}{}", "a".repeat(56), "描述很长的文本需要截断");
+        assert!(mixed.len() > 60);
+        let truncated = truncate_description(&mixed);
+        assert!(truncated.ends_with("..."));
     }
 }

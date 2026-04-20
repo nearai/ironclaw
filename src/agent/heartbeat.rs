@@ -435,7 +435,10 @@ impl HeartbeatRunner {
 
         let response = OutgoingResponse {
             content: format!("🔔 *Heartbeat Alert*\n\n{}", message),
-            thread_id,
+            // `thread_id` originates from the engine's internal `ConversationId`
+            // (rendered as a UUID string) — trust it past the newtype boundary
+            // because it was not supplied by a channel adapter.
+            thread_id: thread_id.map(ironclaw_common::ExternalThreadId::from_trusted),
             attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",

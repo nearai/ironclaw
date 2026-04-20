@@ -1,8 +1,12 @@
 ---
 name: commitment-setup
-version: 0.2.0
-description: One-time setup for the commitments tracking system. Creates workspace structure, schema docs, and installs triage and digest missions.
+version: 0.3.0
+description: One-time setup for the commitments tracking system. Creates workspace structure, schema docs, and installs triage and digest missions. Excluded from activation once `commitments/README.md` exists in the workspace (the file this skill writes as its first step).
 activation:
+  # commitment-setup writes commitments/README.md as its first step, so
+  # the marker is automatically set after a successful first run. To
+  # re-trigger (e.g. migrate to a new schema), delete README.md first.
+  setup_marker: commitments/README.md
   keywords:
     - setup commitments
     - install commitments

@@ -268,7 +268,7 @@ async fn install_tool(
     println!("  Name: {}", tool_name);
     println!("  WASM: {}", target_wasm.display());
     println!("  Size: {} bytes", wasm_bytes.len());
-    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars
+    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars // safety: hex digest is ASCII.
 
     if target_caps.exists() {
         println!("  Caps: {}", target_caps.display());
@@ -1104,6 +1104,7 @@ fn read_hidden_input() -> anyhow::Result<String> {
                     print!("\x08 \x08");
                     std::io::stdout().flush()?;
                 }
+                KeyCode::Backspace => {}
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     return Err(anyhow::anyhow!("Interrupted"));

@@ -1,0 +1,35 @@
+id: hostile-solver-bad-quote
+description: |
+  A malicious or buggy solver returns a quote whose min_out is
+  ~20% below the expected amount — far outside the user's
+  max_slippage_bps of 50 (0.5%). The bounded-check stage must
+  refuse the quote; build_intent returns an error and the skill
+  marks the proposal as `unmet-route`.
+
+  This scenario uses a custom expectation `expect_error_contains`
+  to assert that the tool *fails* loudly instead of producing a
+  bundle.
+steps:
+  - name: build_intent
+    action: build_intent
+    params:
+      plan:
+        proposal_id: hostile-bad-quote
+        legs:
+          - kind: swap
+            chain: base
+            description: Swap USDC for higher-yield USDT
+        expected_out:
+          symbol: USDC
+          chain: base
+          amount: "5000.00"
+          value_usd: "5000.00"
+        expected_cost_usd: "1.00"
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 10000
+        max_slippage_bps: 50
+      solver: replay
+    expect_error_contains: "min_out"
