@@ -1587,6 +1587,11 @@ impl Workspace {
     /// which in multi-scope mode may return a document owned by a secondary
     /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
+        // Scan the incoming entry for prompt injection before touching the DB.
+        if !entry.is_empty() {
+            reject_if_injected(paths::MEMORY, entry)?;
+        }
+
         // Always get/create in the primary scope to preserve write isolation.
         let doc = self
             .storage
@@ -1597,6 +1602,12 @@ impl Workspace {
         } else {
             format!("{}\n\n{}", doc.content, entry)
         };
+
+        // Scan the combined content so that injection patterns split across
+        // multiple appends are caught.
+        if !new_content.is_empty() {
+            reject_if_injected(paths::MEMORY, &new_content)?;
+        }
 
         // Resolve metadata once — shared by versioning and indexing.
         let metadata = self.resolve_metadata(paths::MEMORY).await;
