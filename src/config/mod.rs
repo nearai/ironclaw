@@ -1061,6 +1061,7 @@ mod tests {
             .expect("create temp toml")
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn re_resolve_llm_without_store_keeps_toml_overlay() {
         let _env_guard = crate::config::helpers::lock_env();
