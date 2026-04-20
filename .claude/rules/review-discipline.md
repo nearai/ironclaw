@@ -46,3 +46,28 @@ cargo check --all-features                           # all features
 - `grep -rn 'super::' <files>` -- prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
 - If you fixed a pattern bug, `grep` for other instances across `src/`
 - Run `scripts/pre-commit-safety.sh` to catch UTF-8, case-sensitivity, hardcoded /tmp, and logging issues
+
+## PR Scope Discipline
+
+A PR's title and body must match its diff.
+
+- If the title describes one change ("fix auth cancel") but the diff spans multiple layers (provider → bridge → orchestrator → Python), retitle, split, or explicitly call out the scope expansion in the body. Reference: zmanian's review on #2668 (+590/-72 under a title advertising ~10 lines).
+- **Move-only refactors** must state "no behavior change" in the body and file a follow-up issue for every pre-existing correctness/perf concern surfaced during the move. Don't silently fix things mid-move — it's unreviewable. Pattern across #2628, #2680, #2687.
+- After a refactor that relocates or renames code, grep for `.md` and `CLAUDE.md` references to the moved paths and update them in the same PR. `web/CLAUDE.md` pointing at `server.rs` after its contents moved (#2687) is a review fail.
+
+## Guardrail Scripts Are Code
+
+Lint/boundary/safety scripts under `scripts/` are enforcement infrastructure. They must:
+
+- **Have regression tests** exercising every documented exemption (e.g. `dispatch-exempt`, `silent-ok`, `#[cfg(test)]` skip).
+- **Be included in the CI `has_code` / diff-filter** that gates required checks — a guardrail that isn't run on changes to itself can be weakened without anyone noticing. Reference: PR #2647.
+- **Parse grouped / multiline Rust syntax** when inspecting imports. Line-based regex misses `use crate::channels::web::{handlers::auth::...}` and shim re-exports.
+- **Actually enforce their documented skips** — if the exemption says "skips `#[cfg(test)]` blocks", the scanner must track brace nesting, not match a regex on the first line.
+
+## Doc Absolute Paths
+
+Committed `.md` and `.py` files (outside `tests/` and `scripts/`) must not contain developer-local absolute paths (`/home/<user>/`, `/Users/<user>/`, `/tmp/`). Reference: PR #2689. Pre-commit flags these.
+
+## Stale Comments After Refactors
+
+Doc strings and inline comments are part of the contract. A comment that says "strips trailing punctuation + whitespace" while the code only strips periods (#2701 `src/bridge/router.rs`) is a bug report waiting to happen. When you change behavior in a function, re-read its docstring and adjacent comments — update or delete them in the same change.

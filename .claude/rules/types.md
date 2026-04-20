@@ -127,6 +127,96 @@ impl From<MyId> for String { ... }      // infallible
   boundary.** A `String` returned from an internal function is a
   regression — return the type.
 
+## Using `from_trusted` safely
+
+`from_trusted(String)` is an escape hatch for internal-to-internal
+handoff — not a shortcut for external input.
+
+**Allowed call sites:** values read from a typed upstream that already
+validated — DB rows loaded through typed repos, registry entries, test
+fixtures with literal strings, values copied between already-typed
+fields of the same shape.
+
+**Forbidden call sites:** anything originating outside the process. If
+the input came from an HTTP body, a WebSocket frame, a webhook payload,
+a config file, a CLI arg, or a registry JSON field, use `::new(..)`
+(fallible) and propagate the error.
+
+Review flag: added `from_trusted` in `src/channels/**`, `src/bridge/**`,
+handler files, or `*_handler.rs`. References: PR #2685
+`IncomingMessage::with_thread`, PR #2681 MCP client constructors,
+PR #2687 `extensions_install_handler`.
+
+## Validated newtype template
+
+`new(impl AsRef<str>) -> Result<Self, _>` and `TryFrom<String>` must
+share a private `validate(&str)` helper. `TryFrom<String>` validates on
+the borrow, then consumes the owned `String` — never re-allocates.
+
+```rust
+impl MyId {
+    fn validate(s: &str) -> Result<(), MyIdError> { /* ... */ }
+
+    pub fn new(raw: impl AsRef<str>) -> Result<Self, MyIdError> {
+        Self::validate(raw.as_ref())?;
+        Ok(Self(raw.as_ref().to_owned()))
+    }
+}
+
+impl TryFrom<String> for MyId {
+    type Error = MyIdError;
+    fn try_from(value: String) -> Result<Self, MyIdError> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+```
+
+### Validated newtypes must gate `Deserialize`
+
+Never combine `#[derive(Deserialize)]` with `#[serde(transparent)]` on a
+validated newtype — `transparent` bypasses `::new()` entirely. Use
+`#[serde(try_from = "String")]` and implement `TryFrom<String>` as
+above. Review flag: `#[serde(transparent)]` on any type whose `::new()`
+returns `Result`.
+
+### Byte-length vs. character-length
+
+A validator using `s.len()` measures bytes. If the error message says
+"N characters", switch to `s.chars().count()`. Pick one and match the
+message.
+
+## Wire-stable enums
+
+Enums serialized over the network or persisted to the DB are part of
+the public contract.
+
+**Never use `Debug` as a serializer.** `format!("{:?}", status)` emits
+`"InProgress"` while snake_case serde emits `"in_progress"` — this
+drift has already shipped (#2669 `mission_list` vs `mission_complete`).
+Derive `Serialize`/`Deserialize` with
+`#[serde(rename_all = "snake_case")]` and add enum helper methods — not
+`format!("{:?}", ...)` — for any wire or UI rendering.
+
+**Migrations from `String` must preserve every historical value.** When
+replacing a stringly-typed wire field with an enum, add
+`#[serde(alias = "...")]` for every value any running producer still
+emits. Grep the tree; check staging/production logs. Add a round-trip
+deserialization test with raw legacy JSON. Reference: PR #2678
+`JobResultStatus` rejected `"error"` / `"stuck"` / case variants on
+rollout.
+
+## Wire-contract field naming
+
+A boolean or enum exposed to the web UI has exactly one canonical
+snake_case name on the wire (`engine_v2_enabled`) and one canonical JS
+accessor (`window.bootstrap.engineV2Enabled`). Reading the same value
+from ad-hoc `data.engine_v2` inside a surface file is a bug — it will
+diverge. Delete duplicate fields in response structs (PR #2665 shipped
+both `engine_v2` and `engine_v2_enabled` in one struct). Frontend reads
+the flag from bootstrap globals, not from response bodies. References:
+PR #2683, PR #2702.
+
 ## Applies to
 
 `src/**`, `crates/**`, `tests/**`. Any code inside the IronClaw
