@@ -489,7 +489,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Apply admin tool policy first so admin-disabled tools are removed
         // before per-user permission filtering and session auto-approval.
-        let is_admin = self.tenant.identity().role.is_admin();
+        let is_admin = self.tenant.identity().is_admin();
         let admin_policy = crate::tools::permissions::load_cached_admin_tool_policy(
             self.agent.store(),
             &self.cached_admin_tool_policy,

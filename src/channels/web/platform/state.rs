@@ -372,6 +372,18 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Hot-reload controller for the LLM provider chain. Populated at
+    /// startup when the chain is built from config (not in test harnesses
+    /// that inject a provider directly).
+    pub llm_reload: Option<Arc<crate::llm::LlmReloadHandle>>,
+    /// LLM session manager handed through to `LlmReloadHandle::reload` so
+    /// the rebuilt chain keeps using the same (potentially authenticated)
+    /// NEAR AI / OAuth session without forcing a re-login.
+    pub llm_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    /// Optional TOML config path that produced the current `LlmConfig`.
+    /// Needed so a hot-reload reads the same precedence layers
+    /// (TOML → DB overlay) as startup.
+    pub config_toml_path: Option<std::path::PathBuf>,
     /// Skill registry for skill management API.
     pub skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
@@ -396,7 +408,7 @@ pub struct GatewayState {
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
-    pub active_config: ActiveConfigSnapshot,
+    pub active_config: Arc<tokio::sync::RwLock<ActiveConfigSnapshot>>,
     /// Secrets store for admin secret provisioning.
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.

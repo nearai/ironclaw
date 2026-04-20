@@ -125,6 +125,17 @@ fn map_bridge_err(e: crate::error::Error) -> ToolError {
     ToolError::ExecutionFailed(e.to_string())
 }
 
+/// Parse a raw UUID string from tool params into a typed
+/// [`ironclaw_engine::ProjectId`]. Centralized so every call site uses
+/// the same error message and `.claude/rules/types.md` stays enforced
+/// at the tool boundary — once parsed, only the typed ID flows onward.
+fn parse_project_id(raw: &str) -> Result<ironclaw_engine::ProjectId, ToolError> {
+    let pid = uuid::Uuid::parse_str(raw).map_err(|e| {
+        ToolError::InvalidParameters(format!("project id '{raw}' is not a valid UUID: {e}"))
+    })?;
+    Ok(ironclaw_engine::ProjectId(pid))
+}
+
 // ── project_create ─────────────────────────────────────────────────
 
 pub struct ProjectCreateTool;
@@ -220,9 +231,14 @@ impl Tool for ProjectUpdateTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let id = require_str(&params, "id")?;
+        let id_str = require_str(&params, "id")?;
+        // Parse the string into a typed ProjectId at the tool boundary
+        // per `.claude/rules/types.md` — internal calls (bridge,
+        // engine store) flow a `ProjectId`, never a raw `&str`, so the
+        // compiler catches any misuse.
+        let pid = parse_project_id(id_str)?;
         let fields = upsert_fields_from_params(&params, false)?;
-        let info = crate::bridge::update_engine_project(id, &ctx.user_id, fields)
+        let info = crate::bridge::update_engine_project(pid, &ctx.user_id, fields)
             .await
             .map_err(map_bridge_err)?;
         let body =
@@ -276,25 +292,33 @@ impl Tool for ProjectSetActiveTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let workspace = self.resolver.resolve(&ctx.user_id).await;
-        let project_id = params.get("project_id").and_then(|v| v.as_str());
+        let project_id_str = params.get("project_id").and_then(|v| v.as_str());
+        // Typed parse at the boundary; the pointer-write path below
+        // serializes the string form back out, but every internal
+        // flow (`get_engine_project`) takes the typed identifier.
+        let parsed = match project_id_str {
+            Some(id) if !id.is_empty() => Some(parse_project_id(id)?),
+            _ => None,
+        };
 
-        let content = match project_id {
-            Some(id) if !id.is_empty() => {
+        let content = match parsed {
+            Some(pid) => {
                 // Validate the project exists and is owned by this user before
                 // storing the pointer. A dangling active pointer would surface
                 // as a mysterious "no project" chrome bug later.
-                let maybe = crate::bridge::get_engine_project(id, &ctx.user_id)
+                let maybe = crate::bridge::get_engine_project(&pid.0.to_string(), &ctx.user_id)
                     .await
                     .map_err(map_bridge_err)?;
                 if maybe.is_none() {
                     return Err(ToolError::InvalidParameters(format!(
-                        "project '{id}' not found or not owned by this user"
+                        "project '{}' not found or not owned by this user",
+                        pid.0
                     )));
                 }
-                serde_json::to_string(&serde_json::json!({ "project_id": id }))
+                serde_json::to_string(&serde_json::json!({ "project_id": pid.0.to_string() }))
                     .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
             }
-            _ => "{}".to_string(),
+            None => "{}".to_string(),
         };
 
         workspace
@@ -302,7 +326,9 @@ impl Tool for ProjectSetActiveTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        let result = serde_json::json!({ "project_id": project_id });
+        let result = serde_json::json!({
+            "project_id": parsed.map(|p| p.0.to_string()),
+        });
         Ok(ToolOutput::text(result.to_string(), start.elapsed()))
     }
 
@@ -347,20 +373,28 @@ impl Tool for ProjectAssignThreadTool {
         let thread_id = uuid::Uuid::parse_str(thread_id_str)
             .map_err(|e| ToolError::InvalidParameters(format!("thread_id: {e}")))?;
 
-        let project_id = params
+        // Parse the optional project_id into a typed `ProjectId` so
+        // the bridge call below cannot be accidentally handed a
+        // raw thread UUID in its place.
+        let project_id_raw = params
             .get("project_id")
             .and_then(|v| if v.is_null() { None } else { v.as_str() });
+        let project_id = match project_id_raw {
+            Some(id) => Some(parse_project_id(id)?),
+            None => None,
+        };
 
         // If a project_id is provided, validate existence + ownership before
         // writing anything. This prevents the thread-level metadata row from
         // referencing a project the user does not own.
-        if let Some(id) = project_id {
-            let maybe = crate::bridge::get_engine_project(id, &ctx.user_id)
+        if let Some(pid) = project_id {
+            let maybe = crate::bridge::get_engine_project(&pid.0.to_string(), &ctx.user_id)
                 .await
                 .map_err(map_bridge_err)?;
             if maybe.is_none() {
                 return Err(ToolError::InvalidParameters(format!(
-                    "project '{id}' not found or not owned by this user"
+                    "project '{}' not found or not owned by this user",
+                    pid.0
                 )));
             }
         }
@@ -371,7 +405,7 @@ impl Tool for ProjectAssignThreadTool {
 
         let result = serde_json::json!({
             "thread_id": thread_id_str,
-            "project_id": project_id,
+            "project_id": project_id.map(|p| p.0.to_string()),
         });
         Ok(ToolOutput::text(result.to_string(), start.elapsed()))
     }

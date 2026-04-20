@@ -10,9 +10,24 @@ use axum::{
 use secrecy::SecretString;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
+
+/// Error shape for the write-path settings handlers (`set`, `delete`,
+/// `import`). Carries a status code plus an optional body string — the
+/// body is surfaced to the client through axum's `IntoResponse` for
+/// `(StatusCode, String)`, so the web UI's `apiFetch` can display
+/// actionable reasons for 422 rollbacks alongside an empty body for
+/// authorization failures.
+type WriteErr = (StatusCode, String);
+
+/// Convert a bare `StatusCode` (from helpers that don't carry a reason)
+/// into the handlers' [`WriteErr`] shape. Used at `?` propagation sites
+/// where the inner helper returns `Result<_, StatusCode>`.
+fn no_body(code: StatusCode) -> WriteErr {
+    (code, String::new())
+}
 
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
 const API_KEY_UNCHANGED: &str = "••••••••";
@@ -22,7 +37,7 @@ const API_KEY_UNCHANGED: &str = "••••••••";
 /// Prefers the `CachedSettingsStore` so writes invalidate the cache
 /// (keeping the agent loop's view consistent). Falls back to the raw
 /// `Database` when no cached store is configured.
-pub(super) fn resolve_settings_store(
+pub(crate) fn resolve_settings_store(
     state: &GatewayState,
 ) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
     if let Some(ref sc) = state.settings_cache {
@@ -147,28 +162,58 @@ pub async fn settings_set_handler(
     Path(key): Path<String>,
     Query(query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
+) -> Result<StatusCode, WriteErr> {
+    let effective_user_id = resolve_settings_scope(&user, &query).map_err(no_body)?;
+    ensure_setting_write_allowed(&user, &key).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &effective_user_id, &body.value).await?;
-        validate_custom_providers(&body.value)?;
+        guard_active_provider_not_removed(store, &effective_user_id, &body.value)
+            .await
+            .map_err(no_body)?;
+        validate_custom_providers(&body.value).map_err(no_body)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            extract_builtin_override_keys(&state, &effective_user_id, &body.value).await?
+            extract_builtin_override_keys(&state, &effective_user_id, &body.value)
+                .await
+                .map_err(no_body)?
         }
         "llm_custom_providers" => {
-            extract_custom_provider_keys(&state, &effective_user_id, &body.value).await?
+            extract_custom_provider_keys(&state, &effective_user_id, &body.value)
+                .await
+                .map_err(no_body)?
         }
         _ => body.value.clone(),
+    };
+
+    // Snapshot the current value BEFORE the write so a post-reload failure
+    // can roll the DB back to its pre-request state. Treating a DB read
+    // error as `None` would be unsafe — we might later `delete_setting`
+    // a key whose prior value we simply failed to read. Abort with 500
+    // instead.
+    let reload_triggered =
+        llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
+    let prev_value = if reload_triggered {
+        store
+            .get_setting(&effective_user_id, &key)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %effective_user_id,
+                    "Failed to snapshot setting for rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?
+    } else {
+        None
     };
 
     store
@@ -176,10 +221,209 @@ pub async fn settings_set_handler(
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
 
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                rollback_settings_write(store, &effective_user_id, &key, prev_value.as_ref()).await;
+                tracing::error!(
+                    key = %key,
+                    reason = %reason,
+                    "Rejected LLM settings write because the resulting config \
+                     would not produce a buildable provider chain; rolled back to prior value"
+                );
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
+            }
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Setting keys whose value is consumed by `build_provider_chain` and whose
+/// change should therefore trigger a hot-reload of the LLM provider chain.
+///
+/// Keep this list narrow: every key added here causes an extra
+/// `Config::from_db_with_toml` round-trip plus a chain rebuild (retry, cache,
+/// circuit breaker wrappers), so non-LLM settings must not be listed.
+fn llm_setting_requires_reload(key: &str) -> bool {
+    matches!(
+        key,
+        "llm_backend"
+            | "selected_model"
+            | "llm_custom_providers"
+            | "llm_builtin_overrides"
+            | "ollama_base_url"
+            | "openai_compatible_base_url"
+            | "bedrock_region"
+            | "bedrock_cross_region"
+            | "bedrock_profile"
+    )
+}
+
+/// True when writes to `effective_user_id` actually feed the global provider
+/// chain. The chain is (re)built by layering `__admin__` then `owner_id` in
+/// `Config::from_db_with_toml`, so only writes to those two scopes can
+/// change its resolved value — a member's per-user scope is ignored.
+///
+/// Gates two things at once: (a) scope-correctness (a write that would be
+/// invisible to the reload read never triggers it) and (b) DoS prevention
+/// (any authenticated user writing their own `selected_model` cannot force
+/// an expensive global chain rebuild).
+fn scope_feeds_global_chain(state: &GatewayState, effective_user_id: &str) -> bool {
+    let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+    effective_user_id == admin_scope || effective_user_id == state.owner_id
+}
+
+/// Outcome classes from [`reload_llm_after_settings_change`].
+///
+/// The distinction matters at the call site: a `BuildFailed` outcome means
+/// the DB write produced an unbuildable chain, so the caller must roll
+/// back the setting to avoid stored-state-vs-runtime split-brain. All
+/// other outcomes mean the chain is consistent with the committed state
+/// (either it reloaded, or nothing to reload).
+enum ReloadOutcome {
+    /// Chain was rebuilt successfully and is now live.
+    Swapped,
+    /// Hot-reload wiring missing (test harness / CLI) or no DB store —
+    /// nothing to do. The setting lands; the process keeps serving with
+    /// the pre-change config until restart.
+    Skipped,
+    /// Reading the DB back for the new config failed. Logged at `error!`.
+    /// Caller may roll back defensively.
+    ConfigLoadFailed(String),
+    /// The proposed config resolved OK but building the provider chain
+    /// against it failed (e.g. `llm_backend` switched to a value whose
+    /// credentials aren't present yet). Caller MUST roll back the write
+    /// to keep DB and runtime aligned.
+    BuildFailed(String),
+}
+
+/// Rebuild the active provider chain from the latest settings and atomically
+/// swap the running primary/cheap providers.
+///
+/// The reload reads from the same scope `AppBuilder::init_config` uses at
+/// startup — [`GatewayState::owner_id`] — so `Config::from_db_with_toml`
+/// layers admin → owner in the same precedence order the running chain was
+/// originally built with. Using the just-written `effective_user_id`
+/// instead would skip the admin-merge branch for `__admin__` writes and
+/// drop owner-scope overlays (see #2673 review).
+async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome {
+    let Some(reloader) = state.llm_reload.as_ref() else {
+        tracing::warn!(
+            "LLM setting changed but llm_reload is not wired into the gateway; \
+             provider chain will keep using the pre-change config until restart"
+        );
+        return ReloadOutcome::Skipped;
+    };
+    let store_opt = state.store.as_ref(); // dispatch-exempt: read-only re-resolve of LlmConfig for chain rebuild
+    let Some(store) = store_opt else {
+        tracing::warn!(
+            "LLM setting changed but no database store is configured; \
+             cannot reload provider chain"
+        );
+        return ReloadOutcome::Skipped;
+    };
+    let Some(session_manager) = state.llm_session_manager.as_ref() else {
+        tracing::warn!(
+            "LLM setting changed but llm_session_manager is not wired into the gateway; \
+             cannot reload provider chain"
+        );
+        return ReloadOutcome::Skipped;
+    };
+
+    // Use the gateway owner scope so the admin-scope merge happens the
+    // same way it did at startup. `re_resolve_llm_with_secrets` also
+    // hydrates API keys from the secrets store — without that,
+    // `from_db_with_toml` alone would miss `OPENAI_API_KEY` /
+    // `NEARAI_SESSION_TOKEN` added alongside the backend switch.
+    let mut config = match crate::config::Config::from_db_with_toml(
+        store.as_ref(),
+        &state.owner_id,
+        state.config_toml_path.as_deref(),
+        true,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("LLM hot reload: from_db_with_toml failed: {}", e);
+            return ReloadOutcome::ConfigLoadFailed(e.to_string());
+        }
+    };
+
+    if let Some(secrets) = state.secrets_store.as_ref()
+        && let Err(e) = config
+            .re_resolve_llm_with_secrets(
+                Some(store.as_ref()),
+                &state.owner_id,
+                state.config_toml_path.as_deref(),
+                Some(secrets.as_ref()),
+                true,
+            )
+            .await
+    {
+        tracing::error!("LLM hot reload: secret re-hydration failed: {}", e);
+        return ReloadOutcome::ConfigLoadFailed(e.to_string());
+    }
+
+    if let Err(e) = reloader
+        .reload(&config.llm, Arc::clone(session_manager))
+        .await
+    {
+        tracing::error!("LLM hot reload: provider chain build failed: {}", e);
+        return ReloadOutcome::BuildFailed(e.to_string());
+    }
+
+    // Refresh the active-config snapshot the status handler reads. Only
+    // llm_backend / llm_model are touched — `enabled_channels` is
+    // intentionally left alone because channel enablement is a
+    // channels-manager concern and is not affected by LLM config changes.
+    let active_model = state
+        .llm_provider
+        .as_ref()
+        .map(|provider| provider.active_model_name())
+        .unwrap_or_else(|| config.llm.active_model_name());
+    {
+        let mut active = state.active_config.write().await;
+        active.llm_backend = config.llm.backend.clone();
+        active.llm_model = active_model;
+    }
+
+    tracing::info!(
+        backend = %config.llm.backend,
+        "LLM provider chain hot-reloaded from updated settings"
+    );
+    ReloadOutcome::Swapped
+}
+
+/// Restore the previous value of a settings key (or delete the key if it
+/// wasn't previously set), swallowing rollback errors at `warn!`. Used
+/// after a reload returned `ReloadOutcome::BuildFailed` to keep DB
+/// state aligned with the running provider chain — a best-effort
+/// compensating action so a bad `llm_backend` write doesn't leave the
+/// DB saying "openai" while the runtime is still on "nearai".
+async fn rollback_settings_write(
+    store: &(dyn crate::db::SettingsStore + Send + Sync),
+    user_id: &str,
+    key: &str,
+    prev: Option<&serde_json::Value>,
+) {
+    let rollback_err = match prev {
+        Some(value) => store.set_setting(user_id, key, value).await.err(),
+        None => store.delete_setting(user_id, key).await.err(),
+    };
+    if let Some(e) = rollback_err {
+        tracing::warn!(
+            user_id,
+            key,
+            "LLM hot reload: rollback of setting failed — DB and runtime may now diverge: {}",
+            e
+        );
+    }
 }
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
@@ -280,11 +524,11 @@ pub async fn settings_delete_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
     Query(query): Query<SettingScopeQuery>,
-) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
+) -> Result<StatusCode, WriteErr> {
+    let effective_user_id = resolve_settings_scope(&user, &query).map_err(no_body)?;
+    ensure_setting_write_allowed(&user, &key).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -294,16 +538,55 @@ pub async fn settings_delete_handler(
             &effective_user_id,
             &serde_json::Value::Array(vec![]),
         )
-        .await?;
+        .await
+        .map_err(no_body)?;
     }
+
+    // Snapshot for rollback — see `settings_set_handler` for rationale,
+    // including why a DB read error must not be collapsed to "no prior
+    // value" (doing so could turn rollback into silent data loss).
+    let reload_triggered =
+        llm_setting_requires_reload(&key) && scope_feeds_global_chain(&state, &effective_user_id);
+    let prev_value = if reload_triggered {
+        store
+            .get_setting(&effective_user_id, &key)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %effective_user_id,
+                    "Failed to snapshot setting for rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?
+    } else {
+        None
+    };
 
     store
         .delete_setting(&effective_user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
+
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                rollback_settings_write(store, &effective_user_id, &key, prev_value.as_ref()).await;
+                tracing::error!(
+                    key = %key,
+                    reason = %reason,
+                    "Rejected LLM settings delete because the resulting config \
+                     would not produce a buildable provider chain; rolled back",
+                );
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
+            }
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -330,21 +613,60 @@ pub async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    ensure_settings_import_allowed(&user, &body.settings)?;
+) -> Result<StatusCode, WriteErr> {
+    ensure_settings_import_allowed(&user, &body.settings).map_err(no_body)?;
 
-    let store = resolve_settings_store(&state)?;
+    let store = resolve_settings_store(&state).map_err(no_body)?;
 
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
     let mut sanitized = body.settings.clone();
     if let Some(v) = sanitized.get("llm_builtin_overrides").cloned() {
-        let clean = extract_builtin_override_keys(&state, &user.user_id, &v).await?;
+        let clean = extract_builtin_override_keys(&state, &user.user_id, &v)
+            .await
+            .map_err(no_body)?;
         sanitized.insert("llm_builtin_overrides".to_string(), clean);
     }
     if let Some(v) = sanitized.get("llm_custom_providers").cloned() {
-        let clean = extract_custom_provider_keys(&state, &user.user_id, &v).await?;
+        let clean = extract_custom_provider_keys(&state, &user.user_id, &v)
+            .await
+            .map_err(no_body)?;
         sanitized.insert("llm_custom_providers".to_string(), clean);
+    }
+
+    // Import writes to the *caller's* own scope (not admin scope), so only
+    // reload if that scope feeds the global chain — i.e., the caller is
+    // the gateway owner.
+    let reload_triggered = body.settings.keys().any(|k| llm_setting_requires_reload(k))
+        && scope_feeds_global_chain(&state, &user.user_id);
+
+    // Snapshot every LLM-affecting key from the caller's scope so we can
+    // roll the whole set back atomically if the post-import reload finds
+    // the new config unbuildable. We deliberately don't snapshot keys
+    // that aren't in the reload allowlist — those don't participate in
+    // the build that can fail.
+    //
+    // Snapshot-read failures must abort the import with 500, not be
+    // collapsed to "no prior value" — a later rollback would otherwise
+    // delete a key whose prior value we simply couldn't read.
+    let mut prev_values: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+    if reload_triggered {
+        for key in body
+            .settings
+            .keys()
+            .filter(|k| llm_setting_requires_reload(k))
+        {
+            let prev = store.get_setting(&user.user_id, key).await.map_err(|e| {
+                tracing::error!(
+                    key = %key,
+                    user_id = %user.user_id,
+                    "Failed to snapshot setting for import rollback safety: {}",
+                    e
+                );
+                no_body(StatusCode::INTERNAL_SERVER_ERROR)
+            })?;
+            prev_values.push((key.clone(), prev));
+        }
     }
 
     store
@@ -352,8 +674,27 @@ pub async fn settings_import_handler(
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            no_body(StatusCode::INTERNAL_SERVER_ERROR)
         })?;
+
+    if reload_triggered {
+        match reload_llm_after_settings_change(&state).await {
+            ReloadOutcome::Swapped | ReloadOutcome::Skipped => {}
+            ReloadOutcome::BuildFailed(reason) | ReloadOutcome::ConfigLoadFailed(reason) => {
+                for (key, prev) in &prev_values {
+                    rollback_settings_write(store, &user.user_id, key, prev.as_ref()).await;
+                }
+                tracing::error!(
+                    reason = %reason,
+                    "Rejected LLM settings import because the resulting config \
+                     would not produce a buildable provider chain; rolled back \
+                     {} LLM key(s)",
+                    prev_values.len(),
+                );
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
+            }
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -952,17 +1293,26 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: Some(secrets),
             db_auth: None,
             pairing_store: None,
@@ -1262,7 +1612,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1283,7 +1633,507 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
+    }
+
+    /// Drive through `settings_set_handler` and verify that writing an
+    /// LLM-relevant admin-scope key triggers `reload_llm_after_settings_change`,
+    /// which rebuilds the provider chain and atomically swaps it.
+    ///
+    /// Per `.claude/rules/testing.md` (Test Through the Caller, Not Just
+    /// the Helper), the reload predicate and the swap helper are both
+    /// unit-tested — but a test that drives the actual handler is needed to
+    /// catch regressions where the handler forgets to call the reload path,
+    /// gets the wrapper missing from state, or stops threading the new model
+    /// into `active_config`.
+    #[tokio::test]
+    async fn settings_set_handler_triggers_llm_provider_hot_reload() {
+        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+
+        let secrets = test_secrets_store();
+        let (db, _tmp) = crate::testing::test_db().await;
+
+        // Starting config: NEAR AI backend with "model-start".
+        let mut initial = LlmConfig {
+            backend: "nearai".to_string(),
+            session: SessionConfig::default(),
+            nearai: crate::llm::config::NearAiConfig {
+                model: "model-start".to_string(),
+                cheap_model: None,
+                base_url: "https://api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            openai_codex: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        initial.nearai.model = "model-start".to_string();
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("build initial provider chain");
+        assert_eq!(primary.active_model_name(), "model-start");
+
+        // Seed admin-scope settings that `Config::from_db_with_toml` reads
+        // so the reloaded chain resolves nearai_model from `selected_model`.
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        db.set_setting(admin_scope, "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed llm_backend");
+        db.set_setting(
+            admin_scope,
+            "selected_model",
+            &serde_json::json!("model-start"),
+        )
+        .await
+        .expect("seed selected_model");
+
+        let mut state = test_gateway_state(Arc::clone(&secrets));
+        state.store = Some(Arc::clone(&db));
+        state.llm_provider = Some(Arc::clone(&primary));
+        state.llm_reload = Some(Arc::clone(&reload_handle));
+        state.llm_session_manager = Some(Arc::clone(&session));
+        // Owner scope is the user_id that `Config::from_db_with_toml` is
+        // called with — we set it to admin scope so the settings reload
+        // reads the same rows we just seeded.
+        state.owner_id = admin_scope.to_string();
+        let state = Arc::new(state);
+
+        // Act: the admin user writes selected_model=model-swapped to the
+        // admin scope via the normal settings handler.
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: admin_scope.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("model-swapped"),
+            }),
+        )
+        .await
+        .expect("settings_set_handler should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Assert: the same swappable wrapper now reports the new model.
+        assert_eq!(
+            primary.active_model_name(),
+            "model-swapped",
+            "llm_reload should have swapped the inner provider",
+        );
+
+        // And the status snapshot was updated in the same critical section.
+        let active = state.active_config.read().await;
+        assert_eq!(active.llm_backend, "nearai");
+        assert_eq!(active.llm_model, "model-swapped");
+    }
+
+    /// When `llm_reload` is not wired into the gateway (test harnesses,
+    /// CLI-only runs), the handler must still return success: the setting
+    /// lands in the DB, and the missing-wiring path is logged at `warn!`
+    /// so operators can see the provider chain will stay stale until
+    /// restart. Exercising this explicitly guards against regressions that
+    /// would turn the warning into a 500.
+    #[tokio::test]
+    async fn settings_set_handler_succeeds_without_hot_reload_wiring() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        // Sanity: this state deliberately has no llm_reload.
+        assert!(state.llm_reload.is_none());
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("ignored-value"),
+            }),
+        )
+        .await
+        .expect("handler should not 500 when llm_reload is None");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// Build the same "real provider chain + wired GatewayState" harness as
+    /// `settings_set_handler_triggers_llm_provider_hot_reload`, but with the
+    /// gateway `owner_id` set to `"owner"` and the admin scope pre-seeded
+    /// with backend + model. Returns the wired state plus the provider
+    /// wrapper so tests can observe swap side effects.
+    async fn hot_reload_harness() -> (
+        Arc<GatewayState>,
+        Arc<dyn crate::llm::LlmProvider>,
+        tempfile::TempDir,
+    ) {
+        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+
+        let secrets = test_secrets_store();
+        let (db, tmp) = crate::testing::test_db().await;
+
+        let initial = LlmConfig {
+            backend: "nearai".to_string(),
+            session: SessionConfig::default(),
+            nearai: crate::llm::config::NearAiConfig {
+                model: "model-start".to_string(),
+                cheap_model: None,
+                base_url: "https://api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            openai_codex: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let (primary, _cheap, _recording, reload_handle) =
+            build_provider_chain(&initial, Arc::clone(&session))
+                .await
+                .expect("initial chain");
+
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        db.set_setting(admin_scope, "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed llm_backend");
+        db.set_setting(
+            admin_scope,
+            "selected_model",
+            &serde_json::json!("model-start"),
+        )
+        .await
+        .expect("seed selected_model");
+
+        let mut state = test_gateway_state(Arc::clone(&secrets));
+        state.store = Some(Arc::clone(&db));
+        state.llm_provider = Some(Arc::clone(&primary));
+        state.llm_reload = Some(Arc::clone(&reload_handle));
+        state.llm_session_manager = Some(Arc::clone(&session));
+        // Gateway owner is a distinct identity from admin scope, so tests
+        // can tell when a reload was gated out by scope.
+        state.owner_id = "owner".to_string();
+        (Arc::new(state), primary, tmp)
+    }
+
+    /// A non-admin member must be rejected when trying to change the
+    /// `llm_backend` setting — provider choice is shared across the
+    /// gateway and must stay admin-gated per the product directive
+    /// ("admins choose the provider; members pick the model within it").
+    #[tokio::test]
+    async fn settings_set_handler_rejects_member_writing_llm_backend() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_set_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_backend".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("openai"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
+    }
+
+    /// Members writing their own `selected_model` must succeed (the model
+    /// is a per-user choice) AND must NOT trigger a global chain reload —
+    /// the active chain is resolved from admin/owner scope, so a member's
+    /// own setting has no effect on it. This simultaneously guards the
+    /// product directive and the DoS vector where any member could force
+    /// expensive chain rebuilds by spamming their settings endpoint.
+    #[tokio::test]
+    async fn settings_set_handler_member_selected_model_skips_reload() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("member-pick"),
+            }),
+        )
+        .await
+        .expect("member can write their own selected_model");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The setting landed in the member's scope, readable on a later get.
+        let stored = state
+            .store
+            .as_ref()
+            .expect("store")
+            .get_setting("member", "selected_model")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored, serde_json::json!("member-pick"));
+
+        // Critical: the global chain was NOT rebuilt — primary still points
+        // at the model we seeded into admin scope.
+        assert_eq!(
+            primary.active_model_name(),
+            "model-start",
+            "member's per-user write must not trigger global reload",
+        );
+    }
+
+    /// An admin writing `selected_model` to the `owner` scope (their own
+    /// scope when the admin is also the gateway owner) DOES feed the
+    /// global chain — this is the single-user / admin-is-owner case that
+    /// `scope_feeds_global_chain` explicitly allows alongside the admin
+    /// scope. Without this branch, the default "write to my own settings"
+    /// UX would never trigger a reload for the owner.
+    #[tokio::test]
+    async fn settings_set_handler_owner_scope_triggers_reload() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+
+        // Seed the owner scope so `Config::from_db_with_toml` resolves to
+        // the new model when it reads it back via the `owner` user_id.
+        state
+            .store
+            .as_ref()
+            .expect("store")
+            .set_setting("owner", "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed owner backend");
+
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "owner".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("owner-pick"),
+            }),
+        )
+        .await
+        .expect("admin owner write should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        assert_eq!(primary.active_model_name(), "owner-pick");
+    }
+
+    /// When the settings write produces a config that can't be resolved
+    /// or built, the handler must return 422 AND roll back the DB value
+    /// so stored-state and live-runtime stay in sync. Without rollback, a
+    /// bad write would leave the DB saying one thing while the runtime
+    /// kept running the old chain — exactly the split-brain the PR
+    /// review flagged.
+    ///
+    /// Repro setup: pre-seed an admin-scope config that fails at
+    /// `LlmConfig::resolve` time (`bedrock_cross_region` outside the
+    /// allowed set). The reload attempt during the handler's write will
+    /// see this broken sibling-config, fail resolution, and roll back the
+    /// caller's write.
+    #[tokio::test]
+    async fn settings_set_handler_rolls_back_on_reload_failure() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+        let before_model = primary.active_model_name();
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness
+
+        // Poison the admin-scope LLM config so any reload will fail at
+        // resolve time. We flip the backend to bedrock and give it an
+        // invalid cross-region value — `LlmConfig::resolve` rejects
+        // anything outside `{us, eu, apac, global}` unconditionally, no
+        // network or credentials involved.
+        store
+            .set_setting(admin_scope, "llm_backend", &serde_json::json!("bedrock"))
+            .await
+            .expect("seed broken backend");
+        store
+            .set_setting(
+                admin_scope,
+                "bedrock_region",
+                &serde_json::json!("us-east-1"),
+            )
+            .await
+            .expect("seed region");
+        store
+            .set_setting(
+                admin_scope,
+                "bedrock_cross_region",
+                &serde_json::json!("banana"),
+            )
+            .await
+            .expect("seed invalid cross_region");
+
+        // Now the caller writes some *other* reload-triggering key. The
+        // write itself is well-formed, but the reload re-reads the whole
+        // admin-scope config (including the poisoned values) and bails.
+        let err = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: admin_scope.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_custom_providers".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!([]),
+            }),
+        )
+        .await
+        .expect_err("handler must reject unbuildable LLM config");
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        // The error body must carry the underlying reason so the web UI
+        // can surface it in the Settings UI rather than a generic 422.
+        assert!(
+            !err.1.is_empty(),
+            "422 response body must include the reload failure reason; got empty body",
+        );
+
+        // DB rolled back to the pre-request state for the caller's key
+        // (was never set → delete-on-rollback → still not set).
+        let after = store
+            .get_setting(admin_scope, "llm_custom_providers")
+            .await
+            .expect("read");
+        assert!(
+            after.is_none(),
+            "rollback should have removed the newly-written key; got {:?}",
+            after,
+        );
+
+        // Provider chain unchanged — the old, working chain keeps serving.
+        assert_eq!(primary.active_model_name(), before_model);
+    }
+
+    /// Regression for the review finding that `reload_llm_after_settings_change`
+    /// was reading `Config::from_db_with_toml(effective_user_id, …)`. When
+    /// the write was `scope=admin`, that user_id is `__admin__`, and the
+    /// loader's `if user_id != admin_scope` guard skipped the admin-merge
+    /// step entirely — so owner-scope overlays that were present at
+    /// startup would silently disappear after the first admin-scope write.
+    /// The fix uses `state.owner_id` so the startup layering (admin →
+    /// owner) is preserved.
+    ///
+    /// This test pre-seeds a distinct `selected_model` at the owner scope,
+    /// then admin writes `llm_custom_providers` under scope=admin. If the
+    /// reload still uses `__admin__` as its read scope, the owner's model
+    /// override is lost and the provider ends up reporting the admin-scope
+    /// model instead. With the fix, the owner's model survives.
+    #[tokio::test]
+    async fn reload_rebuilds_from_owner_scope_not_effective_scope() {
+        let (state, primary, _tmp) = hot_reload_harness().await;
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness
+
+        // Owner scope has its own `selected_model` overlay that admin
+        // scope doesn't have. This is the layering AppBuilder sees at
+        // startup.
+        store
+            .set_setting("owner", "llm_backend", &serde_json::json!("nearai"))
+            .await
+            .expect("seed owner backend");
+        store
+            .set_setting(
+                "owner",
+                "selected_model",
+                &serde_json::json!("owner-overlay"),
+            )
+            .await
+            .expect("seed owner overlay");
+
+        // Admin writes a benign change under scope=admin. The value
+        // itself isn't the point — it's the side-effect reload that
+        // should layer admin + owner and produce `owner-overlay`, not
+        // the admin-scope `model-start`.
+        let status = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: admin_scope.to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_custom_providers".to_string()),
+            Query(SettingScopeQuery {
+                scope: Some("admin".to_string()),
+            }),
+            Json(SettingWriteRequest {
+                value: serde_json::json!([]),
+            }),
+        )
+        .await
+        .expect("admin-scope write should succeed");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            primary.active_model_name(),
+            "owner-overlay",
+            "reload must layer admin → owner (same as AppBuilder startup); \
+             reading at effective_user_id=__admin__ drops the owner overlay",
+        );
     }
 
     #[tokio::test]
@@ -1308,7 +2158,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status.0, StatusCode::FORBIDDEN);
     }
 
     // --- Tool permissions helpers ---

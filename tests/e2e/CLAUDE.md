@@ -48,7 +48,7 @@ HEADED=1 pytest scenarios/
 | File | What it tests |
 |------|--------------|
 | `test_connection.py` | Gateway reachability, tab navigation, auth rejection (no token shows auth screen) |
-| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM; also tests empty-message suppression |
+| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM, attachment upload/thread rendering, and empty-message suppression |
 | `test_html_injection.py` | XSS vectors injected directly via `page.evaluate("addMessage('assistant', ...)")` are sanitized by `renderMarkdown`; user messages are shown as escaped plain text |
 | `test_skills.py` | Skills tab UI visibility, ClawHub search (skipped if registry unreachable), install + remove lifecycle |
 | `test_sse_reconnect.py` | SSE reconnect basics plus keepalive comments, multi-tab fanout, restart recovery/history rebuild, stale reconnect IDs, and connection-limit handling |

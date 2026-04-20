@@ -135,7 +135,13 @@ pub(crate) async fn pairing_approve_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Pairing store not available".to_string(),
     ))?;
-    let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
+    // Bind to the authenticated user. `from_trusted` is appropriate: user.user_id
+    // came from the auth layer (DB-sourced). Role is irrelevant for approval —
+    // only the id is recorded on the pairing row.
+    let owner_id = crate::ownership::UserId::from_trusted(
+        user.user_id.clone(),
+        crate::ownership::UserRole::from_db_role(&user.role),
+    );
     let approval = match store.approve(&channel, &code, &owner_id).await {
         Ok(approval) => approval,
         Err(crate::error::DatabaseError::NotFound { .. }) => {
