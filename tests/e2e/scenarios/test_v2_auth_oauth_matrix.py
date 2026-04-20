@@ -1453,8 +1453,8 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         )
         assert owner_result["role"] == "assistant", owner_result
         assert member_result["role"] == "assistant", member_result
-        assert "Mock MCP search completed" in owner_result["text"], owner_result
-        assert "Mock MCP search completed" in member_result["text"], member_result
+        assert "Mock MCP search result" in owner_result["text"], owner_result
+        assert "Mock MCP search result" in member_result["text"], member_result
 
         mcp_state = await _get_mock_mcp_state(server["mock_llm_url"])
         tool_call_auths = {
