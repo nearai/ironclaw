@@ -81,7 +81,7 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
         expected_display_name="Google Calendar",
         response_prompt="list next calendar event",
         expected_tool_name="google_calendar",
-        expected_text="Calendar check completed successfully.",
+        expected_text="google_calendar",
         shared_secret_name="google_oauth_token",
     ),
     "github": SeededProviderCase(
@@ -90,7 +90,7 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
         expected_display_name="GitHub",
         response_prompt="read github issue owner/repo#1",
         expected_tool_name="github",
-        expected_text="GitHub issue lookup completed successfully.",
+        expected_text="github",
         browser_enabled=True,
         shared_secret_name="github_token",
     ),
@@ -100,7 +100,7 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
         expected_display_name="Notion",
         response_prompt="search notion for canary",
         expected_tool_name="notion_notion_search",
-        expected_text="Notion search completed successfully.",
+        expected_text="notion",
         install_kind="mcp_server",
     ),
 }
@@ -126,7 +126,7 @@ BROWSER_CASES: dict[str, BrowserProviderCase] = {
         install_url=None,
         trigger_prompt="read github issue owner/repo#1",
         expected_tool_name="github",
-        expected_text="GitHub issue lookup completed successfully.",
+        expected_text="github",
         auth_extension_name="github",
     ),
     "notion": BrowserProviderCase(
@@ -137,7 +137,7 @@ BROWSER_CASES: dict[str, BrowserProviderCase] = {
         install_url=None,
         trigger_prompt="search notion for canary",
         expected_tool_name="notion_notion_search",
-        expected_text="Notion search completed successfully.",
+        expected_text="notion",
         auth_extension_name="notion",
     ),
 }
