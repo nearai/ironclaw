@@ -697,13 +697,13 @@ impl Tool for SkillSearchTool {
 
 pub struct SkillInstallTool {
     registry: Arc<std::sync::RwLock<SkillRegistry>>,
-    catalog: Arc<SkillCatalog>,
+    catalog: Option<Arc<SkillCatalog>>,
 }
 
 impl SkillInstallTool {
     pub fn new(
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
-        catalog: Arc<SkillCatalog>,
+        catalog: Option<Arc<SkillCatalog>>,
     ) -> Self {
         Self { registry, catalog }
     }
@@ -745,37 +745,58 @@ impl Tool for SkillInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
+        if self.catalog.is_some() {
+            "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
+        } else {
+            "Install a skill from inline SKILL.md content."
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name or slug (from search results)"
+        if self.catalog.is_some() {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name or slug (from search results)"
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Direct URL to a SKILL.md file"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Raw SKILL.md content to install directly"
+                    },
+                    "install_dependencies": {
+                        "type": "boolean",
+                        "description": "When true, also install companion skills declared in requires.skills. Defaults to false so dependency installs stay explicit in the approved tool call.",
+                        "default": false
+                    }
                 },
-                "slug": {
-                    "type": "string",
-                    "description": "Registry slug from catalog search results; preferred when installing from ClawHub"
+                "required": ["name"]
+            })
+        } else {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name for the installed content"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Raw SKILL.md content to install directly"
+                    }
                 },
-                "url": {
-                    "type": "string",
-                    "description": "Direct URL to a SKILL.md file"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Raw SKILL.md content to install directly"
-                },
-                "install_dependencies": {
-                    "type": "boolean",
-                    "description": "When true, also install companion skills declared in requires.skills. Defaults to false so dependency installs stay explicit in the approved tool call.",
-                    "default": false
-                }
-            },
-            "required": ["name"]
-        })
+                "required": ["content"]
+            })
+        }
     }
 
     async fn execute(
@@ -784,7 +805,10 @@ impl Tool for SkillInstallTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let install_dependencies = params
             .get("install_dependencies")
             .and_then(|v| v.as_bool())
@@ -800,7 +824,7 @@ impl Tool for SkillInstallTool {
         // reinstalling the top-level skill. Dependency installs are not a
         // no-op: when explicitly requested, walk the loaded skill's companion
         // list instead of returning early.
-        let loaded_required_skills = {
+        let loaded_required_skills = if let Some(name) = name {
             let guard = self
                 .registry
                 .read()
@@ -819,19 +843,35 @@ impl Tool for SkillInstallTool {
             } else {
                 None
             }
+        } else {
+            None
         };
 
         if let Some(required_skills) = loaded_required_skills {
-            let chain_report = install_missing_skill_dependencies(
-                &self.registry,
-                self.catalog.registry_url(),
-                required_skills,
-                |url| async move { fetch_skill_payload(&url).await },
-            )
-            .await?;
+            let chain_report = if let Some(ref catalog) = self.catalog {
+                install_missing_skill_dependencies(
+                    &self.registry,
+                    catalog.registry_url(),
+                    required_skills.clone(),
+                    |url| async move { fetch_skill_payload(&url).await },
+                )
+                .await?
+            } else {
+                let missing = {
+                    let guard = registry_read(&self.registry);
+                    required_skills
+                        .into_iter()
+                        .filter(|s| !guard.has(s))
+                        .collect::<Vec<_>>()
+                };
+                ChainInstallReport {
+                    pending_explicit_install: missing,
+                    ..Default::default()
+                }
+            };
 
             return Ok(ToolOutput::success(
-                build_already_installed_output(name, &chain_report),
+                build_already_installed_output(name.unwrap_or("unknown"), &chain_report),
                 start.elapsed(),
             ));
         }
@@ -847,21 +887,34 @@ impl Tool for SkillInstallTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
+            // URL installs require ClawHub to be enabled
+            if self.catalog.is_none() {
+                return Err(ToolError::ExecutionFailed(
+                    "URL-based skill installs are disabled (ClawHub registry is not enabled). \
+                     Use the 'content' parameter to install from inline SKILL.md content."
+                        .to_string(),
+                ));
+            }
             // Fetch from explicit URL
             fetch_skill_payload(url).await.map_err(ToolError::from)?
         } else {
-            // Look up in catalog and fetch
+            // Catalog lookup requires ClawHub
+            let catalog = self.catalog.as_ref().ok_or_else(|| {
+                ToolError::ExecutionFailed(
+                    "Catalog-based skill installs are disabled (ClawHub registry is not enabled). \
+                     Use the 'content' parameter to install from inline SKILL.md content."
+                        .to_string(),
+                )
+            })?;
             let download_key = resolve_catalog_download_key(
-                self.catalog.as_ref(),
-                name,
+                catalog.as_ref(),
+                name.unwrap_or(""),
                 requested_identifier.as_deref(),
             )
             .await?;
             requested_identifier = Some(download_key.clone());
-            let download_url = ironclaw_skills::catalog::skill_download_url(
-                self.catalog.registry_url(),
-                &download_key,
-            );
+            let download_url =
+                ironclaw_skills::catalog::skill_download_url(catalog.registry_url(), &download_key);
             fetch_skill_payload(&download_url)
                 .await
                 .map_err(ToolError::from)?
@@ -966,10 +1019,7 @@ impl Tool for SkillInstallTool {
             ChainInstallReport::default()
         } else if !install_dependencies {
             let missing_required_skills = {
-                let guard = self
-                    .registry
-                    .read()
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                let guard = registry_read(&self.registry);
                 required_skills
                     .into_iter()
                     .filter(|skill| !guard.has(skill))
@@ -980,14 +1030,26 @@ impl Tool for SkillInstallTool {
                 pending_explicit_install: missing_required_skills,
                 ..Default::default()
             }
-        } else {
+        } else if let Some(ref catalog) = self.catalog {
             install_missing_skill_dependencies(
                 &self.registry,
-                self.catalog.registry_url(),
+                catalog.registry_url(),
                 required_skills,
                 |url| async move { fetch_skill_payload(&url).await },
             )
             .await?
+        } else {
+            let missing = {
+                let guard = registry_read(&self.registry);
+                required_skills
+                    .into_iter()
+                    .filter(|s| !guard.has(s))
+                    .collect::<Vec<_>>()
+            };
+            ChainInstallReport {
+                pending_explicit_install: missing,
+                ..Default::default()
+            }
         };
 
         let output = build_skill_install_output(&installed_name, &chain_report);
@@ -1948,7 +2010,7 @@ mod tests {
     #[test]
     fn test_skill_install_schema() {
         use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillInstallTool::new(test_registry(), test_catalog());
+        let tool = SkillInstallTool::new(test_registry(), Some(test_catalog()));
         assert_eq!(tool.name(), "skill_install");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
@@ -1959,6 +2021,74 @@ mod tests {
         assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    #[test]
+    fn test_skill_install_schema_without_catalog() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("content").is_some());
+        assert!(schema["properties"].get("url").is_none());
+        assert!(schema["properties"].get("slug").is_none());
+        assert!(
+            tool.description().contains("inline"),
+            "description should mention inline when catalog is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_blocks_url_without_catalog() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "name": "some-skill",
+                    "url": "https://example.com/SKILL.md"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ClawHub"),
+            "error should mention ClawHub: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_blocks_catalog_lookup_without_catalog() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "some-skill"}), &ctx)
+            .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ClawHub"),
+            "error should mention ClawHub: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_content_succeeds_without_catalog() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "---\nname: test-inline\ndescription: a test\nactivation:\n  keywords: [test]\n---\nHello"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "content install should succeed: {:?}",
+            result
+        );
     }
 
     /// Regression: when a persona bundle is already loaded (via bundled
@@ -1987,7 +2117,7 @@ mod tests {
             .unwrap()
             .commit_install(&name, loaded)
             .expect("commit should succeed");
-        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let tool = SkillInstallTool::new(Arc::clone(&registry), Some(test_catalog()));
 
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"name": "ceo-setup"})),
@@ -2031,7 +2161,7 @@ mod tests {
             .unwrap()
             .commit_install(&name, loaded)
             .expect("commit should succeed");
-        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let tool = SkillInstallTool::new(Arc::clone(&registry), Some(test_catalog()));
 
         let output = tool
             .execute(

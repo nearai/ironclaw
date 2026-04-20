@@ -61,7 +61,15 @@ pub async fn run_skills_command(
 
     match cmd {
         SkillsCommand::List { verbose, json } => cmd_list(&config, verbose, json).await,
-        SkillsCommand::Search { query, json } => cmd_search(&query, json).await,
+        SkillsCommand::Search { query, json } => {
+            if !config.clawhub_enabled {
+                anyhow::bail!(
+                    "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
+                     Catalog search is not available."
+                );
+            }
+            cmd_search(&query, json).await
+        }
         SkillsCommand::Info { name, json } => cmd_info(&config, &name, json).await,
     }
 }
@@ -122,8 +130,10 @@ async fn cmd_list(config: &SkillsConfig, verbose: bool, json: bool) -> anyhow::R
         println!("Skills directories:");
         println!("  User:      {}", config.local_dir.display());
         println!("  Installed: {}", config.installed_dir.display());
-        println!();
-        println!("Use 'ironclaw skills search <query>' to find skills on ClawHub.");
+        if config.clawhub_enabled {
+            println!();
+            println!("Use 'ironclaw skills search <query>' to find skills on ClawHub.");
+        }
         return Ok(());
     }
 

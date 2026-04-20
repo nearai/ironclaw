@@ -12,6 +12,10 @@ use crate::settings::Settings;
 pub struct SkillsConfig {
     /// Whether the skills system is enabled.
     pub enabled: bool,
+    /// Whether the ClawHub public registry is enabled.
+    /// When `false`, catalog search and URL-based installs are disabled;
+    /// local skill management and inline content installs still work.
+    pub clawhub_enabled: bool,
     /// Directory containing user-placed skills (default: ~/.ironclaw/skills/).
     /// Skills here are loaded with `Trusted` trust level.
     pub local_dir: PathBuf,
@@ -31,6 +35,7 @@ impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            clawhub_enabled: true,
             local_dir: default_skills_dir(),
             installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
@@ -65,6 +70,11 @@ impl SkillsConfig {
 
         Ok(Self {
             enabled: db_first_bool(ss.enabled, defaults.enabled, "SKILLS_ENABLED")?,
+            clawhub_enabled: db_first_bool(
+                ss.clawhub_enabled,
+                defaults.clawhub_enabled,
+                "CLAWHUB_ENABLED",
+            )?,
             // local_dir and installed_dir are env-only (filesystem paths, no settings counterpart)
             local_dir: optional_env("SKILLS_DIR")?
                 .map(PathBuf::from)
@@ -84,5 +94,42 @@ impl SkillsConfig {
             )?,
             max_scan_depth: parse_optional_env("SKILLS_MAX_SCAN_DEPTH", 3)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::helpers::lock_env;
+    use crate::settings::Settings;
+
+    #[test]
+    fn clawhub_enabled_defaults_true() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+        let cfg = SkillsConfig::resolve(&settings).expect("resolve");
+        assert!(cfg.clawhub_enabled);
+    }
+
+    #[test]
+    fn clawhub_enabled_env_false() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("CLAWHUB_ENABLED", "false") };
+        let cfg = SkillsConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("CLAWHUB_ENABLED") };
+        assert!(!cfg.clawhub_enabled);
+    }
+
+    #[test]
+    fn clawhub_enabled_rejects_invalid() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("CLAWHUB_ENABLED", "not_a_bool") };
+        let result = SkillsConfig::resolve(&settings);
+        unsafe { std::env::remove_var("CLAWHUB_ENABLED") };
+        assert!(result.is_err());
     }
 }

@@ -690,51 +690,61 @@ impl Agent {
         tenant: &crate::tenant::TenantCtx,
     ) -> Result<SubmissionResult, Error> {
         match command {
-            "help" => Ok(SubmissionResult::response(concat!(
-                "System:\n",
-                "  /help             Show this help\n",
-                "  /model [name]     Show or switch the active model\n",
-                "  /version          Show version info\n",
-                "  /tools            List available tools\n",
-                "  /debug            Toggle debug mode\n",
-                "  /reasoning [N|all] Show agent reasoning for turns\n",
-                "  /ping             Connectivity check\n",
-                "\n",
-                "Jobs:\n",
-                "  /job <desc>       Create a new job\n",
-                "  /status [id]      Check job status\n",
-                "  /cancel <id>      Cancel a job\n",
-                "  /list             List all jobs\n",
-                "\n",
-                "Plans:\n",
-                "  /plan <desc>      Create an execution plan\n",
-                "  /plan approve [ref] Approve and start execution\n",
-                "  /plan status [ref]  Check plan progress\n",
-                "  /plan revise [ref]  Revise with feedback\n",
-                "  /plan list        List all plans\n",
-                "\n",
-                "Session:\n",
-                "  /undo             Undo last turn\n",
-                "  /redo             Redo undone turn\n",
-                "  /compact          Compress context window\n",
-                "  /clear            Clear current thread\n",
-                "  /interrupt        Stop current operation\n",
-                "  /new              New conversation thread\n",
-                "  /thread <id>      Switch to thread\n",
-                "  /resume           Resume a previous conversation\n",
-                "\n",
-                "Skills:\n",
-                "  /skills             List installed skills\n",
-                "  /skills search <q>  Search ClawHub registry\n",
-                "\n",
-                "Agent:\n",
-                "  /heartbeat        Run heartbeat check\n",
-                "  /summarize        Summarize current thread\n",
-                "  /suggest          Suggest next steps\n",
-                "  /restart          Gracefully restart the process\n",
-                "\n",
-                "  /quit             Exit",
-            ))),
+            "help" => {
+                let search_line = if self.skill_catalog().is_some() {
+                    "  /skills search <q>  Search ClawHub registry\n"
+                } else {
+                    ""
+                };
+                Ok(SubmissionResult::response(format!(
+                    concat!(
+                        "System:\n",
+                        "  /help             Show this help\n",
+                        "  /model [name]     Show or switch the active model\n",
+                        "  /version          Show version info\n",
+                        "  /tools            List available tools\n",
+                        "  /debug            Toggle debug mode\n",
+                        "  /reasoning [N|all] Show agent reasoning for turns\n",
+                        "  /ping             Connectivity check\n",
+                        "\n",
+                        "Jobs:\n",
+                        "  /job <desc>       Create a new job\n",
+                        "  /status [id]      Check job status\n",
+                        "  /cancel <id>      Cancel a job\n",
+                        "  /list             List all jobs\n",
+                        "\n",
+                        "Plans:\n",
+                        "  /plan <desc>      Create an execution plan\n",
+                        "  /plan approve [ref] Approve and start execution\n",
+                        "  /plan status [ref]  Check plan progress\n",
+                        "  /plan revise [ref]  Revise with feedback\n",
+                        "  /plan list        List all plans\n",
+                        "\n",
+                        "Session:\n",
+                        "  /undo             Undo last turn\n",
+                        "  /redo             Redo undone turn\n",
+                        "  /compact          Compress context window\n",
+                        "  /clear            Clear current thread\n",
+                        "  /interrupt        Stop current operation\n",
+                        "  /new              New conversation thread\n",
+                        "  /thread <id>      Switch to thread\n",
+                        "  /resume           Resume a previous conversation\n",
+                        "\n",
+                        "Skills:\n",
+                        "  /skills             List installed skills\n",
+                        "{}",
+                        "\n",
+                        "Agent:\n",
+                        "  /heartbeat        Run heartbeat check\n",
+                        "  /summarize        Summarize current thread\n",
+                        "  /suggest          Suggest next steps\n",
+                        "  /restart          Gracefully restart the process\n",
+                        "\n",
+                        "  /quit             Exit",
+                    ),
+                    search_line,
+                )))
+            }
 
             "ping" => Ok(SubmissionResult::response("pong!")),
 
@@ -824,6 +834,12 @@ impl Agent {
 
             "skills" => {
                 if args.first().map(|s| s.as_str()) == Some("search") {
+                    if self.skill_catalog().is_none() {
+                        return Ok(SubmissionResult::error(
+                            "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
+                             Catalog search is not available.",
+                        ));
+                    }
                     let query = args[1..].join(" ");
                     if query.is_empty() {
                         return Ok(SubmissionResult::error("Usage: /skills search <query>"));
@@ -832,9 +848,12 @@ impl Agent {
                 } else if args.is_empty() {
                     self.handle_skills_list().await
                 } else {
-                    Ok(SubmissionResult::error(
-                        "Usage: /skills or /skills search <query>",
-                    ))
+                    let hint = if self.skill_catalog().is_some() {
+                        "Usage: /skills or /skills search <query>"
+                    } else {
+                        "Usage: /skills"
+                    };
+                    Ok(SubmissionResult::error(hint))
                 }
             }
 
@@ -942,10 +961,19 @@ impl Agent {
         };
 
         let skills = guard.skills();
+        let clawhub_hint = if self.skill_catalog().is_some() {
+            "\nUse /skills search <query> to find more on ClawHub."
+        } else {
+            ""
+        };
+
         if skills.is_empty() {
-            return Ok(SubmissionResult::response(
-                "No skills installed.\n\nUse /skills search <query> to find skills on ClawHub.",
-            ));
+            let msg = if self.skill_catalog().is_some() {
+                "No skills installed.\n\nUse /skills search <query> to find skills on ClawHub."
+            } else {
+                "No skills installed."
+            };
+            return Ok(SubmissionResult::response(msg));
         }
 
         let mut out = String::from("Installed skills:\n\n");
@@ -961,7 +989,7 @@ impl Agent {
                 s.manifest.name, s.manifest.version, s.trust, desc,
             ));
         }
-        out.push_str("\nUse /skills search <query> to find more on ClawHub.");
+        out.push_str(clawhub_hint);
 
         Ok(SubmissionResult::response(out))
     }

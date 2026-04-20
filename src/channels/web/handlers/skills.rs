@@ -123,7 +123,7 @@ pub async fn skills_search_handler(
 
     let catalog = Arc::clone(state.skill_catalog.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Skill catalog not available".to_string(),
+        "ClawHub registry is not enabled (CLAWHUB_ENABLED=false)".to_string(),
     ))?);
 
     // Search ClawHub catalog
@@ -213,7 +213,8 @@ pub async fn skills_install_handler(
         ));
     }
 
-    tracing::info!(user_id = %user.user_id, skill = %req.name, "skill install requested");
+    let name = req.name.as_deref().unwrap_or("");
+    tracing::info!(user_id = %user.user_id, skill = %name, "skill install requested");
 
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
@@ -227,6 +228,14 @@ pub async fn skills_install_handler(
             ..crate::tools::builtin::skill_tools::SkillInstallPayload::default()
         }
     } else if let Some(ref url) = req.url {
+        // URL installs require ClawHub to be enabled
+        if state.skill_catalog.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "URL-based skill installs are disabled (ClawHub registry is not enabled)"
+                    .to_string(),
+            ));
+        }
         // Fetch from explicit URL (with SSRF protection)
         crate::tools::builtin::skill_tools::fetch_skill_payload(url)
             .await
@@ -234,14 +243,11 @@ pub async fn skills_install_handler(
     } else if let Some(ref catalog) = state.skill_catalog {
         let download_key = if let Some(slug) = req.slug.as_deref().filter(|s| !s.is_empty()) {
             slug.to_string()
-        } else if req.name.contains('/') {
-            req.name.clone()
+        } else if name.contains('/') {
+            name.to_string()
         } else {
-            let outcome = catalog.search(&req.name).await;
-            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(
-                &req.name,
-                &outcome.results,
-            ) {
+            let outcome = catalog.search(name).await;
+            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(name, &outcome.results) {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => {
                     let reason = outcome
@@ -251,7 +257,7 @@ pub async fn skills_install_handler(
                         StatusCode::BAD_REQUEST,
                         format!(
                             "Could not resolve skill name '{}' to a catalog slug: {}",
-                            req.name, reason
+                            name, reason
                         ),
                     ));
                 }
@@ -266,16 +272,13 @@ pub async fn skills_install_handler(
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     } else {
         return Ok(Json(ActionResponse::fail(
-            "Provide 'content' or 'url' to install a skill".to_string(),
+            "Provide 'content' to install a skill (ClawHub registry is not enabled)".to_string(),
         )));
     };
 
     let normalized = ironclaw_skills::normalize_line_endings(&install_payload.skill_md);
-    let requested_identifier = install_requested_identifier(
-        &req.name,
-        req.slug.as_deref(),
-        resolved_download_key.as_deref(),
-    );
+    let requested_identifier =
+        install_requested_identifier(name, req.slug.as_deref(), resolved_download_key.as_deref());
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse, install_content) = {

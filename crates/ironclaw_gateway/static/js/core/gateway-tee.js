@@ -45,6 +45,12 @@ function fetchGatewayStatus() {
       engineModeApplied = true;
     }
 
+    // Hide ClawHub search section when registry is disabled
+    var skillSearchSection = document.querySelector('.skill-search-section');
+    if (skillSearchSection) {
+      skillSearchSection.style.display = data.clawhub_enabled === false ? 'none' : '';
+    }
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 

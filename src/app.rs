@@ -1149,9 +1149,14 @@ impl AppBuilder {
             }
 
             let registry = Arc::new(std::sync::RwLock::new(registry));
-            let catalog = ironclaw_skills::catalog::shared_catalog();
-            tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
-            (Some(registry), Some(catalog))
+            let catalog = if self.config.skills.clawhub_enabled {
+                Some(ironclaw_skills::catalog::shared_catalog())
+            } else {
+                tracing::debug!("ClawHub registry disabled (CLAWHUB_ENABLED=false)");
+                None
+            };
+            tools.register_skill_tools(Arc::clone(&registry), catalog.clone());
+            (Some(registry), catalog)
         } else {
             (None, None)
         };

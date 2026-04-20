@@ -911,6 +911,10 @@ pub struct SkillsSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Whether the ClawHub public registry is enabled.
+    #[serde(default = "default_true")]
+    pub clawhub_enabled: bool,
+
     /// Maximum number of skills that can be active simultaneously.
     #[serde(default = "default_skills_max_active")]
     pub max_active_skills: usize,
@@ -932,6 +936,7 @@ impl Default for SkillsSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            clawhub_enabled: true,
             max_active_skills: default_skills_max_active(),
             max_context_tokens: default_skills_max_context_tokens(),
         }
