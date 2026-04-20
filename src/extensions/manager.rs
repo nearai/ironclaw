@@ -16,7 +16,8 @@ use crate::auth::{
 };
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
+    RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
     owner_id_from_capabilities,
 };
@@ -918,7 +919,10 @@ impl ExtensionManager {
                 .await
             && !username.trim().is_empty()
         {
-            overrides.insert("bot_username".to_string(), serde_json::json!(username));
+            overrides.insert(
+                RUNTIME_CONFIG_KEY_BOT_USERNAME.to_string(),
+                serde_json::json!(username),
+            );
         }
 
         overrides
@@ -5978,7 +5982,7 @@ impl ExtensionManager {
                 .update_secret(name, secret.expose().to_string())
                 .await;
             config_updates.insert(
-                "webhook_secret".to_string(),
+                RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
                 serde_json::Value::String(secret.expose().to_string()),
             );
             should_rerun_on_start = true;

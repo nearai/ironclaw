@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::channels::wasm::WasmChannel;
+use crate::channels::wasm::{
+    RUNTIME_CONFIG_KEY_OWNER_ID, RUNTIME_CONFIG_KEY_TUNNEL_URL, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
+    WasmChannel,
+};
 use crate::extensions::ExtensionError;
 use crate::pairing::ExternalId;
 
@@ -112,14 +115,14 @@ pub(crate) fn build_runtime_config_updates(
 
     if let Some(tunnel_url) = tunnel_url {
         config_updates.insert(
-            "tunnel_url".to_string(),
+            RUNTIME_CONFIG_KEY_TUNNEL_URL.to_string(),
             serde_json::Value::String(tunnel_url.to_string()),
         );
     }
 
     if let Some(secret) = webhook_secret {
         config_updates.insert(
-            "webhook_secret".to_string(),
+            RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
             serde_json::Value::String(secret.to_string()),
         );
     }
@@ -129,7 +132,7 @@ pub(crate) fn build_runtime_config_updates(
             .parse::<i64>()
             .map(serde_json::Value::from)
             .unwrap_or_else(|_| serde_json::Value::String(owner_actor_id.to_string()));
-        config_updates.insert("owner_id".to_string(), owner_id_value);
+        config_updates.insert(RUNTIME_CONFIG_KEY_OWNER_ID.to_string(), owner_id_value);
     }
 
     config_updates
@@ -157,9 +160,10 @@ async fn persist_numeric_owner_id(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalDeps, propagate_approval};
+    use super::{ApprovalDeps, build_runtime_config_updates, propagate_approval};
     use crate::channels::wasm::{
         ChannelCapabilitiesFile, WasmChannel, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        is_reserved_runtime_config_key,
     };
     use crate::pairing::{ExternalId, PairingStore};
     use std::collections::HashMap;
@@ -181,6 +185,23 @@ mod tests {
             .join("channels-src/telegram/telegram.capabilities.json");
         assert!(path.exists(), "telegram capabilities fixture not found");
         path
+    }
+
+    #[test]
+    fn runtime_config_updates_only_emit_reserved_host_keys() {
+        let updates = build_runtime_config_updates(
+            Some("https://example.test"),
+            Some("webhook-secret"),
+            Some("12345"),
+        );
+
+        assert_eq!(updates.len(), 3);
+        for key in updates.keys() {
+            assert!(
+                is_reserved_runtime_config_key(key),
+                "runtime config key {key} must be blocked from secret_config_mappings"
+            );
+        }
     }
 
     #[tokio::test]

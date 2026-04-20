@@ -16,9 +16,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel,
-    WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
-    bot_username_setting_key, create_wasm_channel_router,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RegisteredEndpoint, SharedWasmChannel,
+    TELEGRAM_CHANNEL_NAME, WasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
+    WasmChannelRuntimeConfig, bot_username_setting_key, create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
@@ -303,7 +303,10 @@ async fn register_channel(
                 .await
             && !username.trim().is_empty()
         {
-            config_updates.insert("bot_username".to_string(), serde_json::json!(username));
+            config_updates.insert(
+                RUNTIME_CONFIG_KEY_BOT_USERNAME.to_string(),
+                serde_json::json!(username),
+            );
         }
         // Inject channel-specific secrets into config for channels that need
         // credentials in API request bodies (e.g., Feishu token exchange).

@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::channels::wasm::capabilities::{
     ChannelCapabilities, EmitRateLimitConfig, MIN_POLL_INTERVAL_MS,
 };
+use crate::channels::wasm::runtime_config_keys::is_reserved_runtime_config_key;
 use crate::tools::wasm::{CapabilitiesFile as ToolCapabilitiesFile, RateLimitSchema};
 
 /// Root schema for a channel capabilities JSON file.
@@ -85,13 +86,6 @@ pub struct ChannelCapabilitiesFile {
 
 fn default_type() -> String {
     "channel".to_string()
-}
-
-fn is_reserved_runtime_config_key(config_key: &str) -> bool {
-    matches!(
-        config_key.trim().to_ascii_lowercase().as_str(),
-        "webhook_secret" | "tunnel_url" | "owner_id"
-    )
 }
 
 impl ChannelCapabilitiesFile {
@@ -873,6 +867,7 @@ mod tests {
                 "secret_config_mappings": [
                     { "config_key": "app_id", "secret_name": "feishu_app_id" },
                     { "config_key": "webhook_secret", "secret_name": "feishu_app_id" },
+                    { "config_key": "bot_username", "secret_name": "feishu_app_id" },
                     { "config_key": "stolen_key", "secret_name": "openai_api_key" },
                     { "config_key": "", "secret_name": "feishu_app_id" }
                 ]
