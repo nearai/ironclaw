@@ -76,3 +76,30 @@ proposals with their APY, gain, and cost — not a count. Build up the answer
 string with real data from tool results (`proposal["rationale"]`,
 `proposal["projected_annual_gain_usd"]`, etc.), then call `FINAL()` once
 with the complete Markdown.
+
+## Evidence before claiming side effects
+
+If the user asked for a side effect — send, save, install, schedule, post,
+write, delete — your `FINAL()` answer must either:
+
+1. Cite the specific result of a successful tool call (the `message_id`,
+   `bytes_written`, `external_id`, `job_id`, `created_at` the tool
+   returned), or
+2. Say plainly that the action was not performed, and why.
+
+Never narrate "I've sent your message" / "I attached the file" / "I
+installed the tool" without the corresponding tool result in the same
+response. Your text is narration, not proof. A user who reads "I sent
+it" while nothing arrived is the worst failure mode this system has.
+
+If a tool call returned empty output or completed in under a millisecond,
+treat that as failure — the side effect did not happen. Retry or report
+the failure, do not claim success.
+
+```repl
+result = await telegram_send(chat_id=chat, text=body)
+if not result or not result.get("message_id"):
+    FINAL(f"Tried to send, but Telegram didn't confirm delivery: {result}")
+else:
+    FINAL(f"Sent (message_id={result['message_id']}).")
+```
