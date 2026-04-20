@@ -96,15 +96,15 @@ pub fn spawn_job_monitor_with_context(
                             // Transition in-memory state so the job frees its
                             // max_jobs slot and query tools show the final state.
                             if let Some(ref cm) = context_manager {
-                                let target = if status == "completed" {
+                                let target = if status.is_success() {
                                     JobState::Completed
                                 } else {
                                     JobState::Failed
                                 };
-                                let reason = if status != "completed" {
-                                    Some(format!("Container finished: {}", status))
-                                } else {
+                                let reason = if status.is_success() {
                                     None
+                                } else {
+                                    Some(format!("Container finished: {}", status))
                                 };
                                 let _ = cm
                                     .update_context(job_id, |ctx| {
@@ -173,15 +173,15 @@ pub fn spawn_completion_watcher(
                 Ok((ev_job_id, _user_id, AppEvent::JobResult { status, .. }))
                     if ev_job_id == job_id =>
                 {
-                    let target = if status == "completed" {
+                    let target = if status.is_success() {
                         JobState::Completed
                     } else {
                         JobState::Failed
                     };
-                    let reason = if status != "completed" {
-                        Some(format!("Container finished: {}", status))
-                    } else {
+                    let reason = if status.is_success() {
                         None
+                    } else {
+                        Some(format!("Container finished: {}", status))
                     };
                     let _ = context_manager
                         .update_context(job_id, |ctx| {
@@ -218,6 +218,7 @@ pub fn spawn_completion_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_common::JobResultStatus;
 
     fn test_route() -> JobMonitorRoute {
         JobMonitorRoute {
@@ -311,7 +312,7 @@ mod tests {
                 "test-user".to_string(),
                 AppEvent::JobResult {
                     job_id: job_id.to_string(),
-                    status: "completed".to_string(),
+                    status: JobResultStatus::Completed,
                     session_id: None,
                     fallback_deliverable: None,
                 },
@@ -432,7 +433,7 @@ mod tests {
                 "test-user".to_string(),
                 AppEvent::JobResult {
                     job_id: job_id.to_string(),
-                    status: "completed".to_string(),
+                    status: JobResultStatus::Completed,
                     session_id: None,
                     fallback_deliverable: None,
                 },
@@ -481,7 +482,7 @@ mod tests {
                 "test-user".to_string(),
                 AppEvent::JobResult {
                     job_id: job_id.to_string(),
-                    status: "failed".to_string(),
+                    status: JobResultStatus::Failed,
                     session_id: None,
                     fallback_deliverable: None,
                 },
@@ -521,7 +522,7 @@ mod tests {
                 "test-user".to_string(),
                 AppEvent::JobResult {
                     job_id: job_id.to_string(),
-                    status: "completed".to_string(),
+                    status: JobResultStatus::Completed,
                     session_id: None,
                     fallback_deliverable: None,
                 },

@@ -209,13 +209,13 @@ impl SignalChannel {
                 == tokio::runtime::RuntimeFlavor::MultiThread,
             "Signal channel requires a multi-thread Tokio runtime"
         );
-        let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
+        let result: Result<Option<crate::ownership::UserId>, crate::error::DatabaseError> =
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
                     .block_on(async move { store.resolve_identity("signal", &sender_owned).await })
             });
         match result {
-            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(Some(identity)) => Ok(Some(identity.as_str().to_string())),
             Ok(None) => Err(()),
             Err(e) => {
                 tracing::error!(sender = %sender, error = %e, "Signal: DB error resolving sender identity");

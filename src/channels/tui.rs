@@ -133,6 +133,7 @@ fn build_tui_incoming_message(
             size_bytes: Some(a.data.len() as u64),
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: a.data,
             duration_secs: None,

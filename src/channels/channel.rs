@@ -6,7 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
-use ironclaw_common::{ExtensionName, ExternalThreadId};
+use ironclaw_common::{ExtensionName, ExternalThreadId, JobResultStatus};
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -53,6 +53,8 @@ pub struct IncomingAttachment {
     pub source_url: Option<String>,
     /// Opaque key for host-side storage (e.g., after download/caching).
     pub storage_key: Option<String>,
+    /// Relative path to a project-local copy saved on disk, if persisted.
+    pub local_path: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
     /// Raw file bytes (for small files downloaded by the channel).
@@ -432,7 +434,10 @@ pub enum StatusUpdate {
     /// A sandbox job's status changed.
     JobStatus { job_id: String, status: String },
     /// A sandbox job completed with final result.
-    JobResult { job_id: String, status: String },
+    JobResult {
+        job_id: String,
+        status: JobResultStatus,
+    },
     /// A routine was created, updated, or deleted.
     RoutineUpdate {
         id: String,

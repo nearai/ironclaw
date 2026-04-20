@@ -1,5 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
@@ -58,6 +59,240 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
         id: uuid::Uuid::nil(),
         reason: format!("engine v2 {context}: {e}"),
     })
+}
+
+const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
+
+#[derive(Debug, Clone)]
+struct AttachmentIndexNote {
+    title: String,
+    content: String,
+    metadata: serde_json::Value,
+    tags: Vec<String>,
+}
+
+fn sanitize_attachment_segment(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('.');
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn fallback_attachment_filename(index: usize, mime_type: &str) -> String {
+    let ext = crate::channels::attachment_extension_for_mime(mime_type);
+    format!("attachment-{}.{}", index + 1, ext)
+}
+
+fn attachment_project_relative_path(
+    message: &IncomingMessage,
+    project_id: ironclaw_engine::ProjectId,
+    attachment: &crate::channels::IncomingAttachment,
+    index: usize,
+) -> String {
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let owner = sanitize_attachment_segment(&message.user_id);
+    let message_id = sanitize_attachment_segment(&message.id.to_string());
+    let filename = attachment
+        .filename
+        .as_deref()
+        .map(sanitize_attachment_segment)
+        .unwrap_or_else(|| fallback_attachment_filename(index, &attachment.mime_type));
+    format!(
+        "{}/{}/{}/{}/{}-{}",
+        PROJECT_ATTACHMENT_DIR, owner, project_id, date, message_id, filename
+    )
+}
+
+/// Collapse anything that could break a markdown title/backtick span in a
+/// user-supplied filename before embedding it. User content in attachment
+/// filenames goes straight into `# Uploaded attachment: ...` and into the
+/// note's `title`, so raw newlines / backticks / odd ASCII control codes
+/// would corrupt the agent-visible transcript (and, for a title, the
+/// searchable memory-doc row).
+fn sanitize_filename_for_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\n' | '\r' | '\t' => out.push(' '),
+            '`' => out.push('\''),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return "attachment".to_string();
+    }
+    // Clamp so a pathological filename can't flood the agent prompt.
+    const MAX_DISPLAY_LEN: usize = 256;
+    if trimmed.len() <= MAX_DISPLAY_LEN {
+        trimmed.to_string()
+    } else {
+        let mut t = trimmed.to_string();
+        t.truncate(MAX_DISPLAY_LEN);
+        t
+    }
+}
+
+fn attachment_index_note(
+    message: &IncomingMessage,
+    attachment: &crate::channels::IncomingAttachment,
+    relative_path: &str,
+) -> AttachmentIndexNote {
+    let raw_filename = attachment.filename.as_deref().unwrap_or("attachment");
+    let filename = sanitize_filename_for_display(raw_filename);
+    let attachment_type = match attachment.kind {
+        crate::channels::AttachmentKind::Audio => "audio",
+        crate::channels::AttachmentKind::Image => "image",
+        crate::channels::AttachmentKind::Document => "document",
+    };
+    let mut content = format!(
+        "# Uploaded attachment: {filename}\n\n\
+         - Project file: `{relative_path}`\n\
+         - Attachment type: `{attachment_type}`\n\
+         - MIME type: `{}`\n\
+         - Size: `{}` bytes\n\
+         - Uploaded by: `{}` via `{}`\n",
+        attachment.mime_type,
+        attachment
+            .size_bytes
+            .unwrap_or(attachment.data.len() as u64),
+        message.user_id,
+        message.channel,
+    );
+
+    match attachment.kind {
+        crate::channels::AttachmentKind::Audio => {
+            if let Some(text) = attachment.extracted_text.as_deref() {
+                content.push_str("\n## Transcript\n\n");
+                content.push_str(text);
+            } else {
+                content.push_str("\nTranscript unavailable. The original audio file is stored at the project file path above.");
+            }
+        }
+        crate::channels::AttachmentKind::Image => {
+            content.push_str(
+                "\nThe original image file is stored at the project file path above. Use that file path in later shell or skill commands if needed.",
+            );
+        }
+        crate::channels::AttachmentKind::Document => {
+            if let Some(text) = attachment.extracted_text.as_deref() {
+                content.push_str("\n## Extracted text\n\n");
+                content.push_str(text);
+            } else {
+                content.push_str("\nText extraction unavailable. The original document file is stored at the project file path above.");
+            }
+        }
+    }
+
+    AttachmentIndexNote {
+        title: format!("attachment:{filename}"),
+        content,
+        metadata: serde_json::json!({
+            "kind": "project_attachment",
+            "attachment_type": attachment_type,
+            "filename": filename,
+            "mime_type": attachment.mime_type,
+            "project_path": relative_path,
+            "message_id": message.id.to_string(),
+        }),
+        tags: vec![
+            "attachment".to_string(),
+            "upload".to_string(),
+            attachment_type.to_string(),
+        ],
+    }
+}
+
+async fn persist_project_attachments(
+    project_root: &Path,
+    message: &IncomingMessage,
+    project_id: ironclaw_engine::ProjectId,
+    attachments: &mut [crate::channels::IncomingAttachment],
+) -> Vec<AttachmentIndexNote> {
+    let mut notes = Vec::new();
+
+    for (index, attachment) in attachments.iter_mut().enumerate() {
+        if attachment.data.is_empty() || attachment.local_path.is_some() {
+            continue;
+        }
+
+        let relative_path =
+            attachment_project_relative_path(message, project_id, attachment, index);
+        let absolute_path = project_root.join(Path::new(&relative_path));
+        let Some(parent) = absolute_path.parent() else {
+            tracing::warn!(path = %absolute_path.display(), "engine v2: attachment path had no parent");
+            continue;
+        };
+
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::warn!(path = %parent.display(), error = %e, "engine v2: failed to create attachment directory");
+            continue;
+        }
+
+        if let Err(e) = tokio::fs::write(&absolute_path, &attachment.data).await {
+            tracing::warn!(path = %absolute_path.display(), error = %e, "engine v2: failed to persist attachment file");
+            continue;
+        }
+
+        attachment.local_path = Some(relative_path.clone());
+        // Build the index note while `data` is still populated so the
+        // fallback to `data.len()` in `attachment_index_note` reports the
+        // real payload size when `size_bytes` wasn't pre-filled.
+        notes.push(attachment_index_note(message, attachment, &relative_path));
+        // Intentionally *don't* clear `attachment.data` here. The caller
+        // (`handle_with_engine_inner` in this file) immediately feeds the
+        // same slice to `augment_with_attachments`, which only emits
+        // multimodal `image_parts` for images when `att.data` is non-empty.
+        // Clearing the buffer here would silently drop every uploaded image
+        // from the engine-v2 LLM request — the file is on disk but the
+        // model never sees the bytes. The `persisted_attachments` Vec is
+        // local to the request and is dropped once the engine dispatch
+        // returns, so "storage hygiene" is a no-op anyway.
+    }
+
+    notes
+}
+
+fn resolve_project_root() -> PathBuf {
+    let base_dir = crate::bootstrap::ironclaw_base_dir();
+    base_dir.parent().map(PathBuf::from).unwrap_or(base_dir)
+}
+
+async fn save_attachment_index_notes(
+    store: &Arc<dyn Store>,
+    project_id: ironclaw_engine::ProjectId,
+    user_id: &str,
+    thread_id: ironclaw_engine::ThreadId,
+    notes: Vec<AttachmentIndexNote>,
+) {
+    for note in notes {
+        let mut doc = ironclaw_engine::MemoryDoc::new(
+            project_id,
+            user_id,
+            ironclaw_engine::DocType::Note,
+            note.title,
+            note.content,
+        );
+        doc.metadata = note.metadata;
+        doc.tags = note.tags;
+        doc.source_thread_id = Some(thread_id);
+        if let Err(e) = store.save_memory_doc(&doc).await {
+            tracing::warn!(error = %e, title = %doc.title, "engine v2: failed to save attachment index note");
+        }
+    }
 }
 
 fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
@@ -906,6 +1141,8 @@ struct EngineState {
     auth_manager: Option<Arc<AuthManager>>,
     /// Extension manager for extension-backed auth/setup when no auth manager exists.
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    /// Filesystem root for project-local attachment persistence.
+    project_root: PathBuf,
 }
 
 /// Global engine state, initialized on first use.
@@ -1192,6 +1429,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     let store = Arc::new(HybridStore::new(agent.workspace().cloned()));
     store.load_state_from_workspace().await;
+    effect_adapter.set_engine_store(store.clone()).await;
+    if let Some(skill_registry) = agent.deps.skill_registry.clone() {
+        effect_adapter.set_skill_registry(skill_registry).await;
+    }
 
     // Clean up completed threads and dead leases from prior runs
     let cleaned = store
@@ -1594,6 +1835,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         secrets_store: agent.tools().secrets_store().cloned(),
         auth_manager,
         extension_manager: agent.deps.extension_manager.clone(),
+        project_root: resolve_project_root(),
     });
 
     Ok(())
@@ -3072,18 +3314,25 @@ async fn handle_with_engine_inner(
     }
 
     // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input
-    // so both engine paths enforce the same inbound protections.
-    let validation = agent.safety().validate_input(content);
-    if !validation.is_valid {
-        let details = validation
-            .errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Ok(BridgeOutcome::Respond(format!(
-            "Input rejected by safety validation: {details}"
-        )));
+    // so both engine paths enforce the same inbound protections. When the
+    // message carries attachments, an empty text body is legitimate (the
+    // attachment is the payload); skip the validator's empty-input rejection
+    // but still apply length / policy checks against the text.
+    let trimmed_content = content.trim();
+    let skip_empty_check = trimmed_content.is_empty() && !message.attachments.is_empty();
+    if !skip_empty_check {
+        let validation = agent.safety().validate_input(content);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(BridgeOutcome::Respond(format!(
+                "Input rejected by safety validation: {details}"
+            )));
+        }
     }
 
     let violations = agent.safety().check_policy(content);
@@ -3108,6 +3357,30 @@ async fn handle_with_engine_inner(
         return Ok(BridgeOutcome::Respond(warning));
     }
 
+    // Resolve per-user project (creates if needed).
+    let project_id =
+        resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+
+    let mut persisted_attachments = message.attachments.clone();
+    let attachment_notes = persist_project_attachments(
+        &state.project_root,
+        message,
+        project_id,
+        &mut persisted_attachments,
+    )
+    .await;
+
+    // Engine v2 threads are text-only today, so attachments must be folded
+    // into the effective user content before routing to the engine. This
+    // preserves extracted document text, project-local file paths, and
+    // attachment metadata in both the engine thread and the dual-written
+    // gateway history.
+    let augmented = crate::agent::augment_with_attachments(content, &persisted_attachments);
+    let effective_content = augmented
+        .as_ref()
+        .map(|result| result.text.as_str())
+        .unwrap_or(content);
+
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
     // effects of the message — independent of, and parallel to, the normal
@@ -3118,7 +3391,7 @@ async fn handle_with_engine_inner(
     // v1 routine store and are fired by the v1 RoutineEngine in the
     // background. Missions created via the routine_create alias live in
     // the engine store and are fired here.
-    fire_event_missions_for_message(state, message, content).await;
+    fire_event_missions_for_message(state, message, effective_content).await;
 
     // Send "Thinking..." status to the channel
     let _ = agent
@@ -3151,10 +3424,6 @@ async fn handle_with_engine_inner(
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
-    // Resolve per-user project (creates if needed).
-    let project_id =
-        resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
-
     // Validate the channel-supplied timezone before passing it to the engine.
     // ValidTimezone::parse rejects empty/invalid strings; we send the canonical
     // IANA name (not the raw input) so downstream consumers see a known-good
@@ -3179,7 +3448,7 @@ async fn handle_with_engine_inner(
         .conversation_manager
         .handle_user_message(
             conv_id,
-            content,
+            effective_content,
             project_id,
             &message.user_id,
             thread_config,
@@ -3187,6 +3456,17 @@ async fn handle_with_engine_inner(
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;
+
+    if !attachment_notes.is_empty() {
+        save_attachment_index_notes(
+            &state.store,
+            project_id,
+            &message.user_id,
+            thread_id,
+            attachment_notes,
+        )
+        .await;
+    }
 
     // Dual-write to v1 database so the gateway history API shows messages.
     // Use the thread-scoped conversation (from thread_id) when available,
@@ -3212,7 +3492,9 @@ async fn handle_with_engine_inner(
                 .ok()
         };
         if let Some(cid) = v1_conv_id {
-            let _ = db.add_conversation_message(cid, "user", content).await;
+            let _ = db
+                .add_conversation_message(cid, "user", effective_content)
+                .await;
         }
     }
 
@@ -5205,6 +5487,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+    static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
@@ -5221,6 +5504,24 @@ mod tests {
                 docs: TokioRwLock::new(Vec::new()),
                 projects: TokioRwLock::new(Vec::new()),
             }
+        }
+    }
+
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn enter(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("capture current dir");
+            std::env::set_current_dir(path).expect("switch current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
         }
     }
 
@@ -6617,6 +6918,7 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            project_root: resolve_project_root(),
         }
     }
 
@@ -6756,6 +7058,7 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            project_root: resolve_project_root(),
         }
     }
 
@@ -6821,6 +7124,113 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_persists_attachment_files_and_indexes_them() {
+        let _engine_guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let _cwd_guard = CWD_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let _cwd = CurrentDirGuard::enter(temp_dir.path());
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(None).await;
+
+            let message =
+                IncomingMessage::new("gateway", "alice", "Please keep this upload handy.")
+                    .with_attachments(vec![crate::channels::IncomingAttachment {
+                        id: "att-1".to_string(),
+                        kind: crate::channels::AttachmentKind::Document,
+                        mime_type: "text/plain".to_string(),
+                        filename: Some("notes.txt".to_string()),
+                        size_bytes: Some(20),
+                        source_url: None,
+                        storage_key: None,
+                        local_path: None,
+                        extracted_text: Some("Remember this file.".to_string()),
+                        data: b"Remember this file.\n".to_vec(),
+                        duration_secs: None,
+                    }]);
+
+            let _ = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("router handled message");
+
+            let thread = store
+                .threads
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+                .expect("thread saved");
+            let user_msg = thread
+                .messages
+                .iter()
+                .find(|msg| msg.role == ironclaw_engine::MessageRole::User)
+                .expect("user message recorded");
+            assert!(
+                user_msg
+                    .content
+                    .contains("project_path=\".ironclaw/attachments/alice/"),
+                "expected saved project path in user content, got: {}",
+                user_msg.content
+            );
+            assert!(
+                user_msg
+                    .content
+                    .contains("Saved to project file: .ironclaw/attachments/alice/"),
+                "expected saved path hint in user content, got: {}",
+                user_msg.content
+            );
+
+            let docs = store.docs.read().await;
+            let note = docs.iter().next().cloned().expect("attachment note saved");
+            drop(docs);
+
+            assert_eq!(note.project_id, thread.project_id);
+            assert_eq!(note.user_id, "alice");
+            assert_eq!(note.doc_type, ironclaw_engine::DocType::Note);
+            assert_eq!(note.source_thread_id, Some(thread.id));
+            assert!(note.content.contains("## Extracted text"));
+            assert!(note.content.contains("Remember this file."));
+
+            let relative_path = note
+                .metadata
+                .get("project_path")
+                .and_then(|value| value.as_str())
+                .expect("project_path metadata");
+            let absolute_path = temp_dir.path().join("projects").join(relative_path);
+            assert!(
+                absolute_path.exists(),
+                "expected saved file at {}",
+                absolute_path.display()
+            );
+            let bytes = tokio::fs::read(&absolute_path)
+                .await
+                .expect("read saved attachment");
+            assert_eq!(bytes, b"Remember this file.\n".to_vec());
+            assert!(
+                message
+                    .attachments
+                    .first()
+                    .is_some_and(|attachment| !attachment.data.is_empty()),
+                "source message should remain unchanged"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router attachment persistence test");
     }
 
     #[tokio::test]
@@ -7859,6 +8269,7 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            project_root: resolve_project_root(),
         }
     }
 
