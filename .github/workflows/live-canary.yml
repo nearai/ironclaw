@@ -168,7 +168,9 @@ jobs:
 
   auth-live-seeded:
     name: Auth Live Seeded
+    # Temporarily enabled on pull_request for testing (remove after verification).
     if: >
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'schedule' && github.event.schedule == '15 * * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
     runs-on: ubuntu-latest
