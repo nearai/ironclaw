@@ -15,6 +15,7 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::agent::channel_routing::ChannelRoutingConfig;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -93,6 +94,10 @@ pub struct CreateJobTool {
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Cached channel routing config (shared with dispatcher and SIGHUP handler).
+    /// When present, avoids a per-job DB read and guarantees the same version
+    /// seen by the dispatcher is used for MCP server scoping.
+    channel_routing: Option<Arc<RwLock<Option<ChannelRoutingConfig>>>>,
 }
 
 impl CreateJobTool {
@@ -105,6 +110,7 @@ impl CreateJobTool {
             event_tx: None,
             inject_tx: None,
             secrets_store: None,
+            channel_routing: None,
         }
     }
 
@@ -140,6 +146,20 @@ impl CreateJobTool {
     /// Inject secrets store for credential validation.
     pub fn with_secrets(mut self, secrets: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(secrets);
+        self
+    }
+
+    /// Inject the shared channel routing Arc (from AgentDeps).
+    ///
+    /// When present, `derive_routed_mcp_servers` reads from this cached value
+    /// instead of issuing a fresh DB query per job creation, avoiding extra
+    /// round-trips and ensuring the job inherits the same routing version as
+    /// the dispatcher turn that created it.
+    pub fn with_channel_routing(
+        mut self,
+        routing: Arc<RwLock<Option<ChannelRoutingConfig>>>,
+    ) -> Self {
+        self.channel_routing = Some(routing);
         self
     }
 
@@ -269,6 +289,10 @@ impl CreateJobTool {
 
     /// Derive an implicit MCP server allowlist from the originating channel's
     /// routing group when the caller did not pass `mcp_servers` explicitly.
+    ///
+    /// Uses the cached routing Arc when available (no extra DB round-trip).
+    /// When channel context is missing (routine/heartbeat jobs), applies the
+    /// default group rather than failing open and allowing all servers.
     async fn derive_routed_mcp_servers(
         &self,
         ctx: &JobContext,
@@ -278,7 +302,15 @@ impl CreateJobTool {
             return explicit_mcp_servers;
         }
 
-        let store = self.store.as_ref()?;
+        // Read from cached Arc first; fall back to a DB query when not wired.
+        let routing = if let Some(ref arc) = self.channel_routing {
+            arc.read().await.clone()
+        } else {
+            let store = self.store.as_ref()?;
+            ChannelRoutingConfig::load_from_store(store.as_ref(), &ctx.user_id).await
+        };
+        let routing = routing?;
+
         let null_metadata = serde_json::Value::Null;
         let routing_metadata = ctx
             .metadata
@@ -288,18 +320,18 @@ impl CreateJobTool {
         let routing_channel = routing_metadata
             .get("channel")
             .and_then(|v| v.as_str())
-            .or_else(|| ctx.metadata.get("notify_channel").and_then(|v| v.as_str()))?;
+            .or_else(|| ctx.metadata.get("notify_channel").and_then(|v| v.as_str()));
 
-        let routing = crate::agent::channel_routing::ChannelRoutingConfig::load_from_store(
-            store.as_ref(),
-            &ctx.user_id,
-        )
-        .await?;
+        let routing_channel = match routing_channel {
+            Some(ch) => ch,
+            None => {
+                // No channel context (e.g., routine or heartbeat spawned job).
+                // Fail-closed: apply the default group rather than bypassing routing.
+                return routing.groups.get(&routing.default_group).cloned();
+            }
+        };
 
-        if crate::agent::channel_routing::ChannelRoutingConfig::is_dm(
-            routing_channel,
-            routing_metadata,
-        ) {
+        if ChannelRoutingConfig::is_dm(routing_channel, routing_metadata) {
             return None;
         }
 

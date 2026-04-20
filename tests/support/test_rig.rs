@@ -1242,6 +1242,7 @@ impl TestRigBuilder {
                 None,
                 None,
                 None,
+                None,
             );
 
             // Routine tools: create a RoutineEngine with the LLM and workspace.
