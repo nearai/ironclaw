@@ -3632,7 +3632,6 @@ async fn persist_v2_tool_calls(
         }
         let action_name = msg.action_name.as_deref().unwrap_or("unknown");
         let preview = if msg.content.len() > 500 {
-            // safety: truncate on a char boundary
             let end = msg
                 .content
                 .char_indices()
@@ -3640,7 +3639,7 @@ async fn persist_v2_tool_calls(
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
                 .unwrap_or(0);
-            format!("{}...", &msg.content[..end])
+            format!("{}...", &msg.content[..end]) // safety: end is char-boundary via char_indices
         } else {
             msg.content.clone()
         };

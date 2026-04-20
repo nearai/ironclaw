@@ -61,10 +61,15 @@ async def v2_visibility_server(ironclaw_binary, mock_llm_server):
     home_dir = _V2_VIS_HOME_TMPDIR.name
     os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    gateway_port = s.getsockname()[1]
-    s.close()
+    socks = []
+    for _ in range(2):
+        sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sk.bind(("127.0.0.1", 0))
+        socks.append(sk)
+    gateway_port = socks[0].getsockname()[1]
+    http_port = socks[1].getsockname()[1]
+    for sk in socks:
+        sk.close()
 
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -78,6 +83,8 @@ async def v2_visibility_server(ironclaw_binary, mock_llm_server):
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
         "GATEWAY_USER_ID": "e2e-v2-visibility-tester",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
