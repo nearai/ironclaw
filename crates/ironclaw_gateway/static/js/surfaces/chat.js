@@ -735,13 +735,15 @@ function parseAttachmentAttributes(rawAttrs) {
 // Extract the plain text body and any `<attachments>…</attachments>` payload
 // from a user turn's `user_input`. Messages carry their persisted attachment
 // index inline so chat history can re-render file cards without a DB roundtrip.
+// Only strip the trailing block when at least one `<attachment …>` element is
+// parsed out of it — otherwise the user's raw text happens to end in
+// `<attachments>…</attachments>` and we must leave it intact.
 function parseUserMessageContent(content) {
   const match = content.match(/^([\s\S]*?)(?:\n\n)?<attachments>([\s\S]*?)<\/attachments>\s*$/);
   if (!match) {
     return { text: content, attachments: [], copyText: content };
   }
 
-  const text = match[1].replace(/\s+$/, '');
   const block = match[2];
   const attachments = [];
   const attachmentRegex = /<attachment\b([^>]*)>([\s\S]*?)<\/attachment>/g;
@@ -758,6 +760,11 @@ function parseUserMessageContent(content) {
     });
   }
 
+  if (attachments.length === 0) {
+    return { text: content, attachments: [], copyText: content };
+  }
+
+  const text = match[1].replace(/\s+$/, '');
   const copyParts = [];
   if (text) copyParts.push(text);
   attachments.forEach((att) => {

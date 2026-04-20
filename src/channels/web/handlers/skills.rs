@@ -7,6 +7,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use futures::future::join_all;
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
@@ -104,10 +105,7 @@ pub async fn skills_list_handler(
         guard.skills().to_vec()
     };
 
-    let mut skills = Vec::with_capacity(skill_snapshot.len());
-    for skill in skill_snapshot {
-        skills.push(skill_info(skill).await);
-    }
+    let skills: Vec<SkillInfo> = join_all(skill_snapshot.into_iter().map(skill_info)).await;
 
     let count = skills.len();
     Ok(Json(SkillListResponse { skills, count }))
@@ -163,10 +161,7 @@ pub async fn skills_search_handler(
             .collect();
         (installed_names, matching_skills)
     };
-    let mut installed = Vec::with_capacity(matching_skills.len());
-    for skill in matching_skills {
-        installed.push(skill_info(skill).await);
-    }
+    let installed: Vec<SkillInfo> = join_all(matching_skills.into_iter().map(skill_info)).await;
 
     let catalog_json: Vec<serde_json::Value> = entries
         .into_iter()

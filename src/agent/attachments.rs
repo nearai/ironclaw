@@ -83,6 +83,10 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .duration_secs
                 .map(|d| format!(" duration=\"{d}s\""))
                 .unwrap_or_default();
+            let size_attr = att
+                .size_bytes
+                .map(|s| format!(" size=\"{}\"", format_size(s)))
+                .unwrap_or_default();
 
             let body = format_attachment_body(
                 att.local_path.as_deref(),
@@ -93,7 +97,7 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
             );
 
             format!(
-                "<attachment index=\"{index}\" type=\"audio\" filename=\"{filename}\"{project_path_attr}{duration_attr}>\n\
+                "<attachment index=\"{index}\" type=\"audio\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{duration_attr}{size_attr}>\n\
                  {body}\n\
                  </attachment>"
             )
@@ -214,14 +218,18 @@ mod tests {
     fn audio_with_transcript() {
         let mut att = make_attachment(AttachmentKind::Audio);
         att.filename = Some("voice.ogg".to_string());
+        att.mime_type = "audio/ogg".to_string();
         att.extracted_text = Some("Hello, can you help me?".to_string());
         att.duration_secs = Some(5);
+        att.size_bytes = Some(2048);
 
         let result = augment_with_attachments("hi", &[att]).unwrap();
         assert!(result.text.starts_with("hi\n\n<attachments>"));
         assert!(result.text.contains("type=\"audio\""));
         assert!(result.text.contains("filename=\"voice.ogg\""));
+        assert!(result.text.contains("mime=\"audio/ogg\""));
         assert!(result.text.contains("duration=\"5s\""));
+        assert!(result.text.contains("size=\"2KB\""));
         assert!(result.text.contains("Transcript: Hello, can you help me?"));
         assert!(result.text.ends_with("</attachments>"));
         assert!(result.image_parts.is_empty());
