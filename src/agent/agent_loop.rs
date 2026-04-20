@@ -504,20 +504,21 @@ impl Agent {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Flatten the structured ToolOutput into a plain `$ cmd` / body
-        // block — this is what the TUI's `Response` event renders as a
-        // monospace system message. Keep the gateway's SSE-event shape
-        // off this path: TUI doesn't emit ShellCommand/ShellOutput
-        // events (yet), and the plain-text path is good enough for a
-        // terminal user.
+        // Flatten the structured `ToolOutput` into a plain
+        // `$ cmd` / body block — this is what the TUI's `Response`
+        // event renders as a monospace system message.
+        //
+        // The shell tool returns `{output, exit_code, success,
+        // sandboxed}` where `output` is already the combined
+        // stdout+stderr (see `src/tools/builtin/shell.rs` —
+        // `execute_command` concatenates the two streams). The
+        // previous version of this helper read `stdout` + `stderr`
+        // as separate top-level keys, which the tool does not emit;
+        // every shell-mode turn rendered as a bare `$ cmd\n` with
+        // no body (the "Done, no output" the user reported).
         let result = &out.result;
-        let stdout = result
-            .get("stdout")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let stderr = result
-            .get("stderr")
+        let body = result
+            .get("output")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -527,15 +528,9 @@ impl Agent {
             .unwrap_or(0);
 
         let mut rendered = format!("$ {command}\n");
-        if !stdout.is_empty() {
-            rendered.push_str(&stdout);
-            if !stdout.ends_with('\n') {
-                rendered.push('\n');
-            }
-        }
-        if !stderr.is_empty() {
-            rendered.push_str(&stderr);
-            if !stderr.ends_with('\n') {
+        if !body.is_empty() {
+            rendered.push_str(&body);
+            if !body.ends_with('\n') {
                 rendered.push('\n');
             }
         }

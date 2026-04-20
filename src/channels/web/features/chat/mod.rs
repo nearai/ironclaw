@@ -345,13 +345,24 @@ pub(crate) async fn handle_shell_send(
 }
 
 /// Parse the `shell` tool's `ToolOutput.result` back into the wire fields
-/// the SSE event and conversation row expect. Accepts either the
-/// structured object (current shape) or a bare string (older builds) so
-/// a future shell-tool refactor can't silently break shell mode.
+/// the SSE event and conversation row expect.
+///
+/// The shell tool (`src/tools/builtin/shell.rs`) emits a
+/// `{output, exit_code, success, sandboxed}` object where `output`
+/// is the combined stdout+stderr (the tool merges the two streams
+/// before returning). Older drafts of this helper read `stdout` +
+/// `stderr` as separate top-level keys, which the tool does not
+/// emit — every shell-mode turn rendered with an empty body
+/// regardless of what the command produced. Fixed by reading
+/// `output`; `stderr` stays empty on the wire contract for now
+/// since we don't have a separate stream available.
+///
+/// A `Value::String` fallback covers the case where a future tool
+/// refactor returns a bare text payload.
 fn parse_shell_tool_output(value: &serde_json::Value) -> (String, String, i32, bool) {
     if let Some(obj) = value.as_object() {
         let stdout = obj
-            .get("stdout")
+            .get("output")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
