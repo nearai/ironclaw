@@ -38,6 +38,17 @@
         "channels/slack"
       ],
       "shared_auth": null
+    },
+    "lunarwing": {
+      "display_name": "LunarWing Extensions",
+      "description": "DarkIRC, WeeChat, XMPP channels and Gotify notifications",
+      "extensions": [
+        "channels/darkirc",
+        "channels/weechat",
+        "channels/xmpp",
+        "tools/gotify"
+      ],
+      "shared_auth": null
     }
   }
 }

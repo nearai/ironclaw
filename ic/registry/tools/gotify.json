@@ -1,0 +1,38 @@
+{
+  "name": "gotify",
+  "display_name": "Gotify",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send push notifications to a self-hosted Gotify server",
+  "keywords": [
+    "gotify",
+    "notifications",
+    "push",
+    "alerts"
+  ],
+  "source": {
+    "dir": "tools-src/gotify",
+    "capabilities": "gotify.capabilities.json",
+    "crate_name": "gotify-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": null,
+      "sha256": null
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Gotify",
+    "secrets": [
+      "gotify_app_token"
+    ],
+    "shared_auth": null,
+    "setup_url": null
+  },
+  "tags": [
+    "lunarwing",
+    "notifications"
+  ]
+}

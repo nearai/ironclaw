@@ -18,11 +18,13 @@ const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// Known channel names and their crate names (for locating build artifacts).
 const KNOWN_CHANNELS: &[(&str, &str)] = &[
-    ("telegram", "telegram_channel"),
-    ("slack", "slack_channel"),
+    ("darkirc", "darkirc_channel"),
     ("discord", "discord_channel"),
-    ("whatsapp", "whatsapp_channel"),
     ("feishu", "feishu_channel"),
+    ("slack", "slack_channel"),
+    ("telegram", "telegram_channel"),
+    ("weechat", "weechat_relay_channel"),
+    ("whatsapp", "whatsapp_channel"),
     ("xmpp", "xmpp_channel"),
 ];
 
@@ -144,11 +146,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_known_channels_includes_all_four() {
+    fn test_known_channels_includes_all() {
         let names = bundled_channel_names();
-        assert!(names.contains(&"telegram"));
-        assert!(names.contains(&"slack"));
+        assert!(names.contains(&"darkirc"));
         assert!(names.contains(&"discord"));
+        assert!(names.contains(&"feishu"));
+        assert!(names.contains(&"slack"));
+        assert!(names.contains(&"telegram"));
+        assert!(names.contains(&"weechat"));
         assert!(names.contains(&"whatsapp"));
         assert!(names.contains(&"xmpp"));
     }

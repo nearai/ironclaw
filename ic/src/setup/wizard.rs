@@ -218,7 +218,14 @@ impl SetupWizard {
             // then run only the requested steps.
             self.reconnect_existing_db().await?;
 
-            let valid_steps = ["provider", "channels", "model", "database", "security"];
+            let valid_steps = [
+                "provider",
+                "channels",
+                "model",
+                "database",
+                "security",
+                "extensions",
+            ];
             for s in &self.config.steps {
                 if !valid_steps.contains(&s.as_str()) {
                     return Err(SetupError::Config(format!(
@@ -252,6 +259,10 @@ impl SetupWizard {
                     "channels" => {
                         print_step(step_num, total, "Channel Configuration");
                         self.step_channels().await?;
+                    }
+                    "extensions" => {
+                        print_step(step_num, total, "Extensions");
+                        self.step_extensions().await?;
                     }
                     _ => {} // already validated above
                 }

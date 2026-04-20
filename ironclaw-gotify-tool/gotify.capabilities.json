@@ -59,6 +59,19 @@
     }
   },
   "setup": {
-    "required_secrets": []
+    "required_secrets": [
+      {
+        "name": "gotify_app_token",
+        "prompt": "Enter the Gotify application token (create one in Gotify web UI under Apps)",
+        "optional": false
+      }
+    ],
+    "required_fields": [
+      {
+        "name": "gotify_url",
+        "prompt": "Gotify server URL (e.g. https://gotify.example.com)",
+        "optional": true
+      }
+    ]
   }
 }

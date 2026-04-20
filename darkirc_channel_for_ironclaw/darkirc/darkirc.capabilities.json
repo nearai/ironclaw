@@ -1,47 +1,85 @@
 {
-  "name": "darkirc",
-  "display_name": "DarkIRC",
-  "description": "DarkIRC P2P anonymous IRC channel via local adapter",
-  "version": "0.1.0",
-
-  "adapter_url": "http://127.0.0.1:6680",
-  "dm_policy": "pairing",
-  "allow_from": [],
-  "poll_interval_seconds": 3,
-
-  "secrets": {
-    "darkirc_adapter_secret": {
-      "description": "Shared secret (Bearer token) for adapter auth. Injected as Authorization header by host.",
-      "required": false
+    "version": "0.1.0",
+    "wit_version": "0.3.0",
+    "type": "channel",
+    "name": "darkirc",
+    "description": "DarkIRC P2P anonymous IRC channel via local adapter",
+    "setup": {
+        "required_secrets": [
+            {
+                "name": "darkirc_adapter_secret",
+                "prompt": "Optional shared secret (Bearer token) for DarkIRC adapter authentication. Leave empty to skip.",
+                "optional": true
+            }
+        ],
+        "required_fields": [
+            {
+                "name": "adapter_url",
+                "prompt": "DarkIRC adapter URL where darkirc_adapter.py is listening (default: http://127.0.0.1:6680)",
+                "optional": true
+            },
+            {
+                "name": "dm_policy",
+                "prompt": "DM policy: open, allowlist, or pairing (default: pairing)",
+                "optional": true
+            },
+            {
+                "name": "allow_from",
+                "prompt": "Allowed DM sender nicks or hostmasks (comma-separated, or * for open access)",
+                "optional": true
+            }
+        ]
+    },
+    "capabilities": {
+        "http": {
+            "allowlist": [
+                {
+                    "host": "127.0.0.1",
+                    "path_prefix": "/"
+                },
+                {
+                    "host": "localhost",
+                    "path_prefix": "/"
+                }
+            ],
+            "credentials": {
+                "darkirc_adapter_auth": {
+                    "secret_name": "darkirc_adapter_secret",
+                    "location": {
+                        "type": "bearer"
+                    },
+                    "host_patterns": [
+                        "127.0.0.1",
+                        "localhost"
+                    ]
+                }
+            },
+            "rate_limit": {
+                "requests_per_minute": 60,
+                "requests_per_hour": 3000
+            }
+        },
+        "secrets": {
+            "allowed_names": [
+                "darkirc_*"
+            ]
+        },
+        "channel": {
+            "allow_polling": true,
+            "min_poll_interval_ms": 3000,
+            "workspace_prefix": "channels/darkirc/",
+            "emit_rate_limit": {
+                "messages_per_minute": 100,
+                "messages_per_hour": 5000
+            }
+        }
+    },
+    "config": {
+        "display_name": "DarkIRC",
+        "adapter_url": "http://127.0.0.1:6680",
+        "dm_policy": "pairing",
+        "allow_from": "",
+        "polling_enabled": true,
+        "poll_interval_ms": 3000
     }
-  },
-
-  "http_allowlist": [
-    "http://127.0.0.1:6680/*",
-    "http://localhost:6680/*"
-  ],
-
-  "capabilities": {
-    "http": true,
-    "secrets": ["darkirc_adapter_secret"],
-    "workspace": true,
-    "tools": false
-  },
-
-  "setup": {
-    "prompts": [
-      {
-        "key": "adapter_url",
-        "label": "DarkIRC adapter URL",
-        "default": "http://127.0.0.1:6680",
-        "help": "URL where darkirc_adapter.py is listening"
-      },
-      {
-        "key": "darkirc_adapter_secret",
-        "type": "secret",
-        "label": "Adapter shared secret (optional)",
-        "help": "Bearer token for adapter authentication. Leave empty to skip."
-      }
-    ]
-  }
 }
