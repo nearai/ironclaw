@@ -1544,7 +1544,7 @@ mod tests {
         async fn test_workspace_pool_resolver_returns_different_workspaces() {
             let db = make_test_db().await;
 
-            let pool = crate::channels::web::server::WorkspacePool::new(
+            let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),
@@ -1565,7 +1565,7 @@ mod tests {
         async fn test_workspace_pool_resolver_caches_workspace() {
             let db = make_test_db().await;
 
-            let pool = crate::channels::web::server::WorkspacePool::new(
+            let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),

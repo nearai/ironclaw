@@ -1217,7 +1217,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         let capped = if truncated {
                             let boundary =
                                 crate::util::floor_char_boundary(output, MAX_TOOL_OUTPUT_BYTES);
-                            output[..boundary].to_string()
+                            output[..boundary].to_string() // safety: floor_char_boundary returns a char boundary
                         } else {
                             output.clone()
                         };

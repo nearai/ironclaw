@@ -649,7 +649,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Shared routine engine slot for gateway + generic webhook ingress.
-    let shared_routine_engine_slot: ironclaw::channels::web::server::RoutineEngineSlot =
+    let shared_routine_engine_slot: ironclaw::channels::web::platform::state::RoutineEngineSlot =
         Arc::new(tokio::sync::RwLock::new(None));
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
@@ -842,13 +842,15 @@ async fn async_main() -> anyhow::Result<()> {
             let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
                 max_entries: config.embeddings.cache_size,
             };
-            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
-                Arc::clone(db),
-                components.embeddings.clone(),
-                emb_cache_config,
-                config.search.clone(),
-                config.workspace.clone(),
-            ));
+            let pool = Arc::new(
+                ironclaw::channels::web::platform::state::WorkspacePool::new(
+                    Arc::clone(db),
+                    components.embeddings.clone(),
+                    emb_cache_config,
+                    config.search.clone(),
+                    config.workspace.clone(),
+                ),
+            );
             gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
@@ -963,12 +965,14 @@ async fn async_main() -> anyhow::Result<()> {
             let active_model = components.llm.model_name().to_string();
             let mut enabled = channel_names.clone();
             enabled.push("gateway".into());
-            gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
-                llm_backend: config.llm.backend.to_string(),
-                llm_model: active_model,
-                enabled_channels: enabled,
-                default_timezone: config.agent.default_timezone.clone(),
-            });
+            gw = gw.with_active_config(
+                ironclaw::channels::web::platform::state::ActiveConfigSnapshot {
+                    llm_backend: config.llm.backend.to_string(),
+                    llm_model: active_model,
+                    enabled_channels: enabled,
+                    default_timezone: config.agent.default_timezone.clone(),
+                },
+            );
         }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));

@@ -14,9 +14,8 @@ mod tests {
 
     use ironclaw::agent::SessionManager;
     use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
-    use ironclaw::channels::web::server::{
-        GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-    };
+    use ironclaw::channels::web::platform::router::start_server;
+    use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
     use ironclaw::channels::web::sse::SseManager;
     use ironclaw::channels::web::ws::WsConnectionTracker;
     use ironclaw::db::Database;

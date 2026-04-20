@@ -7,7 +7,6 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | File | Role |
 |------|------|
 | `mod.rs` | Gateway builder, startup, `WebChannel` implementation, `with_*` builder methods |
-| `server.rs` | **Backward-compat shim only** — re-exports `GatewayState` / `start_server` / related types from `platform::*` so external callers (`src/main.rs`, `src/app.rs`, integration tests) keep resolving `crate::channels::web::server::*`. All feature handlers have migrated to `features/<slice>/`. Stage 6 deletes this file entirely once those callers flip to `platform::*`. |
 | `platform/router.rs` | `start_server()` + Axum route composition (public / protected / statics / projects) and the cross-cutting layer stack (CORS, body limit, panic catch, static security headers, CSP). Single coupling point between platform and features. |
 | `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
 | `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), the workspace-backed layout/widget readers (`read_layout_config`, `load_resolved_widgets`, `read_widget_manifest`, `LAYOUT_PATH`, `WIDGETS_DIR`, `MAX_WIDGET_*`), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
@@ -15,12 +14,12 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `platform/sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients. Re-exported as `channels::web::sse` for backward compat. |
 | `platform/ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker`. Re-exported as `channels::web::ws`. |
 | `platform/auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) + DB-token + OIDC extractors. Re-exported as `channels::web::auth`. |
-| `platform/legacy_auth.rs` | Temporary v1 thread-level auth-mode shim: `handle_legacy_auth_token_submission`, `handle_legacy_auth_cancel`, `clear_auth_mode`, `clear_auth_mode_for_thread`. Both the `server.rs` HTTP handlers and `platform/ws.rs` consume these; co-locating them under `platform/` is what lets both reach the implementation without a feature → server.rs back-edge. Delete alongside `/api/chat/auth-token` and `/api/chat/auth-cancel` once the gateway retires the no-`request_id` path. |
+| `platform/legacy_auth.rs` | Temporary v1 thread-level auth-mode shim: `handle_legacy_auth_token_submission`, `handle_legacy_auth_cancel`, `clear_auth_mode`, `clear_auth_mode_for_thread`. Consumed by `features/chat/`, `handlers/auth.rs`, and `platform/ws.rs`; co-located under `platform/` so every consumer can reach it without a cross-slice back-edge. Delete alongside `/api/chat/auth-token` and `/api/chat/auth-cancel` once the gateway retires the no-`request_id` path. |
 | `platform/engine_dispatch.rs` | Shared engine-channel dispatch wrappers: `dispatch_engine_submission`, `dispatch_engine_external_callback`, `dispatch_onboarding_ready_followup`. Lives in platform because `features/chat/`, `features/extensions/`, and `features/pairing/` all compose them. |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
 | `features/extensions/` | Nine extension lifecycle routes — `/api/extensions`, `/api/extensions/readiness`, `/api/extensions/tools`, `/api/extensions/install`, `/api/extensions/{name}/activate`, `/api/extensions/{name}/remove`, `/api/extensions/registry`, `/api/extensions/{name}/setup` (GET+POST). Every handler that takes `{name}` from the URL path validates via `ExtensionName::new` at the boundary (400 on path-traversal / invalid chars / oversized). Owns the `derive_activation_status`, `derive_onboarding`, `extension_phase_for_web`, and `apply_extension_readiness_to_response` helpers. Routes setup-submit through the `AuthManager` canonical resolver + `platform::engine_dispatch`. Migrated from `server.rs` in ironclaw#2599 stage 4d. |
 | `features/jobs/` | Nine sandbox-job routes — `/api/jobs`, `/api/jobs/summary`, `/api/jobs/{id}`, `/api/jobs/{id}/cancel`, `/api/jobs/{id}/restart`, `/api/jobs/{id}/prompt`, `/api/jobs/{id}/events`, `/api/jobs/{id}/files/list`, `/api/jobs/{id}/files/read`. Migrated from `handlers/jobs.rs` in ironclaw#2599 stage 5. |
-| `features/routines/` | Seven routine management routes — `/api/routines`, `/api/routines/summary`, `/api/routines/{id}` (GET+DELETE), `/api/routines/{id}/trigger`, `/api/routines/{id}/toggle`, `/api/routines/{id}/runs`. Merges the previously split `handlers/routines.rs` + `server.rs::routines_runs_handler` into one slice; the two copies of `routines_runs_handler` are now one canonical definition. Migrated in ironclaw#2599 stage 5. |
+| `features/routines/` | Seven routine management routes — `/api/routines`, `/api/routines/summary`, `/api/routines/{id}` (GET+DELETE), `/api/routines/{id}/trigger`, `/api/routines/{id}/toggle`, `/api/routines/{id}/runs`. Merges the previously split `handlers/routines.rs` + an inline `routines_runs_handler` (historically in `server.rs`) into one slice with a single canonical `routines_runs_handler`. Migrated in ironclaw#2599 stage 5. |
 | `features/settings/` | Eight settings routes — `/api/settings`, `/api/settings/export`, `/api/settings/import`, `/api/settings/{key}` (GET/PUT/DELETE), plus the `/api/admin/tool-policy` dependencies via `resolve_settings_store` (now `pub(crate)` for `handlers/tool_policy.rs`). Migrated from `handlers/settings.rs` in ironclaw#2599 stage 5. |
 | `features/chat/` | Ten chat routes end-to-end — `/api/chat/send`, `/api/chat/approval`, `/api/chat/gate/resolve`, `/api/chat/auth-token` (legacy v1 shim), `/api/chat/auth-cancel` (legacy v1 shim), `/api/chat/ws`, `/api/chat/events`, `/api/chat/history`, `/api/chat/threads`, `/api/chat/thread/new`. Owns chat-private helpers: `is_local_origin` (CSRF-gate for WS), `pending_gate_extension_name` (routes through the canonical `AuthManager::resolve_extension_name_for_auth_flow`), in-progress reconciliation (`reconcile_in_progress_with_turns` + satellites), `turn_info_from_in_memory_turn`, `thread_state_label` / `turn_state_label`, `summary_live_state`, and the `ChatEventsQuery` / `HistoryQuery` request DTOs. Absorbed the four live handler duplicates formerly in `handlers/chat.rs`, which has been deleted. Migrated from `server.rs` in ironclaw#2599 stage 4c. |
 | `features/logs/` | `GET /api/logs/events` + `GET/PUT /api/logs/level` — runtime log stream and log-level knob. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
@@ -30,7 +29,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`web_incoming_message`, `build_turns_from_db_messages`, `images_to_attachments`, `truncate_preview`) |
-| `test_helpers.rs` | Always-compiled test utilities. `TestGatewayBuilder` (public) — the `tests/` crate's entry point for spinning up a `GatewayState` + optional Axum server on a random port. Plus three `pub(crate)` `#[cfg(test)]`-gated cross-slice builders — `test_gateway_state(ext_mgr)`, `test_gateway_state_with_dependencies(ext_mgr, store, db_auth, pairing_store)`, `test_gateway_state_with_store_and_session_manager(store, session_manager)` — promoted from `server.rs::tests` as the ironclaw#2599 stage-6 prerequisite so chat / extensions / oauth / pairing slice test modules can reach them without staying inside `server.rs::tests`. |
+| `test_helpers.rs` | Always-compiled test utilities. `TestGatewayBuilder` (public) — the `tests/` crate's entry point for spinning up a `GatewayState` + optional Axum server on a random port. Plus seven `pub(crate)` `#[cfg(test)]`-gated cross-slice fixtures — `test_gateway_state(ext_mgr)`, `test_gateway_state_with_dependencies(ext_mgr, store, db_auth, pairing_store)`, `test_gateway_state_with_store_and_session_manager(store, session_manager)`, `insert_test_user`, `test_secrets_store`, `test_ext_mgr`, `test_ext_mgr_with_db` — landed in ironclaw#2599 stages 6a+6 so the chat / extensions / oauth / pairing / users slice test modules can share construction helpers without a central mega-tests block. |
 | `static/` | Single-page app (HTML/CSS/JS) — embedded at compile time via `include_str!`/`include_bytes!` |
 
 ## Platform vs. feature layering (ironclaw#2599)
@@ -46,11 +45,13 @@ auth, sse, ws) must stay handler-agnostic, and
 `scripts/check_gateway_boundaries.py` (wired into the `code_style`
 CI workflow as of ironclaw#2599 stage 5) enforces this: it fails the
 build on any added import from `platform/*` (except `router.rs`) into
-`handlers/*`, `features/*`, or the `server.rs` compatibility shim. The
-allowlist is empty as of stage 4b — every pre-existing back-edge has
-been migrated into `platform/` proper. The mechanism stays in place
-for narrowly-scoped, reviewer-approved exceptions if a future
-migration step needs one.
+`handlers/*` or `features/*`. The stage-6 deletion also retired the
+`server.rs` shim itself, but the checker still rejects
+`crate::channels::web::server::` paths as a defense-in-depth guard
+against accidental re-introduction. The allowlist is empty as of
+stage 4b — every pre-existing back-edge has been migrated into
+`platform/` proper. The mechanism stays in place for narrowly-scoped,
+reviewer-approved exceptions if a future migration step needs one.
 
 The flat `handlers/` folder is a transitional fallback — individual
 handlers will migrate into `features/<slice>/` directories once their
@@ -188,7 +189,7 @@ Current consolidation points:
 
 - `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
 - `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
-- `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
+- `src/channels/web/features/chat/mod.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
 - `crates/ironclaw_gateway/static/js/core/onboarding.js`: `handleOnboardingState(...)` as the canonical client entrypoint (the old monolithic `app.js` has been split into per-concern modules under `static/js/`; `APP_JS` in `crates/ironclaw_gateway/src/assets.rs` concatenates them at compile time)
 
 All three of the backend wrappers above delegate to the canonical resolver
@@ -322,7 +323,7 @@ Rate limiting: chat send endpoints are capped at **30 messages per 60 seconds** 
 
 ## GatewayState
 
-The shared state struct (`server.rs`) holds refs to all subsystems. Fields are `Option<Arc<T>>` so the gateway can start even when optional subsystems (workspace, sandbox, skills) are disabled. Always null-check before use in handlers.
+The shared state struct (`platform/state.rs`) holds refs to all subsystems. Fields are `Option<Arc<T>>` so the gateway can start even when optional subsystems (workspace, sandbox, skills) are disabled. Always null-check before use in handlers.
 
 Key fields:
 - `msg_tx` — `RwLock<Option<mpsc::Sender<IncomingMessage>>>` — sends messages to the agent loop; set when `start()` is called on the `Channel`.
@@ -364,7 +365,7 @@ The chat history contract also carries a lightweight `HistoryResponse.in_progres
 ## Adding a New API Endpoint
 
 1. Define request/response types in `types.rs`.
-2. Implement the handler in the appropriate `handlers/*.rs` file (or inline in `server.rs` for simple handlers).
-3. Register the route in `start_server()` in `server.rs` under the correct router (`public`, `protected`, or `statics`).
-4. If it is an SSE or WebSocket endpoint, add its path to `allows_query_token_auth()` in `auth.rs`.
-5. If it requires a new `GatewayState` field, add it to the struct and to both the `GatewayChannel::new()` initializer and `rebuild_state()` in `mod.rs`, then add a `with_*` builder method.
+2. Implement the handler in the appropriate `features/<slice>/mod.rs` (preferred) or, for surfaces that don't justify a slice yet, in `handlers/<concern>.rs`.
+3. Register the route in `start_server()` in `platform/router.rs` under the correct router (`public`, `protected`, or `statics`).
+4. If it is an SSE or WebSocket endpoint, add its path to `allows_query_token_auth()` in `platform/auth.rs`.
+5. If it requires a new `GatewayState` field, add it to the struct in `platform/state.rs` and to both the `GatewayChannel::new()` initializer and `rebuild_state()` in `mod.rs`, then add a `with_*` builder method.

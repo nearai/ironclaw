@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use crate::channels::web::server::{
+use crate::channels::web::platform::state::{
     ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
