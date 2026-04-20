@@ -322,9 +322,20 @@ function renderExtensionCard(ext) {
     } else if (status === 'failed') {
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
+      // Only `setup_required` has an inline setup form below (see the
+      // `loadInlineChannelSetup` branch), so keep the legacy label there
+      // to avoid a duplicate setup action. Every other fallback state —
+      // including the default `installed` when no `onboarding_state` is
+      // set — renders no inline form, so pick the label from
+      // `authenticated`: "Setup" before credentials are on file,
+      // "Reconfigure" after. Closes #2235.
       var reconfigureBtn = document.createElement('button');
       reconfigureBtn.className = 'btn-ext configure';
-      reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      if (status === 'setup_required') {
+        reconfigureBtn.textContent = I18n.t('ext.reconfigure');
+      } else {
+        reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');
+      }
       reconfigureBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(reconfigureBtn);
     }
@@ -365,23 +376,35 @@ function renderExtensionCard(ext) {
 
   card.appendChild(actions);
 
-  // For WASM channels, check for pending pairing requests.
+  // For WASM channels, check for setup and pairing requests.
   if (ext.kind === 'wasm_channel') {
-    if ((ext.onboarding_state || ext.activation_status || 'installed') === 'setup_required') {
+    const channelStatus = ext.onboarding_state || ext.activation_status || 'installed';
+    const adminView = currentUserIsAdmin();
+    const showFullPairing = channelStatus === 'pairing_required' || channelStatus === 'pairing';
+    // 'ready' is treated as an active state elsewhere in this file (status
+    // label, stepper), so admins should see pending pairing on both.
+    const isActiveLike = channelStatus === 'active' || channelStatus === 'ready';
+    const showPendingOnly = adminView && isActiveLike;
+
+    if (channelStatus === 'setup_required') {
       const setupSection = document.createElement('div');
       setupSection.className = 'ext-onboarding';
       card.appendChild(setupSection);
       loadInlineChannelSetup(ext, setupSection);
     }
-    if ((ext.onboarding_state || ext.activation_status || 'installed') === 'pairing_required'
-      || (ext.onboarding_state || ext.activation_status || 'installed') === 'pairing') {
+
+    if (showFullPairing || showPendingOnly) {
       const pairingSection = document.createElement('div');
       pairingSection.className = 'ext-pairing';
       pairingSection.setAttribute('data-channel', ext.name);
       pairingSection.__onboarding = ext.onboarding || null;
+      pairingSection.__pairingCompact = !showFullPairing;
       card.appendChild(pairingSection);
-      if (currentUserIsAdmin()) {
-        loadPairingRequests(ext.name, pairingSection, ext.onboarding || null);
+
+      if (adminView) {
+        loadPairingRequests(ext.name, pairingSection, ext.onboarding || null, {
+          compact: !showFullPairing,
+        });
       } else {
         renderMemberPairingClaim(ext, pairingSection, ext.onboarding || null);
       }
@@ -914,78 +937,83 @@ function openOAuthUrl(url) {
 
 // --- Pairing ---
 
-function loadPairingRequests(channel, container, onboarding) {
+function loadPairingRequests(channel, container, onboarding, options) {
   if (!currentUserIsAdmin()) return;
+  const opts = options || {};
+  const compact = !!opts.compact;
 
   apiFetch('/api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
+      const requests = Array.isArray(data.requests) ? data.requests : [];
 
-      const info = onboarding || {};
+      if (!compact) {
+        const info = onboarding || {};
 
-      const heading = document.createElement('div');
-      heading.className = 'pairing-heading';
-      heading.textContent = info.pairing_title || I18n.t('extensions.claimPairing');
-      container.appendChild(heading);
+        const heading = document.createElement('div');
+        heading.className = 'pairing-heading';
+        heading.textContent = info.pairing_title || I18n.t('extensions.claimPairing');
+        container.appendChild(heading);
 
-      const help = document.createElement('div');
-      help.className = 'pairing-help';
-      help.textContent = info.pairing_instructions || I18n.t('extensions.claimPairingHelp');
-      container.appendChild(help);
+        const help = document.createElement('div');
+        help.className = 'pairing-help';
+        help.textContent = info.pairing_instructions || I18n.t('extensions.claimPairingHelp');
+        container.appendChild(help);
 
-      const manual = document.createElement('div');
-      manual.className = 'pairing-row pairing-manual';
+        const manual = document.createElement('div');
+        manual.className = 'pairing-row pairing-manual';
 
-      const input = document.createElement('input');
-      input.className = 'pairing-manual-input';
-      input.type = 'text';
-      input.placeholder = I18n.t('extensions.pairingCodePlaceholder');
-      input.autocomplete = 'off';
-      input.spellcheck = false;
-      input.autocapitalize = 'characters';
-      input.maxLength = 64;
-      input.addEventListener('keydown', function(event) {
-        if (event.key === 'Enter') {
-          event.preventDefault();
+        const input = document.createElement('input');
+        input.className = 'pairing-manual-input';
+        input.type = 'text';
+        input.placeholder = I18n.t('extensions.pairingCodePlaceholder');
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        input.autocapitalize = 'characters';
+        input.maxLength = 64;
+        input.addEventListener('keydown', function(event) {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            approvePairing(channel, input.value, {
+              onSuccess: function() {
+                input.value = '';
+                loadPairingRequests(channel, container, onboarding, opts);
+              }
+            });
+          }
+        });
+        manual.appendChild(input);
+
+        const manualBtn = document.createElement('button');
+        manualBtn.className = 'btn-ext activate pairing-manual-submit';
+        manualBtn.textContent = I18n.t('approval.approve');
+        manualBtn.addEventListener('click', function() {
           approvePairing(channel, input.value, {
             onSuccess: function() {
               input.value = '';
-              loadPairingRequests(channel, container, onboarding);
+              loadPairingRequests(channel, container, onboarding, opts);
             }
           });
-        }
-      });
-      manual.appendChild(input);
-
-      const manualBtn = document.createElement('button');
-      manualBtn.className = 'btn-ext activate pairing-manual-submit';
-      manualBtn.textContent = I18n.t('approval.approve');
-      manualBtn.addEventListener('click', function() {
-        approvePairing(channel, input.value, {
-          onSuccess: function() {
-            input.value = '';
-            loadPairingRequests(channel, container, onboarding);
-          }
         });
-      });
-      manual.appendChild(manualBtn);
-      container.appendChild(manual);
+        manual.appendChild(manualBtn);
+        container.appendChild(manual);
 
-      if (info.restart_instructions) {
-        const restart = document.createElement('div');
-        restart.className = 'pairing-help pairing-restart';
-        restart.textContent = info.restart_instructions;
-        container.appendChild(restart);
+        if (info.restart_instructions) {
+          const restart = document.createElement('div');
+          restart.className = 'pairing-help pairing-restart';
+          restart.textContent = info.restart_instructions;
+          container.appendChild(restart);
+        }
       }
 
-      if (!data.requests || data.requests.length === 0) return;
+      if (requests.length === 0) return;
 
       const pendingHeading = document.createElement('div');
       pendingHeading.className = 'pairing-heading';
       pendingHeading.textContent = I18n.t('extensions.pendingPairing');
       container.appendChild(pendingHeading);
 
-      data.requests.forEach(req => {
+      requests.forEach(req => {
         const row = document.createElement('div');
         row.className = 'pairing-row';
 
@@ -1005,7 +1033,7 @@ function loadPairingRequests(channel, container, onboarding) {
         btn.addEventListener('click', function() {
           approvePairing(channel, req.code, {
             onSuccess: function() {
-              loadPairingRequests(channel, container, onboarding);
+              loadPairingRequests(channel, container, onboarding, opts);
             }
           });
         });
@@ -1124,7 +1152,9 @@ function startPairingPoll() {
   stopPairingPoll();
   pairingPollInterval = setInterval(function() {
     document.querySelectorAll('.ext-pairing[data-channel]').forEach(function(el) {
-      loadPairingRequests(el.getAttribute('data-channel'), el, el.__onboarding || null);
+      loadPairingRequests(el.getAttribute('data-channel'), el, el.__onboarding || null, {
+        compact: !!el.__pairingCompact,
+      });
     });
   }, 10000);
 }
@@ -1204,4 +1234,3 @@ function renderWasmChannelStepper(ext) {
 }
 
 // --- Jobs ---
-

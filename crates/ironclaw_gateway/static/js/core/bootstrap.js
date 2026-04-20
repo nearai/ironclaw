@@ -102,6 +102,11 @@ let stagedAttachments = [];
 // array before composing the body so an Enter-press during file decode still
 // includes the attachment.
 const pendingAttachmentReads = [];
+// Reserved attachment budget for files accepted into FileReader but not yet
+// materialized in `stagedAttachments`. This closes race windows across rapid
+// repeated attach/drop actions before async reads complete.
+let pendingAttachmentBytes = 0;
+let pendingAttachmentCount = 0;
 let authFlowPending = false;
 // Tracks user messages sent but not yet persisted to DB (#2409).
 // When loadHistory() clears the DOM, pending messages are re-injected

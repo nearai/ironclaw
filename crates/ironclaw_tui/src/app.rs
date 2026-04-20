@@ -3410,6 +3410,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pasted_multiline_input_submits_intact() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        let (msg_tx, mut msg_rx) = mpsc::channel(4);
+
+        handle_event(
+            TuiEvent::Paste("first line\nsecond line\nthird line".to_string()),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        assert_eq!(
+            widgets.input_box.current_text(),
+            "first line\nsecond line\nthird line"
+        );
+
+        handle_event(
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        let message = msg_rx.try_recv().expect("multiline message sent");
+        assert_eq!(message.text, "first line\nsecond line\nthird line");
+    }
+
+    #[tokio::test]
     async fn slash_model_without_available_models_submits_on_enter() {
         let mut state = AppState::default();
         let layout = TuiLayout::default();

@@ -1,6 +1,7 @@
 //! Pending gate state — unified type replacing `PendingApproval` and `PendingAuth`.
 
 use chrono::{DateTime, Utc};
+use ironclaw_common::ExternalThreadId;
 use ironclaw_engine::{CapabilityLease, ResumeKind, ThreadId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -35,8 +36,12 @@ pub struct PendingGate {
     pub thread_id: ThreadId,
     /// External/client-visible thread id for channels that maintain their own
     /// conversation identifiers above engine threads.
+    ///
+    /// This is the channel-supplied identifier (web UUID, Telegram chat id,
+    /// Slack `thread_ts`) — not the internal engine [`ThreadId`]. See the
+    /// `ExternalThreadId` rationale in `crates/ironclaw_common/src/identity.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_thread_id: Option<String>,
+    pub scope_thread_id: Option<ExternalThreadId>,
     /// Conversation the thread belongs to.
     pub conversation_id: ironclaw_engine::ConversationId,
     /// Channel that originated the request.
@@ -81,6 +86,19 @@ impl PendingGate {
         Utc::now() > self.expires_at
     }
 
+    /// Effective wire thread identifier for channel events — the external
+    /// scope when set (preserving whatever the channel uses), otherwise the
+    /// internal engine UUID rendered as a string. Chosen because downstream
+    /// `AppEvent` fields carry plain strings today (`#[serde(transparent)]`
+    /// would re-wrap legacy rows) and channels rely on a single source of
+    /// truth for which identifier to route back.
+    pub fn effective_wire_thread_id(&self) -> String {
+        self.scope_thread_id
+            .as_ref()
+            .map(|t| t.as_str().to_string())
+            .unwrap_or_else(|| self.thread_id.to_string())
+    }
+
     /// Build the composite key for this gate.
     pub fn key(&self) -> PendingGateKey {
         PendingGateKey {
@@ -106,10 +124,7 @@ impl From<&PendingGate> for PendingGateView {
     fn from(gate: &PendingGate) -> Self {
         Self {
             request_id: gate.request_id.to_string(),
-            thread_id: gate
-                .scope_thread_id
-                .clone()
-                .unwrap_or_else(|| gate.thread_id.to_string()),
+            thread_id: gate.effective_wire_thread_id(),
             gate_name: gate.gate_name.clone(),
             tool_name: gate.action_name.clone(),
             description: gate.description.clone(),

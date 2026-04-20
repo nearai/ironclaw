@@ -561,12 +561,23 @@ function inferAttachmentMimeType(file) {
   if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
   if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.doc')) return 'application/msword';
   if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (name.endsWith('.xls')) return 'application/vnd.ms-excel';
   if (name.endsWith('.md')) return 'text/markdown';
   if (name.endsWith('.csv')) return 'text/csv';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.xml')) return 'application/xml';
+  if (name.endsWith('.rtf')) return 'application/rtf';
   if (name.endsWith('.txt')) return 'text/plain';
+  if (name.endsWith('.mp3')) return 'audio/mpeg';
+  if (name.endsWith('.ogg')) return 'audio/ogg';
+  if (name.endsWith('.wav')) return 'audio/wav';
+  if (name.endsWith('.m4a')) return 'audio/x-m4a';
+  if (name.endsWith('.mp4')) return 'audio/mp4';
+  if (name.endsWith('.aac')) return 'audio/aac';
+  if (name.endsWith('.flac')) return 'audio/flac';
+  if (name.endsWith('.webm')) return 'audio/webm';
   return 'application/octet-stream';
 }
 
@@ -644,8 +655,8 @@ const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per messag
 const MAX_STAGED_ATTACHMENTS = 5;
 
 function handleAttachmentFiles(files) {
-  let projectedCount = stagedAttachments.length;
-  let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0);
+  let projectedCount = stagedAttachments.length + pendingAttachmentCount;
+  let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
   Array.from(files).forEach(file => {
     const mimeType = inferAttachmentMimeType(file);
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
@@ -662,11 +673,16 @@ function handleAttachmentFiles(files) {
     }
     projectedCount += 1;
     projectedTotalBytes += file.size;
+    pendingAttachmentCount += 1;
+    pendingAttachmentBytes += file.size;
+
     const reader = new FileReader();
     let resolveRead;
     const readPromise = new Promise((resolve) => { resolveRead = resolve; });
     pendingAttachmentReads.push(readPromise);
     const finalizeRead = () => {
+      pendingAttachmentCount = Math.max(0, pendingAttachmentCount - 1);
+      pendingAttachmentBytes = Math.max(0, pendingAttachmentBytes - file.size);
       const idx = pendingAttachmentReads.indexOf(readPromise);
       if (idx !== -1) pendingAttachmentReads.splice(idx, 1);
       resolveRead();

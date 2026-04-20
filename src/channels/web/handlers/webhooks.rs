@@ -14,7 +14,7 @@ use axum::{
 use subtle::ConstantTimeEq;
 
 use crate::agent::routine::Trigger;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 
 /// Validate the webhook secret for a routine.
 ///

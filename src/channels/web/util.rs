@@ -11,53 +11,187 @@ use crate::generated_images::GeneratedImageSentinel;
 
 pub use ironclaw_common::truncate_preview;
 
-/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
-pub(crate) fn images_to_attachments(
-    images: &[ImageData],
-) -> Vec<crate::channels::IncomingAttachment> {
-    use base64::Engine;
-    images
-        .iter()
-        .enumerate()
-        .filter_map(|(i, img)| {
-            if !img.media_type.starts_with("image/") {
-                tracing::warn!(
-                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
-                    img.media_type
-                );
-                return None;
-            }
-            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
-                    return None;
-                }
-            };
-            Some(crate::channels::IncomingAttachment {
-                id: format!("web-image-{i}"),
-                kind: crate::channels::AttachmentKind::Image,
-                mime_type: img.media_type.clone(),
-                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
-                size_bytes: Some(data.len() as u64),
-                source_url: None,
-                storage_key: None,
-                local_path: None,
-                extracted_text: None,
-                data,
-                duration_secs: None,
-            })
-        })
-        .collect()
+fn normalize_mime_type(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
 }
 
-fn mime_to_ext(mime: &str) -> &str {
+fn has_riff_fourcc(data: &[u8], fourcc: &[u8; 4]) -> bool {
+    data.len() >= 12 && data.starts_with(b"RIFF") && data.get(8..12) == Some(fourcc)
+}
+
+fn has_iso_bmff_ftyp(data: &[u8]) -> bool {
+    data.len() >= 8 && data.get(4..8) == Some(b"ftyp")
+}
+
+fn image_mime_to_ext(mime: &str) -> &'static str {
     match mime {
         "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
-        "image/svg+xml" => "svg",
         _ => "jpg",
+    }
+}
+
+fn web_attachment_ext(mime: &str) -> Option<&'static str> {
+    let ext = match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "text/markdown" => Some("md"),
+        "text/csv" => Some("csv"),
+        "application/json" => Some("json"),
+        "application/xml" | "text/xml" => Some("xml"),
+        "application/rtf" | "text/rtf" => Some("rtf"),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
+        "application/vnd.ms-powerpoint" => Some("ppt"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
+        "application/msword" => Some("doc"),
+        "application/vnd.ms-excel" => Some("xls"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/ogg" => Some("ogg"),
+        "audio/wav" | "audio/wave" | "audio/x-wav" => Some("wav"),
+        "audio/mp4" => Some("mp4"),
+        "audio/x-m4a" => Some("m4a"),
+        "audio/aac" => Some("aac"),
+        "audio/flac" => Some("flac"),
+        "audio/webm" => Some("webm"),
+        _ => None,
+    };
+
+    if ext.is_none() {
+        tracing::warn!(
+            mime_type = mime,
+            "Unknown upload MIME type missing default extension"
+        );
+    }
+
+    ext
+}
+
+fn is_allowed_legacy_image_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+    )
+}
+
+fn is_allowed_attachment_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/wave"
+            | "audio/x-wav"
+            | "audio/mp4"
+            | "audio/x-m4a"
+            | "audio/aac"
+            | "audio/flac"
+            | "audio/webm"
+            | "text/plain"
+            | "text/csv"
+            | "text/markdown"
+            | "text/xml"
+            | "application/pdf"
+            | "application/json"
+            | "application/xml"
+            | "application/rtf"
+            | "text/rtf"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/msword"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.ms-excel"
+    )
+}
+
+fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(), String> {
+    if claimed.starts_with("text/") || claimed == "application/json" || claimed == "application/xml"
+    {
+        if std::str::from_utf8(data).is_err() {
+            return Err(format!(
+                "File claimed as {claimed} but contains invalid UTF-8 — not a text file"
+            ));
+        }
+        return Ok(());
+    }
+
+    // ADTS sync for AAC: byte[0] = 0xFF, byte[1] = 1111_ID LL P (LL = layer bits,
+    // must be 00 for AAC). Mask 0xF6 = sync-bits + layer-bits; expected 0xF0. MP3
+    // frames share the 0xFFF sync but use layer != 00, so the mask distinguishes.
+    let aac_is_adts = data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xF6) == 0xF0;
+    let mp3_sync = data.starts_with(b"ID3")
+        || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0);
+
+    match claimed {
+        "application/pdf" if !data.starts_with(b"%PDF") => {
+            Err("File claimed as application/pdf but does not start with %PDF header".to_string())
+        }
+        "image/png" if !data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) => {
+            Err("File claimed as image/png but missing PNG header".to_string())
+        }
+        "image/jpeg" | "image/jpg" if !data.starts_with(&[0xFF, 0xD8, 0xFF]) => {
+            Err("File claimed as image/jpeg but missing JPEG header".to_string())
+        }
+        "image/gif" if !data.starts_with(b"GIF87a") && !data.starts_with(b"GIF89a") => {
+            Err("File claimed as image/gif but missing GIF header".to_string())
+        }
+        "image/webp" if !has_riff_fourcc(data, b"WEBP") => {
+            Err("File claimed as image/webp but missing RIFF/WEBP header".to_string())
+        }
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if !data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) =>
+        {
+            Err(format!(
+                "File claimed as {claimed} but missing ZIP/PK header"
+            ))
+        }
+        "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel"
+            if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) =>
+        {
+            Err(format!("File claimed as {claimed} but missing OLE2 header"))
+        }
+        "application/rtf" | "text/rtf" if !data.starts_with(b"{\\rtf") => {
+            Err("File claimed as RTF but missing {\\rtf header".to_string())
+        }
+        "audio/mpeg" if !mp3_sync => {
+            Err("File claimed as audio/mpeg but missing MP3/ID3 header".to_string())
+        }
+        "audio/ogg" if !data.starts_with(b"OggS") => {
+            Err("File claimed as audio/ogg but missing OggS header".to_string())
+        }
+        "audio/wav" | "audio/wave" | "audio/x-wav" if !has_riff_fourcc(data, b"WAVE") => {
+            Err("File claimed as audio/wav but missing RIFF/WAVE header".to_string())
+        }
+        "audio/mp4" | "audio/x-m4a" if !has_iso_bmff_ftyp(data) => {
+            Err("File claimed as audio/mp4 but missing ISO BMFF ftyp header".to_string())
+        }
+        "audio/aac" if !aac_is_adts && !data.starts_with(b"ADIF") => {
+            Err("File claimed as audio/aac but missing ADTS/ADIF header".to_string())
+        }
+        "audio/flac" if !data.starts_with(b"fLaC") => {
+            Err("File claimed as audio/flac but missing fLaC header".to_string())
+        }
+        "audio/webm" if !data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) => {
+            Err("File claimed as audio/webm but missing EBML header".to_string())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -70,14 +204,47 @@ fn normalize_attachment_filename(filename: &str) -> Option<&str> {
     }
 }
 
-fn attachment_ext(mime: &str) -> &str {
-    crate::channels::attachment_extension_for_mime(mime)
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let normalized_mime = normalize_mime_type(&img.media_type);
+            if !is_allowed_legacy_image_mime(&normalized_mime) {
+                return Err(format!(
+                    "Unsupported image type: {}. Allowed image types: PNG, JPEG, GIF, and WebP.",
+                    img.media_type
+                ));
+            }
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&img.data)
+                .map_err(|e| format!("Invalid image {i}: base64 decode failed: {e}"))?;
+            validate_content_matches_claimed_type(&normalized_mime, &data)?;
+            Ok(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: normalized_mime.clone(),
+                filename: Some(format!("image-{i}.{}", image_mime_to_ext(&normalized_mime))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
 }
 
 /// Convert web gateway `AttachmentData` (generic file upload) to
 /// `IncomingAttachment` objects. Unlike `images_to_attachments`, this path is
-/// strict: a malformed base64 payload is surfaced as an error to the caller so
-/// the client gets a concrete rejection instead of a silent drop.
+/// strict: malformed base64 or spoofed MIME payloads are surfaced as concrete
+/// errors to the caller so the client gets a clear rejection.
 pub(crate) fn web_attachments_to_incoming(
     attachments: &[AttachmentData],
 ) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
@@ -86,21 +253,41 @@ pub(crate) fn web_attachments_to_incoming(
         .iter()
         .enumerate()
         .map(|(i, attachment)| {
+            let normalized_mime = normalize_mime_type(&attachment.mime_type);
+            if !is_allowed_attachment_mime(&normalized_mime) {
+                return Err(format!(
+                    "Unsupported file type: {}. Allowed types: PNG/JPEG/GIF/WebP images; MP3/Ogg/WAV/AAC/FLAC/MP4/M4A/WebM audio; PDF; plain text; CSV; Markdown; JSON; XML; RTF; and Office documents.",
+                    attachment.mime_type
+                ));
+            }
             let data = base64::engine::general_purpose::STANDARD
                 .decode(&attachment.data_base64)
                 .map_err(|e| format!("Invalid attachment {i}: base64 decode failed: {e}"))?;
+            validate_content_matches_claimed_type(&normalized_mime, &data)?;
             let filename = attachment
                 .filename
                 .as_deref()
                 .and_then(normalize_attachment_filename)
                 .map(str::to_owned)
                 .unwrap_or_else(|| {
-                    format!("attachment-{i}.{}", attachment_ext(&attachment.mime_type))
+                    // `is_allowed_attachment_mime` and `web_attachment_ext` are the
+                    // same set by construction, so the extension is always resolvable.
+                    // The `None` fallback is defence-in-depth: if the two lists ever
+                    // drift, we emit an extensionless filename rather than panicking
+                    // in production.
+                    debug_assert!(
+                        web_attachment_ext(&normalized_mime).is_some(),
+                        "allow-list and extension map diverged for MIME {normalized_mime}"
+                    );
+                    match web_attachment_ext(&normalized_mime) {
+                        Some(ext) => format!("attachment-{i}.{ext}"),
+                        None => format!("attachment-{i}"),
+                    }
                 });
             Ok(crate::channels::IncomingAttachment {
                 id: format!("web-attachment-{i}"),
-                kind: crate::channels::AttachmentKind::from_mime_type(&attachment.mime_type),
-                mime_type: attachment.mime_type.clone(),
+                kind: crate::channels::AttachmentKind::from_mime_type(&normalized_mime),
+                mime_type: normalized_mime,
                 filename: Some(filename),
                 size_bytes: Some(data.len() as u64),
                 source_url: None,
@@ -156,7 +343,7 @@ pub(crate) fn inline_attachments_to_incoming(
 ) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     let mut incoming = web_attachments_to_incoming(attachments)?;
     if !images.is_empty() {
-        incoming.extend(images_to_attachments(images));
+        incoming.extend(images_to_attachments(images)?);
     }
     validate_inline_attachment_budget(&incoming)?;
     Ok(incoming)
@@ -191,7 +378,7 @@ pub fn web_incoming_message_with_metadata(
     };
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("user_id".to_string(), serde_json::json!(user_id));
-        if let Some(thread_id) = message.thread_id.as_deref() {
+        if let Some(thread_id) = message.thread_id.as_ref().map(|t| t.as_str()) {
             obj.insert("thread_id".to_string(), serde_json::json!(thread_id));
         }
     }
@@ -960,5 +1147,117 @@ mod tests {
         assert!(turns[0].generated_images[0].data_url.is_none());
         assert!(turns[1].generated_images[0].data_url.is_some());
         assert!(turns[1].generated_images[1].data_url.is_some());
+    }
+
+    #[test]
+    fn web_upload_normalizes_attachment_mime_case() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "Application/PDF; Charset=UTF-8".to_string(),
+            filename: None,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n"),
+        }];
+
+        let incoming =
+            web_attachments_to_incoming(&attachments).expect("uppercase MIME should pass");
+        assert_eq!(incoming[0].mime_type, "application/pdf");
+        assert_eq!(incoming[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
+
+    #[test]
+    fn web_upload_rejects_svg_attachment() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "image/svg+xml".to_string(),
+            filename: None,
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(br#"<svg xmlns='http://www.w3.org/2000/svg'></svg>"#),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(err.contains("Unsupported file type"));
+    }
+
+    #[test]
+    fn web_upload_rejects_spoofed_audio_mp4() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/mp4".to_string(),
+            filename: Some("voice.m4a".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"not-an-mp4"),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(err.contains("missing ISO BMFF ftyp header"));
+    }
+
+    #[test]
+    fn web_upload_rejects_svg_legacy_image() {
+        use base64::Engine;
+
+        let images = vec![ImageData {
+            media_type: "image/svg+xml".to_string(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode(br#"<svg xmlns='http://www.w3.org/2000/svg'></svg>"#),
+        }];
+
+        let err = images_to_attachments(&images).unwrap_err();
+        assert!(err.contains("Unsupported image type"));
+    }
+
+    #[test]
+    fn web_upload_rejects_pdf_with_non_pdf_body() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("invoice.pdf".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(b"<html>not a pdf</html>"),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(
+            err.contains("%PDF"),
+            "expected %PDF-header rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_rejects_mp3_spoofed_as_aac() {
+        use base64::Engine;
+
+        // Layer III MP3 frame: byte[0]=0xFF, byte[1]=0xFB (1111_1011). Layer bits
+        // (mask 0x06) = 0b10 != 0b00, so ADTS check rejects it. Sync-only check
+        // (byte[1] & 0xF0 == 0xF0) would incorrectly accept.
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/aac".to_string(),
+            filename: Some("song.aac".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0xFB, 0, 0]),
+        }];
+
+        let err = web_attachments_to_incoming(&attachments).unwrap_err();
+        assert!(
+            err.contains("ADTS/ADIF"),
+            "expected ADTS/ADIF rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_accepts_valid_adts_aac() {
+        use base64::Engine;
+
+        // Valid ADTS: byte[0]=0xFF, byte[1]=0xF1 (1111_0001: sync+ID=0+layer=00+P=1).
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/aac".to_string(),
+            filename: Some("song.aac".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0xF1, 0, 0]),
+        }];
+
+        let incoming = web_attachments_to_incoming(&attachments).expect("valid ADTS should pass");
+        assert_eq!(incoming[0].mime_type, "audio/aac");
     }
 }

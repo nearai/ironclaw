@@ -53,8 +53,13 @@ mod live_tests {
         );
 
         // The agent should have used the shell tool to install/run zizmor.
+        // Tool events now carry args (e.g. `"shell(cmd)"`) via
+        // `format_action_display_name` in `src/bridge/router.rs`, so match both
+        // the bare name and the argument-prefixed form.
         assert!(
-            tools.iter().any(|t| t == "shell"),
+            tools
+                .iter()
+                .any(|t| t == "shell" || t.starts_with("shell(")),
             "Expected shell tool to be used for running zizmor, got: {tools:?}"
         );
 
@@ -131,10 +136,16 @@ mod live_tests {
 
         // V2 without auto-approve hits an approval gate for shell/tool_install.
         // The response may be the approval prompt itself rather than agent output.
-        // Verify the agent at least attempted a relevant action.
+        // Verify the agent at least attempted a relevant action. Tool events
+        // carry args (e.g. `"shell(cmd)"`) via `format_action_display_name`, so
+        // accept either the bare name or the argument-prefixed form.
         let attempted_relevant_tool = tools.iter().any(|t| {
             t == "shell"
+                || t.starts_with("shell(")
                 || t == "tool_install"
+                || t.starts_with("tool_install(")
+                || t == "tool-install"
+                || t.starts_with("tool-install(")
                 || t.starts_with("tool_search")
                 || t.starts_with("skill_search")
         });
@@ -399,10 +410,18 @@ mod live_tests {
 
         // The agent must NOT have run a tool_install / tool_activate
         // recovery loop — that's the bad behaviour the post-flight
-        // detector eliminates.
-        let bad_recovery = phase_a_tools
-            .iter()
-            .any(|t| t == "tool_install" || t == "tool_activate" || t == "tool-install");
+        // detector eliminates. Match both bare names and the
+        // argument-prefixed `"<name>(args)"` form emitted by
+        // `format_action_display_name`; an exact-match check would silently
+        // miss `"tool_install(foo)"` and turn this into a false negative.
+        let bad_recovery = phase_a_tools.iter().any(|t| {
+            t == "tool_install"
+                || t.starts_with("tool_install(")
+                || t == "tool_activate"
+                || t.starts_with("tool_activate(")
+                || t == "tool-install"
+                || t.starts_with("tool-install(")
+        });
         assert!(
             !bad_recovery,
             "Phase A: agent ran a tool_install/tool_activate recovery loop instead \
@@ -507,11 +526,16 @@ mod live_tests {
             "[DriveAuthGate][Phase B] Tools attempted ({}): {phase_b_tools:?}",
             phase_b_tools.len()
         );
+        // Match bare and argument-prefixed names; see the Phase A comment.
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
             t == "tool_install"
+                || t.starts_with("tool_install(")
                 || t == "tool-install"
+                || t.starts_with("tool-install(")
                 || t == "tool_activate"
+                || t.starts_with("tool_activate(")
                 || t == "secret_list"
+                || t.starts_with("secret_list(")
                 || t.starts_with("tool_search")
         });
         assert!(

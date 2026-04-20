@@ -213,6 +213,63 @@ impl EffectBridgeAdapter {
         Ok(())
     }
 
+    /// Ensure a Project entity exists for `projects/<slug>/...` writes.
+    ///
+    /// The engine treats workspace directories as the source of truth for
+    /// projects: writing any file under `projects/<slug>/` declares the
+    /// project exists. This hook runs after a successful `memory_write`,
+    /// finds-or-creates the matching Project in the store, and hands back
+    /// its ID so the caller can splice `project_id` into the tool output.
+    ///
+    /// Returns `Ok(None)` if the target isn't under `projects/<slug>/...`
+    /// (regular workspace writes) or if we can't derive a usable slug
+    /// (`projects/foo.md` with no directory segment, `projects/` alone,
+    /// etc.) — non-fatal, caller just skips enrichment.
+    async fn ensure_project_for_memory_write(
+        &self,
+        target: &str,
+        user_id: &str,
+    ) -> Result<Option<ironclaw_engine::ProjectId>, EngineError> {
+        let Some(slug) = extract_project_slug_from_target(target) else {
+            return Ok(None);
+        };
+        let mgr = self.mission_manager.read().await;
+        let Some(mgr) = mgr.as_ref() else {
+            // Engine not initialized (unit tests / early startup). A tool
+            // call succeeding without a mission manager is already
+            // unusual; just skip enrichment rather than erroring.
+            return Ok(None);
+        };
+        let store = mgr.store().clone();
+        let existing = store
+            .list_projects(user_id)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to list projects: {e}"),
+            })?;
+        let slug_lower = slug.to_ascii_lowercase();
+        let matched = existing.iter().find(|p| {
+            p.user_id == user_id
+                && (ironclaw_engine::types::slugify_simple(&p.name) == slug_lower
+                    || p.name.to_ascii_lowercase() == slug_lower)
+        });
+        if let Some(p) = matched {
+            return Ok(Some(p.id));
+        }
+        // Create a fresh project named after the slug. The model can
+        // rename it later by writing a different `name` into
+        // `projects/<slug>/.project.json` — slug (directory) stays fixed.
+        let project = ironclaw_engine::Project::new(user_id, slug, "");
+        let pid = project.id;
+        store
+            .save_project(&project)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to register project '{slug}': {e}"),
+            })?;
+        Ok(Some(pid))
+    }
+
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -316,6 +373,16 @@ impl EffectBridgeAdapter {
 
         let result = match action_name {
             "mission_create" => {
+                if should_reject_immediate_mission_create(context) {
+                    return Some(Err(EngineError::Effect {
+                        reason: "Refusing to create a mission for an immediate one-shot request. \
+                             The user asked for this to run now, so complete the task in the \
+                             current foreground thread. Only call mission_create/routine_create \
+                             when the user explicitly asks to schedule, automate, or create a \
+                             recurring routine/mission."
+                            .to_string(),
+                    }));
+                }
                 let name = params
                     .get("name")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -384,86 +451,16 @@ impl EffectBridgeAdapter {
                 // Allow explicit project_id override (so agent can create
                 // missions in a specific project from any thread).
                 // Validate ownership to prevent IDOR via prompt injection.
-                let target_project = if let Some(pid_str) =
-                    params.get("project_id").and_then(|v| v.as_str())
-                {
-                    match uuid::Uuid::parse_str(pid_str) {
-                        Ok(uuid) => {
-                            let pid = ironclaw_engine::ProjectId(uuid);
-                            if pid != context.project_id {
-                                // Verify the target project belongs to this user.
-                                let store = mgr.store();
-                                match store.load_project(pid).await {
-                                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => pid,
-                                    Ok(Some(_)) => {
-                                        return Some(Err(EngineError::Effect {
-                                            reason: "project_id does not belong to current user"
-                                                .to_string(),
-                                        }));
-                                    }
-                                    Ok(None) => {
-                                        return Some(Err(EngineError::Effect {
-                                            reason: format!("Project not found: {pid_str}"),
-                                        }));
-                                    }
-                                    Err(e) => {
-                                        return Some(Err(EngineError::Effect {
-                                            reason: format!(
-                                                "Failed to validate project ownership: {e}"
-                                            ),
-                                        }));
-                                    }
-                                }
-                            } else {
-                                pid
-                            }
+                let target_project =
+                    if let Some(pid_str) = params.get("project_id").and_then(|v| v.as_str()) {
+                        let store = mgr.store().clone();
+                        match resolve_project_ref(store.as_ref(), pid_str, context).await {
+                            Ok(pid) => pid,
+                            Err(e) => return Some(Err(e)),
                         }
-                        Err(_) => {
-                            // Non-UUID project_id (e.g. slug or name) — resolve by
-                            // matching against the user's projects.
-                            let store = mgr.store();
-                            let projects = match store.list_projects(&context.user_id).await {
-                                Ok(ps) => ps,
-                                Err(e) => {
-                                    return Some(Err(EngineError::Effect {
-                                        reason: format!(
-                                            "Failed to resolve project slug '{pid_str}': {e}"
-                                        ),
-                                    }));
-                                }
-                            };
-                            let needle = pid_str.to_lowercase();
-                            let matched = projects.iter().find(|p| {
-                                // Match against lowercased name or its slug form
-                                let name_lower = p.name.to_lowercase();
-                                let name_slug: String = name_lower
-                                    .chars()
-                                    .map(|c| {
-                                        if c.is_ascii_alphanumeric() || c == '-' {
-                                            c
-                                        } else {
-                                            '-'
-                                        }
-                                    })
-                                    .collect();
-                                name_lower == needle || name_slug == needle
-                            });
-                            match matched {
-                                Some(p) => p.id,
-                                None => {
-                                    return Some(Err(EngineError::Effect {
-                                        reason: format!(
-                                            "No project matching '{pid_str}' found for current user. \
-                                             Use a project name, slug, or UUID."
-                                        ),
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    context.project_id
-                };
+                    } else {
+                        context.project_id
+                    };
                 // Validate guardrail params before creating the mission so
                 // a type mismatch doesn't leave a "ghost" mission in storage.
                 let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
@@ -1376,6 +1373,26 @@ impl EffectBridgeAdapter {
                         .await?;
                 }
 
+                // Auto-register a Project entity when a write lands under
+                // `projects/<slug>/...`. Splice the resulting `project_id`
+                // into the tool output so subsequent `mission_create` or
+                // project-aware tool calls can reference it via template
+                // refs (`{{call-N.project_id}}`) without the model needing
+                // to guess a UUID.
+                let mut output_value = output_value;
+                if (lookup_name == "memory_write" || lookup_name == "memory-write")
+                    && let Some(target) = parameters.get("target").and_then(|v| v.as_str())
+                    && let Some(project_id) = self
+                        .ensure_project_for_memory_write(target, &context.user_id)
+                        .await?
+                    && let Some(obj) = output_value.as_object_mut()
+                {
+                    obj.insert(
+                        "project_id".to_string(),
+                        serde_json::Value::String(project_id.0.to_string()),
+                    );
+                }
+
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
@@ -1561,6 +1578,81 @@ impl EffectExecutor for EffectBridgeAdapter {
     }
 }
 
+/// Whole-word immediate-execution markers (word-set membership).
+const IMMEDIATE_WORDS: &[&str] = &["now", "immediate", "immediately", "asap"];
+
+/// Multi-word immediate-execution phrases (substring match on lowered text).
+const IMMEDIATE_PHRASES: &[&str] = &[
+    "right away",
+    "right now",
+    "at once",
+    "do it now",
+    "do this now",
+];
+
+/// Prefix stems for scheduling intent so morphological variants match:
+/// "monitor" matches monitoring/monitors, "routin" matches routine/routinely, etc.
+const SCHEDULE_STEMS: &[&str] = &[
+    "automat",  // automate, automation, automated, automatically
+    "cron",     // cron
+    "daily",    // daily
+    "hourly",   // hourly
+    "mission",  // mission, missions
+    "monitor",  // monitor, monitoring, monitors
+    "monthly",  // monthly
+    "periodic", // periodic, periodically
+    "recur",    // recurring, recurrence, recurs
+    "routin",   // routine, routines, routinely
+    "schedul",  // schedule, scheduled, scheduling
+    "weekly",   // weekly
+];
+
+/// Multi-word scheduling-intent phrases (substring match on lowered text).
+const SCHEDULE_PHRASES: &[&str] = &[
+    "every day",
+    "every morning",
+    "every evening",
+    "every week",
+    "every month",
+    "every hour",
+    "from now on",
+    "long-running",
+];
+
+fn should_reject_immediate_mission_create(context: &ThreadExecutionContext) -> bool {
+    if context.thread_type != ironclaw_engine::types::thread::ThreadType::Foreground {
+        return false;
+    }
+
+    let Some(goal) = context.thread_goal.as_deref() else {
+        return false;
+    };
+
+    let lower = goal.to_ascii_lowercase();
+    let words = word_set(&lower);
+
+    contains_immediate_execution_marker(&lower, &words)
+        && !contains_scheduling_intent(&lower, &words)
+}
+
+fn contains_immediate_execution_marker(lower: &str, words: &HashSet<&str>) -> bool {
+    IMMEDIATE_WORDS.iter().any(|w| words.contains(*w))
+        || IMMEDIATE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn contains_scheduling_intent(lower: &str, words: &HashSet<&str>) -> bool {
+    SCHEDULE_STEMS
+        .iter()
+        .any(|stem| words.iter().any(|w| w.starts_with(stem)))
+        || SCHEDULE_PHRASES.iter().any(|p| lower.contains(*p))
+}
+
+fn word_set(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
 /// Strictly extract a u64 from a JSON value, rejecting wrong types.
 fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
     match params.get(key) {
@@ -1595,6 +1687,89 @@ fn extract_guardrails(
         );
     }
     Ok(())
+}
+
+/// Extract the project slug from a `memory_write` target path.
+///
+/// A "project write" is anything under `projects/<slug>/...` where slug
+/// is non-empty, contains no path separators, and isn't a dotfile that
+/// would confuse the workspace (e.g. `projects/./foo`). Returns the raw
+/// slug exactly as it appears in the path — the caller is responsible
+/// for lowercasing / normalizing if needed.
+///
+/// Non-project writes (paths outside `projects/`, or degenerate
+/// `projects/foo` with no file segment) return `None`.
+fn extract_project_slug_from_target(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("projects/")?;
+    let (slug, remainder) = rest.split_once('/')?;
+    if slug.is_empty() || slug == "." || slug == ".." || slug.starts_with('.') {
+        return None;
+    }
+    // `projects/<slug>/` with nothing after (trailing slash) doesn't
+    // identify a concrete file write. `memory_write` rejects these
+    // anyway, but being explicit avoids creating a project for a
+    // degenerate input.
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Resolve a user-provided project reference (UUID, slug, or name) to a
+/// `ProjectId`. Enforces ownership when the reference is a UUID
+/// belonging to a different project than `context.project_id`.
+///
+/// Used by `mission_create`'s `project_id` param and any future tool
+/// that takes a project reference from the model.
+async fn resolve_project_ref(
+    store: &dyn Store,
+    pid_str: &str,
+    context: &ThreadExecutionContext,
+) -> Result<ironclaw_engine::ProjectId, EngineError> {
+    match uuid::Uuid::parse_str(pid_str) {
+        Ok(uuid) => {
+            let pid = ironclaw_engine::ProjectId(uuid);
+            if pid == context.project_id {
+                return Ok(pid);
+            }
+            match store.load_project(pid).await {
+                Ok(Some(p)) if p.is_owned_by(&context.user_id) => Ok(pid),
+                Ok(Some(_)) => Err(EngineError::Effect {
+                    reason: "project_id does not belong to current user".to_string(),
+                }),
+                Ok(None) => Err(EngineError::Effect {
+                    reason: format!("Project not found: {pid_str}"),
+                }),
+                Err(e) => Err(EngineError::Effect {
+                    reason: format!("Failed to validate project ownership: {e}"),
+                }),
+            }
+        }
+        Err(_) => {
+            let projects =
+                store
+                    .list_projects(&context.user_id)
+                    .await
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("Failed to resolve project slug '{pid_str}': {e}"),
+                    })?;
+            let needle = pid_str.to_lowercase();
+            let matched = projects.iter().find(|p| {
+                let name_lower = p.name.to_lowercase();
+                let name_slug = ironclaw_engine::types::slugify_simple(&p.name);
+                name_lower == needle || name_slug == needle
+            });
+            match matched {
+                Some(p) => Ok(p.id),
+                None => Err(EngineError::Effect {
+                    reason: format!(
+                        "No project matching '{pid_str}' found for current user. \
+                         Use a project name, slug, or UUID."
+                    ),
+                }),
+            }
+        }
+    }
 }
 
 /// Parse a cadence string into a MissionCadence.
@@ -2360,6 +2535,7 @@ mod tests {
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
             user_timezone: None,
+            thread_goal: Some("test goal".to_string()),
         }
     }
 
@@ -3227,6 +3403,432 @@ mod tests {
         assert!(routine_to_mission_alias("web_search", &params).is_none());
     }
 
+    #[test]
+    fn foreground_immediate_one_shot_goal_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Summarize the product feedback for me right now. Do it immediately.".to_string(),
+            ),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_explicit_schedule_allows_mission_create_even_if_run_now() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some(
+                "Create a daily routine to summarize product feedback and run it now.".to_string(),
+            ),
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_every_quantifier_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_immediate_set_up_without_schedule_still_rejects_mission_create() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+        };
+
+        assert!(should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn foreground_monitoring_stem_matches_scheduling_intent() {
+        // Regression: "monitoring" must match the "monitor" stem so that
+        // "set up monitoring now" is recognised as scheduling intent and
+        // NOT incorrectly rejected.
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up monitoring now.".to_string()),
+        };
+
+        // Should NOT be rejected — "monitoring" implies scheduling intent.
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    #[test]
+    fn background_mission_threads_can_create_follow_up_missions() {
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Mission,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: Some("Summarize feedback immediately.".to_string()),
+        };
+
+        assert!(!should_reject_immediate_mission_create(&ctx));
+    }
+
+    // ── Caller-level mission rejection tests ──────────────────
+    //
+    // These test `EffectBridgeAdapter::execute_action` (the caller) rather
+    // than `should_reject_immediate_mission_create` (the helper) in
+    // isolation. This verifies that the computed inputs — thread_goal,
+    // thread_type, and alias-normalized params — flow through correctly.
+    //
+    // Motivated by `.claude/rules/testing.md`: "Test Through the Caller,
+    // Not Just the Helper".
+
+    mod caller_level_mission {
+        use super::*;
+
+        // ── Stubs for MissionManager dependencies ───────────
+
+        struct StubStore;
+
+        #[async_trait]
+        impl ironclaw_engine::Store for StubStore {
+            async fn save_thread(
+                &self,
+                _: &ironclaw_engine::types::thread::Thread,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_thread(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Option<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(None)
+            }
+            async fn list_threads(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ironclaw_engine::ThreadId,
+                _: ironclaw_engine::types::thread::ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(
+                &self,
+                _: &ironclaw_engine::types::step::Step,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::types::step::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ironclaw_engine::ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, _: &ironclaw_engine::Mission) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_mission(
+                &self,
+                _: ironclaw_engine::MissionId,
+            ) -> Result<Option<ironclaw_engine::Mission>, EngineError> {
+                Ok(None)
+            }
+            async fn list_missions(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::Mission>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_mission_status(
+                &self,
+                _: ironclaw_engine::MissionId,
+                _: ironclaw_engine::MissionStatus,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+        }
+
+        struct StubLlm;
+
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for StubLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::types::message::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                unimplemented!("StubLlm — not called in mission create path")
+            }
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+        }
+
+        struct StubEffects;
+
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for StubEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unimplemented!("StubEffects — not called in mission create path")
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Helpers ──────────────────────────────────────────
+
+        async fn make_adapter_with_mission_manager() -> EffectBridgeAdapter {
+            let store: Arc<dyn ironclaw_engine::Store> = Arc::new(StubStore);
+            let thread_manager = Arc::new(ironclaw_engine::ThreadManager::new(
+                Arc::new(StubLlm) as Arc<dyn ironclaw_engine::LlmBackend>,
+                Arc::new(StubEffects) as Arc<dyn ironclaw_engine::EffectExecutor>,
+                Arc::clone(&store),
+                Arc::new(ironclaw_engine::CapabilityRegistry::new()),
+                Arc::new(ironclaw_engine::LeaseManager::new()),
+                Arc::new(ironclaw_engine::PolicyEngine::new()),
+            ));
+            let mgr = Arc::new(ironclaw_engine::MissionManager::new(store, thread_manager));
+            let adapter = make_adapter();
+            adapter.set_mission_manager(mgr).await;
+            adapter
+        }
+
+        fn foreground_ctx(goal: &str) -> ironclaw_engine::ThreadExecutionContext {
+            ironclaw_engine::ThreadExecutionContext {
+                thread_id: ironclaw_engine::ThreadId::new(),
+                thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+                project_id: ironclaw_engine::ProjectId::new(),
+                user_id: "test_user".to_string(),
+                step_id: ironclaw_engine::StepId::new(),
+                current_call_id: None,
+                source_channel: Some("gateway".to_string()),
+                user_timezone: None,
+                thread_goal: Some(goal.to_string()),
+            }
+        }
+
+        // ── Tests ────────────────────────────────────────────
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// return an `EngineError::Effect` rejection when the foreground
+        /// thread goal contains immediate-execution markers and no
+        /// scheduling intent.
+        #[tokio::test]
+        async fn execute_action_rejects_mission_create_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Summarize the product feedback for me right now");
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Product feedback summarizer",
+                        "goal": "Summarize the product feedback",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     mission_create, got: {other:?}"
+                ),
+            }
+        }
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// succeed when the foreground thread goal contains scheduling
+        /// intent, even though it also contains an immediate marker.
+        #[tokio::test]
+        async fn execute_action_allows_mission_create_with_scheduling_intent() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx(
+                "Create a daily routine to summarize product feedback and run it now",
+            );
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Daily feedback summary",
+                        "goal": "Summarize all product feedback from today",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            let action_result =
+                result.expect("scheduling-intent foreground mission_create should not be rejected");
+            assert!(
+                !action_result.is_error,
+                "mission_create should succeed, got error output"
+            );
+        }
+
+        /// Caller-level: the `routine_create` alias path must also be
+        /// rejected when the goal is immediate. This exercises the
+        /// `routine_to_mission_alias` → `handle_mission_call` →
+        /// `should_reject_immediate_mission_create` full path.
+        #[tokio::test]
+        async fn execute_action_rejects_routine_create_alias_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Send me the weather right now");
+
+            let result = adapter
+                .execute_action(
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "Weather update",
+                        "prompt": "Send the current weather forecast",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message via routine alias, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     routine_create alias, got: {other:?}"
+                ),
+            }
+        }
+    }
+
     // ── extract_credential_name tests ──────────────────────────
 
     #[test]
@@ -3399,6 +4001,7 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -3494,6 +4097,7 @@ mod tests {
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter
@@ -3603,6 +4207,7 @@ mod tests {
             current_call_id: Some("call_install".to_string()),
             source_channel: None,
             user_timezone: None,
+            thread_goal: None,
         };
 
         let result = adapter
@@ -3802,6 +4407,363 @@ Use this skill to set up a Pika meeting.
         );
     }
 
+    // ── Project auto-registration from memory_write ─────────────
+
+    #[test]
+    fn extract_project_slug_recognizes_project_paths() {
+        // Classic project write: slug is the first segment, file segment
+        // is what identifies a "real" write.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/AGENTS.md"),
+            Some("commitments")
+        );
+        // Nested subdir under a project still resolves to the top-level slug.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/open/sarah-q2-budget.md"),
+            Some("commitments")
+        );
+    }
+
+    #[test]
+    fn extract_project_slug_rejects_degenerate_targets() {
+        // Non-project writes: never treated as project declarations.
+        assert_eq!(super::extract_project_slug_from_target("AGENTS.md"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("daily/2026-04-14.md"),
+            None
+        );
+        // `projects/` alone, or `projects/foo` with no trailing segment,
+        // isn't a write we can attribute to a specific project — the
+        // former has no slug, the latter has no file component.
+        assert_eq!(super::extract_project_slug_from_target("projects/"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/foo"),
+            None
+        );
+        // Dotfile-ish slugs are rejected — a workspace with `projects/./`
+        // or `projects/../` would be malformed, and declaring a project
+        // from it would pollute the store with an unusable entry.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/./foo.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/../escape.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/.hidden/foo.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn slug_extractor_whitespace_and_special() {
+        // Whitespace in slug — not rejected by extractor (downstream handles)
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/ foo /bar.md"),
+            Some(" foo ")
+        );
+        // Unicode in slug
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/café/notes.md"),
+            Some("café")
+        );
+        // Slug with special chars
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/my_project/file.md"),
+            Some("my_project")
+        );
+    }
+
+    #[test]
+    fn project_new_is_deterministic_from_user_and_slug() {
+        // `Project::new` now derives its ID from `(user_id, slugify(name))`,
+        // so the same inputs produce the same project every time. This is
+        // the invariant that makes workspace-backed projects idempotent:
+        // writing `projects/commitments/AGENTS.md` twice never creates a
+        // duplicate project entity.
+        let a = ironclaw_engine::Project::new("alice", "Commitments", "desc");
+        let b = ironclaw_engine::Project::new("alice", "Commitments", "different desc");
+        assert_eq!(a.id, b.id, "same user+name must produce same ID");
+
+        // Different users still get different IDs for the same slug —
+        // projects are per-user.
+        let c = ironclaw_engine::Project::new("bob", "Commitments", "");
+        assert_ne!(a.id, c.id, "different users must produce different IDs");
+
+        // Slug derivation means `Commitments` and `commitments` land on
+        // the same project, which matches the workspace directory name.
+        let d = ironclaw_engine::Project::new("alice", "commitments", "");
+        assert_eq!(a.id, d.id, "case-different names with same slug match");
+    }
+
+    // ── Caller-level project auto-registration tests ──────────
+    //
+    // `extract_project_slug_from_target` is a predicate that gates a
+    // side effect (`save_project`) via `ensure_project_for_memory_write`.
+    // Per .claude/rules/testing.md, a unit test on the extractor alone
+    // is not sufficient — we must drive execute_action("memory_write")
+    // through the full hook path and inspect the persisted state.
+
+    /// Tool stub that echoes a minimal success body — enough for the
+    /// auto-register post-hook to run and splice `project_id` into it.
+    struct MemoryWriteStub;
+
+    #[async_trait]
+    impl Tool for MemoryWriteStub {
+        fn name(&self) -> &str {
+            "memory_write"
+        }
+        fn description(&self) -> &str {
+            "stub memory_write for auto-register tests"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"status": "ok"}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    /// Drive one `memory_write` with the given target and return
+    /// (result_output, projects_in_store_for_user).
+    async fn run_memory_write(
+        target: &str,
+        user_id: &str,
+    ) -> (serde_json::Value, Vec<ironclaw_engine::Project>) {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _dyn_store) = make_adapter_with_missions_and_store(tools).await;
+
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user_id.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_1"))
+        };
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({"target": target, "content": "x"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("memory_write should succeed");
+        assert!(!result.is_error, "got error: {}", result.output);
+
+        let projects = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user_id)
+            .cloned()
+            .collect();
+        (result.output, projects)
+    }
+
+    /// Canonical slug: the project gets auto-registered and the
+    /// output has a `project_id` splicing matches `Project::new`.
+    #[tokio::test]
+    async fn memory_write_auto_registers_project_on_canonical_slug() {
+        let user = "alice";
+        let (output, projects) = run_memory_write("projects/commitments/AGENTS.md", user).await;
+
+        assert_eq!(projects.len(), 1, "exactly one project should exist");
+        let expected_id = ironclaw_engine::Project::new(user, "commitments", "").id;
+        assert_eq!(projects[0].id, expected_id);
+        assert_eq!(projects[0].name, "commitments");
+        assert_eq!(
+            output.get("project_id").and_then(|v| v.as_str()),
+            Some(expected_id.0.to_string().as_str()),
+            "output should carry the newly-registered project_id"
+        );
+    }
+
+    /// Idempotency: writing twice must not duplicate the project.
+    /// This is the invariant `ProjectId::from_slug` exists to enforce.
+    #[tokio::test]
+    async fn memory_write_is_idempotent_across_repeated_writes() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+        let user = "alice";
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            user_id: user.to_string(),
+            ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+        };
+
+        for path in [
+            "projects/commitments/AGENTS.md",
+            "projects/commitments/open/foo.md",
+            "projects/commitments/.ceo-setup-complete",
+        ] {
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let projects: Vec<_> = store
+            .projects
+            .read()
+            .await
+            .values()
+            .filter(|p| p.user_id == user)
+            .cloned()
+            .collect();
+        assert_eq!(
+            projects.len(),
+            1,
+            "three writes to the same project must not create duplicates"
+        );
+    }
+
+    /// Non-`projects/` writes must never trigger auto-registration.
+    #[tokio::test]
+    async fn memory_write_outside_projects_does_not_register() {
+        let (output, projects) = run_memory_write("daily/2026-04-14.md", "alice").await;
+        assert!(projects.is_empty(), "random writes must not auto-register");
+        assert!(
+            output.get("project_id").is_none(),
+            "no project_id splicing for non-project paths"
+        );
+    }
+
+    /// Edge case: nested subdirectories resolve to the TOP-level slug,
+    /// not a per-subdir project (which would fork identity).
+    #[tokio::test]
+    async fn memory_write_nested_path_registers_top_level_project() {
+        let user = "alice";
+        let (_output, projects) =
+            run_memory_write("projects/commitments/open/team/sarah-q2-budget.md", user).await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].id,
+            ironclaw_engine::Project::new(user, "commitments", "").id,
+            "nested writes must register the top-level project, not a sub-project"
+        );
+    }
+
+    /// Weird-slug case: `projects/My Project/...` still registers a
+    /// project, but the registered project's ID matches what
+    /// `Project::new` (which internally slugifies) would produce.
+    /// This is the anti-fork invariant the review flagged.
+    #[tokio::test]
+    async fn memory_write_weird_slug_matches_project_new_id() {
+        let user = "alice";
+        // These paths all slugify to `my-project`.
+        for path in [
+            "projects/My Project/AGENTS.md",
+            "projects/MY_PROJECT/context.md",
+            "projects/my-project/README.md",
+        ] {
+            let tools = Arc::new(ToolRegistry::new());
+            tools.register(Arc::new(MemoryWriteStub)).await;
+            let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({"target": path, "content": "x"}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error, "path={path}: {}", r.output);
+
+            let projects: Vec<_> = store.projects.read().await.values().cloned().collect();
+            assert_eq!(
+                projects.len(),
+                1,
+                "path={path}: expected exactly one project"
+            );
+            let expected = ironclaw_engine::Project::new(user, "my-project", "").id;
+            assert_eq!(
+                projects[0].id, expected,
+                "path={path}: auto-registered ID must equal Project::new(_, \"my-project\", _) \
+                 — divergence means the workspace dir will fork identity"
+            );
+        }
+    }
+
+    /// User isolation: two users writing to the same slug must end up
+    /// with different projects, never shared state across tenants.
+    #[tokio::test]
+    async fn memory_write_isolates_projects_by_user() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MemoryWriteStub)).await;
+        let (adapter, store, _) = make_adapter_with_missions_and_store(tools).await;
+
+        for user in ["alice", "bob"] {
+            let ctx = ironclaw_engine::ThreadExecutionContext {
+                user_id: user.to_string(),
+                ..exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1"))
+            };
+            let r = adapter
+                .execute_action(
+                    "memory_write",
+                    serde_json::json!({
+                        "target": "projects/notes/entry.md",
+                        "content": "x"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("write");
+            assert!(!r.is_error);
+        }
+
+        let all: Vec<_> = store.projects.read().await.values().cloned().collect();
+        assert_eq!(all.len(), 2, "one project per user, never shared");
+        let a = all.iter().find(|p| p.user_id == "alice").unwrap();
+        let b = all.iter().find(|p| p.user_id == "bob").unwrap();
+        assert_ne!(a.id, b.id, "same slug across users must yield distinct IDs");
+    }
+
+    /// Pathological slug inputs that `extract_project_slug_from_target`
+    /// rejects outright — no project registration and no project_id in
+    /// the output. Covers `projects/` alone, bare `projects/foo`
+    /// (no file), traversal, and dotfile-prefixed dirs.
+    #[tokio::test]
+    async fn memory_write_rejects_pathological_project_targets() {
+        for target in [
+            "projects/",
+            "projects/foo",            // no file segment
+            "projects/./foo.md",       // dot segment
+            "projects/../escape.md",   // traversal
+            "projects/.hidden/foo.md", // dotfile-prefixed dir
+        ] {
+            let (output, projects) = run_memory_write(target, "alice").await;
+            assert!(
+                projects.is_empty(),
+                "{target}: must not auto-register; got {projects:?}"
+            );
+            assert!(
+                output.get("project_id").is_none(),
+                "{target}: must not splice project_id"
+            );
+        }
+    }
+
     // ── Caller-level mission action tests ─────────────────────
     //
     // These drive execute_action("mission_create"/...) through the full
@@ -3817,6 +4779,8 @@ Use this skill to set up a Pika meeting.
         pub(super) struct TestStore {
             threads: RwLock<HashMap<ThreadId, Thread>>,
             missions: RwLock<HashMap<MissionId, Mission>>,
+            pub(in crate::bridge::effect_adapter) projects:
+                RwLock<HashMap<ProjectId, ironclaw_engine::Project>>,
         }
 
         impl TestStore {
@@ -3824,6 +4788,7 @@ Use this skill to set up a Pika meeting.
                 Self {
                     threads: RwLock::new(HashMap::new()),
                     missions: RwLock::new(HashMap::new()),
+                    projects: RwLock::new(HashMap::new()),
                 }
             }
         }
@@ -3872,14 +4837,34 @@ Use this skill to set up a Pika meeting.
             ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
                 Ok(vec![])
             }
-            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+            async fn save_project(
+                &self,
+                project: &ironclaw_engine::Project,
+            ) -> Result<(), EngineError> {
+                self.projects
+                    .write()
+                    .await
+                    .insert(project.id, project.clone());
                 Ok(())
             }
             async fn load_project(
                 &self,
-                _: ProjectId,
+                id: ProjectId,
             ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
-                Ok(None)
+                Ok(self.projects.read().await.get(&id).cloned())
+            }
+            async fn list_projects(
+                &self,
+                user_id: &str,
+            ) -> Result<Vec<ironclaw_engine::Project>, EngineError> {
+                Ok(self
+                    .projects
+                    .read()
+                    .await
+                    .values()
+                    .filter(|p| p.user_id == user_id)
+                    .cloned()
+                    .collect())
             }
             async fn save_memory_doc(
                 &self,
@@ -3972,10 +4957,25 @@ Use this skill to set up a Pika meeting.
     /// Build a MissionManager backed by an in-memory store and wire it
     /// into an EffectBridgeAdapter so tests can drive `execute_action`.
     async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new()))
+            .await
+            .0
+    }
+
+    /// Same as `make_adapter_with_missions` but exposes both the adapter
+    /// (with a caller-provided `ToolRegistry` so tests can register stubs)
+    /// and the backing store, so assertions can inspect persisted state
+    /// after `execute_action` runs.
+    async fn make_adapter_with_missions_and_store(
+        tools: Arc<ToolRegistry>,
+    ) -> (
+        EffectBridgeAdapter,
+        Arc<mission_store::TestStore>,
+        Arc<dyn ironclaw_engine::Store>,
+    ) {
         use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
         use ironclaw_safety::SafetyConfig;
 
-        // Minimal LlmBackend mock — missions don't call the LLM in these tests.
         struct NoopLlm;
         #[async_trait]
         impl ironclaw_engine::LlmBackend for NoopLlm {
@@ -3995,7 +4995,6 @@ Use this skill to set up a Pika meeting.
             }
         }
 
-        // Minimal EffectExecutor mock.
         struct NoopEffects;
         #[async_trait]
         impl ironclaw_engine::EffectExecutor for NoopEffects {
@@ -4022,7 +5021,8 @@ Use this skill to set up a Pika meeting.
             }
         }
 
-        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(mission_store::TestStore::new());
+        let concrete_store = Arc::new(mission_store::TestStore::new());
+        let store: Arc<dyn ironclaw_engine::Store> = concrete_store.clone();
         let thread_manager = Arc::new(ThreadManager::new(
             Arc::new(NoopLlm),
             Arc::new(NoopEffects),
@@ -4034,7 +5034,7 @@ Use this skill to set up a Pika meeting.
         let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
 
         let adapter = EffectBridgeAdapter::new(
-            Arc::new(ToolRegistry::new()),
+            tools,
             Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
@@ -4042,7 +5042,7 @@ Use this skill to set up a Pika meeting.
             Arc::new(HookRegistry::default()),
         );
         adapter.set_mission_manager(Arc::new(mgr)).await;
-        adapter
+        (adapter, concrete_store, store)
     }
 
     /// Regression: mission_create with missing cadence must return an

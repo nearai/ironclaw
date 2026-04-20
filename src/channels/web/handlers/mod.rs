@@ -14,6 +14,4 @@ pub mod tool_policy;
 pub mod users;
 
 pub mod frontend;
-#[allow(dead_code)]
-pub mod static_files;
 pub mod webhooks;

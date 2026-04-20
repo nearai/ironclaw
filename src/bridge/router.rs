@@ -649,10 +649,7 @@ async fn notify_pending_gate(
                     .unwrap_or_else(|_| display_parameters.to_string()),
                 extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: pending
-                    .scope_thread_id
-                    .clone()
-                    .or_else(|| Some(pending.thread_id.to_string())),
+                thread_id: Some(pending.effective_wire_thread_id()),
             },
         );
     }
@@ -952,6 +949,41 @@ async fn resume_lease_for_pending_gate(
         .await
 }
 
+/// Broadcast a `GateResolved { resolution: "expired" }` event and return the
+/// dismissal outcome. Used when the target thread has been deleted between
+/// `take_verified` and resume, so there's no live thread to execute against.
+///
+/// Callers that persist side effects (e.g. `Approved { always }` writing
+/// `AlwaysAllow` to settings) MUST pre-flight with `state.store.load_thread`
+/// and call this helper *before* persisting, so a missing thread doesn't
+/// silently commit a long-lived preference for a tool that never ran (#2347).
+fn emit_gate_expired_dismissal(
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+) -> BridgeOutcome {
+    tracing::debug!(
+        thread_id = %pending.thread_id,
+        gate = %pending.gate_name,
+        action = %pending.action_name,
+        "thread not found for pending gate; emitting expired resolution"
+    );
+    if let Some(ref sse) = state.sse {
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateResolved {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                resolution: "expired".into(),
+                message: "Thread no longer exists.".into(),
+                thread_id: Some(pending.effective_wire_thread_id()),
+            },
+        );
+    }
+    BridgeOutcome::Respond("Thread no longer exists. Approval dismissed.".into())
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -960,12 +992,15 @@ async fn execute_pending_gate_action(
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
 ) -> Result<BridgeOutcome, Error> {
-    let thread = state
-        .store
-        .load_thread(pending.thread_id)
-        .await
-        .map_err(|e| engine_err("load thread", e))?
-        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+    let thread = match state.store.load_thread(pending.thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return Ok(emit_gate_expired_dismissal(state, message, pending)),
+        Err(e) => {
+            // Transient DB failure -- propagate so the caller can retry
+            // rather than permanently discarding the gate.
+            return Err(engine_err("load thread", e));
+        }
+    };
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
@@ -990,6 +1025,7 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     state.effect_adapter.reset_call_count();
@@ -1279,13 +1315,27 @@ async fn fail_waiting_thread(
 
     thread
         .transition_to(ironclaw_engine::ThreadState::Failed, Some(reason.into()))
-        .map_err(|e| engine_err("reconcile waiting thread", e))?;
+        .map_err(|e| engine_err("fail waiting thread", e))?;
     state
         .store
         .save_thread(&thread)
         .await
-        .map_err(|e| engine_err("save reconciled thread", e))?;
+        .map_err(|e| engine_err("save failed thread", e))?;
     Ok(true)
+}
+
+/// Build the user-facing "<message>. Resuming..." status text for the
+/// auth-completed Ready arm.
+///
+/// `result.message` from `ExtensionManager::configure_token` already ends
+/// with a period (e.g. `"Configuration saved for 'telegram'."`), so a
+/// naive `format!("{}. Resuming...", msg)` produces `"...telegram'.. Resuming..."`
+/// — double period. Strip trailing periods and whitespace from the raw
+/// message before formatting. Other punctuation is intentionally left
+/// alone (no real-world backend message ends in `!`/`?`/etc.).
+fn format_auth_completed_resuming(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    format!("{}. Resuming...", trimmed)
 }
 
 /// Outcome of `submit_pending_auth_credential` — distinguishes "a backend
@@ -1301,17 +1351,50 @@ enum PendingAuthCredentialSubmission {
 /// Try to persist a user-supplied auth credential, falling back across the
 /// three backends in priority order:
 ///
-/// 1. `AuthManager::submit_auth_token` — the canonical path (runs the
-///    extension's `configure_token`, validates, and emits a
+/// 1. `AuthManager::submit_auth_token(submit_target, ...)` — the canonical
+///    path (runs the extension's `configure_token`, validates, and emits a
 ///    `ConfigureResult`). Requires a secrets-backed auth manager.
-/// 2. `ExtensionManager::configure_token` — used on hosted instances that
-///    run without `SECRETS_MASTER_KEY`, so no persistent auth manager
-///    exists but the extension manager's in-memory secrets store can still
-///    accept the credential. `NotInstalled` / `NotFound` fall through so
-///    non-extension credentials (plain secrets) are stored in step 3.
-/// 3. Plain `SecretsStore::create` — stores the credential verbatim for
-///    non-extension actions (HTTP tool, skill credentials) when no
-///    extension owns the action.
+/// 2. `ExtensionManager::configure_token(submit_target, ...)` — used on
+///    hosted instances that run without `SECRETS_MASTER_KEY`, so no
+///    persistent auth manager exists but the extension manager's in-memory
+///    secrets store can still accept the credential. `NotInstalled` /
+///    `NotFound` fall through so non-extension credentials (plain secrets)
+///    are stored in step 3.
+/// 3. Plain `SecretsStore::create(credential_name, ...)` — stores the
+///    credential verbatim for non-extension actions (HTTP tool, skill
+///    credentials) when no extension owns the action.
+///
+/// # Why two keys (`submit_target` + `credential_name`)
+///
+/// Steps 1–2 take the **extension** identity (`submit_target`, e.g.
+/// `"telegram"`). They resolve the actual secret key by walking the
+/// extension's capabilities file — that's the whole point of routing
+/// through `configure_token`, which validates the extension is installed
+/// and picks the correct required-secret slot.
+///
+/// Step 3 takes the **credential** identity (`credential_name`, e.g.
+/// `"telegram_bot_token"` or `"github_token"`) because the secrets store
+/// has no concept of extensions — it stores raw secrets keyed by name.
+/// For flows that reach step 3, there is no extension to resolve against
+/// (builtin HTTP tool, skill credentials), so the credential name *is*
+/// the storage key.
+///
+/// The asymmetry is intentional: the engine's `ResumeKind::Authentication`
+/// only carries `credential_name`, so the caller passes both identities
+/// through and each backend picks the one it operates on.
+///
+/// # Credential-name validation on the step-3 fallback
+///
+/// Steps 1–2 reject unknown credentials via their capabilities lookup
+/// (`auth_manager` through `get_credential_spec`; `extension_manager`
+/// through `determine_installed_kind`). Step 3 is the non-extension
+/// path, so the only validation is the upstream trust chain: the pending
+/// gate's `ResumeKind::Authentication.credential_name` is a typed
+/// `CredentialName` (newtype validated at construction), and the pending
+/// gate itself was inserted by the engine for a specific tool-call whose
+/// auth descriptor produced that credential. The caller here receives
+/// the value as `&str` because `CreateSecretParams` is string-typed at
+/// the boundary, but it originates from a validated newtype upstream.
 ///
 /// Returns `SkippedNoBackend` when none of the three is available (bare
 /// test harness with `resume_output` already staged).
@@ -1341,6 +1424,9 @@ async fn submit_pending_auth_credential(
     }
 
     if let Some(ss) = state.secrets_store.as_ref() {
+        // Non-extension path (builtin HTTP, skill credentials): store under
+        // the raw credential name. See function docs for why steps 1–2
+        // take `submit_target` but step 3 takes `credential_name`.
         let params = crate::secrets::CreateSecretParams::new(credential_name, token);
         ss.create(user_id, params).await.map_err(|e| {
             crate::extensions::ExtensionError::Other(format!("Failed to store credential: {e}"))
@@ -1460,7 +1546,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1658,6 +1744,29 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
+    // Use the DB-first config system instead of raw std::env::var reads.
+    // Resolve MissionsConfig from DB-backed settings when available, falling
+    // back to local settings.json + env vars.
+    let missions_settings = if let Some(ref store) = agent.deps.store {
+        match store.get_all_settings(&agent.deps.owner_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::load(),
+        }
+    } else {
+        crate::settings::Settings::load()
+    };
+    let missions_config = match crate::config::MissionsConfig::resolve(&missions_settings) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "MissionsConfig::resolve failed; falling back to defaults"
+            );
+            crate::config::MissionsConfig::default()
+        }
+    };
+    mission_manager_inner =
+        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
@@ -1857,7 +1966,7 @@ async fn resolve_pending_gate_for_user(
         .into_iter()
         .filter(|gate| {
             hinted_scope.is_none_or(|hint| {
-                gate.scope_thread_id.as_deref() == Some(hint)
+                gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                     || hinted_uuid.is_none_or(|uuid| {
                         gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                     })
@@ -1975,7 +2084,7 @@ pub async fn resolve_engine_auth_callback(
             let _ = state.pending_gates.discard(&key).await;
             return Ok(AuthCallbackContinuation::ReplayMessage {
                 channel: pending.source_channel,
-                thread_scope: pending.scope_thread_id,
+                thread_scope: pending.scope_thread_id.map(String::from),
                 content,
             });
         }
@@ -1990,7 +2099,7 @@ pub async fn resolve_engine_auth_callback(
 
     Ok(AuthCallbackContinuation::ResolveGateExternal {
         channel: pending.source_channel,
-        thread_scope: pending.scope_thread_id,
+        thread_scope: pending.scope_thread_id.map(String::from),
         request_id: pending.request_id,
     })
 }
@@ -2341,6 +2450,22 @@ pub async fn resolve_gate(
             // auto-approval that bypasses every subsequent gate. The gate's
             // own `allow_always` is the authoritative server-side policy.
             let always = clamp_always_to_resume_kind(always, &pending.resume_kind);
+
+            // Pre-flight thread check before committing `AlwaysAllow`
+            // persistence (#2347): if the thread was deleted between
+            // `take_verified` and now, persisting auto-approve would leave
+            // a permanent preference behind for a tool that never ran. The
+            // rollback at the bottom of this branch only fires on `Err`, so
+            // execute_pending_gate_action's graceful `Ok(Respond)` on
+            // missing-thread would bypass it. Short-circuit here instead.
+            match state.store.load_thread(pending.thread_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Ok(emit_gate_expired_dismissal(state, message, &pending));
+                }
+                Err(e) => return Err(engine_err("load thread", e)),
+            }
+
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -2355,10 +2480,7 @@ pub async fn resolve_gate(
                         }
                         .into(),
                         message: "Gate approved. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2416,10 +2538,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "denied".into(),
                         message: "Gate denied.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2472,10 +2591,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "cancelled".into(),
                         message: "Gate cancelled.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -2526,10 +2642,7 @@ pub async fn resolve_gate(
                             tool_name: pending.action_name.clone(),
                             resolution: "credential_provided".into(),
                             message: "Credential received. Resuming execution.".into(),
-                            thread_id: pending
-                                .scope_thread_id
-                                .clone()
-                                .or_else(|| Some(pending.thread_id.to_string())),
+                            thread_id: Some(pending.effective_wire_thread_id()),
                         },
                     );
                 }
@@ -2555,7 +2668,7 @@ pub async fn resolve_gate(
                                 StatusUpdate::AuthCompleted {
                                     extension_name: display_name.clone(),
                                     success: true,
-                                    message: format!("{}. Resuming...", result.message),
+                                    message: format_auth_completed_resuming(&result.message),
                                 },
                                 &message.metadata,
                             )
@@ -2577,10 +2690,7 @@ pub async fn resolve_gate(
                                     ironclaw_common::OnboardingStateDto::pairing_required(
                                         display_name.clone(),
                                         Some(next_pending.request_id.to_string()),
-                                        pending
-                                            .scope_thread_id
-                                            .clone()
-                                            .or_else(|| Some(pending.thread_id.to_string())),
+                                        Some(pending.effective_wire_thread_id()),
                                         Some(result.message.clone()),
                                         instructions,
                                         onboarding,
@@ -2606,11 +2716,23 @@ pub async fn resolve_gate(
                     // Bare test-harness path: no backend exists, but the
                     // gate carries a staged `resume_output` (set when the
                     // gate was created with a synthetic output), so we can
-                    // proceed with the resume below. Production flows
-                    // always come through the auth-manager or extension-
-                    // manager branch above.
+                    // proceed with the resume below. The caller's token
+                    // is intentionally dropped here — the resume_output
+                    // already carries whatever the resumed action needs;
+                    // production flows always come through the
+                    // auth-manager or extension-manager branch above.
+                    // `debug!` (not `info!` — would corrupt the REPL/TUI)
+                    // so operators can still see the drop when tracing.
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
-                        if pending.resume_output.is_some() => {}
+                        if pending.resume_output.is_some() =>
+                    {
+                        tracing::debug!(
+                            user_id = %message.user_id,
+                            thread_id = %pending.thread_id,
+                            request_id = %pending.request_id,
+                            "auth gate resume: no backend, token dropped because resume_output is staged",
+                        );
+                    }
                     Ok(PendingAuthCredentialSubmission::SkippedNoBackend) => {
                         let msg =
                             "No auth manager, extension manager, or secrets store available to store credential.".to_string();
@@ -2721,10 +2843,7 @@ pub async fn resolve_gate(
                         tool_name: pending.action_name.clone(),
                         resolution: "external_callback".into(),
                         message: "External callback received. Resuming execution.".into(),
-                        thread_id: pending
-                            .scope_thread_id
-                            .clone()
-                            .or_else(|| Some(pending.thread_id.to_string())),
+                        thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
             }
@@ -3043,13 +3162,9 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
                     .stop_thread(*tid, &message.user_id)
                     .await;
             }
-            let _ = state
-                .pending_gates
-                .discard(&PendingGateKey {
-                    user_id: message.user_id.clone(),
-                    thread_id: *tid,
-                })
-                .await;
+            // Discard all pending gates for this thread regardless of user,
+            // preventing orphaned gates that can never be resolved (#2323).
+            state.pending_gates.discard_for_thread(*tid).await;
         }
     }
 
@@ -3156,7 +3271,7 @@ pub async fn discard_engine_pending_auth_request(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3198,7 +3313,7 @@ pub async fn transition_engine_pending_auth_request_to_pairing(
         .find(|gate| {
             gate.request_id == request_id
                 && hinted_scope.is_none_or(|hint| {
-                    gate.scope_thread_id.as_deref() == Some(hint)
+                    gate.scope_thread_id.as_ref().map(|t| t.as_str()) == Some(hint)
                         || hinted_uuid.is_none_or(|uuid| {
                             gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
                         })
@@ -3760,7 +3875,19 @@ async fn await_thread_outcome(
                     gate_name: "authentication".into(),
                     user_id: message.user_id.clone(),
                     thread_id,
-                    scope_thread_id: message.conversation_scope().map(str::to_string),
+                    scope_thread_id: message.conversation_scope().and_then(|s| {
+                        match ironclaw_common::ExternalThreadId::new(s) {
+                            Ok(tid) => Some(tid),
+                            Err(e) => {
+                                tracing::debug!(
+                                    candidate = %s,
+                                    error = %e,
+                                    "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                                );
+                                None
+                            }
+                        }
+                    }),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
                     action_name: "authentication_fallback".into(),
@@ -3849,7 +3976,19 @@ async fn await_thread_outcome(
                 gate_name: gate_name.clone(),
                 user_id: message.user_id.clone(),
                 thread_id,
-                scope_thread_id: message.conversation_scope().map(str::to_string),
+                scope_thread_id: message.conversation_scope().and_then(|s| {
+                    match ironclaw_common::ExternalThreadId::new(s) {
+                        Ok(tid) => Some(tid),
+                        Err(e) => {
+                            tracing::debug!(
+                                candidate = %s,
+                                error = %e,
+                                "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                            );
+                            None
+                        }
+                    }
+                }),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
@@ -4534,7 +4673,12 @@ pub struct ProjectsOverviewResponse {
 /// Mission summary for list views.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineMissionInfo {
-    pub id: String,
+    /// Typed mission identifier, carried through from the engine rather
+    /// than round-tripped to `String` at the adapter boundary. Serializes
+    /// transparently as a UUID string (via `MissionId`'s derived
+    /// `Serialize`), so the wire shape stays identical to the pre-newtype
+    /// DTO.
+    pub id: ironclaw_engine::MissionId,
     pub name: String,
     pub goal: String,
     pub status: String,
@@ -5138,7 +5282,7 @@ pub async fn list_engine_missions(
     Ok(missions
         .iter()
         .map(|m| EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5193,7 +5337,7 @@ pub async fn get_engine_mission(
 
     Ok(Some(EngineMissionDetail {
         info: EngineMissionInfo {
-            id: m.id.to_string(),
+            id: m.id,
             name: m.name.clone(),
             goal: m.goal.clone(),
             status: format!("{:?}", m.status),
@@ -5579,7 +5723,7 @@ pub(crate) mod test_support {
 
         let store = Arc::new(ThreadTestStore::new());
         for thread in threads {
-            store.save_thread(&thread).await.expect("seed thread");
+            store.save_thread(&thread).await.expect("seed thread"); // safety: cfg(test) fixture
         }
         let store_dyn: Arc<dyn Store> = store;
 
@@ -6344,7 +6488,9 @@ mod tests {
             },
         );
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6422,7 +6568,9 @@ mod tests {
             )
         };
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use test");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
@@ -6477,7 +6625,9 @@ mod tests {
 
         let mut message =
             crate::channels::IncomingMessage::new("web", "alice", "what's happening?");
-        message.thread_id = Some(thread_id.to_string());
+        message.thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            thread_id.to_string(),
+        ));
 
         let response = handle_with_engine(&agent, &message, &message.content)
             .await
@@ -7057,7 +7207,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7095,7 +7247,9 @@ mod tests {
                 auth_url: None,
             },
         );
-        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        pending.scope_thread_id = Some(ironclaw_common::ExternalThreadId::from_trusted(
+            "gateway-thread-123".to_string(),
+        ));
         state.pending_gates.insert(pending).await.unwrap();
 
         let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
@@ -7120,7 +7274,7 @@ mod tests {
         assert_eq!(replacement.request_id.to_string(), next_request_id);
         assert_eq!(replacement.gate_name, "pairing");
         assert_eq!(
-            replacement.scope_thread_id.as_deref(),
+            replacement.scope_thread_id.as_ref().map(|t| t.as_str()),
             Some("gateway-thread-123")
         );
         assert_eq!(replacement.thread_id, thread_id);
@@ -7944,6 +8098,90 @@ mod tests {
         outcome.expect("router no-auth-backend failure test");
     }
 
+    /// Regression for #2323: when the target thread is deleted between
+    /// `take_verified` and resume, an `Approved` resolution must emit
+    /// `GateResolved { resolution: "expired" }` (not just generic error) and
+    /// must *not* persist `AlwaysAllow` — otherwise the caller's rollback
+    /// (`result.is_err()` branch) would be skipped, leaving a permanent
+    /// auto-approve preference behind for a tool that never ran. Covers
+    /// both the `always: false` SSE contract and the pre-flight thread
+    /// check that gates `persist_always_allow`.
+    #[tokio::test]
+    async fn resolve_gate_approved_with_missing_thread_emits_expired_and_skips_persist() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let sse = Arc::new(SseManager::new());
+            let mut event_stream = Box::pin(
+                sse.subscribe_raw(Some("alice".to_string()), false)
+                    .expect("subscribe raw"),
+            );
+
+            let mut state = make_expected_test_state(store);
+            state.sse = Some(Arc::clone(&sse));
+
+            // Thread deleted / never saved — `state.store.load_thread(tid)`
+            // returns `Ok(None)`, mimicking the #2323 race.
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+            let message =
+                IncomingMessage::new("web", "alice", "approve").with_thread(thread_id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread_id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::Approved { always: true },
+            )
+            .await
+            .expect("resolve gate");
+
+            // Graceful dismissal, not an error.
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text)
+                    if text == "Thread no longer exists. Approval dismissed."
+            ));
+
+            // The first (and only) SSE event on this subscription must be
+            // `expired`. Critically it must NOT be `approved_always` — a
+            // prior implementation emitted that first, then discovered the
+            // missing thread and committed AlwaysAllow before anyone could
+            // roll it back.
+            let event = event_stream.next().await.expect("gate event");
+            assert!(
+                matches!(
+                    &event,
+                    AppEvent::GateResolved { resolution, .. } if resolution == "expired"
+                ),
+                "expected expired gate resolution (pre-flight short-circuit), got: {event:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router orphaned-approved-gate expired test");
+    }
+
     /// Unit test for the extension-manager branch of
     /// `submit_pending_auth_credential`. The caller-level regression is
     /// `resolve_gate_uses_extension_manager_without_auth_manager_for_auth_resume`;
@@ -8023,6 +8261,34 @@ mod tests {
         assert!(
             matches!(err, crate::extensions::ExtensionError::ValidationFailed(_)),
             "expected ValidationFailed, got: {err:?}"
+        );
+    }
+
+    /// `format_auth_completed_resuming` strips trailing periods and
+    /// whitespace from the upstream backend message before appending
+    /// ". Resuming...". Regression coverage for the double-period bug
+    /// flagged on PR #2622 — `ExtensionManager::configure_token` returns
+    /// "Configuration saved for 'X'." which used to render as
+    /// "...'X'.. Resuming...".
+    #[test]
+    fn format_auth_completed_resuming_strips_trailing_period() {
+        // The motivating case: extension-manager backend message.
+        assert_eq!(
+            format_auth_completed_resuming("Configuration saved for 'telegram'."),
+            "Configuration saved for 'telegram'. Resuming..."
+        );
+        // Multiple trailing periods + whitespace collapse cleanly.
+        assert_eq!(
+            format_auth_completed_resuming("done...  \n"),
+            "done. Resuming..."
+        );
+        // A message with no trailing punctuation gets exactly one period.
+        assert_eq!(format_auth_completed_resuming("ok"), "ok. Resuming...");
+        // Non-period punctuation is intentionally left intact (no backend
+        // currently produces these, but the spec is "trim periods only").
+        assert_eq!(
+            format_auth_completed_resuming("ready!"),
+            "ready!. Resuming..."
         );
     }
 
