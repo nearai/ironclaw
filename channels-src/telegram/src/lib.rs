@@ -409,7 +409,8 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     }
 }
 
-/// Split a long message into chunks that fit within Telegram's 4096 UTF-16-unit limit.
+/// Split a long message into chunks that each fit within `limit_utf16`
+/// UTF-16 code units.
 ///
 /// Tries to split at the most natural boundary available (in priority order):
 /// 1. Double newline (paragraph break)
@@ -417,8 +418,8 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
 /// 3. Sentence end (`. `, `! `, `? `)
 /// 4. Word boundary (space)
 /// 5. Hard cut at the limit (last resort for pathological input)
-fn split_message(text: &str) -> Vec<String> {
-    if utf16_code_unit_len(text) <= TELEGRAM_MAX_MESSAGE_LEN {
+fn split_message(text: &str, limit_utf16: usize) -> Vec<String> {
+    if utf16_code_unit_len(text) <= limit_utf16 {
         return vec![text.to_string()];
     }
 
@@ -426,8 +427,8 @@ fn split_message(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Find the longest UTF-8 prefix that fits within Telegram's UTF-16 limit.
-        let window_bytes = prefix_within_utf16_limit(remaining, TELEGRAM_MAX_MESSAGE_LEN);
+        // Find the longest UTF-8 prefix that fits within the UTF-16 limit.
+        let window_bytes = prefix_within_utf16_limit(remaining, limit_utf16);
 
         if window_bytes >= remaining.len() {
             // Remainder fits entirely.
@@ -1428,7 +1429,7 @@ fn send_response(
     }
 
     // Split large messages into chunks that fit Telegram's limit.
-    let chunks = split_message(&response.content);
+    let chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LEN);
 
     // The first chunk replies to the original message; subsequent chunks
     // reply to the previously sent chunk so they form a visual thread.
@@ -1444,23 +1445,32 @@ fn send_response(
     Ok(())
 }
 
-/// Maximum recursion depth for splitting too-long messages. Depth 2 means a
-/// single chunk can produce at most 4 sub-messages (2^2).
+/// Maximum recursion depth for splitting too-long messages. Each level
+/// halves the per-chunk UTF-16 limit, so depth 2 allows limits down to
+/// roughly a quarter of the original.
 const MAX_SPLIT_DEPTH: u8 = 2;
 
 /// Send a single chunk, handling Markdown parse errors and too-long retries.
 ///
-/// On `ParseEntities`, retries without Markdown formatting (and disables
-/// Markdown for any subsequent splits of this chunk).
-/// On `TooLong`, halves the chunk and sends each half recursively (up to
-/// `MAX_SPLIT_DEPTH` levels deep).
+/// On `ParseEntities`, retries without Markdown formatting.
+/// On `TooLong`, re-splits the chunk via [`split_message`] with a halved
+/// UTF-16 limit and sends the resulting sub-chunks (up to `MAX_SPLIT_DEPTH`
+/// levels deep), threading replies through each one.
 fn send_chunk(
     chat_id: i64,
     text: &str,
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<i64, String> {
-    send_chunk_inner(chat_id, text, reply_to, message_thread_id, 0, true)
+    send_chunk_inner(
+        chat_id,
+        text,
+        reply_to,
+        message_thread_id,
+        TELEGRAM_MAX_MESSAGE_LEN,
+        0,
+        true,
+    )
 }
 
 fn send_chunk_inner(
@@ -1468,6 +1478,7 @@ fn send_chunk_inner(
     text: &str,
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
+    limit_utf16: usize,
     depth: u8,
     use_markdown: bool,
 ) -> Result<i64, String> {
@@ -1490,20 +1501,24 @@ fn send_chunk_inner(
                 channel_host::LogLevel::Warn,
                 &format!("Markdown parse failed ({}), retrying as plain text", detail),
             );
-            match send_message(chat_id, text, reply_to, None, message_thread_id) {
-                Ok(id) => Ok(id),
-                // Plain-text retry might still be too long — split without Markdown.
-                Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => {
-                    split_and_send(chat_id, text, reply_to, message_thread_id, depth, false)
-                }
-                Err(e) => Err(format!("Plain-text retry also failed: {}", e)),
-            }
+            // Recurse with markdown disabled; this preserves TooLong handling
+            // for the plain-text attempt without duplicating logic.
+            send_chunk_inner(
+                chat_id,
+                text,
+                reply_to,
+                message_thread_id,
+                limit_utf16,
+                depth,
+                false,
+            )
         }
-        Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => split_and_send(
+        Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => resplit_and_send(
             chat_id,
             text,
             reply_to,
             message_thread_id,
+            limit_utf16,
             depth,
             use_markdown,
         ),
@@ -1516,98 +1531,59 @@ fn send_chunk_inner(
     }
 }
 
-/// Find the byte index to split `text` roughly in half at a natural boundary.
+/// Re-split `text` at a halved UTF-16 limit and send each sub-chunk.
 ///
-/// Uses UTF-16 code unit length (Telegram's unit) for the midpoint, then
-/// searches backwards for a paragraph break, newline, or space.
-fn find_split_midpoint(text: &str) -> usize {
-    let half_utf16 = utf16_code_unit_len(text) / 2;
-    let mid_byte = prefix_within_utf16_limit(text, half_utf16);
-    let mid_byte = if mid_byte == 0 || mid_byte >= text.len() {
-        // Fallback: use byte-level char midpoint if UTF-16 calc gives degenerate result.
-        text.char_indices()
-            .nth(text.chars().count() / 2)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len())
-    } else {
-        mid_byte
-    };
-
-    let split_at = text[..mid_byte] // safety: mid_byte from prefix_within_utf16_limit/char_indices
-        .rfind("\n\n")
-        .or_else(|| text[..mid_byte].rfind('\n')) // safety: same char boundary
-        .or_else(|| text[..mid_byte].rfind(' ')) // safety: same char boundary
-        .unwrap_or(mid_byte);
-
-    if split_at == 0 { mid_byte } else { split_at }
-}
-
-/// Split text in half at a natural boundary and send each part recursively.
-///
-/// Returns the message_id of the **last** sent chunk so callers can
+/// Returns the message_id of the **last** sent sub-chunk so the caller can
 /// continue the reply thread correctly.
-fn split_and_send(
+fn resplit_and_send(
     chat_id: i64,
     text: &str,
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
+    limit_utf16: usize,
     depth: u8,
     use_markdown: bool,
 ) -> Result<i64, String> {
-    if text.is_empty() {
-        return Err("Cannot split empty text".to_string());
-    }
+    let new_limit = (limit_utf16 / 2).max(1);
+    let sub_chunks = split_message(text, new_limit);
 
     channel_host::log(
         channel_host::LogLevel::Warn,
         &format!(
-            "Chunk too long ({} UTF-16 units), splitting in half (depth {})",
+            "Chunk too long ({} UTF-16 units), re-splitting at limit {} into {} pieces (depth {})",
             utf16_code_unit_len(text),
-            depth + 1
+            new_limit,
+            sub_chunks.len(),
+            depth + 1,
         ),
     );
 
-    let split_at = find_split_midpoint(text);
-    let first = text[..split_at].trim_end(); // safety: split_at from find_split_midpoint (char boundary)
-    let second = text[split_at..].trim_start(); // safety: same
+    // If re-splitting didn't actually shrink the payload, we can't make
+    // progress — bail rather than loop.
+    if sub_chunks.len() <= 1 {
+        return Err(format!(
+            "Too-long message could not be split further at limit {} ({} UTF-16 units)",
+            new_limit,
+            utf16_code_unit_len(text),
+        ));
+    }
 
-    // Guard against trim producing an empty first half (e.g. whitespace-heavy text).
-    if first.is_empty() {
-        if second.is_empty() {
-            return Err("Cannot split text into non-empty chunks".to_string());
-        }
-        return send_chunk_inner(
+    let mut reply = reply_to;
+    let mut last_id = None;
+    for sub in &sub_chunks {
+        let id = send_chunk_inner(
             chat_id,
-            second,
-            reply_to,
+            sub,
+            reply,
             message_thread_id,
+            new_limit,
             depth + 1,
             use_markdown,
-        );
+        )?;
+        reply = Some(id);
+        last_id = Some(id);
     }
-
-    let first_id = send_chunk_inner(
-        chat_id,
-        first,
-        reply_to,
-        message_thread_id,
-        depth + 1,
-        use_markdown,
-    )?;
-
-    if second.is_empty() {
-        return Ok(first_id);
-    }
-
-    // Return last sent id so the reply chain continues from the final chunk.
-    send_chunk_inner(
-        chat_id,
-        second,
-        Some(first_id),
-        message_thread_id,
-        depth + 1,
-        use_markdown,
-    )
+    last_id.ok_or_else(|| "Re-split produced no chunks".to_string())
 }
 
 /// Extract the base MIME type, stripping any parameters after `;`.
@@ -2428,7 +2404,7 @@ mod tests {
     #[test]
     fn test_split_message_short() {
         let text = "Hello, world!";
-        let chunks = split_message(text);
+        let chunks = split_message(text, TELEGRAM_MAX_MESSAGE_LEN);
         assert_eq!(chunks, vec![text]);
     }
 
@@ -2437,7 +2413,7 @@ mod tests {
         let para_a = "A".repeat(3000);
         let para_b = "B".repeat(3000);
         let text = format!("{}\n\n{}", para_a, para_b);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], para_a);
         assert_eq!(chunks[1], para_b);
@@ -2449,7 +2425,7 @@ mod tests {
         let words: Vec<String> = (0..1000).map(|i| format!("word{:04}", i)).collect();
         let text = words.join(" ");
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() > 1, "expected multiple chunks");
         for chunk in &chunks {
             assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
@@ -2466,7 +2442,7 @@ mod tests {
             .map(|i| format!("Sentence number {}. ", i))
             .collect();
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         for chunk in &chunks {
             assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
@@ -2480,7 +2456,7 @@ mod tests {
         let text: String = sentence.repeat(repeat_count);
         assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
 
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() > 1);
         // First chunk should end at a sentence boundary (trimmed)
         let first = &chunks[0];
@@ -2495,7 +2471,7 @@ mod tests {
     fn test_split_message_hard_cut_no_spaces() {
         // Pathological input: a single huge "word" with no spaces or newlines.
         let text = "x".repeat(TELEGRAM_MAX_MESSAGE_LEN * 2 + 100);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
@@ -2512,7 +2488,7 @@ mod tests {
         let text: String = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN + 100);
         assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
 
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
@@ -2526,14 +2502,12 @@ mod tests {
         let emoji = "\u{1F600}"; // 😀
         let text = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN);
 
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
 
         assert_eq!(chunks.len(), 2);
-        assert!(
-            chunks
-                .iter()
-                .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN)
-        );
+        assert!(chunks
+            .iter()
+            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
     }
 
     #[test]
@@ -3050,13 +3024,11 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(
-            attachments[0]
-                .source_url
-                .as_ref()
-                .unwrap()
-                .contains("large_id")
-        );
+        assert!(attachments[0]
+            .source_url
+            .as_ref()
+            .unwrap()
+            .contains("large_id"));
     }
 
     #[test]
@@ -3323,62 +3295,36 @@ mod tests {
         assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
     }
 
-    // ---- find_split_midpoint tests ----
+    // ---- split_message with custom limit (TooLong retry path) ----
 
     #[test]
-    fn test_find_split_midpoint_paragraph_boundary() {
-        let first = "A".repeat(2000);
-        let second = "B".repeat(2000);
-        let text = format!("{}\n\n{}", first, second);
-        let idx = find_split_midpoint(&text);
-        assert_eq!(&text[..idx].trim_end(), &first.as_str());
+    fn test_split_message_with_halved_limit_respects_paragraph_boundary() {
+        // Simulates the TooLong retry: re-split an already-split chunk at a
+        // halved limit. Paragraph break must still win over word boundary.
+        let para_a = "A".repeat(1500);
+        let para_b = "B".repeat(1500);
+        let text = format!("{}\n\n{}", para_a, para_b);
+        let chunks = split_message(&text, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], para_a);
+        assert_eq!(chunks[1], para_b);
     }
 
     #[test]
-    fn test_find_split_midpoint_newline_boundary() {
-        let first = "A".repeat(2000);
-        let second = "B".repeat(2000);
-        let text = format!("{}\n{}", first, second);
-        let idx = find_split_midpoint(&text);
-        assert_eq!(&text[..idx].trim_end(), &first.as_str());
-    }
-
-    #[test]
-    fn test_find_split_midpoint_space_boundary() {
-        let first = "A".repeat(2000);
-        let second = "B".repeat(2000);
-        let text = format!("{} {}", first, second);
-        let idx = find_split_midpoint(&text);
-        assert_eq!(&text[..idx].trim_end(), &first.as_str());
-    }
-
-    #[test]
-    fn test_find_split_midpoint_no_boundary() {
-        // No spaces, newlines, or paragraph breaks — hard cut at midpoint.
-        let text = "x".repeat(8000);
-        let idx = find_split_midpoint(&text);
-        // Should be roughly half.
-        assert!(idx > 3000 && idx < 5000, "idx={}", idx);
-        // Must be a valid UTF-8 boundary.
-        let _ = &text[..idx];
-    }
-
-    #[test]
-    fn test_find_split_midpoint_emoji_heavy() {
-        // Emoji are 2 UTF-16 code units each. Ensure midpoint uses UTF-16 units.
-        let emoji = "\u{1F600}"; // 😀 — 2 UTF-16 code units, 4 UTF-8 bytes
-        let text: String = emoji.repeat(6000);
-        let idx = find_split_midpoint(&text);
-        // Must land on a char boundary (multiple of 4 bytes for this emoji).
-        assert_eq!(idx % 4, 0, "split not on char boundary: idx={}", idx);
-        // Should be roughly in the middle in UTF-16 terms.
-        let first_utf16 = utf16_len(&text[..idx]);
-        let total_utf16 = utf16_len(&text);
-        assert!(
-            first_utf16 > total_utf16 / 3 && first_utf16 < total_utf16 * 2 / 3,
-            "first_utf16={}, total_utf16={}",
-            first_utf16,
-            total_utf16,
-        );
+    fn test_split_message_with_halved_limit_each_chunk_fits() {
+        // Text originally near TELEGRAM_MAX_MESSAGE_LEN, re-split at half.
+        let words: Vec<String> = (0..400).map(|i| format!("word{:04}", i)).collect();
+        let text = words.join(" ");
+        let half_limit = TELEGRAM_MAX_MESSAGE_LEN / 2;
+        let chunks = split_message(&text, half_limit);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(
+                utf16_len(chunk) <= half_limit,
+                "chunk exceeds halved limit: {} > {}",
+                utf16_len(chunk),
+                half_limit,
+            );
+        }
     }
 }
