@@ -338,7 +338,7 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
     // Re-resolve just the LLM config using the same owner/admin scope layering
     // the gateway used at startup. This avoids rebuilding unrelated config
     // sections while still hydrating secrets-backed API keys for the new chain.
-    let llm_config = match crate::config::Config::resolve_llm_with_secrets(
+    let llm_config = match crate::config::Config::resolve_llm_with_secrets_strict(
         Some(store.as_ref()),
         &state.owner_id,
         state.config_toml_path.as_deref(),

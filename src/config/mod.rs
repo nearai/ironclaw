@@ -287,7 +287,7 @@ impl Config {
         crate::bootstrap::load_ironclaw_env();
 
         let settings =
-            Self::load_db_backed_settings(store, user_id, toml_path, is_operator).await?;
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, false).await?;
         Self::build(&settings).await
     }
 
@@ -395,21 +395,34 @@ impl Config {
         user_id: &str,
         toml_path: Option<&std::path::Path>,
         is_operator: bool,
+        strict_db_reads: bool,
     ) -> Result<Settings, ConfigError> {
         let mut settings = Settings::default();
         profile::apply_profile(&mut settings)?;
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
         let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
-        if user_id != admin_scope
-            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
-            && !admin_map.is_empty()
-        {
-            if !is_operator {
-                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+        if user_id != admin_scope {
+            match store.get_all_settings(admin_scope).await {
+                Ok(mut admin_map) if !admin_map.is_empty() => {
+                    if !is_operator {
+                        crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+                    }
+                    let admin_settings = Settings::from_db_map(&admin_map);
+                    settings.merge_from(&admin_settings);
+                }
+                Ok(_) => {}
+                Err(e) if strict_db_reads => {
+                    return Err(ConfigError::ParseError(format!(
+                        "Failed to load admin-scope settings from DB: {e}"
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load admin-scope settings from DB, using defaults: {e}"
+                    );
+                }
             }
-            let admin_settings = Settings::from_db_map(&admin_map);
-            settings.merge_from(&admin_settings);
         }
 
         match store.get_all_settings(user_id).await {
@@ -420,12 +433,42 @@ impl Config {
                 let db_settings = Settings::from_db_map(&map);
                 settings.merge_from(&db_settings);
             }
+            Err(e) if strict_db_reads => {
+                return Err(ConfigError::ParseError(format!(
+                    "Failed to load settings from DB: {e}"
+                )));
+            }
             Err(e) => {
                 tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
             }
         }
 
         Ok(settings)
+    }
+
+    async fn resolve_llm_with_secrets_inner(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        let mut settings = if let Some(store) = store {
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, strict_db_reads)
+                .await?
+        } else {
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
+        };
+
+        if let Some(secrets) = secrets {
+            hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
+        }
+
+        LlmConfig::resolve(&settings)
     }
 
     /// Resolve only the LLM configuration from the current source stack.
@@ -439,20 +482,21 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<LlmConfig, ConfigError> {
-        let mut settings = if let Some(store) = store {
-            Self::load_db_backed_settings(store, user_id, toml_path, is_operator).await?
-        } else {
-            let mut s = Settings::default();
-            profile::apply_profile(&mut s)?;
-            Self::apply_toml_overlay(&mut s, toml_path)?;
-            s
-        };
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, false)
+            .await
+    }
 
-        if let Some(secrets) = secrets {
-            hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
-        }
-
-        LlmConfig::resolve(&settings)
+    /// Resolve LLM configuration for hot reload paths that must fail closed on
+    /// DB read errors so the caller can roll back the triggering settings write.
+    pub(crate) async fn resolve_llm_with_secrets_strict(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, true)
+            .await
     }
 
     /// Build config from settings (shared by from_env and from_db).
@@ -939,12 +983,16 @@ mod tests {
         rows: tokio::sync::RwLock<
             std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
         >,
+        fail_get_all_settings_for: tokio::sync::RwLock<std::collections::HashSet<String>>,
     }
 
     impl FakeSettingsStore {
         fn new() -> Self {
             Self {
                 rows: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+                fail_get_all_settings_for: tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
+                ),
             }
         }
 
@@ -953,6 +1001,13 @@ mod tests {
             rows.entry(user_id.to_string())
                 .or_default()
                 .insert(key.to_string(), value);
+        }
+
+        async fn fail_get_all_settings_for(&self, user_id: &str) {
+            self.fail_get_all_settings_for
+                .write()
+                .await
+                .insert(user_id.to_string());
         }
     }
 
@@ -1013,6 +1068,16 @@ mod tests {
             user_id: &str,
         ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
         {
+            if self
+                .fail_get_all_settings_for
+                .read()
+                .await
+                .contains(user_id)
+            {
+                return Err(crate::error::DatabaseError::Query(format!(
+                    "injected get_all_settings failure for {user_id}"
+                )));
+            }
             let rows = self.rows.read().await;
             Ok(rows.get(user_id).cloned().unwrap_or_default())
         }
@@ -1093,6 +1158,28 @@ mod tests {
         assert_eq!(
             cfg.llm.nearai.model, "toml-selected-model",
             "re-resolve without a DB store must keep the TOML-selected model"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_llm_with_secrets_strict_fails_on_user_db_read_error() {
+        let store = FakeSettingsStore::new();
+        store.fail_get_all_settings_for("owner-user").await;
+
+        let toml = empty_toml_path();
+        let err = Config::resolve_llm_with_secrets_strict(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "owner-user",
+            Some(toml.path()),
+            None,
+            true,
+        )
+        .await
+        .expect_err("strict resolve should fail closed on DB read error");
+
+        assert!(
+            err.to_string().contains("Failed to load settings from DB"),
+            "strict resolve should surface the DB read failure; got {err}"
         );
     }
 
