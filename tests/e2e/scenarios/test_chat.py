@@ -529,17 +529,35 @@ async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw
 
 
 async def test_gateway_attachment_unextractable_file_uses_placeholder(page, ironclaw_server, mock_llm_server):
-    """Unsupported documents should still reach the backend with a fallback attachment marker."""
+    """A PDF that passes the MIME allowlist + header check but fails content
+    extraction reaches the backend with a fallback "[Failed to extract…]"
+    marker in place of a real transcript.
+
+    `application/octet-stream` was the original trigger, but #2332 locked
+    the gateway to a strict MIME allowlist and rejects octet-stream at
+    `/api/chat/send`. Pick a MIME that IS allowed (PDF) and craft
+    content that passes the `%PDF` header check but is garbage for
+    pdf-extract — same extraction-failure path, exercised through the
+    post-#2332 ingestion gate.
+    """
     attachment_input = page.locator(SEL["attachment_input"])
     chat_input = page.locator(SEL["chat_input"])
     thread_id = await _wait_for_current_thread_id(page)
 
+    # `%PDF-1.4` prefix satisfies `validate_content_matches_claimed_type`'s
+    # PDF magic-byte check in `src/channels/web/util.rs`. The rest is
+    # garbage that pdf-extract cannot parse, so
+    # `document_extraction` falls through to the
+    # "[Failed to extract text from …]" placeholder that this test is
+    # asserting on.
+    corrupt_pdf = b"%PDF-1.4\n<<garbage>> not a real pdf body \x00\x01\x02"
+
     await attachment_input.set_input_files(
         files=[
             {
-                "name": "mystery.bin",
-                "mimeType": "application/octet-stream",
-                "buffer": b"\x00\x01\x02\x03binary-payload",
+                "name": "mystery.pdf",
+                "mimeType": "application/pdf",
+                "buffer": corrupt_pdf,
             }
         ]
     )
@@ -557,13 +575,12 @@ async def test_gateway_attachment_unextractable_file_uses_placeholder(page, iron
     attachment_state = await _last_user_message_state(page)
     assert attachment_state is not None
     assert attachment_state["fileCards"] >= 1, attachment_state
-    assert "mystery.bin" in attachment_state["text"], attachment_state
+    assert "mystery.pdf" in attachment_state["text"], attachment_state
 
     last_turn = history["turns"][-1]
     user_input = last_turn.get("user_input") or ""
-    assert "mystery.bin" in user_input, user_input
+    assert "mystery.pdf" in user_input, user_input
     assert "failed to extract text" in user_input.lower(), user_input
-    assert "unsupported document type" in user_input.lower(), user_input
 
     payload = await _wait_for_mock_llm_request_contains(
         mock_llm_server,
@@ -571,7 +588,7 @@ async def test_gateway_attachment_unextractable_file_uses_placeholder(page, iron
         timeout=45.0,
     )
     serialized = json.dumps(payload)
-    assert "mystery.bin" in serialized, serialized[:1200]
+    assert "mystery.pdf" in serialized, serialized[:1200]
     assert "failed to extract text" in serialized.lower(), serialized[:1200]
 
 

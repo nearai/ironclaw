@@ -362,6 +362,7 @@ function installSkill(name, url, btn, slug) {
   }).then(function(res) {
     if (res.success) {
       showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
+      if (typeof invalidateSlashSkillCache === 'function') invalidateSlashSkillCache();
       if (btn && btn.parentNode) {
         var label = document.createElement('span');
         label.className = 'ext-active-label';
@@ -388,6 +389,7 @@ function removeSkill(name) {
     }).then(function(res) {
       if (res.success) {
         showToast(I18n.t('skills.removed', { name: name }), 'success');
+        if (typeof invalidateSlashSkillCache === 'function') invalidateSlashSkillCache();
       } else {
         showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
       }

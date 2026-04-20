@@ -478,15 +478,26 @@ function updateSlashHighlight() {
   }
 }
 
-// Installed skills merged into the slash-autocomplete menu. Refreshed on
-// demand when the user opens the menu; results arrive asynchronously so
-// the very first `/` press may miss skills, but subsequent ones include
-// them within a render tick.
+// Installed skills merged into the slash-autocomplete menu. Cached with
+// a 30 s TTL — `filterSlashCommands` runs on every keystroke while the
+// user types a `/` command, and without a TTL this would spam
+// `/api/skills` once per character. The cache is also invalidated
+// explicitly by `invalidateSlashSkillCache()` after install/remove so
+// the menu picks up changes immediately without waiting for the TTL
+// to expire.
 let _installedSkillsForSlash = [];
 let _installedSkillsFetchInFlight = false;
+let _installedSkillsFetchedAt = 0;
+const _INSTALLED_SKILLS_TTL_MS = 30000;
+
+function invalidateSlashSkillCache() {
+  _installedSkillsFetchedAt = 0;
+}
 
 function refreshSlashSkillEntries() {
   if (_installedSkillsFetchInFlight) return;
+  const now = Date.now();
+  if (now - _installedSkillsFetchedAt < _INSTALLED_SKILLS_TTL_MS) return;
   _installedSkillsFetchInFlight = true;
   const done = () => { _installedSkillsFetchInFlight = false; };
   apiFetch('/api/skills').then((data) => {
@@ -495,6 +506,7 @@ function refreshSlashSkillEntries() {
       cmd: '/' + skill.name,
       desc: skill.description || (skill.usage_hint || ''),
     }));
+    _installedSkillsFetchedAt = Date.now();
     // Re-filter in place so the menu refreshes with skills without
     // requiring another keystroke.
     const input = document.getElementById('chat-input');

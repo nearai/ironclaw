@@ -634,10 +634,17 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
-        for task in drain_tasks:
+        # Cancel *and* await the drain tasks. Skipping the await leaks
+        # "Task was destroyed but it is pending!" warnings at teardown
+        # and, on restart-style fixtures that call stop() → start(),
+        # builds up zombie readers across cycles.
+        tasks_to_await = list(drain_tasks)
+        drain_tasks.clear()
+        for task in tasks_to_await:
             if not task.done():
                 task.cancel()
-        drain_tasks.clear()
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
 
     await start()
     try:

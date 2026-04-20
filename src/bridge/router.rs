@@ -2557,7 +2557,9 @@ pub async fn resolve_gate(
             // require_action_attempt obligation, which then nudges the LLM
             // to issue another tool call — exactly the opposite of what a
             // denial should produce. Avoid every phrase in
-            // `llm::reasoning::user_signals_execution_intent`'s list.
+            // `crate::llm::user_signals_execution_intent`'s list (the
+            // helper is defined in `src/llm/reasoning.rs` and re-exported
+            // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
                 "User denied action '{}'. Do not retry; choose a different approach.{}",
                 pending.action_name,
