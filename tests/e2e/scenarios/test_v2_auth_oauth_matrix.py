@@ -1462,8 +1462,8 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
             for request in mcp_state.get("requests", [])
             if request.get("method") == "tools/call"
         }
-        assert "Bearer mock-token-mock_mcp_code_owner" in tool_call_auths, mcp_state
-        assert "Bearer mock-token-mock_mcp_code_member" in tool_call_auths, mcp_state
+        assert "Bearer mcp-token-mock_mcp_code_owner" in tool_call_auths, mcp_state
+        assert "Bearer mcp-token-mock_mcp_code_member" in tool_call_auths, mcp_state
     finally:
         await owner_context.close()
         await member_context.close()
