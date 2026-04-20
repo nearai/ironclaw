@@ -11,7 +11,7 @@ use rust_decimal::prelude::ToPrimitive;
 
 use crate::llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
-    sanitize_tool_messages,
+    clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
 
 /// Compute the USD cost of a single completion response, honoring the
@@ -161,7 +161,7 @@ impl LlmBackend for LlmBridgeAdapter {
         }
 
         // With tools: use tool completion (matches existing tools path)
-        let mut request = ToolCompletionRequest::new(chat_messages, tools)
+        let mut request = ToolCompletionRequest::new(chat_messages, tools.clone())
             .with_max_tokens(max_tokens)
             .with_temperature(temperature)
             .with_tool_choice("auto");
@@ -211,14 +211,35 @@ impl LlmBackend for LlmBridgeAdapter {
                 content: response.content.clone(),
             }
         } else {
-            let text = response.content.unwrap_or_default();
-            // Detect ```repl or ```python fenced code blocks
-            match extract_code_block(&text) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(text),
-                },
-                None => LlmResponse::Text(text),
+            let raw_text = response.content.unwrap_or_default();
+            let cleaned_text = clean_response(&raw_text);
+            let recovered_calls = recover_tool_calls_from_content(&raw_text, &tools);
+
+            if !recovered_calls.is_empty() {
+                let calls: Vec<ironclaw_engine::ActionCall> = recovered_calls
+                    .iter()
+                    .map(|tc| ironclaw_engine::ActionCall {
+                        id: tc.id.clone(),
+                        action_name: tc.name.clone(),
+                        parameters: tc.arguments.clone(),
+                    })
+                    .collect();
+                let content = if cleaned_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(cleaned_text)
+                };
+                LlmResponse::ActionCalls { calls, content }
+            } else {
+                // Detect ```repl or ```python fenced code blocks after stripping
+                // provider-flattened tool markers from visible text.
+                match extract_code_block(&cleaned_text) {
+                    Some(code) => LlmResponse::Code {
+                        code,
+                        content: Some(cleaned_text),
+                    },
+                    None => LlmResponse::Text(cleaned_text),
+                }
             }
         };
 
@@ -763,6 +784,97 @@ mod tests {
         assert_eq!(sent[2].content, "result payload");
         assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
+
+    struct FlattenedToolCallProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FlattenedToolCallProvider {
+        fn model_name(&self) -> &str {
+            "flattened-tool-call-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            unreachable!("test only uses complete_with_tools")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some(self.content.clone()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_recovers_flattened_bracket_tool_calls() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "Now let me list your installed extensions and start Pi:\n\n[Called tool `shell` with arguments: {\"command\":\"pi list 2>&1\",\"timeout\":10,\"workdir\":\".\"}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::ActionCalls { calls, content } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].action_name, "shell");
+                assert_eq!(calls[0].parameters["command"], "pi list 2>&1");
+                assert_eq!(
+                    content.as_deref(),
+                    Some("Now let me list your installed extensions and start Pi:")
+                );
+            }
+            other => panic!("expected recovered action call, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_strips_flattened_bracket_markers_from_text() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "Let me check.\n[Called tool `unknown_tool` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, "Let me check.");
+            }
+            other => panic!("expected sanitized text response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
