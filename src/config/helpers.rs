@@ -200,6 +200,15 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
     "llm_custom_providers",
     "ollama_base_url",
     "openai_compatible_base_url",
+    // Provider-selection keys — every member shares one LLM provider chain,
+    // so the choice of backend and the provider-specific endpoint knobs
+    // (Bedrock region / cross-region prefix / AWS profile) must be gated
+    // to admins. Members can still pick their own model via `selected_model`,
+    // which is intentionally NOT in this list.
+    "llm_backend",
+    "bedrock_region",
+    "bedrock_cross_region",
+    "bedrock_profile",
 ];
 
 /// Remove admin-only LLM setting keys from a flat DB settings map.
@@ -277,6 +286,79 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
     }
 }
 
+/// Time-to-live for the cached DNS probe result.
+///
+/// Re-probing every 5 minutes ensures that transient DNS unavailability at
+/// startup does not permanently disable SSRF validation for the process.
+const DNS_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cached DNS probe result with an expiration timestamp.
+struct DnsProbeCache {
+    available: bool,
+    expires_at: std::time::Instant,
+}
+
+/// Try to resolve `hostname` with a short timeout (2 s) on a background
+/// thread.  Returns `true` if the name resolved successfully.
+fn try_resolve_hostname(hostname: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    let owned = hostname.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (owned.as_str(), port).to_socket_addrs().is_ok();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or(false)
+}
+
+/// Check whether external DNS resolution is functional.
+///
+/// In some environments (sandboxed CI, containers behind an egress proxy),
+/// the process has no direct DNS resolution for external hostnames — all
+/// outbound traffic goes through an HTTP proxy that resolves on the
+/// caller's behalf. `to_socket_addrs()` will always fail for non-local
+/// hostnames in such environments.
+///
+/// The result is cached for [`DNS_PROBE_TTL`] (5 minutes) and then
+/// re-probed so that transient DNS outages at startup do not permanently
+/// disable SSRF validation.
+fn dns_probe_available() -> bool {
+    static PROBE: Mutex<Option<DnsProbeCache>> = Mutex::new(None);
+
+    let guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard
+        && std::time::Instant::now() < cached.expires_at
+    {
+        return cached.available;
+    }
+    // Drop the lock before doing the (potentially slow) probe.
+    drop(guard);
+
+    let result = try_resolve_hostname("one.one.one.one", 443);
+
+    let mut guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(DnsProbeCache {
+        available: result,
+        expires_at: std::time::Instant::now() + DNS_PROBE_TTL,
+    });
+    result
+}
+
+/// Try resolving the actual target hostname first.  If that succeeds, DNS
+/// is clearly available for this name and there is no need to fall back to
+/// the generic probe.  If it fails, consult the time-limited generic probe
+/// to decide whether DNS is globally unavailable (skip SSRF validation) or
+/// whether this specific name genuinely does not resolve (report an error).
+fn dns_available_for_host(host: &str, port: u16) -> bool {
+    if try_resolve_hostname(host, port) {
+        return true;
+    }
+    // The target itself did not resolve -- check the generic probe to
+    // distinguish "DNS is down" from "this hostname is invalid".
+    dns_probe_available()
+}
+
 fn validate_base_url_with_policy(
     url: &str,
     field_name: &str,
@@ -325,6 +407,23 @@ fn validate_base_url_with_policy(
 
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
+    } else if !dns_available_for_host(
+        host,
+        parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 }),
+    ) {
+        // When DNS resolution is entirely unavailable (e.g. sandboxed CI
+        // environments where an egress proxy handles DNS, or offline
+        // development), skip the DNS lookup and SSRF IP validation entirely.
+        // The syntactic checks above still apply, and runtime HTTP clients
+        // will resolve through the proxy anyway.
+        tracing::debug!(
+            host = %host,
+            field = %field_name,
+            "DNS resolution unavailable; skipping SSRF IP validation for base URL"
+        );
+        return Ok(());
     } else {
         let port = parsed
             .port()
@@ -735,6 +834,13 @@ mod tests {
 
     #[test]
     fn validate_base_url_rejects_dns_failure() {
+        if !super::dns_probe_available() {
+            eprintln!(
+                "skipping validate_base_url_rejects_dns_failure: \
+                 external DNS resolution is unavailable"
+            );
+            return;
+        }
         if invalid_tld_resolves_locally() {
             eprintln!(
                 "skipping validate_base_url_rejects_dns_failure: \
@@ -938,6 +1044,13 @@ mod tests {
             "openai_compatible_base_url".to_string(),
             serde_json::json!("http://100.64.0.1"),
         );
+        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+        map.insert("bedrock_region".to_string(), serde_json::json!("us-east-1"));
+        map.insert("bedrock_cross_region".to_string(), serde_json::json!("us"));
+        map.insert(
+            "bedrock_profile".to_string(),
+            serde_json::json!("prod-bedrock"),
+        );
         map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
         map.insert("agent.name".to_string(), serde_json::json!("Iron"));
 
@@ -947,7 +1060,15 @@ mod tests {
         assert!(!map.contains_key("llm_custom_providers"));
         assert!(!map.contains_key("ollama_base_url"));
         assert!(!map.contains_key("openai_compatible_base_url"));
-        // Non-admin keys must survive.
+        assert!(
+            !map.contains_key("llm_backend"),
+            "provider backend is admin-only"
+        );
+        assert!(!map.contains_key("bedrock_region"));
+        assert!(!map.contains_key("bedrock_cross_region"));
+        assert!(!map.contains_key("bedrock_profile"));
+        // Model selection stays per-user — admin chooses the provider,
+        // members pick the model within it.
         assert_eq!(
             map.get("selected_model"),
             Some(&serde_json::json!("gpt-4o"))
@@ -956,16 +1077,16 @@ mod tests {
     }
 
     #[test]
-    fn strip_admin_only_llm_keys_is_a_no_op_for_clean_map() {
+    fn strip_admin_only_llm_keys_preserves_model_selection() {
         let mut map = HashMap::new();
         map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
-        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+        map.insert("agent.name".to_string(), serde_json::json!("Iron"));
 
         strip_admin_only_llm_keys(&mut map);
 
         assert_eq!(map.len(), 2);
         assert!(map.contains_key("selected_model"));
-        assert!(map.contains_key("llm_backend"));
+        assert!(map.contains_key("agent.name"));
     }
 
     // --- async DNS regression (#1955: don't stall the tokio worker) ---

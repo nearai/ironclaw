@@ -16,6 +16,7 @@ pub mod bootstrap;
 pub mod bundled;
 pub mod hook;
 pub mod registry;
+pub mod session_summary;
 
 pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
 pub use bundled::{
@@ -23,3 +24,4 @@ pub use bundled::{
 };
 pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
 pub use registry::HookRegistry;
+pub use session_summary::SessionSummaryHook;

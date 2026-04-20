@@ -302,9 +302,35 @@ struct TelegramMessageMetadata {
     /// Whether this is a private (DM) chat.
     is_private: bool,
 
+    /// Telegram chat type for downstream group/private detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_type: Option<String>,
+
     /// Forum topic thread ID (for routing replies back to the correct topic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
+}
+
+/// Deserialize a value that may be a JSON string or number into `Option<String>`.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|id| id.to_string())),
+        Some(_) => Ok(None),
+    }
 }
 
 /// Channel configuration injected by host.
@@ -319,8 +345,10 @@ struct TelegramConfig {
 
     /// Telegram user ID of the bot owner. When set, only messages from this
     /// user are processed. All others are silently dropped.
-    #[serde(default)]
-    owner_id: Option<i64>,
+    /// Accepts both JSON string ("12345") and number (12345) for compatibility
+    /// with both boot-path and hot-activation config injection.
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
+    owner_id: Option<String>,
 
     /// DM policy: "pairing" (default), "allowlist", or "open".
     #[serde(default)]
@@ -374,7 +402,30 @@ enum TelegramStatusAction {
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
-const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+///
+/// The API nominally allows 4096, but Markdown entities and multi-codepoint
+/// emoji can cause edge-case rejections. We leave a safety margin.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4000;
+
+fn utf16_code_unit_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn prefix_within_utf16_limit(text: &str, max_units: usize) -> usize {
+    let mut units = 0;
+    let mut end = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        units += ch_units;
+        end = byte_idx + ch.len_utf8();
+    }
+
+    end
+}
 
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
@@ -386,7 +437,8 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     }
 }
 
-/// Split a long message into chunks that fit within Telegram's 4096-char limit.
+/// Split a long message into chunks that each fit within `limit_utf16`
+/// UTF-16 code units.
 ///
 /// Tries to split at the most natural boundary available (in priority order):
 /// 1. Double newline (paragraph break)
@@ -394,8 +446,8 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
 /// 3. Sentence end (`. `, `! `, `? `)
 /// 4. Word boundary (space)
 /// 5. Hard cut at the limit (last resort for pathological input)
-fn split_message(text: &str) -> Vec<String> {
-    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN {
+fn split_message(text: &str, limit_utf16: usize) -> Vec<String> {
+    if utf16_code_unit_len(text) <= limit_utf16 {
         return vec![text.to_string()];
     }
 
@@ -403,18 +455,26 @@ fn split_message(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Count chars to find the byte offset for our window.
-        let window_bytes = remaining
-            .char_indices()
-            .take(TELEGRAM_MAX_MESSAGE_LEN)
-            .last()
-            .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
-            .unwrap_or(remaining.len());
+        // Find the longest UTF-8 prefix that fits within the UTF-16 limit.
+        let window_bytes = prefix_within_utf16_limit(remaining, limit_utf16);
 
         if window_bytes >= remaining.len() {
             // Remainder fits entirely.
             chunks.push(remaining.to_string());
             break;
+        }
+
+        if window_bytes == 0 {
+            // Defensive fallback: make progress even if a future caller uses a
+            // smaller limit than a single scalar value can fit within.
+            let first_char_len = remaining
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(remaining.len());
+            chunks.push(remaining[..first_char_len].to_string());
+            remaining = &remaining[first_char_len..];
+            continue;
         }
 
         let window = &remaining[..window_bytes];
@@ -521,8 +581,8 @@ impl Guest for TelegramChannel {
         }
 
         // Persist owner_id so subsequent callbacks (on_http_request, on_poll) can read it
-        if let Some(owner_id) = config.owner_id {
-            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, &owner_id.to_string()) {
+        if let Some(ref owner_id) = config.owner_id {
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, owner_id) {
                 channel_host::log(
                     channel_host::LogLevel::Error,
                     &format!("Failed to persist owner_id: {}", e),
@@ -585,10 +645,7 @@ impl Guest for TelegramChannel {
                     .map_err(|e| format!("Failed to register webhook: {}", e))?;
             }
         } else {
-            channel_host::log(
-                channel_host::LogLevel::Info,
-                "Polling mode enabled",
-            );
+            channel_host::log(channel_host::LogLevel::Info, "Polling mode enabled");
 
             // Delete any existing webhook before polling. Telegram returns success
             // when no webhook exists, so any error here (e.g. 401) means a bad token.
@@ -922,10 +979,13 @@ impl Guest for TelegramChannel {
 // Send Message Helper
 // ============================================================================
 
-/// Errors from send_message, split so callers can match on parse-entity failures.
+/// Errors from send_message, split so callers can match on parse-entity failures
+/// and too-long rejections independently.
 enum SendError {
     /// Telegram returned 400 with "can't parse entities" (Markdown issue).
     ParseEntities(String),
+    /// Telegram returned 400 with "message is too long".
+    TooLong(String),
     /// Any other failure.
     Other(String),
 }
@@ -934,6 +994,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::ParseEntities(detail) => write!(f, "parse entities error: {}", detail),
+            SendError::TooLong(detail) => write!(f, "message too long: {}", detail),
             SendError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -952,6 +1013,7 @@ fn normalize_thread_id(thread_id: Option<i64>) -> Option<i64> {
 /// Returns the sent message_id on success. When `parse_mode` is set and
 /// Telegram returns a 400 "can't parse entities" error, returns
 /// `SendError::ParseEntities` so the caller can retry without formatting.
+/// Returns `SendError::TooLong` when Telegram rejects the message as too long.
 fn send_message(
     chat_id: i64,
     text: &str,
@@ -997,6 +1059,9 @@ fn send_message(
                 let body_str = String::from_utf8_lossy(&http_response.body);
                 if body_str.contains("can't parse entities") {
                     return Err(SendError::ParseEntities(body_str.to_string()));
+                }
+                if body_str.contains("message is too long") {
+                    return Err(SendError::TooLong(body_str.to_string()));
                 }
                 return Err(SendError::Other(format!(
                     "Telegram API returned 400: {}",
@@ -1392,69 +1457,161 @@ fn send_response(
     }
 
     // Split large messages into chunks that fit Telegram's limit.
-    let chunks = split_message(&response.content);
-    let total = chunks.len();
+    let chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LEN);
 
     // The first chunk replies to the original message; subsequent chunks
     // reply to the previously sent chunk so they form a visual thread.
     let mut reply_to = reply_to_message_id;
 
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(
-            chat_id,
-            &chunk,
-            reply_to,
-            Some("Markdown"),
-            message_thread_id,
-        );
-
-        let msg_id = match result {
-            Ok(id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Markdown parse failed on chunk {}/{} ({}), retrying as plain text",
-                        i + 1,
-                        total,
-                        detail
-                    ),
-                );
-                let id = send_message(chat_id, &chunk, reply_to, None, message_thread_id)
-                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text chunk {}/{} to chat {}: message_id={}",
-                        i + 1,
-                        total,
-                        chat_id,
-                        id,
-                    ),
-                );
-                id
-            }
-            Err(e) => return Err(e.to_string()),
-        };
+    for chunk in &chunks {
+        let msg_id = send_chunk(chat_id, chunk, reply_to, message_thread_id)?;
 
         // Each subsequent chunk threads off the previous sent message.
         reply_to = Some(msg_id);
     }
 
     Ok(())
+}
+
+/// Maximum recursion depth for splitting too-long messages. Each level
+/// halves the per-chunk UTF-16 limit, so depth 2 allows limits down to
+/// roughly a quarter of the original.
+const MAX_SPLIT_DEPTH: u8 = 2;
+
+/// Send a single chunk, handling Markdown parse errors and too-long retries.
+///
+/// On `ParseEntities`, retries without Markdown formatting.
+/// On `TooLong`, re-splits the chunk via [`split_message`] with a halved
+/// UTF-16 limit and sends the resulting sub-chunks (up to `MAX_SPLIT_DEPTH`
+/// levels deep), threading replies through each one.
+fn send_chunk(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<i64, String> {
+    send_chunk_inner(
+        chat_id,
+        text,
+        reply_to,
+        message_thread_id,
+        TELEGRAM_MAX_MESSAGE_LEN,
+        0,
+        true,
+    )
+}
+
+fn send_chunk_inner(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    limit_utf16: usize,
+    depth: u8,
+    use_markdown: bool,
+) -> Result<i64, String> {
+    let parse_mode = if use_markdown { Some("Markdown") } else { None };
+    let result = send_message(chat_id, text, reply_to, parse_mode, message_thread_id);
+
+    match result {
+        Ok(id) => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Sent chunk to chat {}: message_id={} (depth={}, markdown={})",
+                    chat_id, id, depth, use_markdown,
+                ),
+            );
+            Ok(id)
+        }
+        Err(SendError::ParseEntities(detail)) if use_markdown => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Markdown parse failed ({}), retrying as plain text", detail),
+            );
+            // Recurse with markdown disabled; this preserves TooLong handling
+            // for the plain-text attempt without duplicating logic.
+            send_chunk_inner(
+                chat_id,
+                text,
+                reply_to,
+                message_thread_id,
+                limit_utf16,
+                depth,
+                false,
+            )
+        }
+        Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => resplit_and_send(
+            chat_id,
+            text,
+            reply_to,
+            message_thread_id,
+            limit_utf16,
+            depth,
+            use_markdown,
+        ),
+        Err(SendError::TooLong(_)) => Err(format!(
+            "Message still too long after splitting {} levels deep ({} UTF-16 units)",
+            depth,
+            utf16_code_unit_len(text),
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Re-split `text` at a halved UTF-16 limit and send each sub-chunk.
+///
+/// Returns the message_id of the **last** sent sub-chunk so the caller can
+/// continue the reply thread correctly.
+fn resplit_and_send(
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    message_thread_id: Option<i64>,
+    limit_utf16: usize,
+    depth: u8,
+    use_markdown: bool,
+) -> Result<i64, String> {
+    let new_limit = (limit_utf16 / 2).max(1);
+    let sub_chunks = split_message(text, new_limit);
+
+    channel_host::log(
+        channel_host::LogLevel::Warn,
+        &format!(
+            "Chunk too long ({} UTF-16 units), re-splitting at limit {} into {} pieces (depth {})",
+            utf16_code_unit_len(text),
+            new_limit,
+            sub_chunks.len(),
+            depth + 1,
+        ),
+    );
+
+    // If re-splitting didn't actually shrink the payload, we can't make
+    // progress — bail rather than loop.
+    if sub_chunks.len() <= 1 {
+        return Err(format!(
+            "Too-long message could not be split further at limit {} ({} UTF-16 units)",
+            new_limit,
+            utf16_code_unit_len(text),
+        ));
+    }
+
+    let mut reply = reply_to;
+    let mut last_id = None;
+    for sub in &sub_chunks {
+        let id = send_chunk_inner(
+            chat_id,
+            sub,
+            reply,
+            message_thread_id,
+            new_limit,
+            depth + 1,
+            use_markdown,
+        )?;
+        reply = Some(id);
+        last_id = Some(id);
+    }
+    last_id.ok_or_else(|| "Re-split produced no chunks".to_string())
 }
 
 /// Extract the base MIME type, stripping any parameters after `;`.
@@ -2130,6 +2287,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        chat_type: Some(message.chat.chat_type.clone()),
         message_thread_id: message.message_thread_id,
     };
 
@@ -2268,10 +2426,14 @@ export!(TelegramChannel);
 mod tests {
     use super::*;
 
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
     #[test]
     fn test_split_message_short() {
         let text = "Hello, world!";
-        let chunks = split_message(text);
+        let chunks = split_message(text, TELEGRAM_MAX_MESSAGE_LEN);
         assert_eq!(chunks, vec![text]);
     }
 
@@ -2280,7 +2442,7 @@ mod tests {
         let para_a = "A".repeat(3000);
         let para_b = "B".repeat(3000);
         let text = format!("{}\n\n{}", para_a, para_b);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], para_a);
         assert_eq!(chunks[1], para_b);
@@ -2292,10 +2454,10 @@ mod tests {
         let words: Vec<String> = (0..1000).map(|i| format!("word{:04}", i)).collect();
         let text = words.join(" ");
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() > 1, "expected multiple chunks");
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined chunks must equal the original text exactly.
         let rejoined = chunks.join(" ");
@@ -2309,9 +2471,9 @@ mod tests {
             .map(|i| format!("Sentence number {}. ", i))
             .collect();
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
     }
 
@@ -2323,7 +2485,7 @@ mod tests {
         let text: String = sentence.repeat(repeat_count);
         assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
 
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() > 1);
         // First chunk should end at a sentence boundary (trimmed)
         let first = &chunks[0];
@@ -2338,10 +2500,10 @@ mod tests {
     fn test_split_message_hard_cut_no_spaces() {
         // Pathological input: a single huge "word" with no spaces or newlines.
         let text = "x".repeat(TELEGRAM_MAX_MESSAGE_LEN * 2 + 100);
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined must preserve all characters
         let rejoined: String = chunks.concat();
@@ -2355,13 +2517,26 @@ mod tests {
         let text: String = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN + 100);
         assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
 
-        let chunks = split_message(&text);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
             // Every char should be a complete emoji
             assert!(chunk.chars().all(|c| c == '\u{1F600}'));
         }
+    }
+
+    #[test]
+    fn test_split_message_exact_utf16_limit_for_surrogate_pairs() {
+        let emoji = "\u{1F600}"; // 😀
+        let text = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LEN);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
     }
 
     #[test]
@@ -2520,10 +2695,17 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_owner_id() {
+    fn test_config_with_numeric_owner_id() {
         let json = r#"{"owner_id": 123456789}"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.owner_id, Some(123456789));
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_string_owner_id() {
+        let json = r#"{"owner_id": "123456789"}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
     }
 
     #[test]
@@ -2549,7 +2731,7 @@ mod tests {
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
-        assert_eq!(config.owner_id, Some(42));
+        assert_eq!(config.owner_id, Some("42".to_string()));
         assert!(config.respond_to_all_group_messages);
     }
 
@@ -2745,6 +2927,26 @@ mod tests {
     }
 
     #[test]
+    fn test_telegram_message_metadata_deserializes_without_chat_type() {
+        let metadata: TelegramMessageMetadata = serde_json::from_str(
+            r#"{
+                "chat_id": 999,
+                "message_id": 701,
+                "user_id": 999,
+                "is_private": true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.chat_id, 999);
+        assert_eq!(metadata.message_id, 701);
+        assert_eq!(metadata.user_id, 999);
+        assert!(metadata.is_private);
+        assert_eq!(metadata.chat_type, None);
+        assert_eq!(metadata.message_thread_id, None);
+    }
+
+    #[test]
     fn test_classify_status_update_tool_result_ignored() {
         let update = StatusUpdate {
             status: StatusType::ToolResult,
@@ -2878,13 +3080,11 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(
-            attachments[0]
-                .source_url
-                .as_ref()
-                .unwrap()
-                .contains("large_id")
-        );
+        assert!(attachments[0]
+            .source_url
+            .as_ref()
+            .unwrap()
+            .contains("large_id"));
     }
 
     #[test]
@@ -3149,5 +3349,38 @@ mod tests {
         );
         assert_eq!(classify_attachment("audio/mpeg"), AttachmentKind::Document);
         assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
+    }
+
+    // ---- split_message with custom limit (TooLong retry path) ----
+
+    #[test]
+    fn test_split_message_with_halved_limit_respects_paragraph_boundary() {
+        // Simulates the TooLong retry: re-split an already-split chunk at a
+        // halved limit. Paragraph break must still win over word boundary.
+        let para_a = "A".repeat(1500);
+        let para_b = "B".repeat(1500);
+        let text = format!("{}\n\n{}", para_a, para_b);
+        let chunks = split_message(&text, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], para_a);
+        assert_eq!(chunks[1], para_b);
+    }
+
+    #[test]
+    fn test_split_message_with_halved_limit_each_chunk_fits() {
+        // Text originally near TELEGRAM_MAX_MESSAGE_LEN, re-split at half.
+        let words: Vec<String> = (0..400).map(|i| format!("word{:04}", i)).collect();
+        let text = words.join(" ");
+        let half_limit = TELEGRAM_MAX_MESSAGE_LEN / 2;
+        let chunks = split_message(&text, half_limit);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(
+                utf16_len(chunk) <= half_limit,
+                "chunk exceeds halved limit: {} > {}",
+                utf16_len(chunk),
+                half_limit,
+            );
+        }
     }
 }

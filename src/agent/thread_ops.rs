@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -16,18 +17,61 @@ use crate::agent::dispatcher::{
     capture_auth_prompt, emit_auth_required_status, execute_chat_tool_standalone,
     persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
-use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
+use crate::agent::session::{
+    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome,
+};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
-const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
+const LIVE_STATE_METADATA_KEY: &str = "live_state";
 
+struct ProcessingLiveState<'a> {
+    turn_number: usize,
+    user_message_id: Option<Uuid>,
+    user_input: &'a str,
+    started_at: DateTime<Utc>,
+}
+
+fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
+    if GeneratedImageSentinel::from_value(result).is_some() {
+        return "Generated image".to_string();
+    }
+    match result {
+        serde_json::Value::String(s) => truncate_preview(s, 500),
+        other => truncate_preview(&other.to_string(), 500),
+    }
+}
+
+fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
+    if let Some(sentinel) = GeneratedImageSentinel::from_value(result) {
+        // Persist the full image sentinel so web history can reconstruct the
+        // generated image on refresh without any schema changes. Keep a hard
+        // cap so unexpectedly large data URLs do not grow DB rows without bound.
+        return sentinel.record_content_for_persistence();
+    }
+    match result {
+        serde_json::Value::String(s) => truncate_preview(s, 1000),
+        other => truncate_preview(&other.to_string(), 1000),
+    }
+}
+
+fn tool_result_content_for_rebuild(result: &str) -> String {
+    let Some(sentinel) =
+        GeneratedImageSentinel::from_value(&serde_json::Value::String(result.to_string()))
+    else {
+        return result.to_string();
+    };
+    sentinel.summary_for_context()
+}
+
+const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
@@ -165,6 +209,11 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    // TODO(external-thread-id): accept `&ExternalThreadId` instead of `&str`
+    // once the downstream `Uuid::parse_str` call and internal `session_manager`
+    // boundary are converted. The typed parameter is blocked on
+    // `SessionManager::resolve_thread` which still takes `Option<&str>`; moving
+    // it in one step would invert this PR's "boundary only" scope.
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,
@@ -230,6 +279,23 @@ impl Agent {
                 };
 
                 if requires_preexisting_uuid_thread(&message.channel) {
+                    // Allow new thread creation only from the Responses API.
+                    // Both checks are required:
+                    // - channel == "gateway": server-set, unforgeable by WASM
+                    // - metadata.source == "responses_api": set server-side in
+                    //   create_response_handler, not controllable by the web UI
+                    //   chat which also uses the gateway channel
+                    let is_responses_api = message.channel == "gateway"
+                        && message.metadata.get("source").and_then(|v| v.as_str())
+                            == Some("responses_api");
+                    if !exists && is_responses_api {
+                        tracing::debug!(
+                            user = %message.user_id,
+                            thread_id = %thread_uuid,
+                            "Allowing new thread from gateway (Responses API)"
+                        );
+                        return None;
+                    }
                     tracing::warn!(
                         user = %message.user_id,
                         channel = %message.channel,
@@ -371,70 +437,76 @@ impl Agent {
         match thread_state {
             ThreadState::Processing => {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    // Re-check state under lock — the turn may have completed
-                    // between the snapshot read and this mutable lock acquisition.
-                    if thread.state == ThreadState::Processing {
-                        // Reject messages with attachments — the queue stores
-                        // text only, so attachments would be silently dropped.
-                        if !message.attachments.is_empty() {
-                            return Ok(SubmissionResult::error(
-                                "Cannot queue messages with attachments while a turn is processing. \
-                                 Please resend after the current turn completes.",
-                            ));
-                        }
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        // Re-check state under lock — the turn may have completed
+                        // between the snapshot read and this mutable lock acquisition.
+                        if thread.state == ThreadState::Processing {
+                            // Reject messages with attachments — the queue stores
+                            // text only, so attachments would be silently dropped.
+                            if !message.attachments.is_empty() {
+                                return Ok(SubmissionResult::error(
+                                    "Cannot queue messages with attachments while a turn is processing. \
+                                     Please resend after the current turn completes.",
+                                ));
+                            }
 
-                        // Run the same safety checks that the normal path applies
-                        // (validation, policy, secret scan) so that blocked content
-                        // is never stored in pending_messages or serialized.
-                        let validation = self.safety().validate_input(content);
-                        if !validation.is_valid {
-                            let details = validation
-                                .errors
+                            // Run the same safety checks that the normal path applies
+                            // (validation, policy, secret scan) so that blocked content
+                            // is never stored in pending_messages or serialized.
+                            let validation = self.safety().validate_input(content);
+                            if !validation.is_valid {
+                                let details = validation
+                                    .errors
+                                    .iter()
+                                    .map(|e| format!("{}: {}", e.field, e.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                return Ok(SubmissionResult::error(format!(
+                                    "Input rejected by safety validation: {details}",
+                                )));
+                            }
+                            let violations = self.safety().check_policy(content);
+                            if violations
                                 .iter()
-                                .map(|e| format!("{}: {}", e.field, e.message))
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            return Ok(SubmissionResult::error(format!(
-                                "Input rejected by safety validation: {details}",
-                            )));
-                        }
-                        let violations = self.safety().check_policy(content);
-                        if violations
-                            .iter()
-                            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
-                        {
-                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
-                        }
-                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-                            tracing::warn!(
-                                user = %message.user_id,
-                                channel = %message.channel,
-                                "Queued message blocked: contains leaked secret"
-                            );
-                            return Ok(SubmissionResult::error(warning));
-                        }
+                                .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+                            {
+                                return Ok(SubmissionResult::error(
+                                    "Input rejected by safety policy.",
+                                ));
+                            }
+                            if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                                tracing::warn!(
+                                    user = %message.user_id,
+                                    channel = %message.channel,
+                                    "Queued message blocked: contains leaked secret"
+                                );
+                                return Ok(SubmissionResult::error(warning));
+                            }
 
-                        if !thread.queue_message(content.to_string()) {
-                            return Ok(SubmissionResult::error(format!(
-                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                            )));
+                            if !thread.queue_message(content.to_string()) {
+                                return Ok(SubmissionResult::error(format!(
+                                    "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                                )));
+                            }
+                            // Return `Ok` (not `Response`) so the drain loop in
+                            // agent_loop.rs breaks — `Ok` signals a control
+                            // acknowledgment, not a completed LLM turn.
+                            return Ok(SubmissionResult::Ok {
+                                message: Some(
+                                    "Message queued — will be processed after the current turn."
+                                        .into(),
+                                ),
+                            });
                         }
-                        // Return `Ok` (not `Response`) so the drain loop in
-                        // agent_loop.rs breaks — `Ok` signals a control
-                        // acknowledgment, not a completed LLM turn.
-                        return Ok(SubmissionResult::Ok {
-                            message: Some(
-                                "Message queued — will be processed after the current turn.".into(),
-                            ),
-                        });
+                        // State changed (turn completed) — fall through to process normally.
+                        // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                        // this `Processing` match arm, releasing the session lock
+                        // before the rest of process_user_input runs. No deadlock.
                     }
-                    // State changed (turn completed) — fall through to process normally.
-                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
-                    // this `Processing` match arm, releasing the session lock
-                    // before the rest of process_user_input runs. No deadlock.
-                } else {
-                    return Ok(SubmissionResult::error("Thread no longer exists."));
+                    None => {
+                        return Ok(SubmissionResult::error("Thread no longer exists."));
+                    }
                 }
             }
             ThreadState::AwaitingApproval => {
@@ -471,8 +543,19 @@ impl Agent {
             }
         }
 
+        // Attachments can carry the only user-visible payload (for example,
+        // a files-only send with empty chat text), so validation and policy
+        // checks must run against the augmented content that will actually
+        // enter the turn rather than the raw text field alone.
+        let augmented =
+            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+        let (effective_content, image_parts) = match &augmented {
+            Some(result) => (result.text.as_str(), result.image_parts.clone()),
+            None => (content, Vec::new()),
+        };
+
         // Safety validation for user input
-        let validation = self.safety().validate_input(content);
+        let validation = self.safety().validate_input(effective_content);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -486,7 +569,7 @@ impl Agent {
             )));
         }
 
-        let violations = self.safety().check_policy(content);
+        let violations = self.safety().check_policy(effective_content);
         if violations
             .iter()
             .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
@@ -497,7 +580,7 @@ impl Agent {
         // Scan inbound messages for secrets (API keys, tokens).
         // Catching them here prevents the LLM from echoing them back, which
         // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
             tracing::warn!(
                 user = %message.user_id,
                 channel = %message.channel,
@@ -574,16 +657,8 @@ impl Agent {
             );
         }
 
-        // Augment content with attachment context (transcripts, metadata, images)
-        let augmented =
-            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
-        let (effective_content, image_parts) = match &augmented {
-            Some(result) => (result.text.as_str(), result.image_parts.clone()),
-            None => (content, Vec::new()),
-        };
-
         // Start the turn and get messages
-        let turn_messages = {
+        let (turn_messages, turn_number, turn_started_at) = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -591,7 +666,9 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
-            thread.messages()
+            let turn_number = turn.turn_number;
+            let turn_started_at = turn.started_at;
+            (thread.messages(), turn_number, turn_started_at)
         };
 
         // Persist user message to DB immediately so it survives crashes
@@ -600,13 +677,26 @@ impl Agent {
             thread_id = %thread_id,
             "Persisting user message to DB"
         );
-        self.persist_user_message(
-            thread_id,
-            &message.channel,
-            &message.user_id,
-            effective_content,
-        )
-        .await;
+        let persisted_user_message_id = self
+            .persist_user_message(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                turn_number,
+                effective_content,
+                turn_started_at,
+            )
+            .await;
+
+        if let Some(user_message_id) = persisted_user_message_id {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.turns.last_mut()
+                && turn.turn_number == turn_number
+            {
+                turn.user_message_id = Some(user_message_id);
+            }
+        }
 
         tracing::debug!(
             message_id = %message.id,
@@ -637,6 +727,9 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            drop(sess);
+            self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                .await;
             if let Some(turn_usage) = turn_usage_from_result(&result) {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
@@ -683,12 +776,13 @@ impl Agent {
                     }
                 };
 
-                thread.complete_turn(&response);
+                thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                drop(sess);
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
                 self.persist_tool_calls(
@@ -736,6 +830,9 @@ impl Agent {
                 let parameters = pending.display_parameters.clone();
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 let _ = self
@@ -760,18 +857,23 @@ impl Agent {
                     allow_always,
                 })
             }
-            Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }) => {
-                // Auth-required status already sent by the dispatcher.
-                // Persist the turn to DB (like Response) but suppress the text SSE event.
-                thread.complete_turn(&instructions);
+            Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                // Auth-required card already sent by the dispatcher, and the
+                // thread is already in auth mode (enter_auth_mode called in
+                // execute_tool_calls). CompletedSilently transitions to Idle
+                // without persisting a redundant text response alongside the
+                // auth card.
+                thread.conclude_turn(TurnOutcome::CompletedSilently);
+                //
+                // Persist tool calls so history shows what happened, but
+                // skip persist_assistant_response — the auth card is the
+                // only user-facing signal.
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                drop(sess);
                 self.persist_tool_calls(
                     thread_id,
                     &message.channel,
@@ -781,13 +883,6 @@ impl Agent {
                     narrative.as_deref(),
                 )
                 .await;
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 Ok(SubmissionResult::auth_pending())
@@ -795,11 +890,17 @@ impl Agent {
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
-                thread.fail_turn(error.to_string());
+                thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
-                thread.fail_turn(e.to_string());
+                thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
@@ -841,16 +942,59 @@ impl Agent {
         }
     }
 
-    /// Persist the user message to the DB at turn start (before the agentic loop).
-    ///
-    /// This ensures the user message is durable even if the process crashes
-    /// mid-response. Call this right after `thread.start_turn()`.
-    pub(super) async fn persist_user_message(
+    async fn persist_conversation_live_state(
+        &self,
+        store: &Arc<dyn crate::db::Database>,
+        thread_id: Uuid,
+        live_state: &serde_json::Value,
+    ) {
+        if let Err(e) = store
+            .update_conversation_metadata_field(thread_id, LIVE_STATE_METADATA_KEY, live_state)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to persist conversation live state: {}",
+                e
+            );
+        }
+    }
+
+    async fn persist_processing_live_state(
         &self,
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
-        user_input: &str,
+        live_state: ProcessingLiveState<'_>,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        if !self
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .await
+        {
+            return;
+        }
+
+        let live_state = serde_json::json!({
+            "turn_number": live_state.turn_number,
+            "user_message_id": live_state.user_message_id,
+            "state": "Processing",
+            "user_input": truncate_preview(live_state.user_input, 32 * 1024),
+            "started_at": live_state.started_at.to_rfc3339(),
+        });
+        self.persist_conversation_live_state(&store, thread_id, &live_state)
+            .await;
+    }
+
+    pub(super) async fn clear_conversation_live_state(
+        &self,
+        thread_id: Uuid,
+        channel: &str,
+        user_id: &str,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -865,10 +1009,81 @@ impl Agent {
         }
 
         if let Err(e) = store
+            .update_conversation_metadata_field(
+                thread_id,
+                LIVE_STATE_METADATA_KEY,
+                &serde_json::Value::Null,
+            )
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to clear conversation live state: {}",
+                e
+            );
+        }
+    }
+
+    /// Persist the user message to the DB at turn start (before the agentic loop).
+    ///
+    /// This ensures the user message is durable even if the process crashes
+    /// mid-response. Call this right after `thread.start_turn()`.
+    pub(super) async fn persist_user_message(
+        &self,
+        thread_id: Uuid,
+        channel: &str,
+        user_id: &str,
+        turn_number: usize,
+        user_input: &str,
+        started_at: DateTime<Utc>,
+    ) -> Option<Uuid> {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return None,
+        };
+
+        if !self
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .await
+        {
+            return None;
+        }
+
+        match store
             .add_conversation_message(thread_id, "user", user_input)
             .await
         {
-            tracing::warn!("Failed to persist user message: {}", e);
+            Ok(user_message_id) => {
+                self.persist_processing_live_state(
+                    thread_id,
+                    channel,
+                    user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id: Some(user_message_id),
+                        user_input,
+                        started_at,
+                    },
+                )
+                .await;
+                Some(user_message_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to persist user message: {}", e);
+                self.persist_processing_live_state(
+                    thread_id,
+                    channel,
+                    user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id: None,
+                        user_input,
+                        started_at,
+                    },
+                )
+                .await;
+                None
+            }
         }
     }
 
@@ -901,6 +1116,22 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
+            return;
+        }
+
+        if let Err(e) = store
+            .update_conversation_metadata_field(
+                thread_id,
+                LIVE_STATE_METADATA_KEY,
+                &serde_json::Value::Null,
+            )
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to clear conversation live state after assistant response: {}",
+                e
+            );
         }
     }
 
@@ -938,16 +1169,12 @@ impl Agent {
                     "call_id": format!("turn{}_{}", turn_number, i),
                 });
                 if let Some(ref result) = tc.result {
-                    let preview = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 500),
-                        other => truncate_preview(&other.to_string(), 500),
-                    };
+                    let preview = tool_result_preview_for_persistence(result);
                     obj["result_preview"] = serde_json::Value::String(preview);
-                    // Store full result (truncated to ~1000 chars) for LLM context rebuild
-                    let full_result = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 1000),
-                        other => truncate_preview(&other.to_string(), 1000),
-                    };
+                    // Persist full image sentinel payloads so the web history can
+                    // reconstruct generated image cards after refresh. Other tool
+                    // results remain truncated to keep DB rows bounded.
+                    let full_result = tool_result_content_for_persistence(result);
                     obj["result"] = serde_json::Value::String(full_result);
                 }
                 if let Some(ref error) = tc.error {
@@ -1075,6 +1302,7 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1082,7 +1310,14 @@ impl Agent {
 
         match thread.state {
             ThreadState::Processing | ThreadState::AwaitingApproval => {
+                let channel = thread
+                    .source_channel
+                    .clone()
+                    .unwrap_or_else(|| "gateway".to_string());
                 thread.interrupt();
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &channel, &user_id)
+                    .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
             }
             _ => Ok(SubmissionResult::ok_with_message("Nothing to interrupt.")),
@@ -1134,13 +1369,21 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let channel = thread
+            .source_channel
+            .clone()
+            .unwrap_or_else(|| "gateway".to_string());
         thread.turns.clear();
         thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
+        drop(sess);
+        self.clear_conversation_live_state(thread_id, &channel, &user_id)
+            .await;
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
@@ -1159,7 +1402,8 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
+        // Take + verify under a single lock to prevent TOCTOU races where a
+        // concurrent operation could modify the thread between take and restore.
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -1168,42 +1412,44 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             if thread.state != ThreadState::AwaitingApproval {
-                // Stale or duplicate approval (tool already executed) — silently ignore.
+                // No pending approval on this thread. Could be stale/duplicate
+                // (tool already executed) or a /approve typed on a thread with
+                // nothing pending.  Return a visible message so the user and
+                // UI-level tests know the command was processed.
                 tracing::debug!(
                     %thread_id,
                     state = ?thread.state,
-                    "Ignoring stale approval: thread not in AwaitingApproval state"
+                    "Ignoring approval: thread not in AwaitingApproval state"
                 );
-                return Ok(SubmissionResult::ok_with_message(""));
+                return Ok(SubmissionResult::ok_with_message(
+                    "No pending approval for this thread.",
+                ));
             }
 
-            thread.take_pending_approval()
-        };
+            let pending = match thread.take_pending_approval() {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Ignoring stale approval: no pending approval found"
+                    );
+                    return Ok(SubmissionResult::ok_with_message(""));
+                }
+            };
 
-        let pending = match pending {
-            Some(p) => p,
-            None => {
-                tracing::debug!(
-                    %thread_id,
-                    "Ignoring stale approval: no pending approval found"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
-            }
-        };
-
-        // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+            // Verify request ID while still holding the lock so the pending
+            // approval is atomically restored on mismatch.
+            if let Some(req_id) = request_id
+                && req_id != pending.request_id
+            {
                 thread.await_approval(pending);
+                return Ok(SubmissionResult::error(
+                    "Request ID mismatch. Use the correct request ID.",
+                ));
             }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
-        }
+
+            pending
+        };
 
         if approved {
             // If always, add to auto-approved set and persist to settings.
@@ -1264,11 +1510,41 @@ impl Agent {
             }
 
             // Reset thread state to processing
-            {
+            let resumed_turn = {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.state = ThreadState::Processing;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.state = ThreadState::Processing;
+                        thread.turns.last().map(|turn| {
+                            (
+                                turn.turn_number,
+                                turn.user_message_id,
+                                turn.user_input.clone(),
+                                turn.started_at,
+                            )
+                        })
+                    }
+                    None => {
+                        return Err(Error::from(crate::error::JobError::NotFound {
+                            id: thread_id,
+                        }));
+                    }
                 }
+            };
+
+            if let Some((turn_number, user_message_id, user_input, started_at)) = resumed_turn {
+                self.persist_processing_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id,
+                        user_input: &user_input,
+                        started_at,
+                    },
+                )
+                .await;
             }
 
             // Execute the approved tool and continue the loop
@@ -1301,9 +1577,11 @@ impl Agent {
                 )
                 .await;
 
+            let started_at = std::time::Instant::now();
             let tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
+            let duration_ms = started_at.elapsed().as_millis() as u64;
 
             let tool_ref = self.tools().get(&pending.tool_name).await;
             let _ = self
@@ -1316,6 +1594,7 @@ impl Agent {
                         &tool_result,
                         &pending.display_parameters,
                         tool_ref.as_deref(),
+                        Some(duration_ms),
                     ),
                     &message.metadata,
                 )
@@ -1358,15 +1637,26 @@ impl Agent {
             // Record sanitized result in thread
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    if is_tool_error {
-                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
-                    } else {
-                        turn.record_tool_result_for(
-                            &pending.tool_call_id,
-                            serde_json::json!(result_content),
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        if let Some(turn) = thread.last_turn_mut() {
+                            if is_tool_error {
+                                turn.record_tool_error_for(
+                                    &pending.tool_call_id,
+                                    result_content.clone(),
+                                );
+                            } else {
+                                turn.record_tool_result_for(
+                                    &pending.tool_call_id,
+                                    serde_json::json!(result_content),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::debug!(
+                            %thread_id,
+                            "Thread disappeared before tool result could be recorded"
                         );
                     }
                 }
@@ -1457,9 +1747,11 @@ impl Agent {
                         )
                         .await;
 
+                    let started_at = std::time::Instant::now();
                     let result = self
                         .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                         .await;
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
 
                     let deferred_tool = self.tools().get(&tc.name).await;
                     let _ = self
@@ -1472,6 +1764,7 @@ impl Agent {
                                 &result,
                                 &tc.arguments,
                                 deferred_tool.as_deref(),
+                                Some(duration_ms),
                             ),
                             &message.metadata,
                         )
@@ -1507,6 +1800,7 @@ impl Agent {
                             )
                             .await;
 
+                        let started_at = std::time::Instant::now();
                         let result = execute_chat_tool_standalone(
                             &tools,
                             &safety,
@@ -1515,6 +1809,7 @@ impl Agent {
                             &job_ctx,
                         )
                         .await;
+                        let duration_ms = started_at.elapsed().as_millis() as u64;
 
                         let par_tool = tools.get(&tc.name).await;
                         let _ = channels
@@ -1526,6 +1821,7 @@ impl Agent {
                                     &result,
                                     &tc.arguments,
                                     par_tool.as_deref(),
+                                    Some(duration_ms),
                                 ),
                                 &metadata,
                             )
@@ -1606,15 +1902,24 @@ impl Agent {
                 // Record sanitized result in thread
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                        && let Some(turn) = thread.last_turn_mut()
-                    {
-                        if is_deferred_error {
-                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
-                        } else {
-                            turn.record_tool_result_for(
-                                &tc.id,
-                                serde_json::json!(deferred_content),
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            if let Some(turn) = thread.last_turn_mut() {
+                                if is_deferred_error {
+                                    turn.record_tool_error_for(&tc.id, deferred_content.clone());
+                                } else {
+                                    turn.record_tool_result_for(
+                                        &tc.id,
+                                        serde_json::json!(deferred_content),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::debug!(
+                                %thread_id,
+                                tool = %tc.name,
+                                "Thread disappeared before deferred tool result could be recorded"
                             );
                         }
                     }
@@ -1637,6 +1942,7 @@ impl Agent {
                         auth_data.instructions.clone(),
                         auth_data.auth_url.clone(),
                         auth_data.setup_url.clone(),
+                        None,
                     )
                     .await;
                 }
@@ -1665,10 +1971,18 @@ impl Agent {
 
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.await_approval(new_pending);
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => thread.await_approval(new_pending),
+                        None => {
+                            return Err(Error::from(crate::error::JobError::NotFound {
+                                id: thread_id,
+                            }));
+                        }
                     }
                 }
+
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
 
                 let _ = self
                     .channels
@@ -1717,6 +2031,7 @@ impl Agent {
                     auth_data.instructions,
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    None,
                 )
                 .await;
             }
@@ -1746,7 +2061,7 @@ impl Agent {
                 }) => {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
-                    thread.complete_turn(&response);
+                    thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -1793,6 +2108,13 @@ impl Agent {
                     let parameters = new_pending.display_parameters.clone();
                     let allow_always = new_pending.allow_always;
                     thread.await_approval(*new_pending);
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     let _ = self
@@ -1817,11 +2139,9 @@ impl Agent {
                         allow_always,
                     })
                 }
-                Ok(AgenticLoopResult::AuthPending {
-                    instructions,
-                    turn_usage,
-                }) => {
-                    thread.complete_turn(&instructions);
+                Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                    // See the other AuthPending arm for the full rationale.
+                    thread.conclude_turn(TurnOutcome::CompletedSilently);
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -1836,13 +2156,6 @@ impl Agent {
                         narrative.as_deref(),
                     )
                     .await;
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &instructions,
-                    )
-                    .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     Ok(SubmissionResult::auth_pending())
@@ -1850,11 +2163,25 @@ impl Agent {
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
-                    thread.fail_turn(error.to_string());
+                    thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
-                    thread.fail_turn(e.to_string());
+                    thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
@@ -1868,17 +2195,24 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.clear_pending_approval();
-                    thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.clear_pending_approval();
+                        thread.conclude_turn(TurnOutcome::Completed(rejection.clone()));
+                        // User message already persisted at turn start; save rejection response
+                        self.persist_assistant_response(
+                            thread_id,
+                            &message.channel,
+                            &message.user_id,
+                            &rejection,
+                        )
+                        .await;
+                    }
+                    None => {
+                        return Err(Error::from(crate::error::JobError::NotFound {
+                            id: thread_id,
+                        }));
+                    }
                 }
             }
 
@@ -1905,23 +2239,31 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        ext_name: String,
+        ext_name: ironclaw_common::ExtensionName,
         instructions: String,
         auth_data: &ParsedAuthData,
     ) {
         {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
-                thread.complete_turn(&instructions);
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.enter_auth_mode(ext_name.clone());
+                    thread.conclude_turn(TurnOutcome::Completed(instructions.clone()));
+                    // User message already persisted at turn start; save auth instructions
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &instructions,
+                    )
+                    .await;
+                }
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Thread disappeared before auth intercept could be applied"
+                    );
+                }
             }
         }
         emit_auth_required_status(
@@ -1931,6 +2273,7 @@ impl Agent {
             Some(instructions),
             auth_data.auth_url.clone(),
             auth_data.setup_url.clone(),
+            Some(thread_id.to_string()),
         )
         .await;
     }
@@ -1978,8 +2321,14 @@ impl Agent {
         // Clear auth mode regardless of outcome
         {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.pending_auth = None;
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => thread.pending_auth = None,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Thread disappeared before auth mode could be cleared"
+                    );
+                }
             }
         }
 
@@ -1996,11 +2345,11 @@ impl Agent {
 
         let result = if let Some(auth_manager) = auth_manager {
             auth_manager
-                .submit_auth_token(&pending.extension_name, token, &message.user_id)
+                .submit_auth_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
             ext_mgr
-                .configure_token(&pending.extension_name, token, &message.user_id)
+                .configure_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else {
             return Ok(Some("Extension manager not available.".to_string()));
@@ -2031,8 +2380,16 @@ impl Agent {
             Ok(result) => {
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            thread.enter_auth_mode(pending.extension_name.clone());
+                        }
+                        None => {
+                            tracing::debug!(
+                                %thread_id,
+                                "Thread disappeared before auth mode could be re-entered"
+                            );
+                        }
                     }
                 }
                 emit_auth_required_status(
@@ -2042,6 +2399,7 @@ impl Agent {
                     Some(result.message.clone()),
                     None,
                     None,
+                    Some(thread_id.to_string()),
                 )
                 .await;
                 Ok(Some(result.message))
@@ -2056,8 +2414,16 @@ impl Agent {
                     );
                     {
                         let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(pending.extension_name.clone());
+                        match sess.threads.get_mut(&thread_id) {
+                            Some(thread) => {
+                                thread.enter_auth_mode(pending.extension_name.clone());
+                            }
+                            None => {
+                                tracing::debug!(
+                                    %thread_id,
+                                    "Thread disappeared before auth mode could be re-entered on retry"
+                                );
+                            }
                         }
                     }
                     emit_auth_required_status(
@@ -2067,6 +2433,7 @@ impl Agent {
                         Some(msg.clone()),
                         None,
                         None,
+                        Some(thread_id.to_string()),
                     )
                     .await;
                     return Ok(Some(msg));
@@ -2314,7 +2681,7 @@ fn rebuild_chat_messages_from_db(
                                 // (e.g. "Tool 'http' failed: timeout"), so no prefix needed.
                                 err.to_string()
                             } else if let Some(res) = c.get("result").and_then(|v| v.as_str()) {
-                                res.to_string()
+                                tool_result_content_for_rebuild(res)
                             } else if let Some(preview) =
                                 c.get("result_preview").and_then(|v| v.as_str())
                             {
@@ -2349,6 +2716,7 @@ mod tests {
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
+    use crate::generated_images::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -2451,6 +2819,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -2526,6 +2895,8 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 0, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2535,6 +2906,8 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 10, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2544,6 +2917,8 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 8, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
         ];
@@ -2845,6 +3220,160 @@ mod tests {
         assert_eq!(result[7].content, "Written");
     }
 
+    #[test]
+    fn test_rebuild_chat_messages_summarizes_image_generated_result() {
+        let tool_json = serde_json::json!([
+            {
+                "name": "image_generate",
+                "call_id": "call_0",
+                "parameters": {"prompt": "cat"},
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data": "data:image/jpeg;base64,abc123",
+                    "media_type": "image/jpeg"
+                }).to_string(),
+                "result_preview": "Generated image"
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Draw a cat"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+            make_db_msg("assistant", "Done"),
+        ];
+
+        let result = rebuild_chat_messages_from_db(&messages);
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].content, "Generated image (image/jpeg)");
+    }
+
+    #[test]
+    fn test_tool_result_preview_for_persistence_handles_double_stringified_sentinel() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg"
+        })
+        .to_string();
+        let double_wrapped = serde_json::Value::String(serde_json::to_string(&sentinel).unwrap());
+
+        let preview = tool_result_preview_for_persistence(&double_wrapped);
+        let rebuilt = tool_result_content_for_rebuild(double_wrapped.as_str().unwrap());
+
+        assert_eq!(preview, "Generated image");
+        assert_eq!(rebuilt, "Generated image (image/jpeg)");
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_preserves_image_sentinel_under_cap() {
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg"
+        });
+
+        let persisted = tool_result_content_for_persistence(&result);
+
+        assert!(persisted.contains("\"type\":\"image_generated\""));
+        assert!(persisted.contains("data:image/jpeg;base64,abc123"));
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_caps_oversized_image_sentinel() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/jpeg;base64,{oversized}"),
+            "media_type": "image/jpeg",
+            "path": "workspace/out.jpg"
+        });
+
+        let persisted = tool_result_content_for_persistence(&result);
+
+        let persisted_json: serde_json::Value =
+            serde_json::from_str(&persisted).expect("persisted compact sentinel json");
+
+        assert_eq!(persisted_json["type"], "image_generated");
+        assert_eq!(persisted_json["media_type"], "image/jpeg");
+        assert_eq!(persisted_json["path"], "workspace/out.jpg");
+        assert_eq!(persisted_json["data_omitted"], true);
+        assert!(
+            persisted_json["omitted_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("512 KiB cap"))
+        );
+        assert!(!persisted.contains("data:image/jpeg;base64"));
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_preserves_double_stringified_sentinel_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let filler_len = MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let double_stringified = serde_json::Value::String(normalized.clone());
+
+        assert_eq!(normalized.len(), MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        assert!(double_stringified.to_string().len() > MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+
+        let persisted = tool_result_content_for_persistence(&double_stringified);
+        let parsed = GeneratedImageSentinel::from_output(&persisted).expect("persisted sentinel");
+
+        assert_eq!(persisted, normalized);
+        assert!(parsed.data_url().is_some());
+        assert_eq!(parsed.path(), Some("workspace/out.png"));
+        assert!(!persisted.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_build_turns_collects_generated_images_from_capped_persisted_tool_result() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        });
+        let persisted = tool_result_content_for_persistence(&result);
+        let tool_json = serde_json::json!([
+            {
+                "name": "image_generate",
+                "call_id": "call_img_0",
+                "parameters": {"prompt": "cat"},
+                "result": persisted,
+                "result_preview": "Generated image"
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Draw a cat"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+            make_db_msg("assistant", "Done"),
+        ];
+
+        let turns = crate::channels::web::util::build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].generated_images.len(), 1);
+        assert_eq!(turns[0].generated_images[0].event_id, "call_img_0");
+        assert!(turns[0].generated_images[0].data_url.is_none());
+        assert_eq!(
+            turns[0].generated_images[0].path.as_deref(),
+            Some("workspace/out.png")
+        );
+    }
+
     fn make_db_msg(role: &str, content: &str) -> crate::history::ConversationMessage {
         crate::history::ConversationMessage {
             id: uuid::Uuid::new_v4(),
@@ -2865,6 +3394,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3004,7 +3534,7 @@ mod tests {
         use crate::agent::session::{PendingApproval, Session, Thread};
         use uuid::Uuid;
 
-        let (agent, statuses) = make_thread_ops_test_agent().await;
+        let (agent, statuses) = make_test_agent_with_status_channel("test").await;
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
         let mut thread = Thread::with_id(thread_id, session_id, Some("test"));
@@ -3026,7 +3556,7 @@ mod tests {
 
         let mut sess = Session::new("test-user");
         sess.threads.insert(thread_id, thread);
-        let session = Arc::new(TokioMutex::new(sess));
+        let session = Arc::new(tokio::sync::Mutex::new(sess));
         let message = IncomingMessage::new("test", "test-user", "still waiting?");
 
         let result = agent
@@ -3048,15 +3578,85 @@ mod tests {
             other => panic!("expected pending Ok message, got {other:?}"),
         }
 
-        let statuses = statuses.lock().await.clone();
+        let statuses = statuses.lock().expect("lock").clone();
         assert!(statuses.iter().any(|status| matches!(
             status,
             StatusUpdate::ApprovalNeeded {
                 request_id: status_request_id,
                 tool_name,
                 ..
-            } if status_request_id == &request_id && tool_name == "shell"
+            } if *status_request_id == request_id && tool_name == "shell"
         )));
+    }
+
+    #[tokio::test]
+    async fn test_process_user_input_allows_attachment_only_message() {
+        use crate::agent::session::{Session, Thread};
+        use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
+        use uuid::Uuid;
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+
+        let message = IncomingMessage::new("test", "test-user", "").with_attachments(vec![
+            IncomingAttachment {
+                id: "att_1".to_string(),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some("files-only.txt".to_string()),
+                size_bytes: Some(41),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: Some("Files-only regression attachment.".to_string()),
+                data: b"Files-only regression attachment.".to_vec(),
+                duration_secs: None,
+            },
+        ]);
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "",
+            )
+            .await
+            .expect("attachment-only message handled");
+
+        match result {
+            SubmissionResult::Response { content } => {
+                assert_eq!(content.to_ascii_lowercase(), "ok")
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread exists");
+        let turn = thread.turns.last().expect("turn should be created");
+        assert!(
+            turn.user_input.contains("<attachments>"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input.contains("files-only.txt"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input
+                .contains("Files-only regression attachment."),
+            "{}",
+            turn.user_input
+        );
     }
 
     #[tokio::test]
@@ -3075,7 +3675,7 @@ mod tests {
         let target_thread_id = Uuid::new_v4();
         let mut target_thread = Thread::with_id(target_thread_id, session_id, Some("tui"));
         target_thread.start_turn("Review the diff");
-        target_thread.complete_turn("Waiting for approval.");
+        target_thread.conclude_turn(TurnOutcome::Completed("Waiting for approval.".into()));
         target_thread.await_approval(PendingApproval {
             request_id: Uuid::new_v4(),
             tool_name: "shell".to_string(),
@@ -3231,7 +3831,7 @@ mod tests {
         assert_eq!(thread.state, ThreadState::Processing);
 
         // Simulate the turn completing between snapshot and re-lock
-        thread.complete_turn("done");
+        thread.conclude_turn(TurnOutcome::Completed("done".into()));
         assert_eq!(thread.state, ThreadState::Idle);
 
         let mut session = Session::new("test-user");
@@ -3262,5 +3862,111 @@ mod tests {
         } else {
             Ok(None)
         }
+    }
+
+    /// Regression test for #1486: TOCTOU race in process_approval.
+    ///
+    /// After a request_id mismatch the pending approval must be atomically
+    /// restored so a subsequent approval with the correct ID succeeds.
+    #[tokio::test]
+    async fn test_approval_request_id_mismatch_restores_pending() {
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let correct_request_id = Uuid::new_v4();
+        let wrong_request_id = Uuid::new_v4();
+
+        let mut thread = Thread::with_id(thread_id, session_id, None);
+        let pending = PendingApproval {
+            request_id: correct_request_id,
+            tool_name: "echo".to_string(),
+            parameters: serde_json::json!({"text": "hello"}),
+            display_parameters: serde_json::json!({"text": "hello"}),
+            description: "Echo hello".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        };
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+        let session = Arc::new(Mutex::new(session));
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+
+        let message = IncomingMessage::new("test", "test-user", "yes");
+
+        // Attempt approval with WRONG request ID — should fail but preserve pending
+        let result = agent
+            .process_approval(
+                &message,
+                session.clone(),
+                thread_id,
+                Some(wrong_request_id),
+                true,
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        match &result {
+            SubmissionResult::Error { message } => {
+                assert!(
+                    message.contains("Request ID mismatch"),
+                    "Expected mismatch error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error result, got: {:?}", other),
+        }
+
+        // Verify pending approval is still present (not lost due to TOCTOU)
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).unwrap();
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(
+            thread.pending_approval.is_some(),
+            "Pending approval should be restored after request_id mismatch"
+        );
+        assert_eq!(
+            thread.pending_approval.as_ref().unwrap().request_id,
+            correct_request_id,
+            "Restored pending approval should have the original request_id"
+        );
+    }
+
+    /// Regression test for #1487: process_approval on a missing thread should error.
+    #[tokio::test]
+    async fn test_approval_on_missing_thread_should_error() {
+        use crate::agent::session::Session;
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+
+        // Session with NO threads
+        let session = Session::new("test-user");
+        let session = Arc::new(Mutex::new(session));
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+
+        let message = IncomingMessage::new("test", "test-user", "yes");
+
+        let result = agent
+            .process_approval(&message, session, thread_id, None, true, false)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Approving a missing thread should return an error, got: {:?}",
+            result
+        );
     }
 }

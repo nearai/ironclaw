@@ -15,9 +15,8 @@ use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::MultiAuthState;
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::config::{Config, RegistryProviderConfig, RoutineConfig};
@@ -223,6 +222,7 @@ impl GatewayWorkflowHarness {
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
@@ -230,6 +230,9 @@ impl GatewayWorkflowHarness {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
             auth_manager: None,
@@ -240,7 +243,9 @@ impl GatewayWorkflowHarness {
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
-            active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                ironclaw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -261,6 +266,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,

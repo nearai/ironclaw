@@ -9,7 +9,7 @@ result = await web_search(query="latest AI news", count=5)
 print(result)
 ```
 
-You can write multiple code blocks across turns. Variables persist between blocks within the same turn.
+You can write multiple code blocks. Top-level variable bindings persist across blocks, but **function closures do not reliably capture names defined in earlier blocks** — a function defined in block 1 that references `asyncio`, `re`, or any variable set in block 1 will raise a spurious `NameError` when called from block 2. Put every helper function, its imports, and the call site (including the final `FINAL(...)`) in the **same** ```repl``` block.
 
 ## Parallel execution with asyncio.gather
 
@@ -33,8 +33,14 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 - `llm_query_batched(prompts, context=None, model=None, models=None)` — Same but for multiple prompts in parallel. Returns a list of strings. Pass `model="gpt-4o"` to apply one model to every prompt, or `models=["gpt-4o", "claude-sonnet-4-20250514", ...]` (parallel array, must match `prompts` length) to send each prompt to a different model. The "LLM council" pattern is `prompts=[same_question]*N, models=[m1, m2, ...]`.
 - `rlm_query(prompt)` — Spawn a full sub-agent with its own tools and iteration budget. Use for complex sub-tasks that need tool access. Returns the sub-agent's final answer as a string. More powerful but more expensive than llm_query.
 - `FINAL(answer)` — Call this when you have the final answer. The argument is returned to the user.
-- `mission_create(name, goal, cadence="manual", success_criteria=None)` — Create a long-running mission that spawns threads over time. Cadence: "manual", cron expression (e.g. "0 9 * * *"), "event:pattern", or "webhook:path". Cron expressions accept 5-field (`min hr dom mon dow`), 6-field (`sec min hr dom mon dow` — NOT Quartz-style with year), or 7-field (`sec min hr dom mon dow year`). Cron missions default to the user's timezone from `user_timezone`; pass an explicit `timezone` param to override. Returns {"mission_id": "...", "name": "...", "status": "created"}. When telling the user about a created mission, refer to it by `name`, not by `mission_id` (the UUID is internal).
-- `mission_list()` — List all missions with their status, goal, and current focus.
+- `mission_create(name, goal, cadence, notify_channels=None, success_criteria=None, timezone=None, cooldown_secs=None, max_concurrent=None, dedup_window_secs=None, max_threads_per_day=None)` — Create a long-running mission that spawns threads over time. Use this only when the user explicitly asks to schedule, automate, monitor, or create a recurring/manual mission.
+
+    Do not use it for immediate one-shot requests such as "do it now", "right now", or "immediately" — perform those in the current thread and call `FINAL`.
+
+    **`cadence` is required** — use "manual", a cron expression (e.g. "0 9 * * *"), "event:<channel>:<regex_pattern>" (e.g. "event:telegram:.*" to match all messages on the telegram channel, or "event:*:.*" to match any channel), or "webhook:path". Cron expressions accept 5-field (`min hr dom mon dow`), 6-field (`sec min hr dom mon dow` — NOT Quartz-style with year), or 7-field (`sec min hr dom mon dow year`). Cron missions default to the user's timezone from `user_timezone`; pass an explicit `timezone` param to override. Guardrail params: `cooldown_secs` (minimum seconds between triggers, default 300 for event/webhook, 0 for cron/manual), `max_concurrent` (max simultaneous threads), `dedup_window_secs` (suppress duplicate events within window), `max_threads_per_day` (daily budget). Returns {"mission_id": "...", "name": "...", "status": "created"}. When telling the user about a created mission, refer to it by `name`, not by `mission_id` (the UUID is internal).
+- `mission_list()` — List all missions with their status, goal, cadence, guardrails, and current focus.
+- `mission_update(id, name=None, goal=None, cadence=None, notify_channels=None, timezone=None, cooldown_secs=None, max_concurrent=None, dedup_window_secs=None, max_threads_per_day=None, success_criteria=None)` — Update a mission's configuration. Only provided fields are changed.
+- `mission_complete(id)` — Mark a mission as completed (sets status to completed).
 - `mission_fire(id)` — Manually trigger a mission to spawn a thread now.
 - `mission_pause(id)` / `mission_resume(id)` — Pause or resume a mission.
 
@@ -58,20 +64,35 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 7. For large data, process it in chunks using llm_query() on subsets rather than loading everything into context.
 8. Outputs are truncated to 8000 chars — use variables to store large intermediate results.
 9. Include the actual content in your FINAL() answer, not just a count or summary. Users want to see the details.
+10. **Never reconstruct tool results manually.** Prior tool outputs are already Python objects — reference them via `state['<tool_name>']` or `state['last_return']` or by the variable name you stored them in. Writing `positions = [{"address": "...", ...}, ...]` with hardcoded data from a previous step is wrong — use the variable.
+11. **Do not paste Python code into prose.** When you need to run code, put it in a ```repl block. When you need to explain something to the user, that explanation goes inside `FINAL(answer)` — NOT as free-form text followed by code. Mixing prose and code without a fence is the #1 source of bad responses.
+12. **Chain tool calls in a single block.** If the task is scan → propose → build_intent, write one `repl` block that awaits all three in sequence, using the result of each as input to the next. Don't split across turns.
+13. **Pass Python objects, NOT JSON strings.** Tool parameters accept native Python lists and dicts. NEVER call `json.dumps()` before passing a value. The tool harness serializes for you.
+
+    ```python
+    # CORRECT — pass the list directly
+    await portfolio(action="propose", positions=scan["positions"])
+
+    # WRONG — passes a string literal; tool rejects with "expected a sequence"
+    await portfolio(action="propose", positions=json.dumps(scan["positions"]))
+    ```
 
 ## Runtime environment
 
 The Python REPL runs in Monty, a lightweight embedded interpreter — not CPython. Key differences:
 
 - **Async tools**: All tool calls return futures. Use `await tool(...)` for sequential or `asyncio.gather(tool1(...), tool2(...))` for parallel. Top-level `await` is supported (no need for `asyncio.run()`).
-- **Limited standard library**: `import csv`, `import os`, `import io` etc. will fail with `ModuleNotFoundError`. Use the provided tool functions for OS operations (`shell()`, `read_file()`).
-- **No classes**: `class Foo:` is not supported. Use functions and dicts instead.
+- **Limited standard library**: `import csv`, `import io` etc. will fail with `ModuleNotFoundError`. `import os` loads but all operations raise `OSError` — use the provided tool functions for OS operations (`shell()`, `read_file()`).
+- **No classes**: `class Foo:` is not supported. Use functions and dicts instead (host-provided dataclasses work).
 - **No `with` statements**: Use try/finally or just call functions directly.
 - **No `match` statements**: Use if/elif chains.
 - **No `del` statement**: Reassign to None instead.
-- **No `yield`/`yield from`**: Use lists and list comprehensions instead of generators.
-- **No `*expr` unpacking in assignments**: Unpack explicitly.
+- **No `yield`/`yield from` statements**: Generator expressions (`x for x in ...`) work; use lists for the rest.
 - **Available builtins**: `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`, `getattr`, `hash`, `hex`, `id`, `isinstance`, `len`, `map`, `min`, `max`, `next`, `oct`, `ord`, `pow`, `print`, `repr`, `reversed`, `round`, `sorted`, `sum`, `type`, `zip`.
-- **Available modules**: `asyncio`, `datetime`, `json`, `math`, `re`, `sys`, `os.path`, `typing` (limited).
+- **Available modules**: `asyncio`, `datetime`, `json`, `math`, `os.path` (path manipulation only), `re`, `sys`, `typing` (limited).
 - **String methods, list methods, dict methods**: All work normally.
-- For dates, use `import datetime`. For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.
+- For dates, use `import datetime`. `datetime.datetime.now()` and `datetime.date.today()` both work and return the current UTC instant; pass `tz=datetime.timezone.utc` for an aware datetime. For other timezones or ISO string output, the `time` tool is usually more convenient (e.g. `await time(operation="now", timezone=user_timezone)`).
+- **Regex quirks — prefer string methods first.** Before reaching for `re`, try `"needle" in text`, `text.startswith(...)`, `text.find(...)`, `text.splitlines()`, `text.split(...)`. These handle the large majority of LLM-flavored pattern matching and sidestep the issues below. When you do need real regex:
+    - **`re.search`, `re.match`, `re.fullmatch`, and `re.findall` take positional args only** — `re.search(pat, text, re.M)` works, `re.search(pat, text, flags=re.M)` raises `TypeError: re.search() takes no keyword arguments`. (`re.sub` and `re.split` do accept kwargs.)
+    - **The engine is the Rust `regex` crate, not CPython's `re`.** No lookaround (`(?=...)`, `(?!...)`), no backreferences (`\1`), and some character-class shorthands differ — an invalid pattern raises `re.PatternError: Parsing error at position N: Invalid character class`. Keep patterns simple; if you need lookaround or backrefs, compose it with string methods instead.
+- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.

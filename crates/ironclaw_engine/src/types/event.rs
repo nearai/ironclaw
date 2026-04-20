@@ -147,6 +147,8 @@ pub enum EventKind {
         action_name: String,
         call_id: String,
         error: String,
+        #[serde(default)]
+        duration_ms: u64,
         /// Short human-readable summary of parameters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
@@ -215,10 +217,76 @@ pub enum EventKind {
         skill_names: Vec<String>,
     },
 
+    // ── Code execution instrumentation ────────────────────────
+    /// Emitted when a code (REPL) execution attempt fails. Enables aggregate
+    /// analysis of code execution failure modes to determine whether the
+    /// runtime (Monty), the LLM, or tool dispatch is the primary source of
+    /// failures.
+    CodeExecutionFailed {
+        step_id: StepId,
+        /// Classified failure category.
+        category: crate::types::step::CodeExecutionFailure,
+        /// The error message text (truncated to 500 chars).
+        error: String,
+        /// Hash of the Python code that was executed, for dedup/correlation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_hash: Option<String>,
+        /// Duration of the code execution attempt in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+    },
+
     // ── Orchestrator versioning ───────────────────────────────
     OrchestratorRollback {
         from_version: u64,
         to_version: u64,
         reason: String,
     },
+
+    /// Unknown event kind — catch-all for forward compatibility during
+    /// rolling deploys. Older binaries deserializing events written by
+    /// newer binaries will produce this variant instead of failing.
+    #[serde(other)]
+    Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKind;
+    use crate::types::step::StepId;
+
+    #[test]
+    fn action_failed_defaults_missing_duration_ms_when_deserializing_legacy_payload() {
+        let step_id = StepId::new();
+        let legacy_payload = serde_json::json!({
+            "ActionFailed": {
+                "step_id": step_id,
+                "action_name": "web_search",
+                "call_id": "call_123",
+                "error": "permission denied"
+            }
+        });
+
+        let event_kind: EventKind =
+            serde_json::from_value(legacy_payload).expect("legacy ActionFailed should deserialize");
+
+        match event_kind {
+            EventKind::ActionFailed {
+                step_id: actual_step_id,
+                action_name,
+                call_id,
+                error,
+                duration_ms,
+                params_summary,
+            } => {
+                assert_eq!(actual_step_id, step_id);
+                assert_eq!(action_name, "web_search");
+                assert_eq!(call_id, "call_123");
+                assert_eq!(error, "permission denied");
+                assert_eq!(duration_ms, 0);
+                assert_eq!(params_summary, None);
+            }
+            other => panic!("expected ActionFailed, got {other:?}"),
+        }
+    }
 }

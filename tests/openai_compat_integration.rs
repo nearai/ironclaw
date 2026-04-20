@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use ironclaw::channels::web::server::{GatewayState, start_server};
+use ironclaw::channels::web::platform::router::start_server;
+
+use ironclaw::channels::web::platform::state::GatewayState;
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::error::LlmError;
@@ -201,6 +203,7 @@ async fn start_test_server_with_provider(
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -208,17 +211,26 @@ async fn start_test_server_with_provider(
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
-        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
-        webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        chat_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            30, 60,
+        ),
+        oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            20, 60,
+        ),
+        webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(
+            ironclaw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+        )),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -713,6 +725,7 @@ async fn test_no_llm_provider_returns_503() {
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -720,17 +733,26 @@ async fn test_no_llm_provider_returns_503() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
-        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
-        webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        chat_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            30, 60,
+        ),
+        oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
+            20, 60,
+        ),
+        webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(
+            ironclaw::channels::web::platform::state::ActiveConfigSnapshot::default(),
+        )),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,

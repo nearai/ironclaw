@@ -17,7 +17,7 @@ use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::recording::HttpInterceptor;
-use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
+use crate::llm::{LlmProvider, LlmReloadHandle, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
@@ -37,6 +37,10 @@ pub struct AppComponents {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
+    /// Hot-reload controller for the LLM provider chain. `None` when the
+    /// LLM was injected via `AppBuilder::with_llm` (test harnesses) so the
+    /// chain was not built from config in the first place.
+    pub llm_reload: Option<Arc<LlmReloadHandle>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
@@ -49,6 +53,9 @@ pub struct AppComponents {
     /// runtime settings writes flow through the workspace and pick up schema
     /// validation.
     pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    /// Concrete cache handle for `flush()` / `invalidate_user()`.
+    /// Same instance backing `settings_store` when a cache is active.
+    pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
     pub mcp_process_manager: Arc<McpProcessManager>,
@@ -271,6 +278,36 @@ impl AppBuilder {
         let handles = self.handles.as_ref().unwrap_or(&empty_handles);
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
+        // Safety gate: if we auto-generated a fresh master key this run
+        // but the secrets table already carries rows from a prior key,
+        // those rows are undecryptable and silently continuing would
+        // shadow unrecoverable data. Fail loudly (and fail-closed on
+        // probe error) so the user can restore the original key before
+        // any new writes pile on top.
+        //
+        // Roll back the persistence `auto_generate_and_persist` already
+        // committed: otherwise a subsequent restart would read the
+        // newly-written key as `source = Env/Keychain, generated =
+        // false`, skip this gate, and silently accept the wrong key.
+        // Rollback keeps the gate re-firing on every start until the
+        // user restores the real key or clears the stale rows.
+        if let Some(ref secrets) = store
+            && let Err(gate_err) = crate::secrets::verify_generated_key_safe(
+                self.config.secrets.generated,
+                secrets.as_ref(),
+            )
+            .await
+        {
+            if self.config.secrets.generated {
+                crate::secrets::rollback_generated_key_persistence(
+                    self.config.secrets.source,
+                    &crate::bootstrap::ironclaw_env_path(),
+                )
+                .await;
+            }
+            return Err(gate_err.into());
+        }
+
         if let Some(ref secrets) = store {
             // Migrate any plaintext API keys from the settings table to the
             // encrypted secrets store. Idempotent — safe to run on every startup.
@@ -334,18 +371,20 @@ impl AppBuilder {
             Arc<dyn LlmProvider>,
             Option<Arc<dyn LlmProvider>>,
             Option<Arc<RecordingLlm>>,
+            Arc<LlmReloadHandle>,
         ),
         anyhow::Error,
     > {
-        let (llm, cheap_llm, recording_handle) =
+        let (llm, cheap_llm, recording_handle, reload_handle) =
             crate::llm::build_provider_chain(&self.config.llm, self.session.clone()).await?;
-        Ok((llm, cheap_llm, recording_handle))
+        Ok((llm, cheap_llm, recording_handle, reload_handle))
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
+        cheap_llm: Option<&Arc<dyn LlmProvider>>,
     ) -> Result<
         (
             Arc<SafetyLayer>,
@@ -355,6 +394,7 @@ impl AppBuilder {
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
             Option<Arc<dyn HttpInterceptor>>,
+            Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>>,
         ),
         anyhow::Error,
     > {
@@ -408,7 +448,7 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
-        let workspace = if let Some(ref db) = self.db {
+        let (workspace, workspace_resolver) = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
             };
@@ -451,22 +491,30 @@ impl AppBuilder {
             }
 
             let ws = Arc::new(ws);
-            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
-                Arc::clone(db),
-                embeddings.clone(),
-                emb_cache_config,
-                self.config.search.clone(),
-                self.config.workspace.clone(),
-            ));
-            tools.register_memory_tools_with_resolver(pool);
+            let pool: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver> =
+                Arc::new(crate::channels::web::platform::state::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
+            let pool_for_hooks = Arc::clone(&pool);
+            let reasoning_llm: Option<Arc<dyn LlmProvider>> =
+                cheap_llm.map(Arc::clone).or_else(|| Some(Arc::clone(llm)));
+            tools.register_memory_tools_with_resolver(
+                pool,
+                reasoning_llm,
+                self.config.search.reasoning_enabled,
+            );
             tracing::debug!(
                 multi_tenant = is_multi_tenant,
                 "Memory tools configured with per-user workspace resolver"
             );
 
-            Some(ws)
+            (Some(ws), Some(pool_for_hooks))
         } else {
-            None
+            (None, None)
         };
 
         // Register image/vision tools if we have a workspace and LLM API credentials
@@ -500,7 +548,7 @@ impl AppBuilder {
                     .unwrap_or_else(|| self.config.llm.nearai.model.clone());
                 let models = vec![model_name.clone()];
                 let gen_model = crate::llm::image_models::suggest_image_model(&models)
-                    .unwrap_or("flux-1.1-pro")
+                    .unwrap_or("black-forest-labs/FLUX.2-klein-4B")
                     .to_string();
                 tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
 
@@ -533,6 +581,7 @@ impl AppBuilder {
             builder,
             credential_registry,
             http_interceptor,
+            workspace_resolver,
         ))
     }
 
@@ -823,7 +872,7 @@ impl AppBuilder {
             Arc::new(InMemorySecretsStore::new(crypto))
         };
         let extension_manager = {
-            let manager = Arc::new(ExtensionManager::new(
+            let mut em = ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(&mcp_process_manager),
                 ext_secrets,
@@ -836,7 +885,11 @@ impl AppBuilder {
                 self.config.owner_id.clone(),
                 self.db.clone(),
                 catalog_entries.clone(),
-            ));
+            );
+            if let Some(ref ss) = settings_store_override {
+                em = em.with_settings_store(Arc::clone(ss));
+            }
+            let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
 
             // Register permission management tool and upgrade tool_list with
@@ -931,16 +984,42 @@ impl AppBuilder {
             );
         }
 
-        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
-            (llm, None, None)
-        } else {
-            self.init_llm().await?
-        };
-        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
-            self.init_tools(&llm).await?;
+        let (llm, cheap_llm, recording_handle, llm_reload) =
+            if let Some(llm) = self.llm_override.take() {
+                (llm, None, None, None)
+            } else {
+                let (llm, cheap, recording, reload) = self.init_llm().await?;
+                (llm, cheap, recording, Some(reload))
+            };
+        let (
+            safety,
+            tools,
+            embeddings,
+            workspace,
+            builder,
+            credential_registry,
+            http_interceptor,
+            workspace_resolver,
+        ) = self.init_tools(&llm, cheap_llm.as_ref()).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
+
+        // Register session summary hook (writes conversation summary on session end).
+        if let (Some(db), Some(ws_resolver)) = (&self.db, &workspace_resolver) {
+            let summary_llm = cheap_llm
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(|| Arc::clone(&llm));
+            hooks
+                .register(Arc::new(crate::hooks::SessionSummaryHook::new(
+                    Arc::clone(db) as Arc<dyn crate::db::ConversationStore>,
+                    Arc::clone(ws_resolver),
+                    summary_llm,
+                )))
+                .await;
+        }
+
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
@@ -949,22 +1028,30 @@ impl AppBuilder {
         // `upgrade_tool_list`) can be wired with the adapter from the start.
         // The same adapter instance is then exposed on `AppComponents.settings_store`
         // and reused by main.rs (e.g. for the SIGHUP reload handler).
-        let settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
-            match (&workspace, &self.db) {
-                (Some(ws), Some(db)) => {
-                    let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
-                        Arc::clone(ws),
-                        Arc::clone(db),
-                    ));
-                    if let Err(e) = adapter.ensure_system_config().await {
-                        tracing::debug!(
-                            "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
-                        );
-                    }
-                    Some(adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+        let (settings_store, settings_cache): (
+            Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+            Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
+        ) = match (&workspace, &self.db) {
+            (Some(ws), Some(db)) => {
+                let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
+                    Arc::clone(ws),
+                    Arc::clone(db),
+                ));
+                if let Err(e) = adapter.ensure_system_config().await {
+                    tracing::debug!(
+                        "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
+                    );
                 }
-                _ => None,
-            };
+                let cached = Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                    adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+                ));
+                (
+                    Some(Arc::clone(&cached) as Arc<dyn crate::db::SettingsStore + Send + Sync>),
+                    Some(cached),
+                )
+            }
+            _ => (None, None),
+        };
 
         let (
             mcp_session_manager,
@@ -1094,11 +1181,13 @@ impl AppBuilder {
             secrets_store: self.secrets_store,
             llm,
             cheap_llm,
+            llm_reload,
             safety,
             tools,
             embeddings,
             workspace,
             settings_store,
+            settings_cache,
             extension_manager,
             mcp_session_manager,
             mcp_process_manager,

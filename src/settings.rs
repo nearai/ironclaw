@@ -150,6 +150,12 @@ pub struct Settings {
     #[serde(default)]
     pub selected_model: Option<String>,
 
+    /// Default sampling temperature for LLM requests (0.0–2.0).
+    /// When set, used as the default for conversational turns.
+    /// Per-request temperature (e.g. from the API) takes precedence.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
     // === Step 5: Embeddings ===
     /// Embeddings configuration.
     #[serde(default)]
@@ -216,6 +222,10 @@ pub struct Settings {
     /// Workspace search fusion configuration.
     #[serde(default)]
     pub search: SearchSettings,
+
+    /// Mission configuration.
+    #[serde(default)]
+    pub missions: MissionSettings,
 
     /// Transcription configuration.
     #[serde(default)]
@@ -405,8 +415,10 @@ pub struct ChannelSettings {
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
     /// Enabled WASM channels by name.
-    /// Channels not in this list but present in the channels directory will still load.
-    /// This is primarily used by the setup wizard to track which channels were configured.
+    /// Primarily used by the setup wizard to track which channels were configured.
+    ///
+    /// Startup treats this as a fallback restore source only until
+    /// `activated_channels` has been persisted by the runtime.
     #[serde(default)]
     pub wasm_channels: Vec<String>,
 
@@ -446,7 +458,7 @@ impl Default for ChannelSettings {
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
-            cli_mode: None,
+            cli_mode: Some("tui".to_string()),
         }
     }
 }
@@ -659,7 +671,7 @@ fn default_wasm_timeout() -> u64 {
 }
 
 fn default_wasm_fuel_limit() -> u64 {
-    10_000_000
+    500_000_000
 }
 
 impl Default for WasmSettings {
@@ -998,6 +1010,11 @@ pub struct SearchSettings {
     /// Vector weight for fusion. `None` = use per-strategy default.
     #[serde(default)]
     pub vector_weight: Option<f32>,
+
+    /// Whether reasoning-augmented recall is enabled for memory search.
+    /// `None` = use env/default (false).
+    #[serde(default)]
+    pub reasoning_enabled: Option<bool>,
 }
 
 fn default_search_fusion_strategy() -> String {
@@ -1015,8 +1032,18 @@ impl Default for SearchSettings {
             rrf_k: default_search_rrf_k(),
             fts_weight: None,
             vector_weight: None,
+            reasoning_enabled: None,
         }
     }
+}
+
+/// Mission-related settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MissionSettings {
+    /// Conversation insights extraction interval (every N completed threads).
+    /// `None` = use env/default (5). Minimum: 1.
+    #[serde(default)]
+    pub insights_interval: Option<u32>,
 }
 
 /// Transcription pipeline settings.
@@ -1407,6 +1434,31 @@ mod tests {
         assert_eq!(
             restored.selected_model,
             Some("claude-3-5-sonnet-20241022".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_db_map_tool_permissions() {
+        use crate::tools::permissions::PermissionState;
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "tool_permissions.http".to_string(),
+            serde_json::Value::String("always_allow".to_string()),
+        );
+        map.insert(
+            "tool_permissions.shell".to_string(),
+            serde_json::Value::String("ask_each_time".to_string()),
+        );
+        let settings = Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("http"),
+            Some(&PermissionState::AlwaysAllow),
+            "tool_permissions.http should be AlwaysAllow, got {:?}",
+            settings.tool_permissions
+        );
+        assert_eq!(
+            settings.tool_permissions.get("shell"),
+            Some(&PermissionState::AskEachTime),
         );
     }
 
@@ -1989,6 +2041,15 @@ mod tests {
                 max_parallel_jobs: 10,
                 ..Default::default()
             },
+            search: SearchSettings {
+                reasoning_enabled: Some(true),
+                fts_weight: Some(0.4),
+                vector_weight: Some(0.6),
+                ..Default::default()
+            },
+            missions: MissionSettings {
+                insights_interval: Some(7),
+            },
             ..Default::default()
         };
 
@@ -2056,6 +2117,26 @@ mod tests {
         assert_eq!(
             restored.agent.max_parallel_jobs, 10,
             "agent.max_parallel_jobs lost"
+        );
+        assert_eq!(
+            restored.search.reasoning_enabled,
+            Some(true),
+            "search.reasoning_enabled lost"
+        );
+        assert_eq!(
+            restored.search.fts_weight,
+            Some(0.4),
+            "search.fts_weight lost"
+        );
+        assert_eq!(
+            restored.search.vector_weight,
+            Some(0.6),
+            "search.vector_weight lost"
+        );
+        assert_eq!(
+            restored.missions.insights_interval,
+            Some(7),
+            "missions.insights_interval lost"
         );
     }
 

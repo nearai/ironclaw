@@ -28,6 +28,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+mod missions;
 pub mod oauth;
 pub mod profile;
 pub mod relay;
@@ -60,6 +61,7 @@ pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
+pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
@@ -119,6 +121,7 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
+    pub missions: MissionsConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
     /// OAuth/social login configuration (Google, GitHub, etc.).
@@ -186,6 +189,7 @@ impl Config {
                 tui: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
+                configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
             },
             agent: AgentConfig::for_testing(),
@@ -214,6 +218,7 @@ impl Config {
                 master_key: Some(generate_test_master_key()),
                 enabled: true,
                 source: crate::settings::KeySource::Env,
+                generated: false,
             },
             builder: BuilderModeConfig {
                 enabled: false,
@@ -239,6 +244,7 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
+            missions: MissionsConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             oauth: OAuthConfig::default(),
@@ -280,12 +286,32 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with defaults, apply deployment profile, then TOML overlay.
+        // Resolution layers (lowest -> highest priority):
+        //   defaults -> deployment profile -> TOML -> admin DB -> per-user DB
         let mut settings = Settings::default();
         profile::apply_profile(&mut settings)?;
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
-        // Overlay DB settings on top so DB values win over TOML.
+        // Layer admin-scope defaults between TOML and per-user settings.
+        // This lets an admin set instance-wide defaults (e.g. temperature,
+        // model) that members inherit unless they override per-user.
+        // Skip if the user IS the admin scope to avoid a redundant merge.
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope
+            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
+            && !admin_map.is_empty()
+        {
+            // Defense-in-depth: even though the admin-scope map is written
+            // by an operator, never let admin-only LLM endpoint settings
+            // (private/loopback URLs) propagate down to non-operators.
+            if !is_operator {
+                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+            }
+            let admin_settings = Settings::from_db_map(&admin_map);
+            settings.merge_from(&admin_settings);
+        }
+
+        // Overlay per-user DB settings on top (highest priority).
         match store.get_all_settings(user_id).await {
             Ok(mut map) => {
                 if !is_operator {
@@ -392,10 +418,21 @@ impl Config {
         is_operator: bool,
     ) -> Result<(), ConfigError> {
         let mut settings = if let Some(store) = store {
-            // Profile as base, then TOML, then DB on top (DB wins).
+            // Resolution layers: profile -> TOML -> admin DB -> per-user DB.
             let mut s = Settings::default();
             profile::apply_profile(&mut s)?;
             Self::apply_toml_overlay(&mut s, toml_path)?;
+            let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+            if user_id != admin_scope
+                && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
+                && !admin_map.is_empty()
+            {
+                if !is_operator {
+                    crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+                }
+                let admin_settings = Settings::from_db_map(&admin_map);
+                s.merge_from(&admin_settings);
+            }
             if let Ok(mut map) = store.get_all_settings(user_id).await {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
@@ -455,6 +492,7 @@ impl Config {
             skills: SkillsConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve(settings)?,
+            missions: MissionsConfig::resolve(settings)?,
             workspace,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
@@ -605,6 +643,24 @@ pub fn inject_single_var(key: &str, value: &str) {
             poisoned
                 .into_inner()
                 .insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
         }
     }
 }
@@ -999,6 +1055,15 @@ mod tests {
         cfg
     }
 
+    /// Return a path to a temporary empty TOML file so that tests do not
+    /// accidentally load the user's real `~/.ironclaw/config.toml`.
+    fn empty_toml_path() -> tempfile::NamedTempFile {
+        tempfile::Builder::new()
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp toml")
+    }
+
     #[tokio::test]
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
@@ -1014,11 +1079,12 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.path()),
             None,
             false, // <- non-operator: admin-only keys must be stripped
         )
@@ -1050,18 +1116,93 @@ mod tests {
             )
             .await;
 
+        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         // is_operator=true: admin/operator may legitimately configure
         // builtin overrides, so the resolve path must keep them.
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "operator-user",
-            None,
+            Some(toml.path()),
             None,
             true,
         )
         .await
         .expect("resolve should succeed for operator");
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_strips_admin_scope_admin_only_keys_for_non_operator() {
+        // Regression: a non-operator member must not inherit admin-only LLM
+        // keys from the admin-defaults scope, even when the admin scope was
+        // populated by an actual operator. The poisoned model below would
+        // propagate to `cfg.llm.nearai.model` if the strip filter was not
+        // applied to the admin-scope merge inside `re_resolve_llm_with_secrets`.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-poison-model"
+                    }
+                }),
+            )
+            .await;
+
+        let toml = empty_toml_path();
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "member-user",
+            Some(toml.path()),
+            None,
+            false,
+        )
+        .await
+        .expect("resolve should succeed for non-operator member");
+
+        assert_ne!(
+            cfg.llm.nearai.model, "admin-poison-model",
+            "admin-scope llm_builtin_overrides must not propagate to a non-operator member"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_keeps_admin_scope_admin_only_keys_for_operator() {
+        // Mirror of the above: an operator may legitimately inherit admin
+        // defaults, including admin-only LLM keys, since they could set them
+        // themselves directly.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-set-model"
+                    }
+                }),
+            )
+            .await;
+
+        let toml = empty_toml_path();
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "another-operator",
+            Some(toml.path()),
+            None,
+            true,
+        )
+        .await
+        .expect("resolve should succeed for operator");
+
+        assert_eq!(
+            cfg.llm.nearai.model, "admin-set-model",
+            "operator must inherit admin-scope builtin override model"
+        );
     }
 
     #[tokio::test]
