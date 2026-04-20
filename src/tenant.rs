@@ -926,8 +926,9 @@ impl SystemScope {
 
 /// Database access for human admin operations.
 ///
-/// Constructable only with `UserRole::Admin`. Returns `None` if the identity
-/// is not an admin. Currently exposes user management only.
+/// Constructable when the identity has admin privileges (`UserRole::Admin`
+/// or `UserRole::Owner`, as determined by `UserId::is_admin()`). Returns
+/// `None` otherwise. Currently exposes user management only.
 #[derive(Clone)]
 pub struct AdminScope {
     inner: Arc<dyn Database>,

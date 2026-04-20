@@ -358,7 +358,10 @@ where
             .cloned()
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))?;
         if !identity.is_admin() {
-            return Err((StatusCode::FORBIDDEN, "Admin role required"));
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Admin privileges required (admin or owner)",
+            ));
         }
         Ok(AdminUser(identity))
     }

@@ -42,9 +42,12 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
 
     // Ensure owner user row exists before approval (FK on channel_identities.owner_id).
     // Best-effort: don't block CLI if the upsert fails (e.g. read-only replica).
+    // The CLI identity is the deployment owner — persist the "owner" role so
+    // a reload via `UserRole::from_db_role` stays `UserRole::Owner` rather
+    // than being silently downgraded to `Admin`.
     db.get_or_create_user(crate::db::UserRecord {
         id: config.owner_id.clone(),
-        role: "admin".to_string(),
+        role: crate::ownership::UserRole::Owner.as_db_role().to_string(),
         display_name: "Owner".to_string(),
         status: "active".to_string(),
         email: None,

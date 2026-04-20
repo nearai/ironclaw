@@ -104,11 +104,33 @@ pub enum UserIdError {
 /// Deliberately omits `From<String>` / `From<&str>` so raw-string callers
 /// must explicitly choose validation ([`UserId::new`]) or a documented
 /// opt-out ([`UserId::from_trusted`]).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// # Equality / hashing
+///
+/// `PartialEq`, `Eq`, and `Hash` are implemented manually over `id` only;
+/// `role` is metadata that travels with the identity. Two `UserId` values
+/// with the same `id` but different `role`s compare equal and hash
+/// identically so that `HashMap`/`HashSet` lookups and cache keys remain
+/// stable if the role is refreshed from the DB.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserId {
     id: String,
     #[serde(default = "UserRole::regular_default_if_missing")]
     role: UserRole,
+}
+
+impl PartialEq for UserId {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for UserId {}
+
+impl std::hash::Hash for UserId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 impl UserId {
@@ -259,12 +281,37 @@ mod tests {
     }
 
     #[test]
-    fn user_id_equality_distinguishes_role() {
-        // Two IDs with same string but different roles are NOT equal.
-        // That's intentional: role is part of the identity as carried.
+    fn user_id_equality_ignores_role() {
+        // Equality and hashing consider only the id. Role is metadata and
+        // must not affect HashMap/HashSet lookup — otherwise a cache keyed
+        // on UserId would miss when a role is refreshed from the DB.
         let regular = UserId::from_trusted("alice".into(), UserRole::Regular);
         let admin = UserId::from_trusted("alice".into(), UserRole::Admin);
-        assert_ne!(regular, admin);
+        assert_eq!(regular, admin);
+    }
+
+    #[test]
+    fn user_id_hashset_cross_role_membership() {
+        use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Same id, different roles → same hash.
+        let owner = UserId::new("alice", UserRole::Owner).unwrap();
+        let regular = UserId::new("alice", UserRole::Regular).unwrap();
+        assert_eq!(owner, regular);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        owner.hash(&mut h1);
+        regular.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+
+        // A HashSet containing the Owner variant also "contains" the
+        // Regular variant with the same id.
+        let mut set: HashSet<UserId> = HashSet::new();
+        set.insert(owner);
+        assert!(set.contains(&regular));
     }
 
     #[test]
