@@ -832,6 +832,11 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
+        // Propagate thread_id into metadata so tools (e.g. abound_send_wire)
+        // can reference it as notify_thread_id in outbound notifications.
+        job_ctx.metadata = serde_json::json!({
+            "notify_thread_id": context.thread_id.to_string(),
+        });
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.

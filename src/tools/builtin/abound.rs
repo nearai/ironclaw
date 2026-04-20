@@ -437,6 +437,13 @@ impl Tool for AboundSendWireTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
+            tracing::debug!(
+                user_id = %ctx.user_id,
+                thread_id = %thread_id,
+                ctx_metadata = %ctx.metadata,
+                "abound_send_wire: send action — resolving notify_thread_id"
+            );
+
             let notif_body = json!({
                 "message_id": format!("wire_approval_{ts}"),
                 "action_type": "notification",
@@ -449,9 +456,21 @@ impl Tool for AboundSendWireTool {
                 },
             });
             let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
+
+            tracing::debug!(
+                url = %notif_url,
+                payload = %notif_body,
+                "abound_send_wire: sending notification"
+            );
+
             let notif_result = abound_post(
                 &self.client, &*self.secrets, &ctx.user_id, &notif_url, &notif_body,
             ).await?;
+
+            tracing::debug!(
+                response = %notif_result,
+                "abound_send_wire: notification response"
+            );
 
             let status = notif_result.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
             if (200..300).contains(&status) {
