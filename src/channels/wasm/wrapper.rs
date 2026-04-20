@@ -62,13 +62,13 @@ use crate::tools::wasm::{
 };
 use ironclaw_safety::LeakDetector;
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
@@ -339,11 +339,31 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Parse headers from WASM and scan for leaks before credential injection.
+        // Host-injected tokens (e.g., xoxb- Slack bot token) would otherwise
+        // trigger the leak detector. The URL has template substitution applied
+        // (`injected_url`) but not yet host credential injection.
+        let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
+            &headers_json,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Malformed headers JSON from WASM; scanning empty headers");
+            std::collections::HashMap::new()
+        });
 
+        let mut logical_url = injected_url;
+
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        leak_detector
+            .scan_http_request(&logical_url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Now inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -363,22 +383,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let mut logical_url = injected_url;
-
-        // Leak scan runs on WASM-provided values BEFORE host credential injection.
-        // This prevents false positives where the host-injected Bearer token
-        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
-        // the real value, so scanning the pre-injection state is correct.
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&logical_url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
         if let Some(host) = extract_host_from_url(&logical_url) {
@@ -386,7 +390,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
 
         let (transport_url, allow_private_test_target) = {
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             {
                 let rewritten = rewrite_http_url_for_testing(&logical_url)
                     .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
@@ -401,7 +405,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 }
                 (url, is_rewritten)
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, debug_assertions)))]
             {
                 (logical_url.clone(), false)
             }
@@ -418,7 +422,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        // Test-only URL rewrites intentionally point at local fake servers.
+        // Test/dev URL rewrites intentionally point at local fake servers.
         if !allow_private_test_target {
             reject_private_ip(&transport_url)?;
         }
@@ -758,6 +762,10 @@ pub struct WasmChannel {
     /// Polling shutdown signal sender (keeps polling alive while held).
     poll_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
+    /// Join handle for the active polling task so restarts can wait for the
+    /// previous long-poll to exit before starting a replacement.
+    poll_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
+
     /// Websocket runtime shutdown signal sender.
     websocket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
@@ -783,6 +791,12 @@ pub struct WasmChannel {
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
 
+    /// Serializes callback execution for a single channel instance.
+    ///
+    /// Some channel state is read-modify-written through the shared workspace
+    /// store, so overlapping callbacks can otherwise lose updates.
+    callback_lock: Arc<tokio::sync::Mutex<()>>,
+
     /// Last-seen message metadata (contains chat_id for broadcast routing).
     /// Populated from incoming messages so `broadcast()` knows where to send.
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -794,7 +808,9 @@ pub struct WasmChannel {
     owner_scope_id: String,
 
     /// Channel-specific actor ID that maps to the instance owner on this channel.
-    owner_actor_id: Option<String>,
+    /// Wrapped in `Arc` so spawned polling/websocket tasks can read the current
+    /// value after pairing approval without capturing a stale clone.
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
 
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
@@ -827,6 +843,117 @@ async fn do_update_broadcast_metadata(
             );
         }
     }
+}
+
+fn durable_workspace_settings_key(channel_name: &str) -> String {
+    format!("channels.wasm_workspace.{}", channel_name)
+}
+
+async fn do_persist_durable_workspace(
+    channel_name: &str,
+    owner_scope_id: &str,
+    workspace_store: &ChannelWorkspaceStore,
+    durable_paths: &[String],
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    if durable_paths.is_empty() {
+        return;
+    }
+
+    let Some(store) = settings_store else {
+        return;
+    };
+
+    let snapshot = workspace_store.snapshot();
+    let durable_snapshot: HashMap<String, String> = durable_paths
+        .iter()
+        .filter_map(|path| {
+            snapshot
+                .get(path)
+                .cloned()
+                .map(|value| (path.clone(), value))
+        })
+        .collect();
+    let key = durable_workspace_settings_key(channel_name);
+
+    let result = if durable_snapshot.is_empty() {
+        store.delete_setting(owner_scope_id, &key).await.map(|_| ())
+    } else {
+        store
+            .set_setting(owner_scope_id, &key, &serde_json::json!(durable_snapshot))
+            .await
+    };
+
+    if let Err(e) = result {
+        tracing::warn!(
+            channel = %channel_name,
+            "Failed to persist durable workspace state: {}",
+            e
+        );
+    }
+}
+
+async fn do_load_durable_workspace(
+    channel_name: &str,
+    owner_scope_id: &str,
+    workspace_store: &ChannelWorkspaceStore,
+    durable_paths: &[String],
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    if durable_paths.is_empty() {
+        return;
+    }
+
+    let Some(store) = settings_store else {
+        return;
+    };
+
+    let key = durable_workspace_settings_key(channel_name);
+    let load_value = match store.get_setting(owner_scope_id, &key).await {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                channel = %channel_name,
+                "Failed to load durable workspace state: {}",
+                e
+            );
+            None
+        }
+    };
+
+    let load_value = if load_value.is_none() && owner_scope_id != "default" {
+        match store.get_setting("default", &key).await {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "Failed to load legacy durable workspace state: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        load_value
+    };
+
+    let Some(value) = load_value else {
+        return;
+    };
+
+    let Ok(snapshot) = serde_json::from_value::<HashMap<String, String>>(value) else {
+        tracing::warn!(
+            channel = %channel_name,
+            "Ignoring invalid durable workspace snapshot"
+        );
+        return;
+    };
+
+    let filtered: HashMap<String, String> = snapshot
+        .into_iter()
+        .filter(|(path, _)| durable_paths.iter().any(|durable| durable == path))
+        .collect();
+    workspace_store.restore_snapshot(&filtered);
 }
 
 fn resolve_message_scope(
@@ -952,6 +1079,7 @@ impl WasmChannel {
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
             shutdown_tx: RwLock::new(None),
             poll_shutdown_tx: RwLock::new(None),
+            poll_task: RwLock::new(None),
             websocket_shutdown_tx: RwLock::new(None),
             websocket_poll_lock: Arc::new(Mutex::new(())),
             endpoints: RwLock::new(Vec::new()),
@@ -959,10 +1087,11 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            callback_lock: Arc::new(tokio::sync::Mutex::new(())),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
-            owner_actor_id: None,
+            owner_actor_id: Arc::new(tokio::sync::RwLock::new(None)),
             secrets_store: None,
         }
     }
@@ -979,13 +1108,57 @@ impl WasmChannel {
 
     /// Bind this channel to the external actor that maps to the configured owner.
     pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
-        self.owner_actor_id = owner_actor_id;
+        self.owner_actor_id = Arc::new(tokio::sync::RwLock::new(owner_actor_id));
         self
     }
 
+    /// Ensure the message channel exists, creating it if needed.
+    ///
+    /// Returns `Some(stream)` if a new channel was created (caller must wire
+    /// up a forwarding task), or `None` if it already exists.
+    ///
+    /// This handles the case where `Channel::start()` failed at boot (e.g.,
+    /// missing credentials) — `message_tx` was never set, so polling tasks
+    /// can't deliver messages. `refresh_active_channel` calls this to repair
+    /// the channel after credentials become available.
+    pub async fn ensure_message_channel(&self) -> Option<MessageStream> {
+        let mut guard = self.message_tx.write().await;
+        let needs_create = guard.is_none() || guard.as_ref().is_some_and(|tx| tx.is_closed());
+        if needs_create {
+            let (tx, rx) = mpsc::channel(256);
+            *guard = Some(tx);
+            tracing::debug!(channel = %self.name, "Created new message_tx (channel was not started or receiver was dropped)");
+            Some(Box::pin(ReceiverStream::new(rx)))
+        } else {
+            None
+        }
+    }
+
+    /// Update the owner actor ID on a running channel after pairing approval.
+    pub async fn set_owner_actor_id(&self, owner_actor_id: Option<String>) {
+        *self.owner_actor_id.write().await = owner_actor_id;
+    }
+
+    pub(crate) async fn owner_actor_id(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
+    }
+
+    pub(crate) async fn config_json_snapshot(&self) -> String {
+        self.config_json.read().await.clone()
+    }
+
+    pub(crate) async fn restore_runtime_state(
+        &self,
+        owner_actor_id: Option<String>,
+        config_json: String,
+    ) {
+        *self.owner_actor_id.write().await = owner_actor_id;
+        *self.config_json.write().await = config_json;
+    }
+
     #[cfg(test)]
-    pub(crate) fn owner_actor_id_for_test(&self) -> Option<String> {
-        self.owner_actor_id.clone()
+    pub(crate) async fn owner_actor_id_for_test(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
     }
 
     #[cfg(test)]
@@ -1084,6 +1257,43 @@ impl WasmChannel {
         format!("channel_broadcast_metadata_{}", self.name)
     }
 
+    fn durable_workspace_paths(&self) -> &[String] {
+        &self.capabilities.durable_workspace_paths
+    }
+
+    async fn load_durable_workspace_snapshot(&self) {
+        do_load_durable_workspace(
+            &self.name,
+            &self.owner_scope_id,
+            &self.workspace_store,
+            self.durable_workspace_paths(),
+            self.settings_store.as_ref(),
+        )
+        .await;
+    }
+
+    async fn persist_durable_workspace_snapshot_if_needed(&self, committed_paths: &[String]) {
+        if committed_paths.is_empty() {
+            return;
+        }
+
+        if !committed_paths
+            .iter()
+            .any(|path| self.capabilities.is_durable_workspace_path(path))
+        {
+            return;
+        }
+
+        do_persist_durable_workspace(
+            &self.name,
+            &self.owner_scope_id,
+            &self.workspace_store,
+            self.durable_workspace_paths(),
+            self.settings_store.as_ref(),
+        )
+        .await;
+    }
+
     /// Update broadcast metadata in memory and persist if changed (best-effort).
     ///
     /// Compares with the current value to avoid redundant DB writes on every
@@ -1099,15 +1309,11 @@ impl WasmChannel {
         .await;
     }
 
-    /// Load broadcast metadata from settings store on startup.
+    /// Load broadcast metadata from the owner-scoped settings store on startup.
     ///
-    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
-    ///
-    /// If no metadata is found under `self.owner_scope_id`, a second lookup
-    /// under `"default"` is attempted for backward compatibility with instances
-    /// that stored broadcast metadata before the ownership model migration.
-    /// Remove this fallback once all deployments have run the
-    /// `migrate_default_owner` bootstrap step and restarted at least once.
+    /// Broadcast metadata is owner-scoped runtime state. If the configured
+    /// owner scope has no stored value, we intentionally leave the in-memory
+    /// state empty rather than falling back to `default`.
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
@@ -1122,29 +1328,11 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
-                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
-                    if self.owner_scope_id != "default" {
-                        match store
-                            .get_setting("default", &self.broadcast_metadata_key())
-                            .await
-                        {
-                            Ok(Some(serde_json::Value::String(meta))) => {
-                                *self.last_broadcast_metadata.write().await = Some(meta);
-                                tracing::debug!(
-                                    channel = %self.name,
-                                    "Restored legacy owner broadcast metadata from default scope"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    channel = %self.name,
-                                    "Failed to load legacy broadcast metadata: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
+                    tracing::debug!(
+                        channel = %self.name,
+                        owner_scope_id = %self.owner_scope_id,
+                        "No owner-scoped broadcast metadata stored"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1211,6 +1399,7 @@ impl WasmChannel {
         &self,
         config: WebsocketRuntimeConfig,
         shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -1223,10 +1412,10 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let callback_lock = self.callback_lock.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
 
@@ -1366,6 +1555,7 @@ impl WasmChannel {
                                                             credentials: Arc::clone(&credentials),
                                                             pairing_store: pairing_store.clone(),
                                                             workspace_store: workspace_store.clone(),
+                                                            callback_lock: Arc::clone(&callback_lock),
                                                             message_tx: message_tx.clone(),
                                                             rate_limiter: Arc::clone(&rate_limiter),
                                                             last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
@@ -1547,6 +1737,19 @@ impl WasmChannel {
         )
     }
 
+    fn commit_callback_workspace_writes(
+        host_state: &mut ChannelHostState,
+        workspace_store: &ChannelWorkspaceStore,
+    ) -> Vec<String> {
+        let pending_writes = host_state.take_pending_writes();
+        let committed_paths = pending_writes
+            .iter()
+            .map(|write| write.path.clone())
+            .collect();
+        workspace_store.commit_writes(&pending_writes);
+        committed_paths
+    }
+
     fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
         for entry in host_state.take_logs() {
             match entry.level {
@@ -1566,6 +1769,9 @@ impl WasmChannel {
     async fn execute_on_start_with_state(
         &self,
     ) -> Result<(Result<ChannelConfig, WasmChannelError>, ChannelHostState), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+        self.load_durable_workspace_snapshot().await;
+
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
@@ -1582,48 +1788,54 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
-        tokio::time::timeout(timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                let mut store = Self::create_store(
-                    &runtime,
-                    &prepared,
-                    &capabilities,
-                    credentials,
-                    host_credentials,
-                    pairing_store,
-                )?;
-                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+        let (config_result, host_state, committed_paths) =
+            tokio::time::timeout(timeout, async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut store = Self::create_store(
+                        &runtime,
+                        &prepared,
+                        &capabilities,
+                        credentials,
+                        host_credentials,
+                        pairing_store,
+                    )?;
+                    let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
-                let channel_iface = instance.near_agent_channel();
-                let config_result = channel_iface
-                    .call_on_start(&mut store, &config_json)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
-                    .and_then(|wasm_result| match wasm_result {
-                        Ok(wit_config) => Ok(convert_channel_config(wit_config)),
-                        Err(err_msg) => Err(WasmChannelError::CallbackFailed {
-                            name: prepared.name.clone(),
-                            reason: err_msg,
-                        }),
-                    });
+                    let channel_iface = instance.near_agent_channel();
+                    let config_result = channel_iface
+                        .call_on_start(&mut store, &config_json)
+                        .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
+                        .and_then(|wasm_result| match wasm_result {
+                            Ok(wit_config) => Ok(convert_channel_config(wit_config)),
+                            Err(err_msg) => Err(WasmChannelError::CallbackFailed {
+                                name: prepared.name.clone(),
+                                reason: err_msg,
+                            }),
+                        });
 
-                let mut host_state =
-                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                    let mut host_state =
+                        Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                    let committed_paths =
+                        Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok::<_, WasmChannelError>((config_result, host_state))
+                    Ok::<_, WasmChannelError>((config_result, host_state, committed_paths))
+                })
+                .await
+                .map_err(|e| WasmChannelError::ExecutionPanicked {
+                    name: channel_name.clone(),
+                    reason: e.to_string(),
+                })?
             })
             .await
-            .map_err(|e| WasmChannelError::ExecutionPanicked {
-                name: channel_name.clone(),
-                reason: e.to_string(),
-            })?
-        })
-        .await
-        .map_err(|_| WasmChannelError::Timeout {
-            name: self.name.clone(),
-            callback: "on_start".to_string(),
-        })?
+            .map_err(|_| WasmChannelError::Timeout {
+                name: self.name.clone(),
+                callback: "on_start".to_string(),
+            })??;
+
+        self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+            .await;
+
+        Ok((config_result, host_state))
     }
 
     /// Execute the on_start callback.
@@ -1673,6 +1885,8 @@ impl WasmChannel {
         body: &[u8],
         secret_validated: bool,
     ) -> Result<HttpResponse, WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             method = method,
@@ -1768,10 +1982,10 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok((response, host_state))
+                Ok((response, host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1783,7 +1997,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok((response, mut host_state))) => {
+            Ok(Ok((response, mut host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
@@ -1807,6 +2023,8 @@ impl WasmChannel {
     ///
     /// Called periodically if polling is configured.
     pub async fn call_on_poll(&self) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         // If no WASM bytes, do nothing (for testing)
         if self.prepared.component().is_none() {
             tracing::debug!(
@@ -1854,10 +2072,10 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1869,7 +2087,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), mut host_state))) => {
+            Ok(Ok(((), mut host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 let _ = drain_guest_logs(&channel_name, "on_poll", &mut host_state);
 
                 // Process emitted messages
@@ -1901,6 +2121,8 @@ impl WasmChannel {
         metadata_json: &str,
         attachments: &[String],
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             message_id = %message_id,
@@ -2014,10 +2236,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_respond WASM execution completed successfully");
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| {
@@ -2032,7 +2254,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), _host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -2058,6 +2282,8 @@ impl WasmChannel {
         thread_id: Option<&str>,
         attachments: &[String],
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         tracing::info!(
             channel = %self.name,
             user_id = %user_id,
@@ -2142,10 +2368,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_broadcast WASM execution completed successfully");
-                Ok(((), host_state))
+                Ok(((), host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2157,7 +2383,9 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), _host_state, committed_paths))) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %channel_name,
                     "WASM channel on_broadcast completed"
@@ -2180,6 +2408,8 @@ impl WasmChannel {
         status: &StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), WasmChannelError> {
+        let _callback_guard = self.callback_lock.lock().await;
+
         // If no WASM bytes, do nothing (for testing)
         if self.prepared.component().is_none() {
             return Ok(());
@@ -2223,10 +2453,10 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths =
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
-                Ok(())
+                Ok(committed_paths)
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2237,7 +2467,9 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(())) => {
+            Ok(Ok(committed_paths)) => {
+                self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
+                    .await;
                 tracing::debug!(
                     channel = %self.name,
                     "WASM channel on_status completed"
@@ -2259,26 +2491,34 @@ impl WasmChannel {
     #[allow(clippy::too_many_arguments)]
     async fn execute_status(
         channel_name: &str,
+        owner_scope_id: &str,
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
+        callback_lock: &Arc<tokio::sync::Mutex<()>>,
+        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+        timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
         if prepared.component().is_none() {
             return Ok(());
         }
 
+        let _callback_guard = callback_lock.lock().await;
+
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
         let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
+        let durable_workspace_paths = capabilities.durable_workspace_paths.clone();
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let owner_scope_id_owned = owner_scope_id.to_string();
         let workspace_store = Arc::clone(workspace_store);
+        let workspace_store_for_callback = Arc::clone(&workspace_store);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -2299,10 +2539,12 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths = Self::commit_callback_workspace_writes(
+                    &mut host_state,
+                    &workspace_store_for_callback,
+                );
 
-                Ok(())
+                Ok(committed_paths)
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2313,7 +2555,23 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(committed_paths)) => {
+                if committed_paths.iter().any(|path| {
+                    durable_workspace_paths
+                        .iter()
+                        .any(|durable| durable == path)
+                }) {
+                    do_persist_durable_workspace(
+                        channel_name,
+                        &owner_scope_id_owned,
+                        &workspace_store,
+                        &durable_workspace_paths,
+                        settings_store,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(WasmChannelError::Timeout {
                 name: channel_name.to_string(),
@@ -2370,10 +2628,10 @@ impl WasmChannel {
 
                 // Spawn background repeater
                 let channel_name = self.name.clone();
+                let owner_scope_id = self.owner_scope_id.clone();
                 let runtime = Arc::clone(&self.runtime);
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
-                let workspace_store = self.workspace_store.clone();
                 let credentials = self.credentials.clone();
                 // Pre-resolve host credentials once for the lifetime of the repeater.
                 // Channels tokens rarely change, so a snapshot per-repeater is correct.
@@ -2384,6 +2642,9 @@ impl WasmChannel {
                 )
                 .await;
                 let pairing_store = self.pairing_store.clone();
+                let workspace_store = self.workspace_store.clone();
+                let callback_lock = self.callback_lock.clone();
+                let settings_store = self.settings_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let Some(wit_update) = status_to_wit(&status, metadata) else {
                     return Ok(());
@@ -2402,14 +2663,17 @@ impl WasmChannel {
 
                         if let Err(e) = Self::execute_status(
                             &channel_name,
+                            &owner_scope_id,
                             &runtime,
                             &prepared,
                             &capabilities,
                             &credentials,
                             hc,
                             pairing_store.clone(),
-                            callback_timeout,
                             &workspace_store,
+                            &callback_lock,
+                            settings_store.as_ref(),
+                            callback_timeout,
                             wit_update_clone,
                         )
                         .await
@@ -2537,10 +2801,13 @@ impl WasmChannel {
                 }
             }
 
+            // Clone the owner_actor_id out of the lock to avoid holding
+            // the read guard across the async resolve call below.
+            let owner_actor_id = self.owner_actor_id.read().await.clone();
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
-                self.owner_actor_id.as_deref(),
+                owner_actor_id.as_deref(),
                 &emitted.user_id,
                 self.pairing_store.as_ref(),
             )
@@ -2620,8 +2887,9 @@ impl WasmChannel {
     pub async fn ensure_polling(&self, config: &ChannelConfig) {
         // Always stop any existing polling task first — if the channel switched
         // from polling to webhook (or polling was disabled), the old task must
-        // not keep running.
-        let _ = self.poll_shutdown_tx.write().await.take();
+        // not keep running. Wait for the old task to finish so two pollers
+        // cannot race on the same workspace-backed polling offset.
+        self.stop_polling().await;
 
         if let Some(poll_config) = &config.poll
             && poll_config.enabled
@@ -2640,7 +2908,12 @@ impl WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let handle = self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
+            *self.poll_task.write().await = Some(handle);
             tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
         }
     }
@@ -2650,7 +2923,12 @@ impl WasmChannel {
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
     /// needed for polling to a spawned task. Each poll tick creates a fresh WASM
     /// instance (matching our "fresh instance per callback" pattern).
-    fn start_polling(&self, interval: Duration, shutdown_rx: oneshot::Receiver<()>) {
+    fn start_polling(
+        &self,
+        interval: Duration,
+        shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    ) -> tokio::task::JoinHandle<()> {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
@@ -2662,11 +2940,11 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let callback_lock = self.callback_lock.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -2691,25 +2969,31 @@ impl WasmChannel {
                         // Execute on_poll with fresh WASM instance
                         let result = Self::execute_poll(
                             &channel_name,
+                            &owner_scope_id,
                             &runtime,
                             &prepared,
                             &capabilities,
                             &credentials,
                             host_credentials,
                             pairing_store.clone(),
-                            callback_timeout,
                             &workspace_store,
+                            &callback_lock,
+                            settings_store.as_ref(),
+                            callback_timeout,
                         ).await;
 
                         match result {
                             Ok(emitted_messages) => {
+                                // Read the current owner on each tick so
+                                // post-approval changes are visible immediately.
+                                let current_owner = owner_actor_id.read().await.clone();
                                 // Process any emitted messages
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
                                             channel_name: &channel_name,
                                             owner_scope_id: &owner_scope_id,
-                                            owner_actor_id: owner_actor_id.as_deref(),
+                                            owner_actor_id: current_owner.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
                                             rate_limiter: &rate_limiter,
@@ -2743,7 +3027,21 @@ impl WasmChannel {
                     }
                 }
             }
-        });
+        })
+    }
+
+    async fn stop_polling(&self) {
+        let shutdown_tx = self.poll_shutdown_tx.write().await.take();
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        let poll_task = self.poll_task.write().await.take();
+        if let Some(handle) = poll_task
+            && let Err(error) = handle.await
+        {
+            tracing::debug!(channel = %self.name, error = %error, "Polling task join failed");
+        }
     }
 
     /// Execute a single poll callback with a fresh WASM instance.
@@ -2754,14 +3052,17 @@ impl WasmChannel {
     #[allow(clippy::too_many_arguments)]
     async fn execute_poll(
         channel_name: &str,
+        owner_scope_id: &str,
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
+        callback_lock: &Arc<tokio::sync::Mutex<()>>,
+        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+        timeout: Duration,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
         if prepared.component().is_none() {
@@ -2772,12 +3073,17 @@ impl WasmChannel {
             return Ok(Vec::new());
         }
 
+        let _callback_guard = callback_lock.lock().await;
+
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
         let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
+        let durable_workspace_paths = capabilities.durable_workspace_paths.clone();
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let owner_scope_id_owned = owner_scope_id.to_string();
         let workspace_store = Arc::clone(workspace_store);
+        let workspace_store_for_callback = Arc::clone(&workspace_store);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -2802,10 +3108,12 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                let committed_paths = Self::commit_callback_workspace_writes(
+                    &mut host_state,
+                    &workspace_store_for_callback,
+                );
 
-                Ok(host_state)
+                Ok((host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2816,7 +3124,21 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(mut host_state)) => {
+            Ok(Ok((mut host_state, committed_paths))) => {
+                if committed_paths.iter().any(|path| {
+                    durable_workspace_paths
+                        .iter()
+                        .any(|durable| durable == path)
+                }) {
+                    do_persist_durable_workspace(
+                        channel_name,
+                        &owner_scope_id_owned,
+                        &workspace_store,
+                        &durable_workspace_paths,
+                        settings_store,
+                    )
+                    .await;
+                }
                 let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
@@ -2990,15 +3312,11 @@ impl Channel for WasmChannel {
         // Restore broadcast metadata from settings (survives restarts)
         self.load_broadcast_metadata().await;
 
-        // Create message channel
-        let (tx, rx) = mpsc::channel(256);
-        *self.message_tx.write().await = Some(tx);
-
-        // Create shutdown channel
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
-
-        // Call on_start to get configuration
+        // Call on_start BEFORE creating message_tx so a failed start
+        // doesn't leave an orphaned sender with a dropped receiver.
+        // (If on_start fails, the rx would be dropped on error return
+        // but message_tx would keep the tx alive — causing is_closed=true
+        // on any subsequent polling attempt.)
         let config = self
             .call_on_start()
             .await
@@ -3006,6 +3324,14 @@ impl Channel for WasmChannel {
                 name: self.name.clone(),
                 reason: e.to_string(),
             })?;
+
+        // Create message channel — only after on_start succeeds
+        let (tx, rx) = mpsc::channel(256);
+        *self.message_tx.write().await = Some(tx);
+
+        // Create shutdown channel
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Store the config
         *self.channel_config.write().await = Some(config.clone());
@@ -3048,7 +3374,12 @@ impl Channel for WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let handle = self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
+            *self.poll_task.write().await = Some(handle);
         }
 
         if let Some(websocket_config) =
@@ -3057,7 +3388,11 @@ impl Channel for WasmChannel {
         {
             let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
             *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            self.start_websocket_runtime(websocket_config, websocket_shutdown_rx);
+            self.start_websocket_runtime(
+                websocket_config,
+                websocket_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
         }
 
         tracing::info!(
@@ -3090,11 +3425,12 @@ impl Channel for WasmChannel {
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
         // Store for owner-target routing (chat_id etc.) only when the configured
         // owner is the actor in this conversation.
+        let owner_actor_id = self.owner_actor_id.read().await.clone();
         if should_update_owner_broadcast_metadata(
             &msg.user_id,
             &msg.sender_id,
             &self.owner_scope_id,
-            self.owner_actor_id.as_deref(),
+            owner_actor_id.as_deref(),
         ) {
             self.update_broadcast_metadata(&metadata_json).await;
         }
@@ -3178,8 +3514,7 @@ impl Channel for WasmChannel {
             let _ = tx.send(());
         }
 
-        // Stop polling by dropping the sender (receiver will complete)
-        let _ = self.poll_shutdown_tx.write().await.take();
+        self.stop_polling().await;
 
         // Stop websocket runtime by dropping the sender (receiver will complete)
         let _ = self.websocket_shutdown_tx.write().await.take();
@@ -3464,12 +3799,13 @@ struct WebsocketPollContext {
     credentials: Arc<RwLock<HashMap<String, String>>>,
     pairing_store: Arc<PairingStore>,
     workspace_store: Arc<ChannelWorkspaceStore>,
+    callback_lock: Arc<tokio::sync::Mutex<()>>,
     message_tx: Arc<RwLock<Option<mpsc::Sender<IncomingMessage>>>>,
     rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
-    owner_actor_id: Option<String>,
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
@@ -3510,24 +3846,30 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
 
             match WasmChannel::execute_poll(
                 &ctx.channel_name,
+                &ctx.owner_scope_id,
                 &ctx.runtime,
                 &ctx.prepared,
                 &ctx.capabilities,
                 &ctx.credentials,
                 host_credentials,
                 ctx.pairing_store.clone(),
-                ctx.callback_timeout,
                 &ctx.workspace_store,
+                &ctx.callback_lock,
+                ctx.settings_store.as_ref(),
+                ctx.callback_timeout,
             )
             .await
             {
                 Ok(emitted_messages) => {
+                    // Read the current owner so post-approval changes
+                    // are visible immediately.
+                    let current_owner = ctx.owner_actor_id.read().await.clone();
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
                                 channel_name: &ctx.channel_name,
                                 owner_scope_id: &ctx.owner_scope_id,
-                                owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                owner_actor_id: current_owner.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
                                 rate_limiter: &ctx.rate_limiter,
@@ -3969,6 +4311,7 @@ fn status_to_wit(
             instructions,
             auth_url,
             setup_url,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthRequired,
             message: {
@@ -4131,7 +4474,9 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 ///
 /// The replacement preserves the original path and query string so tests can
 /// point production hosts at local fakes without adding channel-specific code.
-#[cfg(test)]
+/// Replacement bases must be loopback URLs because credentials are injected
+/// before transport rewrite.
+#[cfg(any(test, debug_assertions))]
 fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4152,7 +4497,7 @@ fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     Some(rewritten)
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4166,6 +4511,15 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
                 let host = host.trim().to_lowercase();
                 let base = base.trim().trim_end_matches('/').to_string();
                 if host.is_empty() || base.is_empty() {
+                    return None;
+                }
+                if !is_loopback_test_rewrite_base(&base) {
+                    tracing::warn!(
+                        env_var = TEST_HTTP_REWRITE_MAP_ENV,
+                        %host,
+                        %base,
+                        "Ignoring non-loopback test HTTP rewrite target"
+                    );
                     return None;
                 }
                 Some((host, base))
@@ -4182,12 +4536,40 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
+fn is_loopback_test_rewrite_base(base: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(any(test, debug_assertions))]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
-    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
-        .ok()
+    let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .filter(|base| {
+            if is_loopback_test_rewrite_base(base) {
+                true
+            } else {
+                tracing::warn!(
+                    env_var = TELEGRAM_TEST_API_BASE_ENV,
+                    %base,
+                    "Ignoring non-loopback Telegram test API rewrite target"
+                );
+                false
+            }
+        })?;
 
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4374,6 +4756,7 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -4438,6 +4821,13 @@ mod tests {
     }
 
     fn create_test_channel_with_owner_scope(owner_scope_id: &str) -> WasmChannel {
+        create_test_channel_with_owner_scope_and_settings(owner_scope_id, None)
+    }
+
+    fn create_test_channel_with_owner_scope_and_settings(
+        owner_scope_id: &str,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
+    ) -> WasmChannel {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
@@ -4457,8 +4847,147 @@ mod tests {
             owner_scope_id,
             "{}".to_string(),
             Arc::new(PairingStore::new_noop()),
-            None,
+            settings_store,
         )
+    }
+
+    #[cfg(feature = "libsql")]
+    fn create_test_slack_channel_with_settings_store(
+        settings_store: Arc<dyn crate::db::SettingsStore>,
+        owner_scope_id: &str,
+    ) -> WasmChannel {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "slack".to_string(),
+            description: "Slack test channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+        let capabilities = ChannelCapabilities::for_channel("slack")
+            .with_path("/webhook/slack")
+            .with_durable_workspace_paths(vec!["state/active_threads".to_string()]);
+
+        WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            owner_scope_id,
+            "{}".to_string(),
+            Arc::new(PairingStore::new_noop()),
+            Some(settings_store),
+        )
+    }
+
+    struct RecordingSettingsStore {
+        values: tokio::sync::RwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+        lookups: tokio::sync::RwLock<Vec<(String, String)>>,
+    }
+
+    impl RecordingSettingsStore {
+        fn new() -> Self {
+            Self {
+                values: tokio::sync::RwLock::new(HashMap::new()),
+                lookups: tokio::sync::RwLock::new(Vec::new()),
+            }
+        }
+
+        async fn seed(&self, user_id: &str, key: &str, value: serde_json::Value) {
+            self.values
+                .write()
+                .await
+                .entry(user_id.to_string())
+                .or_default()
+                .insert(key.to_string(), value);
+        }
+
+        async fn lookups(&self) -> Vec<(String, String)> {
+            self.lookups.read().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for RecordingSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            self.lookups
+                .write()
+                .await
+                .push((user_id.to_string(), key.to_string()));
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|row| row.get(key).cloned()))
+        }
+
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::get_setting_full not implemented".into(),
+            ))
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.seed(user_id, key, value.clone()).await;
+            Ok(())
+        }
+
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            let mut rows = self.values.write().await;
+            Ok(rows
+                .get_mut(user_id)
+                .map(|row| row.remove(key).is_some())
+                .unwrap_or(false))
+        }
+
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::list_settings not implemented".into(),
+            ))
+        }
+
+        async fn get_all_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::get_all_settings not implemented".into(),
+            ))
+        }
+
+        async fn set_all_settings(
+            &self,
+            _user_id: &str,
+            _settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::set_all_settings not implemented".into(),
+            ))
+        }
+
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self.values.read().await.contains_key(user_id))
+        }
     }
 
     #[test]
@@ -4834,22 +5363,125 @@ mod tests {
         let timeout = std::time::Duration::from_secs(5);
 
         let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
+        let callback_lock = Arc::new(tokio::sync::Mutex::new(()));
 
         let result = WasmChannel::execute_poll(
             "poll-test",
+            "default",
             &runtime,
             &prepared,
             &capabilities,
             &credentials,
             Vec::new(), // no host credentials in test
             Arc::new(PairingStore::new_noop()),
-            timeout,
             &workspace_store,
+            &callback_lock,
+            None,
+            timeout,
         )
         .await;
 
         assert!(result.is_ok()); // safety: test-only assertion
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_on_respond_workspace_write_commit_survives_later_callback() {
+        use crate::channels::wasm::host::{ChannelHostState, ChannelWorkspaceStore};
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+
+        let workspace_store = ChannelWorkspaceStore::new();
+        let mut respond_state =
+            ChannelHostState::new("slack", ChannelCapabilities::for_channel("slack"));
+        respond_state
+            .workspace_write(
+                "state/active_threads",
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string(),
+            )
+            .expect("on_respond write should be accepted");
+
+        WasmChannel::commit_callback_workspace_writes(&mut respond_state, &workspace_store);
+        assert_eq!(respond_state.pending_writes_count(), 0);
+
+        let workspace_store = Arc::new(workspace_store);
+        let mut later_caps = ChannelCapabilities::for_channel("slack");
+        later_caps.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&workspace_store) as Arc<dyn WorkspaceReader>),
+        });
+        let later_state = ChannelHostState::new("slack", later_caps);
+
+        assert_eq!(
+            later_state
+                .workspace_read("state/active_threads")
+                .expect("later callback read should not fail"),
+            Some(
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_inject_workspace_reader_supports_broadcast_callback_state_reads() {
+        use crate::channels::wasm::host::{
+            ChannelHostState, ChannelWorkspaceStore, PendingWorkspaceWrite,
+        };
+
+        let workspace_store = Arc::new(ChannelWorkspaceStore::new());
+        workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/feishu/state/api_base".to_string(),
+            content: "https://open.feishu.cn".to_string(),
+        }]);
+
+        let callback_caps = WasmChannel::inject_workspace_reader(
+            &ChannelCapabilities::for_channel("feishu"),
+            &workspace_store,
+        );
+        let callback_state = ChannelHostState::new("feishu", callback_caps);
+
+        assert_eq!(
+            callback_state
+                .workspace_read("state/api_base")
+                .expect("callback read should not fail"),
+            Some("https://open.feishu.cn".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_durable_workspace_paths_restore_across_channel_restart() {
+        use crate::channels::wasm::host::PendingWorkspaceWrite;
+        use crate::testing::test_db;
+
+        let (db, _temp_dir) = test_db().await;
+        let settings_store = Arc::clone(&db) as Arc<dyn crate::db::SettingsStore>;
+        let channel = create_test_slack_channel_with_settings_store(
+            Arc::clone(&settings_store),
+            "owner-scope",
+        );
+
+        channel.workspace_store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/slack/state/active_threads".to_string(),
+            content: r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001","last_seen_ms":1710000000000}]"#.to_string(),
+        }]);
+        channel
+            .persist_durable_workspace_snapshot_if_needed(&[
+                "channels/slack/state/active_threads".to_string()
+            ])
+            .await;
+
+        let restored = create_test_slack_channel_with_settings_store(settings_store, "owner-scope");
+        restored.load_durable_workspace_snapshot().await;
+
+        assert_eq!(
+            crate::tools::wasm::WorkspaceReader::read(
+                &*restored.workspace_store,
+                "channels/slack/state/active_threads",
+            ),
+            Some(
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001","last_seen_ms":1710000000000}]"#.to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -5022,6 +5654,54 @@ mod tests {
         // Shutdown should clean up properly
         channel.shutdown().await.expect("Shutdown should succeed");
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_polling_replaces_task_without_leaking_previous_poller() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "poll-channel".to_string(),
+            description: "Polling test channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+
+        let capabilities = ChannelCapabilities::for_channel("poll-channel")
+            .with_path("/webhook/poll")
+            .with_polling(1000);
+
+        let channel = WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "default",
+            "{}".to_string(),
+            Arc::new(PairingStore::new_noop()),
+            None,
+        );
+
+        let poll_config = crate::channels::wasm::schema::ChannelConfig {
+            display_name: "poll-channel".to_string(),
+            http_endpoints: Vec::new(),
+            poll: Some(crate::channels::wasm::schema::PollConfigSchema {
+                enabled: true,
+                interval_ms: 1000,
+            }),
+        };
+
+        channel.ensure_polling(&poll_config).await;
+        assert!(channel.poll_shutdown_tx.read().await.is_some());
+        assert!(channel.poll_task.read().await.is_some());
+
+        channel.ensure_polling(&poll_config).await;
+        assert!(channel.poll_shutdown_tx.read().await.is_some());
+        assert!(channel.poll_task.read().await.is_some());
+
+        channel.stop_polling().await;
+        assert!(channel.poll_shutdown_tx.read().await.is_none());
+        assert!(channel.poll_task.read().await.is_none());
     }
 
     #[tokio::test]
@@ -5454,10 +6134,11 @@ mod tests {
         let metadata = serde_json::json!({"chat_id": 42});
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthRequired {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
+                request_id: None,
             },
             &metadata,
         )
@@ -5505,6 +6186,7 @@ mod tests {
                 error: None,
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5529,6 +6211,7 @@ mod tests {
                 error: Some("connection refused".to_string()),
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5616,7 +6299,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: true,
                 message: "Token saved".to_string(),
             },
@@ -5639,7 +6322,7 @@ mod tests {
         let metadata = serde_json::json!(null);
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::AuthCompleted {
-                extension_name: "weather".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("weather").unwrap(),
                 success: false,
                 message: "Invalid token".to_string(),
             },
@@ -6063,6 +6746,15 @@ mod tests {
                 .expect("Telegram URL should rewrite");
         assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
 
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "https://example.com");
+        }
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage");
+        assert!(rewritten.is_none());
+
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             if let Some(value) = original {
@@ -6251,6 +6943,40 @@ mod tests {
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
         assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#)); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_start_does_not_fallback_to_default_broadcast_metadata_scope() {
+        let store = Arc::new(RecordingSettingsStore::new());
+        store
+            .seed(
+                "default",
+                "channel_broadcast_metadata_test",
+                serde_json::json!(r#"{"chat_id":12345}"#),
+            )
+            .await;
+
+        let channel = create_test_channel_with_owner_scope_and_settings(
+            "owner-scope",
+            Some(store.clone() as Arc<dyn crate::db::SettingsStore>),
+        );
+
+        let _stream = channel.start().await.expect("Channel should start");
+
+        assert!(
+            channel.last_broadcast_metadata.read().await.is_none(),
+            "owner-scoped metadata should stay empty when only default scope has a value"
+        );
+        assert_eq!(
+            store.lookups().await,
+            vec![(
+                "owner-scope".to_string(),
+                "channel_broadcast_metadata_test".to_string()
+            )],
+            "load_broadcast_metadata must not probe default scope"
+        );
+
+        channel.shutdown().await.expect("Shutdown should succeed");
     }
 
     #[tokio::test]
@@ -6529,18 +7255,87 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_http_url_for_testing_uses_host_map() {
-        use std::sync::{Mutex, OnceLock};
+    fn test_http_request_scans_headers_before_placeholder_substitution() {
+        use super::ChannelStoreData;
+        use std::collections::HashMap;
 
-        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
 
-        // SAFETY: guarded by ENV_MUTEX — no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"http://127.0.0.1:1"}"#,
+            );
+        }
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability::new(vec![EndpointPattern::host(
+                    "slack.com",
+                )])),
+                ..Default::default()
+            });
+
+        // Placeholder whose substituted value matches the openai_api_key leak
+        // pattern (`sk-(?:proj-)?[a-zA-Z0-9]{20,}`). If the scan ran AFTER
+        // `inject_credentials` replaced `{FAKE_TOKEN}` in the Authorization
+        // header, the Bearer value would trip the detector.
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "FAKE_TOKEN".to_string(),
+            "sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+        );
+
+        let mut store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            capabilities,
+            credentials,
+            Vec::new(),
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let result = super::near::agent::channel_host::Host::http_request(
+            &mut store,
+            "BREW".to_string(),
+            "https://slack.com/api/chat.postMessage".to_string(),
+            r#"{"Authorization":"Bearer {FAKE_TOKEN}"}"#.to_string(),
+            None,
+            Some(1_000),
+        );
+
+        // Reaching the unsupported-method branch proves the leak scan accepted
+        // the raw `Bearer {FAKE_TOKEN}` header value. A regression to
+        // post-injection scanning would surface as "Potential secret leak
+        // blocked" before method dispatch.
+        let error = result.expect_err("unsupported method should fail after leak scan");
+        assert!(
+            !error.contains("Potential secret leak blocked"),
+            "placeholder-substituted credential must not trigger request leak scan: {error}"
+        );
+        assert!(
+            error.contains("Unsupported HTTP method: BREW"),
+            "expected unsupported method after leak scan, got: {error}"
+        );
+
+        // SAFETY: Under ENV_MUTEX, restore original state.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var(TEST_HTTP_REWRITE_MAP_ENV, val);
+            } else {
+                std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_http_url_for_testing_uses_host_map() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var(
                 TEST_HTTP_REWRITE_MAP_ENV,
@@ -6566,6 +7361,17 @@ mod tests {
         let result = rewrite_http_url_for_testing("https://api.telegram.org/bot123/getMe");
         assert!(result.is_none());
 
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"https://example.com"}"#,
+            );
+        }
+        let result = rewrite_http_url_for_testing("https://slack.com/api/chat.postMessage");
+        assert!(result.is_none());
+
         // SAFETY: guarded by ENV_MUTEX — restore original state.
         unsafe {
             if let Some(ref val) = original {
@@ -6574,5 +7380,26 @@ mod tests {
                 std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
             }
         }
+    }
+
+    #[test]
+    fn resolve_message_scope_recognizes_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "12345");
+        assert_eq!(user_id, "default");
+        assert!(is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_non_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "99999");
+        assert_eq!(user_id, "99999");
+        assert!(!is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_no_owner_configured() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", None, "12345");
+        assert_eq!(user_id, "12345");
+        assert!(!is_owner);
     }
 }

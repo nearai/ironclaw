@@ -75,8 +75,14 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v1 (default agentic loop).
+    ///
+    /// Marked `#[ignore]` by default because the `IRONCLAW_LIVE_TEST=1`
+    /// recording path needs real LLM credentials. The `replay` feature flag
+    /// promotes this test out of `--ignored` so CI can run the committed
+    /// fixture without extra `-- --ignored` gymnastics; see
+    /// `.github/workflows/replay-gate.yml`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
@@ -96,7 +102,7 @@ mod live_tests {
     /// mentions zizmor in its response (even if it can't execute shell).
     /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)
@@ -236,7 +242,7 @@ mod live_tests {
 
         // Live-mode only. In replay mode the harness builds a stub rig
         // (no recorded fixture, no LLM provider) and we exit early.
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveAuthGate] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression covered by \
@@ -376,7 +382,7 @@ mod live_tests {
             .collect();
         let drive_gate = auth_required_events
             .iter()
-            .find(|(ext, _, _)| ext.contains("google") || ext.contains("drive"));
+            .find(|(ext, _, _)| ext.as_str().contains("google") || ext.as_str().contains("drive"));
         assert!(
             drive_gate.is_some(),
             "Phase A: expected an AuthRequired event for the Google Drive extension, \
@@ -573,7 +579,7 @@ mod live_tests {
             (user_input.to_string(), phase_a_text.clone()),
             (phase_b_user_label, phase_b_text.clone()),
         ];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 
     /// End-to-end verification of the *transparent* OAuth refresh path.
@@ -620,7 +626,7 @@ mod live_tests {
             .build()
             .await;
 
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveRefresh] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression for the OAuth refresh layer lives in \
@@ -704,7 +710,8 @@ mod live_tests {
             matches!(
                 s,
                 StatusUpdate::AuthRequired { extension_name, .. }
-                    if extension_name.contains("google") || extension_name.contains("drive")
+                    if extension_name.as_str().contains("google")
+                        || extension_name.as_str().contains("drive")
             )
         });
         assert!(
@@ -762,6 +769,6 @@ mod live_tests {
         );
 
         let turns = vec![(user_input.to_string(), response_text.clone())];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 }

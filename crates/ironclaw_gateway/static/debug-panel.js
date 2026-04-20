@@ -19,6 +19,7 @@
   let pendingTools = {};
   let currentTurn = 0;     // increments on each user message
   let viewingTurn = 0;     // which turn the Activity tab is showing
+  let firstAvailableTurn = 1; // bumped when eviction drops a whole turn
   let overlay = null;
   let panelEl = null;
   let toolbarBtn = null;
@@ -478,9 +479,18 @@
     }
     activityLog.push(entry);
 
-    // Eviction
+    // Eviction — bump firstAvailableTurn when we drop the last entry
+    // belonging to a turn so turn-nav can render an "evicted" placeholder
+    // instead of silently showing an empty timeline for older turns.
     while (activityLog.length > MAX_ACTIVITY) {
-      activityLog.shift();
+      var dropped = activityLog.shift();
+      if (dropped && dropped.turn >= firstAvailableTurn) {
+        var stillHas = false;
+        for (var i = 0; i < activityLog.length; i++) {
+          if (activityLog[i].turn === dropped.turn) { stillHas = true; break; }
+        }
+        if (!stillHas) firstAvailableTurn = dropped.turn + 1;
+      }
     }
 
     // Only render if viewing the current turn
@@ -581,9 +591,18 @@
     pendingTools = {};
     currentTurn++;
     viewingTurn = currentTurn;
-    // Evict oldest entries if over cap
+    // Evict oldest entries if over cap, mirroring the eviction in
+    // addActivity(): bump firstAvailableTurn whenever the last entry of
+    // a turn drops out of the buffer.
     while (activityLog.length > MAX_ACTIVITY) {
-      activityLog.shift();
+      var dropped = activityLog.shift();
+      if (dropped && dropped.turn >= firstAvailableTurn) {
+        var stillHas = false;
+        for (var i = 0; i < activityLog.length; i++) {
+          if (activityLog[i].turn === dropped.turn) { stillHas = true; break; }
+        }
+        if (!stillHas) firstAvailableTurn = dropped.turn + 1;
+      }
     }
     rebuildActivityDOM();
     updateTurnNav();
@@ -598,7 +617,8 @@
   }
 
   function viewTurn(turn) {
-    if (turn < 1) turn = 1;
+    var lo = firstAvailableTurn;
+    if (turn < lo) turn = lo;
     if (turn > maxTurn()) turn = maxTurn();
     viewingTurn = turn;
     rebuildActivityDOM();
@@ -612,7 +632,7 @@
     var prevBtn = nav.querySelector('.debug-turn-prev');
     var nextBtn = nav.querySelector('.debug-turn-next');
     if (label) label.textContent = t('debug.activityTurn') + ' ' + viewingTurn + ' / ' + maxTurn();
-    if (prevBtn) prevBtn.disabled = viewingTurn <= 1;
+    if (prevBtn) prevBtn.disabled = viewingTurn <= firstAvailableTurn;
     if (nextBtn) nextBtn.disabled = viewingTurn >= maxTurn();
     nav.style.display = maxTurn() > 0 ? 'flex' : 'none';
   }
@@ -621,6 +641,17 @@
     var list = document.getElementById('debug-activity-list');
     if (!list) return;
     list.textContent = '';
+
+    // If the user is browsing a turn whose entries have been evicted,
+    // tell them so explicitly instead of silently rendering "no events"
+    // — eviction at MAX_ACTIVITY=1000 is invisible without this.
+    if (viewingTurn > 0 && viewingTurn < firstAvailableTurn) {
+      var evicted = document.createElement('div');
+      evicted.className = 'debug-activity-empty';
+      evicted.textContent = t('debug.activityEvicted');
+      list.appendChild(evicted);
+      return;
+    }
 
     var entries = entriesForTurn(viewingTurn);
 
@@ -885,7 +916,12 @@
       { id: 'tokens', key: 'debug.statsTotalTokens', value: '0' },
       { id: 'input', key: 'debug.statsInputTokens', value: '0' },
       { id: 'output', key: 'debug.statsOutputTokens', value: '0' },
+      // Session cost is summed from per-turn `turn_cost` SSE events.
       { id: 'cost', key: 'debug.statsCost', value: '$0.00' },
+      // Daily cost comes from the server (/api/gateway/status) and is
+      // a separate metric — keep it in its own card so the two values
+      // never overwrite each other on the 30 s poll cycle.
+      { id: 'daily-cost', key: 'debug.statsDailyCost', value: '-' },
       { id: 'tools', key: 'debug.statsToolCalls', value: '0' }
     ];
 
@@ -1147,25 +1183,19 @@
     apiFetchCompat('/api/gateway/status')
       .then(function (data) {
         renderModelUsage(data.model_usage || []);
-        // Use server-side cost/token data as source of truth
-        if (data.model_usage && data.model_usage.length > 0) {
-          var totalCost = 0;
-          data.model_usage.forEach(function (m) {
-            var c = parseFloat(m.cost);
-            if (!isNaN(c)) totalCost += c;
-          });
-          if (totalCost > 0) {
-            sessionStats.cost = totalCost;
-            setStatText('debug-stat-cost', '$' + totalCost.toFixed(4));
-          }
-        }
+        // Render the server's daily cost in its own card and leave the
+        // session cost card driven solely by the SSE turn_cost
+        // accumulator. Mixing the two sources caused the displayed cost
+        // to jump back and forth on the 30 s poll cadence.
+        var dailyCost = null;
         if (data.daily_cost) {
           var dc = parseFloat(data.daily_cost);
-          if (!isNaN(dc) && dc > 0) {
-            sessionStats.cost = dc;
-            setStatText('debug-stat-cost', '$' + dc.toFixed(4));
-          }
+          if (!isNaN(dc)) dailyCost = dc;
         }
+        setStatText(
+          'debug-stat-daily-cost',
+          dailyCost !== null ? '$' + dailyCost.toFixed(4) : '-'
+        );
         updateSseHealthDisplay();
       })
       .catch(function () { /* ignore */ });
