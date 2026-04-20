@@ -3794,9 +3794,19 @@ async fn await_thread_outcome(
                     gate_name: "authentication".into(),
                     user_id: message.user_id.clone(),
                     thread_id,
-                    scope_thread_id: message
-                        .conversation_scope()
-                        .map(|s| ironclaw_common::ExternalThreadId::from_trusted(s.to_string())),
+                    scope_thread_id: message.conversation_scope().and_then(|s| {
+                        match ironclaw_common::ExternalThreadId::new(s) {
+                            Ok(tid) => Some(tid),
+                            Err(e) => {
+                                tracing::debug!(
+                                    candidate = %s,
+                                    error = %e,
+                                    "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                                );
+                                None
+                            }
+                        }
+                    }),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
                     action_name: "authentication_fallback".into(),
@@ -3885,9 +3895,19 @@ async fn await_thread_outcome(
                 gate_name: gate_name.clone(),
                 user_id: message.user_id.clone(),
                 thread_id,
-                scope_thread_id: message
-                    .conversation_scope()
-                    .map(|s| ironclaw_common::ExternalThreadId::from_trusted(s.to_string())),
+                scope_thread_id: message.conversation_scope().and_then(|s| {
+                    match ironclaw_common::ExternalThreadId::new(s) {
+                        Ok(tid) => Some(tid),
+                        Err(e) => {
+                            tracing::debug!(
+                                candidate = %s,
+                                error = %e,
+                                "router: invalid conversation_scope_id from IncomingMessage; storing None in pending gate"
+                            );
+                            None
+                        }
+                    }
+                }),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),

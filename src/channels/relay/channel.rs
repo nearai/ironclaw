@@ -310,12 +310,17 @@ impl Channel for RelayChannel {
                 reason: "Missing channel_id in message metadata".to_string(),
             })?;
 
-        // Determine thread_id from response or metadata
+        // Determine thread_id: prefer the explicit response value, then the
+        // validated inbound `msg.thread_id` (now a typed ExternalThreadId),
+        // then fall back to raw metadata. Filter empty strings so we never
+        // emit `thread_ts: ""` to the upstream relay.
         let thread_id = response
             .thread_id
             .as_ref()
             .map(|t| t.as_str())
-            .or_else(|| metadata.get("thread_id").and_then(|v| v.as_str()));
+            .or_else(|| msg.thread_id.as_ref().map(|t| t.as_str()))
+            .or_else(|| metadata.get("thread_id").and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty());
 
         let (method, body) = self.build_send_body(channel_id, &response.content, thread_id);
 
