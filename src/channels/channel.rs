@@ -6,7 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
-use ironclaw_common::{ExtensionName, ExternalThreadId, JobResultStatus};
+use ironclaw_common::{ExtensionName, ExternalThreadId, ExternalThreadIdError, JobResultStatus};
 use uuid::Uuid;
 
 use crate::error::ChannelError;
@@ -171,17 +171,49 @@ impl IncomingMessage {
         self
     }
 
-    /// Set the thread ID.
+    /// Set the thread ID (trusted path — no validation).
     ///
     /// Accepts raw strings — the value is wrapped with
-    /// [`ExternalThreadId::from_trusted`] because callers are typically
-    /// channel adapters forwarding a value already emitted by their external
-    /// platform. The `conversation_scope_id` shadow mirrors the raw string.
+    /// [`ExternalThreadId::from_trusted`]. This is a **trusted-path
+    /// convenience**: the caller is assumed to have sourced the string from
+    /// an internal/typed origin (DB row, internal channel adapter, a
+    /// platform identifier already accepted by the upstream channel). The
+    /// `conversation_scope_id` shadow mirrors the raw string.
+    ///
+    /// **For untrusted input** (HTTP webhooks, relay callbacks, any raw
+    /// caller-supplied payload), prefer [`Self::try_with_thread`] which
+    /// validates via [`ExternalThreadId::new`] and returns an error on
+    /// empty / NUL / oversized strings. See `.claude/rules/types.md` on
+    /// the `new` vs `from_trusted` choice being the audit trail.
     pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
         let thread_id = thread_id.into();
         self.conversation_scope_id = Some(thread_id.clone());
         self.thread_id = Some(ExternalThreadId::from_trusted(thread_id));
         self
+    }
+
+    /// Set the thread ID from untrusted input, validating the raw string.
+    ///
+    /// Use this variant at the system boundary — HTTP webhooks, relay
+    /// callback payloads, or any path where the string came from an
+    /// external caller. Returns [`ExternalThreadIdError`] for empty,
+    /// oversized, or NUL-containing values; callers typically log and
+    /// drop the thread_id (or return 400) on error. For
+    /// internal-trusted paths (typed DB rows, already-validated channel
+    /// adapter state), use [`Self::with_thread`].
+    ///
+    /// Takes `&mut self` so callers retain ownership of the message on
+    /// validation failure (useful when the desired fallback is to
+    /// continue with an unset thread id rather than fail the whole
+    /// message).
+    pub fn try_with_thread(
+        &mut self,
+        thread_id: impl AsRef<str>,
+    ) -> Result<(), ExternalThreadIdError> {
+        let typed = ExternalThreadId::new(thread_id)?;
+        self.conversation_scope_id = Some(typed.as_str().to_string());
+        self.thread_id = Some(typed);
+        Ok(())
     }
 
     /// Set the thread ID from an already-typed [`ExternalThreadId`].
@@ -314,14 +346,35 @@ impl OutgoingResponse {
         }
     }
 
-    /// Set the thread ID for the response.
+    /// Set the thread ID for the response (trusted path — no validation).
     ///
     /// Accepts raw strings — the value is wrapped with
-    /// [`ExternalThreadId::from_trusted`] because callers typically forward
-    /// an identifier that a channel adapter already accepted.
+    /// [`ExternalThreadId::from_trusted`]. This is a **trusted-path
+    /// convenience**: the caller is assumed to have sourced the string
+    /// from an internal/typed origin (a channel adapter that already
+    /// accepted the identifier upstream, a DB row, etc.).
+    ///
+    /// **For untrusted input** (HTTP webhook callbacks, relay callbacks,
+    /// any raw caller-supplied payload), prefer [`Self::try_in_thread`]
+    /// which validates via [`ExternalThreadId::new`].
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(ExternalThreadId::from_trusted(thread_id.into()));
         self
+    }
+
+    /// Set the thread ID from untrusted input, validating the raw string.
+    ///
+    /// Use this variant at the system boundary — HTTP webhooks, relay
+    /// callback payloads, or any path where the string came from an
+    /// external caller. Returns [`ExternalThreadIdError`] for empty,
+    /// oversized, or NUL-containing values. For internal-trusted paths,
+    /// use [`Self::in_thread`].
+    pub fn try_in_thread(
+        &mut self,
+        thread_id: impl AsRef<str>,
+    ) -> Result<(), ExternalThreadIdError> {
+        self.thread_id = Some(ExternalThreadId::new(thread_id)?);
+        Ok(())
     }
 
     /// Set the thread ID from an already-typed [`ExternalThreadId`].

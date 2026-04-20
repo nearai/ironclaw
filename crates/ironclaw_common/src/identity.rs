@@ -248,7 +248,7 @@ impl ExtensionName {
     }
 }
 
-/// Maximum length for an [`ExternalThreadId`].
+/// Maximum length for an [`ExternalThreadId`], measured in bytes.
 ///
 /// Chosen to accommodate Slack's compound `thread_ts` identifiers, web-UI
 /// generated UUID strings, Telegram chat IDs, and comparable channel-specific
@@ -261,7 +261,7 @@ pub const MAX_EXTERNAL_THREAD_ID_LEN: usize = 512;
 pub enum ExternalThreadIdError {
     #[error("external thread id must not be empty")]
     Empty,
-    #[error("external thread id exceeds {MAX_EXTERNAL_THREAD_ID_LEN} characters")]
+    #[error("external thread id exceeds {MAX_EXTERNAL_THREAD_ID_LEN} bytes")]
     TooLong,
     #[error("external thread id must not contain NUL bytes")]
     ContainsNul,
@@ -284,8 +284,19 @@ pub struct ExternalThreadId(String);
 impl ExternalThreadId {
     /// Construct from any string-like value, validating length and
     /// disallowing NUL bytes. Returns [`ExternalThreadIdError`] on failure.
+    ///
+    /// Length is measured in bytes via `str::len`.
     pub fn new(raw: impl AsRef<str>) -> Result<Self, ExternalThreadIdError> {
-        let s = raw.as_ref();
+        Self::validate(raw.as_ref())?;
+        Ok(Self(raw.as_ref().to_string()))
+    }
+
+    /// Validate a candidate string without constructing.
+    ///
+    /// Shared by `new` (which allocates) and `TryFrom<String>` (which
+    /// consumes the owned String without reallocating). Length is
+    /// measured in bytes via `str::len`.
+    fn validate(s: &str) -> Result<(), ExternalThreadIdError> {
         if s.is_empty() {
             return Err(ExternalThreadIdError::Empty);
         }
@@ -295,7 +306,7 @@ impl ExternalThreadId {
         if s.contains('\0') {
             return Err(ExternalThreadIdError::ContainsNul);
         }
-        Ok(Self(s.to_string()))
+        Ok(())
     }
 
     /// Construct without validation.
@@ -345,7 +356,8 @@ impl TryFrom<&str> for ExternalThreadId {
 impl TryFrom<String> for ExternalThreadId {
     type Error = ExternalThreadIdError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        Self::validate(&value)?;
+        Ok(Self(value))
     }
 }
 
@@ -374,7 +386,7 @@ impl PartialEq<&str> for ExternalThreadId {
     }
 }
 
-/// Maximum length for an [`McpServerName`].
+/// Maximum length for an [`McpServerName`], measured in bytes.
 ///
 /// MCP server names are used as tool-name prefixes in LLM providers (which
 /// typically require `^[a-zA-Z0-9_-]+$`), as components of secret-store keys
@@ -387,7 +399,7 @@ pub const MAX_MCP_SERVER_NAME_LEN: usize = 64;
 pub enum McpServerNameError {
     #[error("MCP server name must not be empty")]
     Empty,
-    #[error("MCP server name exceeds {MAX_MCP_SERVER_NAME_LEN} characters")]
+    #[error("MCP server name exceeds {MAX_MCP_SERVER_NAME_LEN} bytes")]
     TooLong,
     #[error(
         "MCP server name '{0}' contains invalid characters \
@@ -422,12 +434,22 @@ impl McpServerName {
     /// Construct from any string-like value, validating the allowlist.
     ///
     /// Rejects empty strings, strings longer than
-    /// [`MAX_MCP_SERVER_NAME_LEN`], and strings containing any character
-    /// outside the allowlist (alphanumeric, `-`, `_`). Path separators,
-    /// shell metacharacters, NUL bytes, and whitespace all fall into the
+    /// [`MAX_MCP_SERVER_NAME_LEN`] bytes (length is measured in bytes
+    /// via `str::len`), and strings containing any character outside the
+    /// allowlist (alphanumeric, `-`, `_`). Path separators, shell
+    /// metacharacters, NUL bytes, and whitespace all fall into the
     /// invalid-character bucket.
     pub fn new(raw: impl AsRef<str>) -> Result<Self, McpServerNameError> {
-        let s = raw.as_ref();
+        Self::validate(raw.as_ref())?;
+        Ok(Self(raw.as_ref().to_string()))
+    }
+
+    /// Validate a candidate string without constructing.
+    ///
+    /// Shared by `new` (which allocates) and `TryFrom<String>` (which
+    /// consumes the owned String without reallocating). Length is
+    /// measured in bytes via `str::len`.
+    fn validate(s: &str) -> Result<(), McpServerNameError> {
         if s.is_empty() {
             return Err(McpServerNameError::Empty);
         }
@@ -440,7 +462,7 @@ impl McpServerName {
         {
             return Err(McpServerNameError::InvalidChar(s.to_string()));
         }
-        Ok(Self(s.to_string()))
+        Ok(())
     }
 
     /// Construct without validation.
@@ -492,7 +514,8 @@ impl TryFrom<&str> for McpServerName {
 impl TryFrom<String> for McpServerName {
     type Error = McpServerNameError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        Self::validate(&value)?;
+        Ok(Self(value))
     }
 }
 

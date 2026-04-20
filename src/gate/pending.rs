@@ -124,11 +124,7 @@ impl From<&PendingGate> for PendingGateView {
     fn from(gate: &PendingGate) -> Self {
         Self {
             request_id: gate.request_id.to_string(),
-            thread_id: gate
-                .scope_thread_id
-                .as_ref()
-                .map(|t| t.as_str().to_string())
-                .unwrap_or_else(|| gate.thread_id.to_string()),
+            thread_id: gate.effective_wire_thread_id(),
             gate_name: gate.gate_name.clone(),
             tool_name: gate.action_name.clone(),
             description: gate.description.clone(),

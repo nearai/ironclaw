@@ -240,7 +240,7 @@ impl Channel for RelayChannel {
                     "Relay: received message from {}", provider_str
                 );
 
-                let msg = IncomingMessage::new(&relay_name, &event.sender_id, event.text())
+                let mut msg = IncomingMessage::new(&relay_name, &event.sender_id, event.text())
                     .with_user_name(event.display_name())
                     .with_metadata(serde_json::json!({
                         "team_id": event.team_id(),
@@ -256,13 +256,27 @@ impl Channel for RelayChannel {
                 // otherwise use the message timestamp (event.id) so that
                 // responses are threaded under the user's message in channels.
                 // Fall back to channel_id only if event.id is missing.
-                let msg = if let Some(ref thread_id) = event.thread_id {
-                    msg.with_thread(thread_id)
+                // Thread id comes from an external relay event — validate via
+                // `try_with_thread`. On invalid input, log and drop the
+                // thread_id so the message still flows but without threading.
+                let candidate: Option<&str> = if let Some(ref thread_id) = event.thread_id {
+                    Some(thread_id.as_str())
                 } else if !event.id.is_empty() {
-                    msg.with_thread(&event.id)
+                    Some(event.id.as_str())
+                } else if !event.channel_id.is_empty() {
+                    Some(event.channel_id.as_str())
                 } else {
-                    msg.with_thread(&event.channel_id)
+                    None
                 };
+                if let Some(raw) = candidate
+                    && let Err(e) = msg.try_with_thread(raw)
+                {
+                    tracing::warn!(
+                        thread_id = raw,
+                        error = %e,
+                        "Relay: invalid thread_id in event; dropping thread context"
+                    );
+                }
 
                 if tx.send(msg).await.is_err() {
                     tracing::info!("Relay channel receiver dropped, stopping");
