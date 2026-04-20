@@ -491,11 +491,32 @@ async def trigger_auth_card(
     page: Any,
     selectors: dict[str, str],
     case: BrowserProviderCase,
+    base_url: str | None = None,
+    token: str | None = None,
 ) -> Any:
-    chat_input = page.locator(selectors["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
-    await chat_input.fill(case.trigger_prompt)
-    await chat_input.press("Enter")
+    # Activate the extension via the API — this triggers the OAuth flow and
+    # broadcasts an auth card via SSE to the browser. Sending a chat message
+    # doesn't work because unactivated WASM tools aren't in the registry and
+    # ironclaw returns "tool not found" instead of an auth card.
+    if base_url and token:
+        response = await api_request(
+            "POST",
+            base_url,
+            f"/api/extensions/{case.auth_extension_name}/activate",
+            token=token,
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise CanaryError(
+                f"Activate failed for {case.auth_extension_name}: "
+                f"{response.status_code} {response.text[:500]}"
+            )
+    else:
+        # Fallback: try via chat message (original approach)
+        chat_input = page.locator(selectors["chat_input"])
+        await chat_input.wait_for(state="visible", timeout=5000)
+        await chat_input.fill(case.trigger_prompt)
+        await chat_input.press("Enter")
     return await wait_for_auth_card(page, selectors, case.auth_extension_name)
 
 
@@ -671,13 +692,32 @@ async def browser_oauth_probe(
     started = time.perf_counter()
     try:
         context, page = await open_gateway_page(browser, base_url, token, storage_state)
-        auth_card = await trigger_auth_card(page, selectors, case)
-        oauth_button = auth_card.locator(selectors["auth_oauth_btn"]).first
-        await oauth_button.wait_for(state="visible", timeout=10000)
-        popup = await click_auth_popup(page, oauth_button)
+
+        # Get auth_url by activating the extension via the API.
+        # Direct activation returns the OAuth URL without needing the
+        # agent gate flow (which requires the tool to be registered first).
+        activate_resp = await api_request(
+            "POST", base_url,
+            f"/api/extensions/{case.auth_extension_name}/activate",
+            token=token, timeout=30,
+        )
+        if activate_resp.status_code != 200:
+            raise CanaryError(
+                f"Activate failed for {case.auth_extension_name}: "
+                f"{activate_resp.status_code} {activate_resp.text[:500]}"
+            )
+        auth_url = activate_resp.json().get("auth_url")
+        if not auth_url:
+            raise CanaryError(
+                f"Activate returned no auth_url for {case.auth_extension_name}: "
+                f"{activate_resp.json()}"
+            )
+
+        # Open the OAuth URL directly in a popup and complete provider login.
+        popup = await page.context.new_page()
+        await popup.goto(auth_url, timeout=30000)
         await complete_provider_auth(popup, case, output_dir)
 
-        await auth_card.wait_for(state="hidden", timeout=30000)
         await wait_for_extension_state(
             base_url,
             token,
