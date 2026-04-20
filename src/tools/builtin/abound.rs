@@ -440,12 +440,12 @@ impl Tool for AboundSendWireTool {
             let notif_body = json!({
                 "message_id": format!("wire_approval_{ts}"),
                 "action_type": "notification",
+                "notify_thread_id": thread_id,
                 "meta_data": {
                     "type": "wire_approval",
                     "amount": amount,
                     "beneficiary_ref_id": beneficiary,
                     "payment_reason_key": payment_reason,
-                    "notify_thread_id": thread_id,
                 },
             });
             let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
@@ -883,9 +883,16 @@ impl Tool for AboundRateAlertTool {
 
         // Step 2: Send notification if threshold exceeded or force_notify
         let notification_sent = if should_notify {
+            let thread_id = ctx
+                .metadata
+                .get("notify_thread_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
             let notif_body = json!({
                 "message_id": message_id,
                 "action_type": "notification",
+                "notify_thread_id": thread_id,
                 "meta_data": {
                     "alert": format!("{from}/{to} rate alert"),
                     "current_rate": current_rate,
@@ -961,13 +968,16 @@ mod tests {
             .unwrap_or("");
 
         let notif_body = json!({
+            "message_id": "wire_approval_123",
+            "action_type": "notification",
+            "notify_thread_id": extracted,
             "meta_data": {
-                "notify_thread_id": extracted,
+                "type": "wire_approval",
             },
         });
 
         assert_eq!(
-            notif_body["meta_data"]["notify_thread_id"].as_str(),
+            notif_body["notify_thread_id"].as_str(),
             Some(thread_id),
         );
     }
