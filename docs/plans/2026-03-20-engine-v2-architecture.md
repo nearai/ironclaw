@@ -1,8 +1,8 @@
 # IronClaw Engine v2: Unified Thread-Capability-CodeAct Architecture
 
 **Date:** 2026-03-20
-**Updated:** 2026-04-01
-**Status:** In Progress (Phases 1-6 complete, engine running end-to-end)
+**Updated:** 2026-04-21
+**Status:** Phases 1–6 complete, Phase 7 engine-side complete, Phase 8 infrastructure integration in progress. Engine v2 runs end-to-end under `ENGINE_V2=true`. Default-flip work tracked in issue #2800.
 **Goal:** Replace IronClaw's ~10 fragmented abstractions with a unified execution model built on 5 primitives: Thread, Step, Capability, MemoryDoc, Project. Developed as a standalone crate (`ironclaw_engine`) that can be swapped in when it passes all acceptance tests.
 
 ---
@@ -218,15 +218,19 @@ After thread completes, the engine records traces, analyzes issues, and emits le
 
 Learning is driven by trace analysis plus learning missions (`self-improvement`, `skill-extraction`, `conversation-insights`) rather than a separate `reflection/` module.
 
-### 4.3 Compaction (from RLM)
-Compaction should be orchestrator-owned, not Rust-loop-owned.
-When context pressure reaches the configured threshold, the Python orchestrator loop should:
-1. Call its own LLM primitive to summarize progress so far
-2. Replace active chat history with a compact continuation scaffold
-3. Preserve full prior trajectory in searchable/project-scoped history accessible to code
-4. Continue to rely on retrieval/search over workspace-backed artifacts rather than replaying raw history into the attention window
+### 4.3 Compaction (from RLM) — IMPLEMENTED
 
-Rust should provide token estimates, retrieval helpers, checkpoints, and final transcript commit points. The compaction policy, timing, and prompt should live in the Python RLM loop, and the orchestrator should own the mutable working transcript it sends to the LLM.
+Compaction is orchestrator-owned, in Python. See `crates/ironclaw_engine/orchestrator/default.py:240-310`:
+
+- Triggers when token count exceeds 85% of the model limit
+- Calls `__llm_complete__()` to produce a summary
+- Replaces working messages with `[system message, summary, continuation prompt]`
+- Stores a snapshot in state history for audit
+- Full prior trajectory stays searchable via workspace-backed retrieval; raw history is not replayed into the attention window
+
+Rust side provides token estimation, retrieval helpers, and final transcript commit points; the orchestrator owns the mutable working transcript it sends to the LLM.
+
+Note: the crate-structure block above mentions `executor/compaction.rs` — that file was never created. Compaction lives entirely in Python; the Rust side only exposes the primitives the Python orchestrator calls.
 
 ### 4.4 `rlm_query()` — full recursive sub-agent
 Unlike `llm_query()` (single-shot text completion), `rlm_query(prompt)` spawns a **child thread with its own CodeAct executor**:
@@ -269,7 +273,8 @@ pub struct Mission {
 ```
 
 ### 4.9 Tool reliability learning
-Track per-action EMA metrics (success rate, latency, failure patterns). Current remaining question: whether to inject them into context by default or only surface them through targeted retrieval/debugging.
+
+`ReliabilityTracker` (`crates/ironclaw_engine/src/reliability.rs`) records EMA-smoothed success rate and latency per action. Tracked in issue #2800 (PR-B): writes from `EffectBridgeAdapter` after every dispatch, reads from `build_step_context` to append a "recently unreliable actions" section to the system prompt when `call_count ≥ 10` and `success_rate < 0.7` (cap 5 entries, kill switch `ENGINE_V2_RELIABILITY_HINTS`).
 
 ### 4.10 Tests
 - Learning missions produce the correct knowledge artifacts from completed threads
@@ -388,10 +393,10 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 - Depends on `ironclaw_common` crate with `AppEvent` type (PR #1615, merged into branch)
 
 #### Routines / Jobs — PARTIAL
-- V1-only tools (`routine_create`, `create_job`, `build_software`, etc.) are blocked in engine v2 with a helpful error: "use the slash command instead"
-- Filtered out of `available_actions()` so the system prompt doesn't list them
-- Routines still work via `/routine` slash commands (fall through to v1)
-- Engine v2 Mission APIs exist and are wired through the bridge; remaining work is migration/UX convergence rather than greenfield implementation
+- `routine_create` / `routine_update` / `routine_list` / etc. are translated to mission_* dispatches via `routine_to_mission_alias()` in `src/bridge/effect_adapter.rs` before the v1-denylist check fires. The LLM-facing routine tools go through the mission manager in v2, not the v1 routine engine.
+- Tracked in issue #2800 (PR-C): extend the alias to cover `create_job` / `cancel_job` as well. Only `build_software` remains hard-denylisted as v1-specific infra.
+- Routines still work via `/routine` slash commands (fall through to v1 when user is on v1 engine).
+- Remaining work is `create_job` aliasing plus UX communication; greenfield Mission APIs are done.
 
 #### Rate limiting — DONE
 - Per-user per-tool sliding window via `RateLimiter` in `EffectBridgeAdapter`
@@ -403,45 +408,48 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 - Atomic counter in `EffectBridgeAdapter`, error on exceed
 
 #### Acceptance testing — IN PROGRESS
-- Engine v2 already has dedicated TestRig + TraceLlm replay coverage
-- Continue expanding fixture parity through `with_engine_v2()` rather than introducing a separate harness
-- Remaining work is coverage expansion:
+- Engine v2 has dedicated TestRig + TraceLlm replay coverage via `tests/support/test_rig.rs` and `tests/support/replay_outcome.rs`, driven through `with_engine_v2()`.
+- Tracked in issue #2800 (PR-D): expand coverage to:
   - gate pause/resume
   - auth flows
   - mission execution
   - retrieval/learning flows
   - orchestrator-driven compaction
   - broader replay parity with existing recorded traces
+- Issue #2800 also tracks PR-E (v1 regression-test port) and PR-differential (v2-vs-v1 strictly-better benchmark).
 
-#### Two-phase commit (NOT YET IMPLEMENTED)
-For `WriteExternal` + `Financial` effects:
-1. Simulate → preview
-2. Approve → user/policy
-3. Execute → actual effect
+#### Two-phase commit — IMPLEMENTED via unified gate
 
-This should remain an adapter-boundary feature in `EffectBridgeAdapter`, reusing the unified gate flow rather than introducing a separate approval pipeline.
+For `WriteExternal` + `Financial` effects, the unified gate mechanism satisfies the approval invariant:
+
+- `PolicyEngine::evaluate_with_provenance` injects `RequireApproval` for `WriteExternal` and `Financial` effects when triggered by `LlmGenerated` or `ToolOutput` provenance (`crates/ironclaw_engine/src/capability/policy.rs:126-169`).
+- The Tier 0 executor halts the batch on `RequireApproval` and emits `ThreadOutcome::GatePaused` (`crates/ironclaw_engine/src/executor/structured.rs:139-171`).
+- Resume flows through `POST /api/chat/gate/resolve` — same path as auth gates.
+
+A separate "simulate → preview → approve → execute" flow is intentionally not implemented: the gate mechanism already bounds blast radius, and a preview step would need to round-trip the effect payload through another LLM turn. If a future surface (e.g. DeFi portfolio) requires preview, it should be added at the `EffectBridgeAdapter` boundary for that specific effect, not as a policy-layer primitive.
 
 ---
 
 ## Phase 7: Cleanup and Migration
 
-**Goal:** Remove old abstractions, migrate all code to engine model.
+### 7a. Engine-side cleanup — DONE
 
-### 7.1 Deprecate old types
-- `Session` / `Thread` / `Turn` → engine `Thread` + `Step`
-- `JobState` / `JobContext` → engine `ThreadState` + `Thread`
-- `RoutineEngine` / `Routine` → engine `Mission` + `Thread`
-- `SkillSelector` / `LoadedSkill` → engine `Capability` (knowledge)
-- `HookPipeline` → engine `Capability` (policies)
-- `ApprovalRequirement` / `ApprovalContext` → engine `CapabilityLease` + `PolicyEngine`
+The `ironclaw_engine` crate contains zero references to `JobState`, `Session`, `Routine`, or v1 delegate types. The engine was built clean from day one on the five primitives (Thread, Step, Capability, MemoryDoc, Project). No migration work is needed inside the crate.
 
-### 7.2 Slim down main crate
-- Agent module becomes thin adapter over engine
-- `app.rs` orchestrates engine startup
-- Remove `LoopDelegate` and its three implementations
-- Remove `SessionManager`, `Scheduler` (replaced by `ThreadManager`)
+### 7b. Host-side cleanup — BLOCKED ON DEFAULT FLIP
 
-### 7.3 Sub-crate extraction
+Once engine v2 is the default (issue #2800, PR-F), the host crate can shed its v1-only code:
+
+- `src/worker/` (JobDelegate, ACP bridge) — replaced by engine Threads
+- `src/orchestrator/` (job_manager, container IPC) — replaced by engine's effect executor
+- `src/context/` (JobState, JobContext, ContextManager) — replaced by engine's Thread state
+- `src/agent/routine_engine.rs` — replaced by engine's MissionManager
+- `src/agent/session.rs`, `src/agent/scheduler.rs` — replaced by ThreadManager
+- `LoopDelegate` and its three implementations — replaced by the unified `ExecutionLoop`
+
+This is NOT a prerequisite for the default flip — all three paths co-exist today. Host cleanup is a follow-up track after v2 has been stable in production.
+
+### 7c. Sub-crate extraction
 Once boundaries stabilize, split if beneficial:
 - `ironclaw_types` — shared types for WASM extensions
 - `ironclaw_capability` — if used by tooling/CLI independently
@@ -520,13 +528,16 @@ Once boundaries stabilize, split if beneficial:
 | **3** | CodeAct (Monty + RLM pattern) | **DONE** | 74 | `b59a0b9`, `9538332` |
 | **4** | Retrieval, learning missions, budget controls, compaction hooks | **PARTIAL** | 78 | `4bc7ffd` |
 | **5** | Conversation surface | **DONE** | 85 | `0827235` |
-| **6** | Main crate bridge (Strategy C) | **PARTIAL** | 151 | `ac4ced0`→`ccec1917` |
-| **7** | Cleanup + migration | Planned | — | — |
-| **8** | WASM tools + Docker isolation | Planned | — | — |
+| **6** | Main crate bridge (Strategy C) | **DONE** | 151+ | `ac4ced0`→`ccec1917` |
+| **7a** | Engine-side cleanup | **DONE** | — | (no v1 types in engine crate) |
+| **7b** | Host-side v1 removal | Blocked on default flip | — | — |
+| **8** | WASM tools + Docker isolation | In progress (see `docs/plans/2026-04-10-engine-v2-sandbox.md`) | — | — |
 
-**Phase 4 remaining:** orchestrator-owned compaction policy, real USD cost tracking, and any decision to surface reliability metrics in context.
-**Phase 6 remaining:** broader acceptance coverage and two-phase commit at the adapter boundary.
-Phase 7 no longer depends on adding SQL persistence; it depends on engine stabilization and migration confidence. Phase 8 remains infrastructure integration.
+**Phase 4 status:** compaction DONE in Python (`orchestrator/default.py:240-310`). Engine-side `cost_usd`/`total_cost_usd` plumbing DONE; host-side cost population tracked in issue #2800 (PR-A). Reliability injection tracked in issue #2800 (PR-B).
+
+**Phase 6 status:** two-phase commit DONE via unified gate (`policy.rs:126-169` + `structured.rs:139-171`). Acceptance coverage expansion tracked in issue #2800 (PR-D).
+
+**Default flip:** tracked in issue #2800 (PR-F). Gates are listed in that issue's "Rollout gates" section.
 
 ---
 
