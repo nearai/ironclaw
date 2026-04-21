@@ -224,7 +224,7 @@ impl ToolRegistry {
     /// registry whose engine version isn't V2 — capabilities are v2-native
     /// by construction, and a v1 registry holding one would leak v2-only
     /// actions into discovery surfaces.
-    pub async fn set_capability_registry(
+    pub(crate) async fn set_capability_registry(
         &self,
         registry: Arc<ironclaw_engine::CapabilityRegistry>,
     ) {
@@ -238,7 +238,9 @@ impl ToolRegistry {
     }
 
     /// Snapshot of the installed capability registry, if any.
-    pub async fn capability_registry(&self) -> Option<Arc<ironclaw_engine::CapabilityRegistry>> {
+    pub(crate) async fn capability_registry(
+        &self,
+    ) -> Option<Arc<ironclaw_engine::CapabilityRegistry>> {
         self.capability_registry.read().await.clone()
     }
 

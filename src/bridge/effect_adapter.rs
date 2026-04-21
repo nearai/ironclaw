@@ -116,7 +116,7 @@ impl EffectBridgeAdapter {
     /// surface actions from engine-native capabilities (missions, etc.) to
     /// the LLM. Called once at bridge setup after `router.rs` has finished
     /// registering all capabilities.
-    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+    pub(crate) async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
         *self.capability_registry.write().await = Some(registry);
     }
 
