@@ -8,7 +8,6 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod attachment_tests {
-    use std::path::PathBuf;
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -26,14 +25,13 @@ mod attachment_tests {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
+    /// Serialize tests that mutate the process-global engine `project_root`
+    /// via `override_engine_project_root_for_test`. Concurrent overrides
+    /// would trample each other's paths — the lock is still required even
+    /// though each test now uses its own tempdir.
     fn engine_v2_attachment_root_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn engine_v2_project_root() -> PathBuf {
-        let base_dir = ironclaw::bootstrap::ironclaw_base_dir();
-        base_dir.parent().map(PathBuf::from).unwrap_or(base_dir)
     }
 
     fn make_attachment(kind: AttachmentKind) -> IncomingAttachment {
@@ -226,10 +224,27 @@ mod attachment_tests {
     #[tokio::test]
     async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
         let _guard = engine_v2_attachment_root_lock().lock().await;
-        let project_root = engine_v2_project_root();
+
+        // Each iteration gets its own tempdir so attachment writes stay
+        // fully off the host HOME directory. The previous version of this
+        // test derived `project_root` from `bootstrap::ironclaw_base_dir()`
+        // and would actually write real files into `~/.ironclaw/attachments`
+        // on a dev machine / CI runner.
+        let project_root_tmp = tempfile::tempdir().expect("create attachment project_root tempdir");
+        let project_root = project_root_tmp.path().to_path_buf();
 
         for channel in ["telegram", "whatsapp"] {
             let rig = TestRigBuilder::new().with_engine_v2().build().await;
+            // Redirect the engine's project_root to our tempdir so the
+            // assertion on saved_path below sees the real write. Without
+            // this override the engine joins paths against the cached
+            // `ironclaw_base_dir()` (first-caller-wins LazyLock), which
+            // resolves to `$HOME/.ironclaw` and is unrelated to the
+            // per-test tempdir here.
+            assert!(
+                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone()).await,
+                "engine state should be installed after build()"
+            );
 
             let attachment_bytes = format!("Attachment from {channel}").into_bytes();
             let mut msg = IncomingMessage::new(channel, "cross-channel-user", "check this file");

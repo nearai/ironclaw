@@ -113,6 +113,34 @@ function renderSkillCard(skill) {
     card.appendChild(kw);
   }
 
+  if (skill.usage_hint) {
+    var hint = document.createElement('div');
+    hint.className = 'ext-usage-hint';
+    hint.textContent = skill.usage_hint;
+    card.appendChild(hint);
+  }
+
+  if (skill.has_requirements) {
+    var reqs = document.createElement('div');
+    reqs.className = 'ext-bundle-detail';
+    reqs.textContent = 'Bundle includes requirements.txt';
+    card.appendChild(reqs);
+  }
+
+  if (skill.has_scripts) {
+    var scripts = document.createElement('div');
+    scripts.className = 'ext-bundle-detail';
+    scripts.textContent = 'Bundle includes scripts/';
+    card.appendChild(scripts);
+  }
+
+  if (skill.install_source_url) {
+    var source = document.createElement('div');
+    source.className = 'ext-install-source';
+    source.textContent = 'Installed from: ' + skill.install_source_url;
+    card.appendChild(source);
+  }
+
   var actions = document.createElement('div');
   actions.className = 'ext-actions';
 

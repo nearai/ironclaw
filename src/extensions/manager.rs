@@ -3856,7 +3856,8 @@ impl ExtensionManager {
             client_secret_secret_name: None,
             client_secret_expires_at,
             auto_activate_extension: true,
-        });
+        })
+        .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
         if is_gateway {
             let mut flow = launch.flow;
@@ -4236,6 +4237,19 @@ impl ExtensionManager {
                 ExtensionKind::WasmChannel | ExtensionKind::WasmTool
             ),
         });
+        let launch = match launch {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::error!(
+                    extension_name = %extension_name,
+                    secret_name = %secret_name,
+                    user_id = %user_id,
+                    error = %error,
+                    "Secret-backed OAuth launch rejected due to malformed descriptor; falling back to manual token entry"
+                );
+                return None;
+            }
+        };
         let pending_flow = launch.flow;
 
         if self.should_use_gateway_mode() {
@@ -4824,7 +4838,8 @@ impl ExtensionManager {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             auto_activate_extension: true,
-        });
+        })
+        .map_err(|e| e.to_string())?;
 
         if self.should_use_gateway_mode() {
             Ok(self

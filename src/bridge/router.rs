@@ -2612,8 +2612,17 @@ pub async fn resolve_gate(
                 )
                 .await;
 
+            // Word the deny message carefully: the resume handler treats
+            // certain imperative verb phrases ("execute it", "run it", "send
+            // it", …) as fresh execution intent and re-arms the
+            // require_action_attempt obligation, which then nudges the LLM
+            // to issue another tool call — exactly the opposite of what a
+            // denial should produce. Avoid every phrase in
+            // `crate::llm::user_signals_execution_intent`'s list (the
+            // helper is defined in `src/llm/reasoning.rs` and re-exported
+            // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
-                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                "User denied action '{}'. Do not retry; choose a different approach.{}",
                 pending.action_name,
                 reason
                     .as_deref()
@@ -5549,6 +5558,27 @@ pub async fn reset_engine_state() {
     }
 }
 
+/// Test-only override for `EngineState::project_root`.
+///
+/// Attachment persistence resolves paths through the cached
+/// `bootstrap::ironclaw_base_dir()`; in tests that want to assert on a
+/// tempdir this override lets the test redirect writes to a known
+/// location after `init_engine` has populated `ENGINE_STATE`. Returns
+/// `true` if the override was applied.
+#[doc(hidden)]
+#[cfg(feature = "libsql")]
+pub async fn override_engine_project_root_for_test(path: PathBuf) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let mut guard = lock.write().await;
+    let Some(state) = guard.as_mut() else {
+        return false;
+    };
+    state.project_root = path;
+    true
+}
+
 /// Build retrospective `ExecutionTrace`s for every currently-known engine
 /// thread. Returns an empty vector when engine v2 is not initialized.
 ///
@@ -6004,7 +6034,12 @@ mod tests {
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
-    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+    // Share the `test_support::ENGINE_STATE_TEST_LOCK` declared for the rest of
+    // the crate instead of a sibling copy — a private duplicate here would only
+    // serialize against tests in this module and would race against tests in
+    // other modules that already hold `test_support::ENGINE_STATE_TEST_LOCK`,
+    // letting concurrent tests overwrite the shared `ENGINE_STATE` `OnceLock`.
+    use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     // ──────────────────────────────────────────────────────────────────
