@@ -202,9 +202,9 @@ pub enum EngineVersion {
 }
 
 /// Try `resolver(name)` first, then hyphen↔underscore aliases — matching
-/// `ToolRegistry::get`'s normalization. Used on every capability-registry
-/// read path so hyphenated LLM emissions resolve the same as underscored
-/// ones (and the register-time shadow check catches both forms).
+/// `ToolRegistry::get`'s normalization for capability-registry lookups.
+/// Used by discovery/read paths and register-time shadow checks so
+/// hyphenated and underscored names are treated equivalently there.
 pub(crate) fn resolve_with_aliases<T>(
     name: &str,
     mut resolver: impl FnMut(&str) -> Option<T>,
