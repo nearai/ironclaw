@@ -5552,13 +5552,24 @@ impl ExtensionManager {
         // (user-agnostic) tool wrappers. The wrappers resolve the caller's
         // client at dispatch time from the shared `McpClientStore`, so the
         // client must be in the store before any tool call arrives.
+        //
+        // If wrapper construction fails, pull the just-inserted client
+        // back out so we don't leave an orphan entry in the store (no
+        // wrappers registered in `ToolRegistry` → dispatch attempts
+        // against this user would fail with "tool not found" despite
+        // `contains(user_id, name) == true`). The per-server lifecycle
+        // lock held at the top of this function keeps the cleanup safe
+        // against concurrent `remove` / re-`activate` on the same server.
         let client = Arc::new(client);
         self.mcp_clients.insert(user_id, name, client.clone()).await;
 
-        let tool_impls = client
-            .create_tools_with_store(self.mcp_client_store())
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        let tool_impls = match client.create_tools_with_store(self.mcp_client_store()).await {
+            Ok(tools) => tools,
+            Err(e) => {
+                self.mcp_clients.remove(user_id, name).await;
+                return Err(ExtensionError::ActivationFailed(e.to_string()));
+            }
+        };
 
         // Source the reported names from the wrapper itself, not from the
         // raw McpTool list. The wrapper canonicalizes dashes to underscores
