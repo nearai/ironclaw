@@ -599,9 +599,14 @@ async fn non_matching_goal_skips_skill_codeact() {
 
     let skill_doc = make_github_skill_doc(project_id);
 
-    // LLM just returns text — no code execution needed
+    // Code-only contract: the LLM emits Python that calls FINAL(). No http
+    // calls for this "unrelated goal" path — the point is to verify that
+    // the github skill does NOT get injected when the goal doesn't match.
     let llm = ScriptedLlm::new(vec![LlmOutput {
-        response: LlmResponse::Text("The weather is sunny.".into()),
+        response: LlmResponse::Code {
+            code: "FINAL(\"The weather is sunny.\")".into(),
+            content: None,
+        },
         usage: TokenUsage::default(),
     }]);
 

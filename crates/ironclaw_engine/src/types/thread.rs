@@ -161,7 +161,9 @@ pub struct ThreadConfig {
 impl Default for ThreadConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 50,
+            // Under the code-only contract, a well-posed turn FINALs in 1–3
+            // iterations. Grinding past ~10 means the LLM is spinning.
+            max_iterations: 10,
             max_duration: None,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,

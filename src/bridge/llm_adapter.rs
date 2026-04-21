@@ -202,123 +202,28 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     chat
 }
 
-/// Extract Python code from fenced code blocks in the LLM response.
+/// Strip the outermost code fence if the whole response is wrapped in one.
 ///
-/// Tries these markers in order: ```repl, ```python, ```py, then bare ```
-/// (if the content looks like Python). Collects ALL code blocks in the
-/// response and concatenates them (models sometimes split code across
-/// multiple blocks with explanation text between them).
+/// Rule: if `text` (after trimming) starts with one of the accepted openers
+/// (```repl / ```python / ```py / bare ```) on its own line and ends with
+/// ``` on its own line, return the text in between. Otherwise return `None`
+/// and let the caller pass the response to Monty verbatim — Monty's
+/// SyntaxError is the LLM's signal to adjust.
+///
+/// Nested fences inside Python strings are *not* parsed; they're just bytes
+/// inside the body. That's the whole point of this approach: the previous
+/// "find the first closing ```" logic mis-terminated on the nested fence
+/// and truncated the script.
 fn extract_code_block(text: &str) -> Option<String> {
-    let mut all_code = Vec::new();
-
-    for marker in ["```repl", "```python", "```py", "```"] {
-        let mut search_from = 0;
-        while let Some(start) = text[search_from..].find(marker) {
-            let abs_start = search_from + start;
-            let after_marker = abs_start + marker.len();
-
-            if marker == "```" && text[after_marker..].starts_with(|c: char| c.is_alphabetic()) {
-                let lang: String = text[after_marker..]
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                    .collect();
-                if !["repl", "python", "py"].contains(&lang.as_str()) {
-                    search_from = after_marker;
-                    continue;
-                }
-            }
-
-            let code_start = text[after_marker..]
-                .find('\n')
-                .map(|i| after_marker + i + 1)
-                .unwrap_or(after_marker);
-
-            if let Some(end) = text[code_start..].find("```") {
-                let code = text[code_start..code_start + end].trim();
-                if !code.is_empty() {
-                    if marker == "```" && !looks_like_python(code) {
-                        search_from = code_start + end + 3;
-                        continue;
-                    }
-                    all_code.push(code.to_string());
-                }
-                search_from = code_start + end + 3;
-            } else {
-                break;
-            }
-        }
-
-        if !all_code.is_empty() {
-            break;
-        }
-    }
-
-    if all_code.is_empty() {
-        return None;
-    }
-
-    Some(all_code.join("\n\n"))
-}
-
-/// Returns true when `line` contains an identifier-style function call
-/// (an identifier or attribute path immediately followed by `(`).
-///
-/// Avoids the false positives `trimmed.contains('(')` produced for markdown
-/// links like `[text](url)` and prose like "See (docs)" — neither has an
-/// alphanumeric/underscore character directly before the `(`.
-fn has_identifier_call(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'(' && i > 0 {
-            let prev = bytes[i - 1];
-            if prev.is_ascii_alphanumeric() || prev == b'_' {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn looks_like_python(code: &str) -> bool {
-    const PY_KEYWORDS: &[&str] = &[
-        "import", "from", "def", "class", "if", "for", "while", "return", "print", "FINAL", "try",
-        "with", "pass", "raise", "yield", "lambda", "elif", "else", "async", "await", "global",
-        "nonlocal", "assert", "break", "continue", "del", "not", "and", "or", "is", "in",
-    ];
-
-    for line in code.lines().take(5) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            return true;
-        }
-        if trimmed.starts_with('-')
-            || trimmed.starts_with('*')
-            || trimmed.starts_with('|')
-            || trimmed.starts_with('>')
+    let trimmed = text.trim();
+    for marker in ["```repl\n", "```python\n", "```py\n", "```\n"] {
+        if let Some(rest) = trimmed.strip_prefix(marker)
+            && let Some(body) = rest.strip_suffix("```")
         {
-            return false;
-        }
-        if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ") {
-            return false;
-        }
-        if has_identifier_call(trimmed) {
-            return true;
-        }
-        if trimmed.contains('=') {
-            return true;
-        }
-        let first_word: String = trimmed
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if PY_KEYWORDS.contains(&first_word.as_str()) {
-            return true;
+            return Some(body.trim_end().to_string());
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -566,17 +471,32 @@ mod tests {
     // ── extract_code_block tests ────────────────────────────
 
     #[test]
-    fn extract_repl_block() {
-        let text = "Some explanation\n```repl\nx = 1 + 2\nprint(x)\n```\nMore text";
+    fn extract_repl_block_pure() {
+        // Outer fence wraps the whole response → strip.
+        let text = "```repl\nx = 1 + 2\nprint(x)\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "x = 1 + 2\nprint(x)");
     }
 
     #[test]
-    fn extract_python_block() {
-        let text = "Let me compute:\n```python\nresult = sum([1,2,3])\n```";
+    fn extract_repl_block_with_outer_prose_is_none() {
+        // Prose outside the fence → don't strip; let the caller pass the
+        // whole thing to Monty and get a SyntaxError the LLM can read.
+        let text = "Some explanation\n```repl\nx = 1 + 2\nprint(x)\n```\nMore text";
+        assert!(extract_code_block(text).is_none());
+    }
+
+    #[test]
+    fn extract_python_block_pure() {
+        let text = "```python\nresult = sum([1,2,3])\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "result = sum([1,2,3])");
+    }
+
+    #[test]
+    fn extract_python_block_with_prefix_prose_is_none() {
+        let text = "Let me compute:\n```python\nresult = sum([1,2,3])\n```";
+        assert!(extract_code_block(text).is_none());
     }
 
     #[test]
@@ -587,10 +507,16 @@ mod tests {
     }
 
     #[test]
-    fn extract_bare_backtick_block() {
-        let text = "Here's the code:\n```\nx = 42\nFINAL(x)\n```";
+    fn extract_bare_backtick_block_pure() {
+        let text = "```\nx = 42\nFINAL(x)\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "x = 42\nFINAL(x)");
+    }
+
+    #[test]
+    fn extract_bare_backtick_block_with_prose_is_none() {
+        let text = "Here's the code:\n```\nx = 42\nFINAL(x)\n```";
+        assert!(extract_code_block(text).is_none());
     }
 
     #[test]
@@ -656,19 +582,26 @@ mod tests {
 
     #[test]
     fn multiple_code_blocks_concatenated() {
+        // Old semantic: concatenate two separate ```repl blocks into one
+        // script. Under the strip-outer-fence-only rule, a response that
+        // isn't wrapped in a single outer fence must not be re-assembled —
+        // Monty will SyntaxError on the whole response, which is the LLM's
+        // cue to emit one script next turn.
         let text = "\
 Let me search first:\n\
 ```repl\nresult = web_search(query=\"test\")\nprint(result)\n```\n\
 Now let's process:\n\
 ```repl\nFINAL(result['title'])\n```";
-        let code = extract_code_block(text).unwrap();
-        assert!(code.contains("web_search"));
-        assert!(code.contains("FINAL"));
-        assert!(code.contains("\n\n"));
+        assert!(
+            extract_code_block(text).is_none(),
+            "multi-fence responses no longer concatenate under strip-outer-only"
+        );
     }
 
     #[test]
-    fn mixed_thinking_and_code() {
+    fn mixed_thinking_and_code_is_none() {
+        // Prose + fence + prose + fence → not wrapped in one outer fence,
+        // so strip-outer-only declines to extract.
         let text = "\
 Let me help you explore the relationship between Hyperliquid's price and revenue.\n\
 \n\
@@ -679,17 +612,20 @@ First, let's gather some data:\n\
 And also check the token price:\n\
 \n\
 ```python\ntoken_data = web_search(\n    query=\"Hyperliquid token price\",\n    count=3\n)\nprint(token_data)\n```";
-        let code = extract_code_block(text).unwrap();
-        assert!(code.contains("web_search"));
-        assert!(code.contains("Hyperliquid revenue"));
-        assert!(code.contains("Hyperliquid token price"));
+        assert!(extract_code_block(text).is_none());
     }
 
     #[test]
-    fn repl_preferred_over_bare() {
+    fn outer_strip_preserves_inner_fences_verbatim() {
+        // The whole point of strip-outer-only: nested ``` inside the body
+        // are just characters, not fence boundaries. The old extractor
+        // terminated on the first inner ``` and truncated the script.
+        // Here the body contains a literal ```repl — Monty would fail to
+        // parse this as Python, but that's a *downstream* decision and
+        // precisely the behavior the rule guarantees.
         let text = "```\nignored\n```\n```repl\nused = True\n```";
         let code = extract_code_block(text).unwrap();
-        assert_eq!(code, "used = True");
+        assert_eq!(code, "ignored\n```\n```repl\nused = True");
     }
 
     #[test]

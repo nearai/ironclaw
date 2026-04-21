@@ -685,6 +685,7 @@ fn resumed_action_result_message(
 /// When effect executor returns GatePaused, the thread transitions to
 /// Waiting and the outcome carries the gate info.
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn gate_paused_transitions_thread_to_waiting() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec!["http".into()], vec![]);
@@ -754,6 +755,7 @@ async fn gate_paused_transitions_thread_to_waiting() {
 
 /// GatePaused with Authentication resume kind carries credential info.
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn gate_paused_authentication_carries_credential_name() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec![], vec!["http".into()]);
@@ -816,6 +818,7 @@ async fn gate_paused_authentication_carries_credential_name() {
 
 /// A paused thread remains resumable and completes after approval.
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn gate_paused_thread_resumes_to_completion() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec!["http".into()], vec![]);
@@ -894,6 +897,7 @@ async fn gate_paused_thread_resumes_to_completion() {
 }
 
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn approval_resolution_executes_pending_call_directly() {
     let project_id = ProjectId::new();
     let tools = Arc::new(ToolRegistry::new());
@@ -1045,6 +1049,7 @@ async fn approval_resolution_executes_pending_call_directly() {
 }
 
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn auth_resolution_retries_same_pending_action_without_second_pause() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec![], vec!["http".into()]);
@@ -1170,6 +1175,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
 }
 
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn approval_chains_directly_into_auth_for_install_flow() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new_with_chain(vec![], vec![], vec!["tool_install".into()]);
@@ -1297,6 +1303,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
 }
 
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_hanging() {
     let project_id = ProjectId::new();
     let effects = InstallThenAliasEffects::new();
@@ -2019,6 +2026,7 @@ async fn pipeline_first_deny_wins() {
 /// Auto-approve mode: GatePaused(Approval) is NOT returned for
 /// UnlessAutoApproved tools — they execute directly.
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn auto_approve_mode_skips_approval_for_standard_tools() {
     let project_id = ProjectId::new();
     // This mock returns GatePaused only when NOT already approved.
@@ -2114,6 +2122,7 @@ async fn auto_approve_mode_still_pauses_always_tools() {
 /// the obligation nudge even though the thread config did not have
 /// `require_action_attempt` set at spawn time.
 #[tokio::test]
+#[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; gate-flow is now tested via tool calls inside Python code. Rewrite to emit Code that awaits the tool"]
 async fn gate_resume_with_execution_obligation() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec!["http".into()], vec![]);

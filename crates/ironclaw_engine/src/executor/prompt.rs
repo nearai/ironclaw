@@ -75,9 +75,6 @@ impl PlatformInfo {
 /// The main instruction block (before tool listing).
 const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");
 
-/// The strategy/closing block (after tool listing).
-const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
-
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
 
@@ -135,8 +132,8 @@ fn build_codeact_system_prompt_inner(
     platform: Option<&PlatformInfo>,
 ) -> String {
     // Layout for prompt caching: the stable-per-deployment prefix
-    // (preamble + platform + postamble) comes first so providers can reuse
-    // the KV cache across turns. "Stable per deployment" not "per session":
+    // (preamble + platform) comes first so providers can reuse the KV
+    // cache across turns. "Stable per deployment" not "per session":
     // PlatformInfo includes version (bumps per release) and model_name
     // (can change if the user switches mid-session), so turns that straddle
     // those events will see a cache miss here — but every normal turn
@@ -149,9 +146,6 @@ fn build_codeact_system_prompt_inner(
     if let Some(info) = platform {
         prompt.push_str(&info.to_prompt_section());
     }
-
-    // Strategy / error-recovery guidance (stable).
-    prompt.push_str(CODEACT_POSTAMBLE);
 
     // Runtime prompt overlay (dynamic: self-improvement mission edits this).
     if let Some(overlay) = overlay {
@@ -211,17 +205,17 @@ mod tests {
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
-        // Structural markers — if either the preamble or postamble gets
-        // accidentally emptied, these fail. Generic words like "Python" or
-        // "FINAL" would still match a broken include, so check section
-        // headings that exist in exactly one place each.
+        // Structural markers — if the preamble gets accidentally emptied,
+        // these fail. Generic words like "Python" or "FINAL" would still
+        // match a broken include, so check section headings that exist in
+        // exactly one place each.
         assert!(
-            prompt.contains("## Response shape"),
-            "preamble include appears to be missing its 'Response shape' section"
+            prompt.contains("## What each turn does"),
+            "preamble include appears to be missing its 'What each turn does' section"
         );
         assert!(
             prompt.contains("## Reminders"),
-            "postamble include appears to be missing its 'Reminders' section"
+            "preamble include appears to be missing its trailing 'Reminders' section"
         );
         assert!(!prompt.contains("Learned Rules"));
     }

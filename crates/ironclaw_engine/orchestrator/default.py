@@ -595,11 +595,15 @@ def run_loop(context, goal, actions, state, config):
     errors raise as Python exceptions — the LLM reads the traceback
     next turn and self-corrects.
     """
-    max_iterations = config.get("max_iterations", 30)
+    max_iterations = config.get("max_iterations", 10)
     # None means "no limit" — callers can disable the safety net explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    # Idle-turn watchdog: N consecutive turns with no FINAL, no tool call,
+    # and no error → fire a one-shot synthetic prompt, then reset.
+    max_idle_turns = config.get("max_idle_turns", 3)
 
     consecutive_errors = 0
+    consecutive_idle_turns = 0
     step_count = config.get("step_count", 0)
     if not isinstance(state, dict):
         state = {}
@@ -617,6 +621,7 @@ def run_loop(context, goal, actions, state, config):
         if signal and isinstance(signal, dict) and "inject" in signal:
             injected_text = signal["inject"]
             append_message(working_messages, "User", injected_text)
+            consecutive_idle_turns = 0
 
         # 2. Check budget
         budget = __check_budget__()
@@ -726,16 +731,9 @@ def run_loop(context, goal, actions, state, config):
         for r in result.get("action_results", []):
             state[r.get("action_name", "unknown")] = r.get("output")
 
-        # Format output for next LLM context
-        output = format_output(result)
-        append_message(working_messages, "User", output)
-
-        # Check for FINAL() in code output
-        if result.get("final_answer") is not None:
-            __transition_to__("completed", "FINAL() in code")
-            return complete_result(state, "completed", result["final_answer"])
-
-        # Check for unified gate pause (new path)
+        # Check gate BEFORE appending stdout — otherwise the gate's
+        # "RuntimeError: execution paused" leaks into transcript and
+        # confuses the LLM on resume.
         gate = result.get("pending_gate")
         if gate is None:
             gate = result.get("need_approval")
@@ -753,7 +751,22 @@ def run_loop(context, goal, actions, state, config):
                 "call_id": gate.get("call_id", ""),
                 "parameters": gate.get("parameters", {}),
                 "resume_kind": gate.get("resume_kind", {}),
+                "resume_output": gate.get("resume_output"),
+                "paused_lease": gate.get("paused_lease"),
             }
+
+        # Format output for next LLM context. If the script did not FINAL,
+        # annotate the output so the LLM knows none of this reached the user
+        # — only FINAL(answer) produces user-visible text.
+        output = format_output(result)
+        if result.get("final_answer") is None:
+            output = output + "\n\n[Note: the above was NOT shown to the user. Only FINAL(answer) sends output.]"
+        append_message(working_messages, "User", output)
+
+        # Check for FINAL() in code output
+        if result.get("final_answer") is not None:
+            __transition_to__("completed", "FINAL() in code")
+            return complete_result(state, "completed", result["final_answer"])
 
         # Check for approval or authentication needed (legacy path)
         if result.get("need_approval") is not None:
@@ -786,6 +799,7 @@ def run_loop(context, goal, actions, state, config):
         # Python traceback and try again — but after N failures we stop.
         if result.get("had_error"):
             consecutive_errors += 1
+            consecutive_idle_turns = 0
             if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
                 __transition_to__("failed", "too many consecutive errors")
                 return complete_result(
@@ -795,6 +809,24 @@ def run_loop(context, goal, actions, state, config):
                 )
         else:
             consecutive_errors = 0
+            # Idle = clean run, no FINAL, no tool call. Tool calls count as
+            # progress (non-empty action_results); FINAL exits the loop above.
+            if not result.get("action_results"):
+                consecutive_idle_turns += 1
+                if consecutive_idle_turns >= max_idle_turns:
+                    append_message(
+                        working_messages,
+                        "User",
+                        "[system] You have run " + str(consecutive_idle_turns) +
+                        " scripts that succeeded but neither called FINAL() nor invoked a tool. "
+                        "If you have the answer, call FINAL(answer) now. "
+                        "If you need to do something real, call the appropriate tool. "
+                        "Do not emit standalone print() demos — every script must end the turn or take a real action.",
+                    )
+                    __emit_event__("idle_watchdog_fired", consecutive=consecutive_idle_turns)
+                    consecutive_idle_turns = 0
+            else:
+                consecutive_idle_turns = 0
 
         __save_checkpoint__(state, {
             "consecutive_errors": consecutive_errors,

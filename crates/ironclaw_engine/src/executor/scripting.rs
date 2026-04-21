@@ -840,6 +840,12 @@ pub async fn execute_code_with_skills(
 
                 let mut results: Vec<(u32, ExtFunctionResult)> =
                     Vec::with_capacity(pending_ids.len());
+                // Gate-capture slot: set by `resolve_tool_future` when a tool
+                // raises `EngineError::GatePaused`. If any future in this
+                // batch hit a gate, we skip the VM resume entirely and
+                // return `need_approval` to the orchestrator so it can
+                // transition the thread to `waiting`.
+                let mut pending_gate: Option<crate::runtime::messaging::ThreadOutcome> = None;
 
                 for &mid in &pending_ids {
                     let ext_result = if let Some(pf) = pending_futures.remove(&mid) {
@@ -863,6 +869,7 @@ pub async fn execute_code_with_skills(
                                     context,
                                     &mut action_results,
                                     &mut events,
+                                    &mut pending_gate,
                                 )
                                 .await
                             }
@@ -878,6 +885,25 @@ pub async fn execute_code_with_skills(
                         ))
                     };
                     results.push((mid, ext_result));
+                }
+
+                // A gate fired — halt the script here and hand the outcome
+                // up to the orchestrator. Resuming the VM would raise a
+                // `RuntimeError: execution paused by gate ...` inside Python,
+                // which the LLM then tries to "fix" by rewriting the same
+                // call with different parameters (the bug captured in
+                // ironclaw-trace.jsonl: 5 retries before max_consecutive_errors).
+                if let Some(outcome) = pending_gate {
+                    return Ok(CodeExecutionResult {
+                        return_value: serde_json::Value::Null,
+                        stdout,
+                        action_results,
+                        events,
+                        need_approval: Some(outcome),
+                        recursive_tokens,
+                        final_answer,
+                        failure: None,
+                    });
                 }
 
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1638,6 +1664,14 @@ async fn handle_llm_query_batched_standalone(
 // ── Future resolution helpers ───────────────────────────────
 
 /// Resolve a pending tool execution future.
+///
+/// `pending_gate` is the outer loop's gate-capture slot. When the tool
+/// raises `EngineError::GatePaused`, we stash the full outcome there so
+/// the caller can return `CodeExecutionResult::need_approval = Some(...)`
+/// to the orchestrator — otherwise gates emitted during code-only tool
+/// dispatch silently degrade into a Python `RuntimeError` that the LLM
+/// retries against. First gate wins (subsequent ones in a parallel batch
+/// are ignored for propagation; they still emit ApprovalRequested events).
 #[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
     handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
@@ -1650,6 +1684,7 @@ async fn resolve_tool_future(
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
     events: &mut Vec<EventKind>,
+    pending_gate: &mut Option<crate::runtime::messaging::ThreadOutcome>,
 ) -> ExtFunctionResult {
     match handle.await {
         Ok((Ok(result), execution_duration_ms)) => {
@@ -1701,15 +1736,17 @@ async fn resolve_tool_future(
                 gate_name,
                 action_name,
                 call_id,
+                parameters: gate_params,
                 resume_kind,
-                ..
+                resume_output,
+                paused_lease,
             }),
             _,
         )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
-                action_name,
-                call_id,
+                action_name: action_name.clone(),
+                call_id: call_id.clone(),
                 parameters: Some(parameters),
                 description: None,
                 allow_always: match *resume_kind {
@@ -1719,6 +1756,21 @@ async fn resolve_tool_future(
                 gate_name: Some(gate_name.clone()),
                 params_summary,
             });
+            // Stash the full gate outcome for the outer loop to propagate
+            // to the orchestrator via CodeExecutionResult::need_approval.
+            // Without this, the gate silently degrades into a Python
+            // RuntimeError and the LLM burns iterations retrying.
+            if pending_gate.is_none() {
+                *pending_gate = Some(crate::runtime::messaging::ThreadOutcome::GatePaused {
+                    gate_name: gate_name.clone(),
+                    action_name,
+                    call_id,
+                    parameters: *gate_params,
+                    resume_kind: *resume_kind,
+                    resume_output: resume_output.map(|b| *b),
+                    paused_lease,
+                });
+            }
             ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
                 Some(format!("execution paused by gate '{gate_name}'")),
@@ -2287,6 +2339,91 @@ FINAL("should not reach")
         assert!(
             result.final_answer.is_none()
                 || result.final_answer.as_deref() != Some("should not reach")
+        );
+    }
+
+    // ── Gate raised from inside an `await` ──────────────────
+
+    fn make_gate_error() -> EngineError {
+        EngineError::GatePaused {
+            gate_name: "authentication".into(),
+            action_name: "telegram_login".into(),
+            call_id: "call_login_1".into(),
+            parameters: Box::new(serde_json::json!({"phone": "+1"})),
+            resume_kind: Box::new(crate::gate::ResumeKind::Approval {
+                allow_always: false,
+            }),
+            resume_output: None,
+            paused_lease: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_raised_from_await_populates_need_approval() {
+        let thread = make_test_thread();
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("telegram_login")],
+            vec![Err(make_gate_error())],
+        ));
+
+        let code = r#"
+result = await telegram_login(phone="+1")
+FINAL("should not reach — gate should halt the script")
+"#;
+
+        let result = run_code(code, effects, &thread).await.unwrap();
+
+        assert!(result.final_answer.is_none(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        match result.need_approval {
+            Some(crate::runtime::messaging::ThreadOutcome::GatePaused {
+                ref gate_name,
+                ref action_name,
+                ref call_id,
+                ..
+            }) => {
+                assert_eq!(gate_name, "authentication");
+                assert_eq!(action_name, "telegram_login");
+                assert_eq!(call_id, "call_login_1");
+            }
+            other => panic!("expected need_approval = Some(GatePaused), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_in_parallel_gather_still_propagates() {
+        // One arm succeeds, the other hits a gate — gate must still win.
+        let thread = make_test_thread();
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("good"), test_action("needs_auth")],
+            vec![
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "good".into(),
+                    output: serde_json::json!("ok"),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                }),
+                Err(make_gate_error()),
+            ],
+        ));
+
+        let code = r#"
+import asyncio
+a, b = await asyncio.gather(good(), needs_auth())
+FINAL("should not reach")
+"#;
+
+        let result = run_code(code, effects, &thread).await.unwrap();
+
+        assert!(result.final_answer.is_none(), "stdout: {}", result.stdout);
+        assert!(
+            matches!(
+                result.need_approval,
+                Some(crate::runtime::messaging::ThreadOutcome::GatePaused { .. })
+            ),
+            "got {:?}",
+            result.need_approval
         );
     }
 

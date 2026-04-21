@@ -597,8 +597,14 @@ mod tests {
         ) -> Result<LlmOutput, EngineError> {
             let mut r = self.0.lock().unwrap();
             if r.is_empty() {
+                // Code-only contract: every LLM response is Python. When
+                // the mock runs out, emit a terminal FINAL so the
+                // orchestrator completes instead of rejecting a Text reply.
                 Ok(LlmOutput {
-                    response: LlmResponse::Text("done".into()),
+                    response: LlmResponse::Code {
+                        code: "FINAL(\"done\")".into(),
+                        content: None,
+                    },
                     usage: TokenUsage::default(),
                 })
             } else {
@@ -798,7 +804,10 @@ mod tests {
         let store = Arc::new(MockStore::new());
         let tm = Arc::new(ThreadManager::new(
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
-                response: LlmResponse::Text("Hello!".into()),
+                response: LlmResponse::Code {
+                    code: "FINAL(\"Hello!\")".into(),
+                    content: None,
+                },
                 usage: TokenUsage::default(),
             }]))),
             Arc::new(MockEffects),
@@ -866,7 +875,10 @@ mod tests {
         let store = Arc::new(MockStore::new());
         let tm = Arc::new(ThreadManager::new(
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
-                response: LlmResponse::Text("Recovered".into()),
+                response: LlmResponse::Code {
+                    code: "FINAL(\"Recovered\")".into(),
+                    content: None,
+                },
                 usage: TokenUsage::default(),
             }]))),
             Arc::new(MockEffects),

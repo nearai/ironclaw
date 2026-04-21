@@ -646,6 +646,28 @@ async fn handle_llm_complete(
         metadata: HashMap::new(),
     };
 
+    let tid = thread.id.to_string();
+    super::trace_dump::dump(
+        "llm_in",
+        &tid,
+        &serde_json::json!({
+            "messages": messages.iter().map(|m| serde_json::json!({
+                "role": format!("{:?}", m.role),
+                "content": m.content,
+                "action_name": m.action_name,
+                "action_call_id": m.action_call_id,
+            })).collect::<Vec<_>>(),
+            "action_count": actions.len(),
+            "config": {
+                "max_tokens": config.max_tokens,
+                "temperature": config.temperature,
+                "force_text": config.force_text,
+                "model": config.model,
+                "depth": config.depth,
+            },
+        }),
+    );
+
     match deps.llm.complete(&messages, &actions, &config).await {
         Ok(output) => {
             total_tokens.input_tokens += output.usage.input_tokens;
@@ -678,6 +700,13 @@ async fn handle_llm_complete(
                     // ActionCalls. Surface the contract violation so traces
                     // show where the offending adapter lives instead of
                     // silently losing the response.
+                    super::trace_dump::dump(
+                        "llm_err",
+                        &tid,
+                        &serde_json::json!({
+                            "error": "LlmBackend returned ActionCalls under code-only contract",
+                        }),
+                    );
                     return ExtFunctionResult::Error(monty::MontyException::new(
                         monty::ExcType::RuntimeError,
                         Some(
@@ -689,12 +718,20 @@ async fn handle_llm_complete(
                 }
             };
 
+            super::trace_dump::dump("llm_out", &tid, &result);
             ExtFunctionResult::Return(json_to_monty(&result))
         }
-        Err(e) => ExtFunctionResult::Error(monty::MontyException::new(
-            monty::ExcType::RuntimeError,
-            Some(format!("LLM call failed: {e}")),
-        )),
+        Err(e) => {
+            super::trace_dump::dump(
+                "llm_err",
+                &tid,
+                &serde_json::json!({ "error": e.to_string() }),
+            );
+            ExtFunctionResult::Error(monty::MontyException::new(
+                monty::ExcType::RuntimeError,
+                Some(format!("LLM call failed: {e}")),
+            ))
+        }
     }
 }
 
@@ -739,6 +776,16 @@ async fn handle_execute_code_step(
         user_timezone: thread_user_timezone(thread),
         thread_goal: Some(thread.goal.clone()),
     };
+
+    let tid = thread.id.to_string();
+    super::trace_dump::dump(
+        "code_in",
+        &tid,
+        &serde_json::json!({
+            "code": code,
+            "state": state,
+        }),
+    );
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -857,12 +904,20 @@ async fn handle_execute_code_step(
                 }),
             });
 
+            super::trace_dump::dump("code_out", &tid, &result_json);
             ExtFunctionResult::Return(json_to_monty(&result_json))
         }
-        Err(e) => ExtFunctionResult::Error(monty::MontyException::new(
-            monty::ExcType::RuntimeError,
-            Some(format!("Code execution failed: {e}")),
-        )),
+        Err(e) => {
+            super::trace_dump::dump(
+                "code_err",
+                &tid,
+                &serde_json::json!({ "error": e.to_string() }),
+            );
+            ExtFunctionResult::Error(monty::MontyException::new(
+                monty::ExcType::RuntimeError,
+                Some(format!("Code execution failed: {e}")),
+            ))
+        }
     }
 }
 

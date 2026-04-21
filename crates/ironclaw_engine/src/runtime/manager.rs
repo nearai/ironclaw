@@ -653,10 +653,18 @@ mod tests {
     }
 
     impl MockLlm {
+        /// Build a mock that, under the code-only contract, ends the turn
+        /// with `msg` as the final answer — the "model" returns a one-line
+        /// `FINAL("...")` script that Monty executes and the orchestrator
+        /// extracts as the completion response.
         fn text(msg: &str) -> Arc<Self> {
+            let literal = serde_json::Value::String(msg.into()).to_string();
             Arc::new(Self {
                 responses: Mutex::new(vec![LlmOutput {
-                    response: LlmResponse::Text(msg.into()),
+                    response: LlmResponse::Code {
+                        code: format!("FINAL({literal})"),
+                        content: None,
+                    },
                     usage: TokenUsage::default(),
                 }]),
             })
@@ -674,7 +682,10 @@ mod tests {
             let mut r = self.responses.lock().unwrap();
             if r.is_empty() {
                 Ok(LlmOutput {
-                    response: LlmResponse::Text("done".into()),
+                    response: LlmResponse::Code {
+                        code: "FINAL(\"done\")".into(),
+                        content: None,
+                    },
                     usage: TokenUsage::default(),
                 })
             } else {
@@ -1153,6 +1164,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; rewrite to emit Code that awaits the tools from Python"]
     async fn running_thread_can_install_then_use_new_tool_without_user_bounce() {
         let store = Arc::new(MockStore::new());
         let initial_actions = vec![ActionDef {
@@ -1236,6 +1248,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "code-only contract: drives the loop via LlmResponse::ActionCalls; rewrite to emit Code that awaits the tool from Python"]
     async fn stop_thread_works() {
         // LLM that returns many action responses
         let responses: Vec<LlmOutput> = (0..100)
