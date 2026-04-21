@@ -20,10 +20,30 @@ use ironclaw::channels::web::auth::MultiAuthState;
 use ironclaw::channels::web::platform::router::start_server;
 use ironclaw::channels::web::platform::state::GatewayState;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
+use tokio::sync::oneshot;
 
 const AUTH_TOKEN: &str = "test-responses-api-token";
 
-async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
+/// RAII guard that shuts the gateway test server down when dropped,
+/// even on early returns or panics. Without this, every `#[tokio::test]`
+/// would leak its spawned `axum::serve` task for the remainder of the
+/// test process.
+struct ServerGuard {
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            // Best-effort: the receiver may already be gone if the
+            // serve task exited for another reason. Either way, we've
+            // released our half of the channel.
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, ServerGuard) {
     let state = TestGatewayBuilder::new().user_id("test-user").build();
     let auth = MultiAuthState::single(AUTH_TOKEN.to_string(), "test-user".to_string());
     let addr: SocketAddr = "127.0.0.1:0"
@@ -32,7 +52,8 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
     let bound = start_server(addr, state.clone(), auth.into())
         .await
         .expect("start gateway test server");
-    (bound, state)
+    let shutdown = state.shutdown_tx.write().await.take();
+    (bound, state, ServerGuard { shutdown })
 }
 
 fn client() -> reqwest::Client {
@@ -48,7 +69,7 @@ fn client() -> reqwest::Client {
 /// assertion is "the route exists".
 #[tokio::test]
 async fn canonical_post_path_routes_to_handler() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
     let url = format!("http://{}/api/v1/responses", addr);
 
     let resp = client()
@@ -79,7 +100,7 @@ async fn canonical_post_path_routes_to_handler() {
 /// against the pre-#2201 path).
 #[tokio::test]
 async fn legacy_post_path_still_routes_to_handler() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
     let url = format!("http://{}/v1/responses", addr);
 
     let resp = client()
@@ -107,7 +128,7 @@ async fn legacy_post_path_still_routes_to_handler() {
 /// registered and the path parameter is reaching the handler.
 #[tokio::test]
 async fn canonical_get_path_routes_to_handler() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
     let url = format!("http://{}/api/v1/responses/not_a_valid_id", addr);
 
     let resp = client()
@@ -130,7 +151,7 @@ async fn canonical_get_path_routes_to_handler() {
 /// handler.
 #[tokio::test]
 async fn legacy_get_path_still_routes_to_handler() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
     let url = format!("http://{}/v1/responses/not_a_valid_id", addr);
 
     let resp = client()
@@ -153,7 +174,7 @@ async fn legacy_get_path_still_routes_to_handler() {
 /// return 401, not 404 (which would indicate the route is missing).
 #[tokio::test]
 async fn both_paths_require_auth() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
 
     for path in ["/api/v1/responses", "/v1/responses"] {
         let url = format!("http://{}{}", addr, path);
@@ -177,7 +198,7 @@ async fn both_paths_require_auth() {
 /// not 404 — the auth middleware has to apply to legacy aliases as well.
 #[tokio::test]
 async fn both_get_paths_require_auth() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _guard) = start_test_server().await;
 
     for path in [
         "/api/v1/responses/not_a_valid_id",
