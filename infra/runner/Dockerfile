@@ -31,6 +31,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         liblttng-ust1 \
         libssl-dev \
         pkg-config \
+        # ironclaw pulls pyo3 via pydantic-monty (embedded Python
+        # interpreter called from Rust validators), so the build
+        # needs both python3 (for pyo3's interpreter-discovery step)
+        # and python3-dev (libpython headers/linkage for the embed
+        # mode — pyo3 without `extension-module` links against
+        # libpython directly).
+        python3 \
+        python3-dev \
         tar \
     && rm -rf /var/lib/apt/lists/*
 
