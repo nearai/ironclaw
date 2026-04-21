@@ -22,6 +22,42 @@ WORK_DIR="${RUNNER_DATA}/_work"
 
 mkdir -p "${RUNNER_DIR}" "${WORK_DIR}" "${HOME}" "${RUNNER_TOOL_CACHE}" "${RUNNER_TEMP}"
 
+# One-shot ironclaw DB bootstrap. The `private-oauth` canary lane expects
+# an existing libsql DB at `$HOME/.ironclaw/ironclaw.db` with pre-seeded
+# Google OAuth secrets (`google_oauth_token`, `..._refresh_token`,
+# `..._scopes`). Minting those requires a human clicking "Allow" in a
+# browser; the pragmatic flow is to do the consent on a laptop and
+# transfer the resulting DB onto the runner volume.
+#
+# `IRONCLAW_DB_B64` is a base64-encoded copy of that DB. When set AND
+# the target file doesn't already exist, we decode once into place.
+# Running daily canary jobs rotate the refresh token on the runner's
+# DB; the `-f` guard ensures we never overwrite those rotations with
+# the stale laptop snapshot. To force a re-seed (e.g., after a volume
+# wipe), the file won't be there so the decode fires automatically.
+#
+# After a successful decode operators should remove `IRONCLAW_DB_B64`
+# from the Railway service env — the value is large (~1 MB base64'd
+# for a typical DB) and doesn't need to persist.
+DB_TARGET="${HOME}/.ironclaw/ironclaw.db"
+if [[ -n "${IRONCLAW_DB_B64:-}" && ! -f "${DB_TARGET}" ]]; then
+    echo "[entrypoint] Bootstrapping ${DB_TARGET} from IRONCLAW_DB_B64"
+    mkdir -p "$(dirname "${DB_TARGET}")"
+    # Strip any whitespace the Railway UI may have introduced on paste
+    # (wrapped lines, trailing newlines) before decode.
+    if ! printf '%s' "${IRONCLAW_DB_B64}" | tr -d '[:space:]' \
+            | base64 -d > "${DB_TARGET}"; then
+        echo "[entrypoint] ERROR: base64 decode of IRONCLAW_DB_B64 failed" >&2
+        rm -f "${DB_TARGET}"
+        exit 1
+    fi
+    chmod 600 "${DB_TARGET}"
+    # stat flag differs across GNU/BSD; fall back silently if neither matches.
+    db_size="$(stat -c %s "${DB_TARGET}" 2>/dev/null \
+        || stat -f %z "${DB_TARGET}" 2>/dev/null || echo unknown)"
+    echo "[entrypoint] Wrote ${db_size} bytes to ${DB_TARGET}"
+fi
+
 # Recovery path. If the volume holds a stale `.runner` sentinel for a
 # registration that GitHub has since deleted (because the UI "Remove"
 # button was clicked, or GitHub auto-GC'd a runner that went offline
