@@ -8,9 +8,11 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod attachment_tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -24,34 +26,14 @@ mod attachment_tests {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
-    fn cwd_lock() -> &'static Mutex<()> {
+    fn engine_v2_attachment_root_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    struct WorkingDirGuard {
-        original: PathBuf,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl WorkingDirGuard {
-        fn enter(path: &Path) -> Self {
-            let guard = cwd_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let original = std::env::current_dir().expect("current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self {
-                original,
-                _guard: guard,
-            }
-        }
-    }
-
-    impl Drop for WorkingDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).expect("restore current dir");
-        }
+    fn engine_v2_project_root() -> PathBuf {
+        let base_dir = ironclaw::bootstrap::ironclaw_base_dir();
+        base_dir.parent().map(PathBuf::from).unwrap_or(base_dir)
     }
 
     fn make_attachment(kind: AttachmentKind) -> IncomingAttachment {
@@ -243,10 +225,10 @@ mod attachment_tests {
 
     #[tokio::test]
     async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
-        for channel in ["telegram", "whatsapp"] {
-            let cwd = tempfile::tempdir().expect("temp cwd");
-            let _cwd = WorkingDirGuard::enter(cwd.path());
+        let _guard = engine_v2_attachment_root_lock().lock().await;
+        let project_root = engine_v2_project_root();
 
+        for channel in ["telegram", "whatsapp"] {
             let rig = TestRigBuilder::new().with_engine_v2().build().await;
             // Redirect attachment persistence into the tempdir so the
             // assertion on saved_path below sees the real write. The engine
@@ -254,7 +236,7 @@ mod attachment_tests {
             // (first-caller-wins LazyLock), which is `$HOME/.ironclaw` in a
             // fresh process and unrelated to the per-test tempdir here.
             assert!(
-                ironclaw::bridge::override_engine_project_root_for_test(cwd.path().to_path_buf())
+                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone())
                     .await,
                 "engine state should be installed after build()"
             );
@@ -312,7 +294,7 @@ mod attachment_tests {
                 "unexpected persisted path for {channel}: {project_path}"
             );
 
-            let saved_path = cwd.path().join(project_path);
+            let saved_path = project_root.join(project_path);
             assert!(
                 saved_path.exists(),
                 "saved attachment missing: {}",

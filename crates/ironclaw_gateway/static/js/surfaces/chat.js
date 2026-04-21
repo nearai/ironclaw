@@ -129,8 +129,20 @@ async function sendMessage() {
   }));
   const displayContent = content
     || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '(images attached)');
+  const pendingCopyTextParts = [];
+  if (displayContent) pendingCopyTextParts.push(displayContent);
+  pendingAttachmentsForDisplay.forEach((att) => {
+    const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
+    pendingCopyTextParts.push(
+      suffix
+        ? `[Attachment] ${att.filename || 'attachment'} (${suffix})`
+        : `[Attachment] ${att.filename || 'attachment'}`
+    );
+  });
+  const pendingCopyText = pendingCopyTextParts.join('\n');
   const userMsg = addMessage('user', displayContent, {
     attachments: pendingAttachmentsForDisplay,
+    copyText: pendingCopyText,
   });
   if (attachedImageDataUrls.length > 0) {
     appendImagesToMessage(userMsg, attachedImageDataUrls);
@@ -149,7 +161,6 @@ async function sendMessage() {
   let pendingId = null;
   const pendingThreadId = currentThreadId;
   if (currentThreadId) {
-    const displayContent = content || '(images attached)';
     if (!_pendingUserMessages.has(currentThreadId)) {
       _pendingUserMessages.set(currentThreadId, []);
     }
@@ -157,6 +168,8 @@ async function sendMessage() {
     _pendingUserMessages.get(currentThreadId).push({
       id: pendingId,
       content: displayContent,
+      copyText: pendingCopyText,
+      attachments: pendingAttachmentsForDisplay.map((att) => ({ ...att })),
       images: attachedImageDataUrls,
       timestamp: Date.now(),
     });
@@ -428,6 +441,8 @@ function resolveGeneratedImageForRender(threadId, image) {
 
 // --- Slash Autocomplete ---
 
+let _slashSkillEntries = [];
+
 function showSlashAutocomplete(matches) {
   const el = document.getElementById('slash-autocomplete');
   if (!el || matches.length === 0) { hideSlashAutocomplete(); return; }
@@ -455,6 +470,51 @@ function showSlashAutocomplete(matches) {
   el.style.display = 'block';
 }
 
+function setSlashSkillEntries(skills) {
+  if (!Array.isArray(skills)) {
+    _slashSkillEntries = [];
+    const input = document.getElementById('chat-input');
+    if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+    return;
+  }
+  _slashSkillEntries = skills
+    .filter((skill) => skill && typeof skill.name === 'string' && skill.name.trim() !== '')
+    .map((skill) => ({
+      cmd: '/' + skill.name.trim(),
+      desc: (skill.description || '').trim() || 'Skill',
+      kind: 'skill',
+    }))
+    .sort((a, b) => a.cmd.localeCompare(b.cmd));
+  const input = document.getElementById('chat-input');
+  if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+}
+
+function getSlashAutocompleteItems() {
+  const items = SLASH_COMMANDS.map((cmd) => ({
+    cmd: cmd.cmd,
+    desc: cmd.desc,
+    kind: 'command',
+  }));
+  const seen = new Set(items.map((item) => item.cmd.toLowerCase()));
+  _slashSkillEntries.forEach((item) => {
+    const key = item.cmd.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  });
+  return items;
+}
+
+function refreshSlashSkillEntries() {
+  return apiFetch('/api/skills')
+    .then(function(data) {
+      setSlashSkillEntries((data && data.skills) || []);
+    })
+    .catch(function() {
+      // Preserve the last known skill list on transient fetch failures.
+    });
+}
+
 function hideSlashAutocomplete() {
   const el = document.getElementById('slash-autocomplete');
   if (el) el.style.display = 'none';
@@ -478,53 +538,13 @@ function updateSlashHighlight() {
   }
 }
 
-// Installed skills merged into the slash-autocomplete menu. Cached with
-// a 30 s TTL — `filterSlashCommands` runs on every keystroke while the
-// user types a `/` command, and without a TTL this would spam
-// `/api/skills` once per character. The cache is also invalidated
-// explicitly by `invalidateSlashSkillCache()` after install/remove so
-// the menu picks up changes immediately without waiting for the TTL
-// to expire.
-let _installedSkillsForSlash = [];
-let _installedSkillsFetchInFlight = false;
-let _installedSkillsFetchedAt = 0;
-const _INSTALLED_SKILLS_TTL_MS = 30000;
-
-function invalidateSlashSkillCache() {
-  _installedSkillsFetchedAt = 0;
-}
-
-function refreshSlashSkillEntries() {
-  if (_installedSkillsFetchInFlight) return;
-  const now = Date.now();
-  if (now - _installedSkillsFetchedAt < _INSTALLED_SKILLS_TTL_MS) return;
-  _installedSkillsFetchInFlight = true;
-  const done = () => { _installedSkillsFetchInFlight = false; };
-  apiFetch('/api/skills').then((data) => {
-    const list = (data && Array.isArray(data.skills)) ? data.skills : [];
-    _installedSkillsForSlash = list.map((skill) => ({
-      cmd: '/' + skill.name,
-      desc: skill.description || (skill.usage_hint || ''),
-    }));
-    _installedSkillsFetchedAt = Date.now();
-    // Re-filter in place so the menu refreshes with skills without
-    // requiring another keystroke.
-    const input = document.getElementById('chat-input');
-    if (input && input.value.startsWith('/')) {
-      filterSlashCommands(input.value);
-    }
-    done();
-  }).catch(done);
-}
-
 function filterSlashCommands(value) {
   if (!value.startsWith('/')) { hideSlashAutocomplete(); return; }
   // Only show autocomplete when the input is just a slash command prefix (no spaces except /thread new)
   const lower = value.toLowerCase();
-  refreshSlashSkillEntries();
-  const allCommands = SLASH_COMMANDS.concat(_installedSkillsForSlash);
-  const matches = allCommands.filter((c) => c.cmd.startsWith(lower));
-  if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === lower.trimEnd())) {
+  const exactLower = lower.trimEnd();
+  const matches = getSlashAutocompleteItems().filter((c) => c.cmd.toLowerCase().startsWith(lower));
+  if (matches.length === 0 || (matches.length === 1 && matches[0].cmd.toLowerCase() === exactLower)) {
     hideSlashAutocomplete();
   } else {
     showSlashAutocomplete(matches);

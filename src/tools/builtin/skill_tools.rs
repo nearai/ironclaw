@@ -1602,14 +1602,52 @@ fn extract_skill_bundle_from_zip(
         if file.is_dir() {
             continue;
         }
+        // Reject early if the declared size already blows the budget — this is
+        // a cheap reject for honestly-labelled archives. The authoritative
+        // check is the post-read length comparison below, because a malicious
+        // archive can forge `size()` (the `zip` crate surfaces central-directory
+        // metadata, which is attacker-controlled).
         if file.size() > MAX_ZIP_ENTRY_BYTES {
             return Err(ToolError::ExecutionFailed(format!(
                 "ZIP entry too large to decompress safely: {}",
                 file.name()
             )));
         }
+
+        let entry_name = file.name().to_string();
+        let mut path = normalize_archive_path(Path::new(&entry_name))?;
+        if let Some(root) = &strip_root
+            && let Ok(stripped) = path.strip_prefix(root)
+        {
+            path = stripped.to_path_buf();
+        }
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+
+        // Cap the actual read at MAX_ZIP_ENTRY_BYTES + 1 so a forged metadata
+        // size cannot trick us into materializing an unbounded decompressed
+        // payload. If we hit the limit, the next byte exists — the entry is
+        // oversized regardless of what the header claims.
+        let mut contents = Vec::new();
+        (&mut file)
+            .take(MAX_ZIP_ENTRY_BYTES + 1)
+            .read_to_end(&mut contents)
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to read ZIP entry {}: {e}",
+                    path.display()
+                ))
+            })?;
+        if contents.len() as u64 > MAX_ZIP_ENTRY_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP entry too large to decompress safely: {}",
+                entry_name
+            )));
+        }
+
         total_unzipped_bytes = total_unzipped_bytes
-            .checked_add(file.size())
+            .checked_add(contents.len() as u64)
             .ok_or_else(|| {
                 ToolError::ExecutionFailed(
                     "ZIP archive decompressed size overflowed safety budget".to_string(),
@@ -1621,21 +1659,6 @@ fn extract_skill_bundle_from_zip(
                 total_unzipped_bytes, MAX_TOTAL_UNZIPPED_BYTES
             )));
         }
-
-        let mut path = normalize_archive_path(Path::new(file.name()))?;
-        if let Some(root) = &strip_root
-            && let Ok(stripped) = path.strip_prefix(root)
-        {
-            path = stripped.to_path_buf();
-        }
-        if path.as_os_str().is_empty() {
-            continue;
-        }
-
-        let mut contents = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut contents).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read ZIP entry {}: {e}", path.display()))
-        })?;
 
         if path.file_name().is_some_and(|name| name == "SKILL.md") {
             skill_dirs.insert(path.parent().unwrap_or(Path::new("")).to_path_buf());
@@ -2294,15 +2317,8 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_deflate() {
-        use std::io::Write;
-
         let skill_md = b"---\nname: test\n---\n# Test Skill\n";
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("SKILL.md", options).unwrap();
-        writer.write_all(skill_md).unwrap();
-        let zip = writer.finish().unwrap().into_inner();
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Deflated);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: test\n---\n# Test Skill\n");
@@ -2310,15 +2326,8 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_store() {
-        use std::io::Write;
-
         let skill_md = b"---\nname: stored\n---\n# Stored\n";
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        writer.start_file("SKILL.md", options).unwrap();
-        writer.write_all(skill_md).unwrap();
-        let zip = writer.finish().unwrap().into_inner();
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Stored);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: stored\n---\n# Stored\n");
@@ -2664,13 +2673,7 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_missing_skill_md() {
-        use std::io::Write;
-
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        writer.start_file("_meta.json", options).unwrap();
-        writer.write_all(b"{}").unwrap();
-        let zip = writer.finish().unwrap().into_inner();
+        let zip = build_zip_archive(&[("_meta.json", b"{}")], zip::CompressionMethod::Stored);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(err.to_string().contains("does not contain SKILL.md"));
@@ -2678,39 +2681,41 @@ mod tests {
 
     // ── ZIP extraction security regression tests ────────────────────────
 
-    /// Helper: build a minimal ZIP with a single file using `zip::ZipWriter`
-    /// (valid EOCD so `zip::ZipArchive::new` accepts it).
-    fn build_zip_entry(file_name: &str, content: &[u8]) -> Vec<u8> {
+    fn build_zip_archive(
+        entries: &[(&str, &[u8])],
+        compression: zip::CompressionMethod,
+    ) -> Vec<u8> {
         use std::io::Write;
 
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        writer.start_file(file_name, options).unwrap();
-        writer.write_all(content).unwrap();
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default().compression_method(compression);
+        for (file_name, content) in entries {
+            writer.start_file(*file_name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
         writer.finish().unwrap().into_inner()
+    }
+
+    fn build_zip_entry_store(file_name: &str, content: &[u8]) -> Vec<u8> {
+        build_zip_archive(&[(file_name, content)], zip::CompressionMethod::Stored)
     }
 
     #[test]
     fn test_zip_extract_valid_skill() {
         let content = b"---\nname: hello\n---\n# Hello Skill\nDoes things.\n";
-        let zip = build_zip_entry("SKILL.md", content);
+        let zip = build_zip_entry_store("SKILL.md", content);
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, std::str::from_utf8(content).unwrap());
     }
 
     #[test]
     fn test_zip_extract_ignores_non_skill_entries() {
-        use std::io::Write;
-
         // ZIP with README.md and src/main.rs but no SKILL.md -- should error.
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        writer.start_file("README.md", options).unwrap();
-        writer.write_all(b"# Readme").unwrap();
-        writer.start_file("src/main.rs", options).unwrap();
-        writer.write_all(b"fn main() {}").unwrap();
-        let zip = writer.finish().unwrap().into_inner();
+        let zip = build_zip_archive(
+            &[("README.md", b"# Readme"), ("src/main.rs", b"fn main() {}")],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
@@ -2722,38 +2727,86 @@ mod tests {
 
     #[test]
     fn test_zip_extract_path_traversal_rejected() {
-        // An entry named "../../SKILL.md" must be rejected by path normalization
-        // before the SKILL.md matcher runs.
+        // Parent components are invalid and must be rejected during path normalization.
         let content = b"---\nname: evil\n---\n# Malicious path traversal\n";
-        let zip = build_zip_entry("../../SKILL.md", content);
+        let zip = build_zip_entry_store("../../SKILL.md", content);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
             err.to_string().contains("unsafe path"),
-            "Path traversal entry should be rejected as unsafe, got: {}",
+            "Path traversal entry should be rejected during normalization, got: {}",
             err
         );
     }
 
     #[test]
-    fn test_zip_extract_oversized_rejected() {
-        use std::io::Write;
+    fn test_zip_extract_nested_single_skill_supported() {
+        // A ZIP containing a single nested skill directory should still extract SKILL.md.
+        let content = b"---\nname: nested\n---\n# Nested\n";
+        let zip = build_zip_entry_store("subdir/SKILL.md", content);
 
-        // Entry whose uncompressed size exceeds MAX_ZIP_ENTRY_BYTES (2 MB).
-        // Using repeating bytes keeps the compressed payload small so the
-        // test doesn't need to allocate megabytes of incompressible data.
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("SKILL.md", options).unwrap();
-        let oversized = vec![b'A'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
-        writer.write_all(&oversized).unwrap();
-        let zip = writer.finish().unwrap().into_inner();
+        let result = super::extract_skill_from_zip(&zip).unwrap();
+        assert_eq!(result, std::str::from_utf8(content).unwrap());
+    }
+
+    #[test]
+    fn test_zip_extract_oversized_rejected() {
+        let oversized_body = vec![b'x'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
+        let zip = build_zip_archive(
+            &[("blob.bin", oversized_body.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("too large"),
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
             "Oversized entry should be rejected, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_zip_extract_forged_metadata_rejected() {
+        // A malicious ZIP can report a tiny `uncompressed_size` in the central
+        // directory (which `ZipFile::size()` exposes) while shipping a much
+        // larger actual payload that `read_to_end()` still yields. The
+        // extractor's decompression budget must be enforced against the
+        // *actual* bytes read, not the attacker-controlled metadata —
+        // otherwise a few KB of archive can expand to arbitrary memory.
+        //
+        // Build an honest oversized Stored ZIP, then rewrite the
+        // `uncompressed_size` fields in both the local file header and the
+        // central-directory header to claim 10 bytes.
+        let oversized_body = vec![b'A'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
+        let mut zip = build_zip_archive(
+            &[("SKILL.md", oversized_body.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
+
+        // Local file header signature 0x04034b50 (little-endian 50 4B 03 04);
+        // uncompressed_size is at offset 22 within the header.
+        let lfh_sig: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
+        let lfh_offset = zip
+            .windows(4)
+            .position(|w| w == lfh_sig)
+            .expect("local file header not found");
+        zip[lfh_offset + 22..lfh_offset + 26].copy_from_slice(&10u32.to_le_bytes());
+
+        // Central-directory file header signature 0x02014b50; uncompressed_size
+        // is at offset 24 within the header. `ZipFile::size()` reads from here.
+        let cdh_sig: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+        let cdh_offset = zip
+            .windows(4)
+            .position(|w| w == cdh_sig)
+            .expect("central-directory header not found");
+        zip[cdh_offset + 24..cdh_offset + 28].copy_from_slice(&10u32.to_le_bytes());
+
+        let err = super::extract_skill_from_zip(&zip).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
+            "Forged-metadata ZIP must be rejected based on actual bytes read, got: {}",
             err
         );
     }

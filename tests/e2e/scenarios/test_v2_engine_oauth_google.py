@@ -41,6 +41,13 @@ ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _GOOGLE_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-google-e2e-")
 _GOOGLE_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-google-e2e-home-")
 
+# Single source of truth for the OAuth client id advertised by this fixture.
+# The mock LLM's /oauth/refresh handler keys refresh behavior off this value
+# (see tests/e2e/conftest.py `hosted_oauth_refresh_server`), so the server env
+# and any in-test assertions must agree. Derive both from this constant
+# rather than hardcoding the literal in two places.
+EXPECTED_GOOGLE_CLIENT_ID = "hosted-google-client-id"
+
 
 def _forward_coverage_env(env: dict):
     """Forward LLVM coverage env vars from outer environment."""
@@ -414,7 +421,7 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
         # /oauth/refresh handler expects so `refresh_token_via_proxy`
         # succeeds on the expired-token path. Other E2E fixtures use the
         # same value (see tests/e2e/conftest.py:600, :901).
-        "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+        "GOOGLE_OAUTH_CLIENT_ID": EXPECTED_GOOGLE_CLIENT_ID,
         # Refresh proxy URL is the mock_llm server on 127.0.0.1; the
         # production SSRF guard blocks loopback by default. Mock-based
         # E2E tests opt in to the loopback path via this env var
@@ -519,8 +526,8 @@ async def test_oauth_redirect_flow(v2_google_server):
     # Verify URL contains client_id and state
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
-    assert params.get("client_id") == ["test-google-client-id"], (
-        f"auth_url should include client_id=test-google-client-id: {auth_url}"
+    assert params.get("client_id") == [EXPECTED_GOOGLE_CLIENT_ID], (
+        f"auth_url should include client_id={EXPECTED_GOOGLE_CLIENT_ID}: {auth_url}"
     )
     state = params.get("state", [None])[0]
     assert state, f"auth_url should include state parameter: {auth_url}"
@@ -801,25 +808,34 @@ async def test_oauth_token_refresh_on_expiry(v2_google_server, mock_google_api):
         for t in history.get("turns", [])
     ), f"Expected at least one non-empty response: {history}"
 
-    # Check if a refresh was issued to the mock OAuth proxy
+    # Check that a refresh was issued to the mock OAuth proxy. We already
+    # skipped above when no refresh_token was stored — past that skip, the
+    # expired-token path MUST call the refresh endpoint, otherwise the
+    # regression this test claims to pin (refresh never fires) slips
+    # through as a false-green.
     async with httpx.AsyncClient() as client:
         state_r = await client.get(f"{mock_llm_url}/__mock/oauth/state", timeout=10)
         state_r.raise_for_status()
         oauth_state = state_r.json()
 
-    # If refresh happened, verify the token was updated in the DB
-    if oauth_state.get("refresh_count", 0) >= 1:
-        _, expires_after, updated_after = _find_secret_row(db_path, secret_name)
-        expires_after_dt = _parse_timestamp(expires_after)
-        updated_after_dt = _parse_timestamp(updated_after)
-        updated_before_dt = _parse_timestamp(updated_before)
-        assert expires_after_dt is not None, "expires_at should be set after refresh"
-        assert updated_after_dt is not None, "updated_at should be set after refresh"
-        if updated_before_dt is not None:
-            assert updated_after_dt > updated_before_dt, (
-                f"updated_at should advance after refresh: "
-                f"before={updated_before_dt}, after={updated_after_dt}"
-            )
-        assert expires_after_dt > datetime.now(timezone.utc), (
-            f"expires_at should be in the future after refresh: {expires_after_dt}"
+    refresh_count = oauth_state.get("refresh_count", 0)
+    assert refresh_count >= 1, (
+        f"Expired-token path MUST call the OAuth refresh endpoint at least "
+        f"once; refresh_count={refresh_count}, oauth_state={oauth_state}"
+    )
+
+    # Verify the token was actually updated in the DB as a result of the refresh.
+    _, expires_after, updated_after = _find_secret_row(db_path, secret_name)
+    expires_after_dt = _parse_timestamp(expires_after)
+    updated_after_dt = _parse_timestamp(updated_after)
+    updated_before_dt = _parse_timestamp(updated_before)
+    assert expires_after_dt is not None, "expires_at should be set after refresh"
+    assert updated_after_dt is not None, "updated_at should be set after refresh"
+    if updated_before_dt is not None:
+        assert updated_after_dt > updated_before_dt, (
+            f"updated_at should advance after refresh: "
+            f"before={updated_before_dt}, after={updated_after_dt}"
         )
+    assert expires_after_dt > datetime.now(timezone.utc), (
+        f"expires_at should be in the future after refresh: {expires_after_dt}"
+    )

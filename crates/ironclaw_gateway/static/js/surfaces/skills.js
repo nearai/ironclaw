@@ -62,6 +62,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
+    setSlashSkillEntries((data && data.skills) || []);
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
@@ -362,7 +363,6 @@ function installSkill(name, url, btn, slug) {
   }).then(function(res) {
     if (res.success) {
       showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
-      if (typeof invalidateSlashSkillCache === 'function') invalidateSlashSkillCache();
       if (btn && btn.parentNode) {
         var label = document.createElement('span');
         label.className = 'ext-active-label';
@@ -389,7 +389,6 @@ function removeSkill(name) {
     }).then(function(res) {
       if (res.success) {
         showToast(I18n.t('skills.removed', { name: name }), 'success');
-        if (typeof invalidateSlashSkillCache === 'function') invalidateSlashSkillCache();
       } else {
         showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
       }
@@ -420,4 +419,3 @@ document.getElementById('skill-search-input').addEventListener('keydown', functi
 });
 
 // --- Tool Permissions ---
-

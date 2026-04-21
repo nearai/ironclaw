@@ -79,6 +79,7 @@ let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
 let currentThreadIsReadOnly = false;
+const threadChannelHints = new Map();
 let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
