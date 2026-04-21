@@ -523,6 +523,7 @@ pub(crate) async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
+            channel: None,
             pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
             in_progress: None,
         }));
@@ -559,6 +560,7 @@ pub(crate) async fn chat_history_handler(
             turns,
             has_more: false,
             oldest_timestamp: None,
+            channel: None,
             pending_gate,
             in_progress: in_progress_from_thread(thread),
         }));
@@ -588,6 +590,7 @@ pub(crate) async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
+                channel: None,
                 pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
                 in_progress,
             }));
@@ -608,19 +611,18 @@ pub(crate) async fn chat_history_handler(
             .enumerate()
             .filter_map(|(index, entry)| engine_history_entry_to_message(thread_id, index, entry))
             .collect();
-        if !synthetic.is_empty() {
-            let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
-            let mut turns = build_turns_from_db_messages(&synthetic);
-            enforce_generated_image_history_budget(&mut turns);
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more: false,
-                oldest_timestamp,
-                pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
-                in_progress: None,
-            }));
-        }
+        let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
+        let mut turns = build_turns_from_db_messages(&synthetic);
+        enforce_generated_image_history_budget(&mut turns);
+        return Ok(Json(HistoryResponse {
+            thread_id,
+            turns,
+            has_more: false,
+            oldest_timestamp,
+            channel: Some("engine".to_string()),
+            pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+            in_progress: None,
+        }));
     }
 
     // Empty thread (just created, no messages yet)
@@ -639,6 +641,7 @@ pub(crate) async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
+        channel: None,
         pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
         in_progress,
     }))
@@ -723,51 +726,12 @@ pub(crate) async fn chat_threads_handler(
                     });
                 }
 
-                // Engine v2 threads for this user in the default project. These
-                // don't always get a matching v1 conversation row (the assistant
-                // flow dual-writes into the single assistant conv id, not the
-                // engine thread id), so without this merge they'd be invisible
-                // in the sidebar even though the chat history endpoint can now
-                // render them by id.
-                if let Ok(engine_threads) =
-                    crate::bridge::list_engine_threads(None, &user.user_id).await
-                {
-                    let existing_ids: std::collections::HashSet<uuid::Uuid> = threads
-                        .iter()
-                        .map(|t| t.id)
-                        .chain(assistant_thread.as_ref().map(|a| a.id))
-                        .collect();
-                    for eng in engine_threads {
-                        let Ok(uuid) = uuid::Uuid::parse_str(&eng.id) else {
-                            continue;
-                        };
-                        if existing_ids.contains(&uuid) {
-                            continue;
-                        }
-                        // Prefer the explicit short `title` set at thread
-                        // creation (mission name, derived first-line of the
-                        // user message). Fall back to a derived short label
-                        // from `goal` for legacy threads persisted before
-                        // the `title` field existed.
-                        let sidebar_title = eng.title.clone().or_else(|| {
-                            ironclaw_engine::Thread::derive_title_from_message(&eng.goal)
-                        });
-                        threads.push(ThreadInfo {
-                            id: uuid,
-                            state: eng.state,
-                            turn_count: eng.step_count,
-                            created_at: eng.created_at,
-                            updated_at: eng.updated_at.clone(),
-                            title: sidebar_title,
-                            thread_type: Some(eng.thread_type),
-                            channel: Some("engine".to_string()),
-                        });
-                    }
-                    // Re-sort by updated_at descending so engine threads interleave
-                    // chronologically with v1 conversations.
-                    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                }
-
+                // Keep the chat sidebar scoped to persisted chat conversations.
+                // Engine v2 foreground threads are assistant execution internals
+                // and can rotate per message, so surfacing them here makes
+                // ordinary prompts look like standalone `engine` threads.
+                // Explicit engine-thread history still works via
+                // `chat_history_handler` when the caller already has a thread id.
                 let active_thread = session.lock().await.active_thread;
 
                 return Ok(Json(ThreadListResponse {
@@ -1907,6 +1871,63 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn test_chat_threads_handler_hides_engine_threads_from_sidebar() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let mut thread = ironclaw_engine::Thread::new(
+            "assistant hello",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread
+            .messages
+            .push(ironclaw_engine::ThreadMessage::user("hello"));
+        let engine_thread_id = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state = test_gateway_state_with_store_and_session_manager(db, session_manager);
+
+        let response = chat_threads_handler(
+            axum::extract::State(state),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+        )
+        .await
+        .expect("handler ok");
+
+        assert!(response.assistant_thread.is_some());
+        assert!(
+            response
+                .threads
+                .iter()
+                .all(|thread| thread.id != engine_thread_id),
+            "chat sidebar must not surface engine execution threads"
+        );
+        assert!(
+            response
+                .threads
+                .iter()
+                .all(|thread| thread.channel.as_deref() != Some("engine")),
+            "chat sidebar must stay scoped to chat conversations"
+        );
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn test_chat_new_thread_handler_persists_to_db_and_session() {
         let (db, _tmp) = crate::testing::test_db().await;
         let session_manager = Arc::new(SessionManager::new());
@@ -2271,7 +2292,42 @@ mod tests {
         let turn = &response.turns[0];
         assert_eq!(turn.user_input, "hello engine");
         assert_eq!(turn.response.as_deref(), Some("hi back"));
+        assert_eq!(response.channel.as_deref(), Some("engine"));
         assert!(!response.has_more);
+
+        crate::bridge::test_support::clear_engine_state().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_history_returns_engine_channel_hint_without_renderable_messages() {
+        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
+            .lock()
+            .await;
+        crate::bridge::test_support::clear_engine_state().await;
+
+        let project_id =
+            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
+        let thread = ironclaw_engine::Thread::new(
+            "empty engine thread",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let thread_uuid = thread.id.0;
+        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+
+        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned")
+            .session_manager = Some(Arc::new(SessionManager::new()));
+
+        let (s, u, q) = history_request(state, "alice", thread_uuid);
+        let response = chat_history_handler(s, u, q).await.expect("history");
+
+        assert_eq!(response.thread_id, thread_uuid);
+        assert!(response.turns.is_empty());
+        assert_eq!(response.channel.as_deref(), Some("engine"));
 
         crate::bridge::test_support::clear_engine_state().await;
     }
