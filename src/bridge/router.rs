@@ -1474,22 +1474,13 @@ async fn wire_capability_registry(
     tools: &crate::tools::ToolRegistry,
     capabilities: Arc<CapabilityRegistry>,
 ) {
-    // Enforce the no-overlap invariant at startup: no tool currently in the
-    // registry may share a name with a capability action. `register()`'s
-    // capability-shadow check only fires once capabilities are wired; this
-    // catches the reverse — built-ins registered before wiring that collide.
-    #[cfg(debug_assertions)]
-    {
-        for tool_name in tools.list().await {
-            if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n))
-                .is_some()
-            {
-                panic!(
-                    "wire_capability_registry: tool '{tool_name}' collides with a \
-                     capability action. Capability names are reserved — rename the tool \
-                     or the capability."
-                );
-            }
+    for tool_name in tools.all_registered_names().await {
+        if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n)).is_some()
+        {
+            panic!(
+                "wire_capability_registry: tool '{tool_name}' collides with a \
+                 capability action — rename one of them"
+            );
         }
     }
 
@@ -6069,6 +6060,71 @@ mod tests {
              so available_actions advertises capability actions; got: {:?}",
             actions.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
+    }
+
+    // A tool registered before v2 wiring that collides with a capability
+    // action name would cause split-brain discovery. Must run in release
+    // too, and must see v1-only tools hidden from `list()`.
+    #[tokio::test]
+    #[should_panic(expected = "collides with a capability action")]
+    async fn wire_capability_registry_panics_on_collision() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct Shadow;
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for Shadow {
+            fn name(&self) -> &str {
+                "mission_create"
+            }
+            fn description(&self) -> &str {
+                "bogus"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                unreachable!()
+            }
+            fn engine_compatibility(&self) -> crate::tools::EngineCompatibility {
+                // v1-only, so `list()` wouldn't surface this on a v2 registry —
+                // but `all_registered_names()` must.
+                crate::tools::EngineCompatibility::V1Only
+            }
+        }
+
+        let tools =
+            Arc::new(ToolRegistry::new().with_engine_version(crate::tools::EngineVersion::V2));
+        tools.register(Arc::new(Shadow)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut caps = CapabilityRegistry::new();
+        caps.register(Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+
+        wire_capability_registry(&adapter, &tools, Arc::new(caps)).await;
     }
 
     // ──────────────────────────────────────────────────────────────────

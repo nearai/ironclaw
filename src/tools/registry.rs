@@ -297,10 +297,10 @@ impl ToolRegistry {
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
-    /// Rejects names containing `.`. Skips the capability-shadowing check
+    /// Rejects names containing `.`. Skips the capability-shadow check
     /// because built-ins register before v2 wiring; the reverse collision
-    /// (built-in shadowing a capability) is caught by a debug-assert in
-    /// `bridge::router::wire_capability_registry`.
+    /// is caught by `bridge::router::wire_capability_registry`, which
+    /// returns an error if any registered tool name matches a capability.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
@@ -401,6 +401,11 @@ impl ToolRegistry {
             .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
             .map(|tool| tool.name().to_string())
             .collect()
+    }
+
+    /// Every registered tool name, regardless of engine-version filtering.
+    pub async fn all_registered_names(&self) -> Vec<String> {
+        self.tools.read().await.keys().cloned().collect()
     }
 
     /// Retain only tools whose names are in the given allowlist.
