@@ -1202,6 +1202,12 @@ struct EngineState {
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
+    /// Tracks per-action success rate / latency. Populated via the
+    /// `ReliabilityRecordingEffects` decorator wrapping the effect adapter.
+    /// Engine-side consumers (future: context builder) read
+    /// `unreliable_with_min_calls()` to generate prompt hints.
+    #[allow(dead_code)] // read-path wiring lands in #2800 PR-B follow-up
+    reliability_tracker: Arc<ironclaw_engine::ReliabilityTracker>,
 }
 
 /// Global engine state, initialized on first use.
@@ -1701,9 +1707,32 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_capability_registry(Arc::clone(&capabilities))
         .await;
 
+    // #2800 PR-B: record per-action success rate and latency in a shared
+    // `ReliabilityTracker` so future context builders can inject "recently
+    // unreliable actions" hints into the system prompt. Wrapping here means
+    // the engine itself has no dependency on the host's recording policy —
+    // the decorator is transparent.
+    //
+    // Kill switch: `ENGINE_V2_RELIABILITY_HINTS=false` skips the decorator.
+    // Defaults to enabled. The tracker stays available either way; disabling
+    // just means the numbers are all zeros.
+    let reliability_tracker = Arc::new(ironclaw_engine::ReliabilityTracker::new());
+    let reliability_enabled = std::env::var("ENGINE_V2_RELIABILITY_HINTS")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "false" | "0" | "off"))
+        .unwrap_or(true);
+    let effects_for_engine: Arc<dyn ironclaw_engine::traits::effect::EffectExecutor> =
+        if reliability_enabled {
+            Arc::new(ironclaw_engine::ReliabilityRecordingEffects::new(
+                effect_adapter.clone(),
+                Arc::clone(&reliability_tracker),
+            ))
+        } else {
+            effect_adapter.clone()
+        };
+
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
-        effect_adapter.clone(),
+        effects_for_engine,
         store_dyn.clone(),
         capabilities,
         leases,
@@ -1968,6 +1997,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         auth_manager,
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
+        reliability_tracker,
     });
 
     Ok(())
@@ -5799,6 +5829,7 @@ pub(crate) mod test_support {
             auth_manager: None,
             extension_manager: None,
             project_root: super::resolve_project_root(),
+            reliability_tracker: Arc::new(ironclaw_engine::ReliabilityTracker::new()),
         };
 
         let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
@@ -7468,6 +7499,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            reliability_tracker: Arc::new(ironclaw_engine::ReliabilityTracker::new()),
         }
     }
 
@@ -7608,6 +7640,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            reliability_tracker: Arc::new(ironclaw_engine::ReliabilityTracker::new()),
         }
     }
 
@@ -8931,6 +8964,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            reliability_tracker: Arc::new(ironclaw_engine::ReliabilityTracker::new()),
         }
     }
 
