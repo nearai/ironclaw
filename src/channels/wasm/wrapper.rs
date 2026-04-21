@@ -8835,6 +8835,7 @@ mod tests {
             credentials,
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let result = super::near::agent::channel_host::Host::http_request(
