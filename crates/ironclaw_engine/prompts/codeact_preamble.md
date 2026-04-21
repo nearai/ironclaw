@@ -72,7 +72,7 @@ The Python REPL runs in Monty, a lightweight embedded interpreter — not CPytho
 - **No `match` statements**: Use if/elif chains.
 - **No `del` statement**: Reassign to None instead.
 - **No `yield`/`yield from` statements**: Generator expressions (`x for x in ...`) work; use lists for the rest.
-- **Available builtins**: `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`, `getattr`, `hash`, `hex`, `id`, `isinstance`, `len`, `map`, `min`, `max`, `next`, `oct`, `ord`, `pow`, `print`, `repr`, `reversed`, `round`, `sorted`, `sum`, `type`, `zip`.
+- **Available builtins**: `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`, `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `len`, `map`, `min`, `max`, `next`, `oct`, `ord`, `pow`, `print`, `repr`, `reversed`, `round`, `sorted`, `sum`, `type`, `zip`.
 - **Available modules**: `asyncio`, `datetime`, `json`, `math`, `os.path` (path manipulation only), `re`, `sys`, `typing` (limited).
 - **String methods, list methods, dict methods**: All work normally.
 - For dates, use `import datetime`. `datetime.datetime.now()` and `datetime.date.today()` both work and return the current UTC instant; pass `tz=datetime.timezone.utc` for an aware datetime. For other timezones or ISO string output, the `time` tool is usually more convenient (e.g. `await time(operation="now", timezone=user_timezone)`).
