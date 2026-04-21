@@ -49,12 +49,20 @@ pub struct OrchestratorState {
     pub store: Option<Arc<dyn Database>>,
     /// Encrypted secrets store for credential injection into containers.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-    /// In-memory cache of job_id → user_id for SSE scoping. Populated when
-    /// sandbox jobs are created, avoiding a DB round-trip on every job event.
+    /// In-memory cache of job_id → user_id for SSE scoping and credential
+    /// lookup. Lazily populated on first read via `resolve_job_owner`, which
+    /// falls back to `get_sandbox_job` when the entry is missing. The DB is
+    /// always the source of truth; the cache just avoids a round-trip on
+    /// every job event for long-running jobs.
     pub job_owner_cache: Arc<std::sync::RwLock<HashMap<Uuid, String>>>,
 }
 
-/// Maximum entries in the job_owner_cache before oldest entries are evicted.
+/// Maximum entries in the job_owner_cache before arbitrary entries are
+/// evicted. HashMap iteration order is unspecified, so eviction is not
+/// LRU/FIFO — for the cache's purpose (avoid a DB hit per SSE event of a
+/// live job), this is adequate: the next read of an evicted entry just
+/// refills from DB. Upgrade to `IndexMap` or `lru::LruCache` if we ever
+/// need real recency ordering.
 const MAX_JOB_OWNER_CACHE_SIZE: usize = 10_000;
 
 impl OrchestratorState {
@@ -102,11 +110,6 @@ impl OrchestratorState {
             }
         }
         cache.insert(job_id, user_id);
-    }
-
-    /// Pre-populate the cache at job creation time.
-    pub fn register_job_owner(&self, job_id: Uuid, user_id: &str) {
-        self.cache_job_owner(job_id, user_id.to_string());
     }
 }
 
@@ -426,6 +429,10 @@ async fn job_event_handler(
 
     // Broadcast via the channel (if configured).
     if let Some(ref tx) = state.job_event_tx {
+        // silent-ok: SSE broadcast is best-effort and already handles the
+        // empty-user_id case below by sending with an empty scope string,
+        // which the gateway filters out. A transient DB miss here should
+        // not block the worker from reporting progress.
         let user_id = state.resolve_job_owner(job_id).await.unwrap_or_default();
 
         if user_id.is_empty() {
@@ -509,13 +516,20 @@ async fn get_credentials_handler(
             .get_decrypted(&job_user_id, &grant.secret_name)
             .await
             .map_err(|e| {
-                tracing::debug!(
+                // Internal log is warn (not error) because the common case is
+                // a benign "user has no such secret" miss. Kept above debug so
+                // a real crypto/keychain failure surfaces in production logs —
+                // 403 telemetry alone can't distinguish "wrong tenant" from
+                // "crypto broken".
+                tracing::warn!(
                     job_id = %job_id,
                     user_id = %job_user_id,
+                    env_var = %grant.env_var,
                     "Failed to decrypt secret for credential grant: {}", e
                 );
-                // Return 403 for all secret failures to avoid leaking
-                // whether a secret exists for a different user.
+                // Wire response is 403 for all secret failures to avoid
+                // leaking whether a secret exists under a different user's
+                // scope.
                 StatusCode::FORBIDDEN
             })?;
 
@@ -971,8 +985,11 @@ mod tests {
             .unwrap();
 
         let resp = router.oneshot(req).await.unwrap();
-        // Alice has no "api_key" secret -- should fail, not leak bob's
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // Alice has no "api_key" secret -- handler must refuse (403) rather
+        // than serve bob's value. All secret-lookup failures map to FORBIDDEN
+        // so the response does not leak whether a secret exists under any
+        // other user's scope.
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     // -- Job event handler tests --
