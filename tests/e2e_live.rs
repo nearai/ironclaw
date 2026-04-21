@@ -53,8 +53,13 @@ mod live_tests {
         );
 
         // The agent should have used the shell tool to install/run zizmor.
+        // Tool events now carry args (e.g. `"shell(cmd)"`) via
+        // `format_action_display_name` in `src/bridge/router.rs`, so match both
+        // the bare name and the argument-prefixed form.
         assert!(
-            tools.iter().any(|t| t == "shell"),
+            tools
+                .iter()
+                .any(|t| t == "shell" || t.starts_with("shell(")),
             "Expected shell tool to be used for running zizmor, got: {tools:?}"
         );
 
@@ -75,8 +80,14 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v1 (default agentic loop).
+    ///
+    /// Marked `#[ignore]` by default because the `IRONCLAW_LIVE_TEST=1`
+    /// recording path needs real LLM credentials. The `replay` feature flag
+    /// promotes this test out of `--ignored` so CI can run the committed
+    /// fixture without extra `-- --ignored` gymnastics; see
+    /// `.github/workflows/replay-gate.yml`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan")
             .with_max_tool_iterations(40)
@@ -96,7 +107,7 @@ mod live_tests {
     /// mentions zizmor in its response (even if it can't execute shell).
     /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys or a recorded trace fixture
+    #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
             .with_engine_v2(true)
@@ -125,10 +136,16 @@ mod live_tests {
 
         // V2 without auto-approve hits an approval gate for shell/tool_install.
         // The response may be the approval prompt itself rather than agent output.
-        // Verify the agent at least attempted a relevant action.
+        // Verify the agent at least attempted a relevant action. Tool events
+        // carry args (e.g. `"shell(cmd)"`) via `format_action_display_name`, so
+        // accept either the bare name or the argument-prefixed form.
         let attempted_relevant_tool = tools.iter().any(|t| {
             t == "shell"
+                || t.starts_with("shell(")
                 || t == "tool_install"
+                || t.starts_with("tool_install(")
+                || t == "tool-install"
+                || t.starts_with("tool-install(")
                 || t.starts_with("tool_search")
                 || t.starts_with("skill_search")
         });
@@ -376,7 +393,7 @@ mod live_tests {
             .collect();
         let drive_gate = auth_required_events
             .iter()
-            .find(|(ext, _, _)| ext.contains("google") || ext.contains("drive"));
+            .find(|(ext, _, _)| ext.as_str().contains("google") || ext.as_str().contains("drive"));
         assert!(
             drive_gate.is_some(),
             "Phase A: expected an AuthRequired event for the Google Drive extension, \
@@ -393,10 +410,18 @@ mod live_tests {
 
         // The agent must NOT have run a tool_install / tool_activate
         // recovery loop — that's the bad behaviour the post-flight
-        // detector eliminates.
-        let bad_recovery = phase_a_tools
-            .iter()
-            .any(|t| t == "tool_install" || t == "tool_activate" || t == "tool-install");
+        // detector eliminates. Match both bare names and the
+        // argument-prefixed `"<name>(args)"` form emitted by
+        // `format_action_display_name`; an exact-match check would silently
+        // miss `"tool_install(foo)"` and turn this into a false negative.
+        let bad_recovery = phase_a_tools.iter().any(|t| {
+            t == "tool_install"
+                || t.starts_with("tool_install(")
+                || t == "tool_activate"
+                || t.starts_with("tool_activate(")
+                || t == "tool-install"
+                || t.starts_with("tool-install(")
+        });
         assert!(
             !bad_recovery,
             "Phase A: agent ran a tool_install/tool_activate recovery loop instead \
@@ -501,11 +526,16 @@ mod live_tests {
             "[DriveAuthGate][Phase B] Tools attempted ({}): {phase_b_tools:?}",
             phase_b_tools.len()
         );
+        // Match bare and argument-prefixed names; see the Phase A comment.
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
             t == "tool_install"
+                || t.starts_with("tool_install(")
                 || t == "tool-install"
+                || t.starts_with("tool-install(")
                 || t == "tool_activate"
+                || t.starts_with("tool_activate(")
                 || t == "secret_list"
+                || t.starts_with("secret_list(")
                 || t.starts_with("tool_search")
         });
         assert!(
@@ -704,7 +734,8 @@ mod live_tests {
             matches!(
                 s,
                 StatusUpdate::AuthRequired { extension_name, .. }
-                    if extension_name.contains("google") || extension_name.contains("drive")
+                    if extension_name.as_str().contains("google")
+                        || extension_name.as_str().contains("drive")
             )
         });
         assert!(

@@ -105,6 +105,16 @@ async def test_owner_can_send_message_and_get_response(page, ironclaw_server):
 
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=10000)
+    if await chat_input.evaluate("el => !!el.disabled"):
+        await page.keyboard.press("Control+n")
+        await page.wait_for_function(
+            """selector => {
+                const input = document.querySelector(selector);
+                return !!input && !input.disabled;
+            }""",
+            arg=SEL["chat_input"],
+            timeout=10000,
+        )
 
     # Count existing assistant messages
     assistant_msgs = page.locator(SEL["message_assistant"])

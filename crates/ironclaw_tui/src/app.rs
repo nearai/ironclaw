@@ -1145,10 +1145,10 @@ async fn handle_event(
         }
 
         TuiEvent::JobResult { job_id, status } => {
-            let new_status = if status == "failed" {
-                JobStatus::Failed
-            } else {
+            let new_status = if status.is_success() {
                 JobStatus::Completed
+            } else {
+                JobStatus::Failed
             };
             if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                 job.status = new_status;
@@ -3407,6 +3407,40 @@ mod tests {
         let message = msg_rx.try_recv().expect("message sent");
         assert_eq!(message.text, "run it");
         assert_eq!(message.thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[tokio::test]
+    async fn pasted_multiline_input_submits_intact() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        let (msg_tx, mut msg_rx) = mpsc::channel(4);
+
+        handle_event(
+            TuiEvent::Paste("first line\nsecond line\nthird line".to_string()),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        assert_eq!(
+            widgets.input_box.current_text(),
+            "first line\nsecond line\nthird line"
+        );
+
+        handle_event(
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        let message = msg_rx.try_recv().expect("multiline message sent");
+        assert_eq!(message.text, "first line\nsecond line\nthird line");
     }
 
     #[tokio::test]

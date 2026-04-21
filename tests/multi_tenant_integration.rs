@@ -23,9 +23,8 @@ use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use ironclaw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
@@ -316,12 +315,12 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     let manager = SseManager::new();
     let mut alice_stream = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob_stream = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -361,12 +360,12 @@ async fn sse_global_event_delivered_to_all_users() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     let mut bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -394,7 +393,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     let manager = SseManager::new();
     let mut alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
 
@@ -426,7 +425,7 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     let manager = SseManager::new();
     // Unscoped subscriber (None user_id) — backwards-compatible single-user mode
-    let mut stream = Box::pin(manager.subscribe_raw(None).expect("subscribe"));
+    let mut stream = Box::pin(manager.subscribe_raw(None, false).expect("subscribe"));
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
@@ -504,14 +503,14 @@ async fn sse_connection_count_tracks_scoped_subscribers() {
 
     let _alice = Box::pin(
         manager
-            .subscribe_raw(Some(ALICE_USER_ID.to_string()))
+            .subscribe_raw(Some(ALICE_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 1);
 
     let _bob = Box::pin(
         manager
-            .subscribe_raw(Some(BOB_USER_ID.to_string()))
+            .subscribe_raw(Some(BOB_USER_ID.to_string()), false)
             .expect("subscribe"),
     );
     assert_eq!(manager.connection_count(), 2);
@@ -537,6 +536,7 @@ fn gateway_state_has_multi_tenant_fields() {
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None, // Multi-tenant: per-user workspace pool
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -551,6 +551,9 @@ fn gateway_state_has_multi_tenant_fields() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -561,7 +564,7 @@ fn gateway_state_has_multi_tenant_fields() {
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -626,6 +629,7 @@ async fn start_owner_scoped_sender_server() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -640,6 +644,9 @@ async fn start_owner_scoped_sender_server() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -650,7 +657,7 @@ async fn start_owner_scoped_sender_server() -> (
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -778,6 +785,85 @@ async fn full_server_chat_send_accepted_for_alice() {
 
     assert_eq!(msg.content, "hello from alice");
     assert_eq!(msg.channel, "gateway");
+}
+
+#[tokio::test]
+async fn full_server_chat_send_accepts_document_attachment_for_alice() {
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    let (addr, _state) = TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start server");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .json(&serde_json::json!({
+            "content": "parse this invoice",
+            "attachments": [{
+                "mime_type": "application/pdf",
+                "filename": "invoice.pdf",
+                "data_base64": "JVBERi0xLjQKaW52b2ljZQ=="
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 202);
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for agent message")
+        .expect("Agent channel closed");
+
+    assert_eq!(msg.content, "parse this invoice");
+    assert_eq!(msg.attachments.len(), 1);
+    assert_eq!(
+        msg.attachments[0].kind,
+        ironclaw::channels::AttachmentKind::Document
+    );
+    assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+    assert_eq!(msg.attachments[0].filename.as_deref(), Some("invoice.pdf"));
+    assert_eq!(msg.attachments[0].data, b"%PDF-1.4\ninvoice");
+}
+
+#[tokio::test]
+async fn full_server_chat_send_rejects_malformed_attachment_for_alice() {
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    let (addr, _state) = TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start server");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .json(&serde_json::json!({
+            "content": "parse this invoice",
+            "attachments": [{
+                "mime_type": "application/pdf",
+                "filename": "invoice.pdf",
+                "data_base64": "not valid base64"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), agent_rx.recv())
+            .await
+            .is_err(),
+        "Malformed uploads must not queue a text-only agent message"
+    );
 }
 
 #[tokio::test]
@@ -1025,6 +1111,7 @@ async fn start_multi_user_server_with_db() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -1039,6 +1126,9 @@ async fn start_multi_user_server_with_db() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -1049,7 +1139,7 @@ async fn start_multi_user_server_with_db() -> (
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(Default::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -1066,9 +1156,10 @@ async fn start_multi_user_server_with_db() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("Failed to start server with DB");
+    let bound =
+        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
+            .await
+            .expect("Failed to start server with DB");
 
     (bound, state, db, temp_dir)
 }

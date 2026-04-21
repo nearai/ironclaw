@@ -22,7 +22,6 @@ pub(crate) mod onboarding;
 pub mod openai_compat;
 pub mod platform;
 pub mod responses_api;
-pub mod server;
 pub mod types;
 pub(crate) mod util;
 
@@ -35,11 +34,15 @@ pub use platform::auth;
 pub use platform::sse;
 pub use platform::ws;
 
-/// Test helpers for gateway integration tests.
+/// Test helpers for gateway tests.
 ///
 /// Always compiled (not behind `#[cfg(test)]`) so that integration tests in
 /// `tests/` -- which import this crate as a regular dependency -- can use
-/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder).
+/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder). The
+/// cross-slice `pub(crate)` builders inside the module
+/// (`test_gateway_state`, `test_gateway_state_with_dependencies`,
+/// `test_gateway_state_with_store_and_session_manager`) are individually
+/// `#[cfg(test)]`-gated since they only have in-crate unit-test callers.
 pub mod test_helpers;
 
 #[cfg(test)]
@@ -54,20 +57,20 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use crate::config::GatewayConfig;
+use crate::config::{Config, GatewayConfig};
 use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::Workspace;
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
 use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
 use self::auth::{CombinedAuthState, DbAuthenticator, MultiAuthState};
-use self::server::GatewayState;
+use self::platform::state::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
@@ -149,6 +152,7 @@ impl GatewayChannel {
             )),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -163,17 +167,22 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
+            chat_rate_limiter: platform::state::PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: platform::state::PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(
+                platform::state::ActiveConfigSnapshot::default(),
+            )),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,
@@ -209,6 +218,7 @@ impl GatewayChannel {
             )),
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
+            multi_tenant_mode: self.state.multi_tenant_mode,
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             log_level_handle: self.state.log_level_handle.clone(),
@@ -223,17 +233,20 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            llm_reload: self.state.llm_reload.clone(),
+            llm_session_manager: self.state.llm_session_manager.clone(),
+            config_toml_path: self.state.config_toml_path.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             auth_manager: self.state.auth_manager.clone(),
-            chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: server::RateLimiter::new(10, 60),
+            chat_rate_limiter: platform::state::PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: platform::state::PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: platform::state::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
-            active_config: self.state.active_config.clone(),
+            active_config: Arc::clone(&self.state.active_config),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
             pairing_store: self.state.pairing_store.clone(),
@@ -372,6 +385,26 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the LLM hot-reload controller for the settings handlers.
+    pub fn with_llm_reload(mut self, reload: Arc<crate::llm::LlmReloadHandle>) -> Self {
+        self.rebuild_state(|s| s.llm_reload = Some(reload));
+        self
+    }
+
+    /// Inject the LLM session manager so a hot-reload can rebuild the
+    /// provider chain without dropping the current auth session.
+    pub fn with_llm_session_manager(mut self, sm: Arc<crate::llm::SessionManager>) -> Self {
+        self.rebuild_state(|s| s.llm_session_manager = Some(sm));
+        self
+    }
+
+    /// Inject the TOML config path so `Config::from_db_with_toml` can be
+    /// replayed identically during a hot-reload.
+    pub fn with_config_toml_path(mut self, path: std::path::PathBuf) -> Self {
+        self.rebuild_state(|s| s.config_toml_path = Some(path));
+        self
+    }
+
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
         self.rebuild_state(|s| s.registry_entries = entries);
@@ -385,14 +418,16 @@ impl GatewayChannel {
     }
 
     /// Inject a shared routine engine slot used by other HTTP ingress paths.
-    pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
+    pub fn with_routine_engine_slot(mut self, slot: platform::state::RoutineEngineSlot) -> Self {
         self.rebuild_state(|s| s.routine_engine = slot);
         self
     }
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
-    pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.rebuild_state(|s| s.active_config = config);
+    pub fn with_active_config(mut self, config: platform::state::ActiveConfigSnapshot) -> Self {
+        self.rebuild_state(|s| {
+            s.active_config = Arc::new(tokio::sync::RwLock::new(config));
+        });
         self
     }
 
@@ -537,8 +572,41 @@ impl GatewayChannel {
     }
 
     /// Inject the per-user workspace pool for multi-user mode.
-    pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
+    pub fn with_workspace_pool(mut self, pool: Arc<platform::state::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Configure DB-backed workspace access from the resolved runtime config.
+    ///
+    /// Startup should decide multi-tenant mode from explicit config, not from
+    /// current DB contents. This helper keeps the DB-backed workspace pool and
+    /// the `multi_tenant_mode` flag wired together so production startup and
+    /// integration tests exercise the same caller path.
+    pub fn with_db_backing_from_config(
+        mut self,
+        config: &Config,
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        let emb_cache_config = EmbeddingCacheConfig {
+            max_entries: config.embeddings.cache_size,
+        };
+        let pool = Arc::new(platform::state::WorkspacePool::new(
+            db,
+            embeddings,
+            emb_cache_config,
+            config.search.clone(),
+            config.workspace.clone(),
+        ));
+        self = self.with_workspace_pool(pool);
+        self = self.with_multi_tenant_mode(config.is_multi_tenant_deployment());
+        self
+    }
+
+    /// Mark whether the gateway started in multi-tenant mode.
+    pub fn with_multi_tenant_mode(mut self, multi_tenant_mode: bool) -> Self {
+        self.rebuild_state(|s| s.multi_tenant_mode = multi_tenant_mode);
         self
     }
 
@@ -579,7 +647,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -590,7 +658,7 @@ impl Channel for GatewayChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let thread_id = match &msg.thread_id {
-            Some(tid) => tid.clone(),
+            Some(tid) => tid.as_str().to_string(),
             None => {
                 return Err(ChannelError::MissingRoutingTarget {
                     name: "gateway".to_string(),
@@ -615,6 +683,17 @@ impl Channel for GatewayChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        // Skip verbose-only events (ToolResultFull, TurnMetrics) entirely
+        // when no debug subscriber is connected — avoids cloning up to 50 KB
+        // of tool output and allocating model-name strings on every tool
+        // call. Gating on `has_verbose_receivers()` (not just
+        // `has_receivers()`) keeps the short-circuit active even when
+        // ordinary non-debug subscribers are present, which is the common
+        // case for non-admin browser tabs.
+        if status.is_verbose_only() && !self.state.sse.has_verbose_receivers() {
+            return Ok(());
+        }
+
         let thread_id = metadata
             .get("thread_id")
             .and_then(|v| v.as_str())
@@ -766,6 +845,34 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::ToolResultFull {
+                name,
+                output,
+                truncated,
+                call_id,
+            } => AppEvent::ToolResultFull {
+                name,
+                output,
+                truncated: if truncated { Some(true) } else { None },
+                call_id,
+                thread_id,
+            },
+            StatusUpdate::TurnMetrics {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                model,
+                duration_ms,
+                iteration,
+            } => AppEvent::TurnMetrics {
+                thread_id,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                model,
+                duration_ms,
+                iteration,
+            },
             StatusUpdate::JobStatus { job_id, status } => AppEvent::JobStatus {
                 job_id,
                 message: status,
@@ -776,9 +883,13 @@ impl Channel for GatewayChannel {
                 session_id: None,
                 fallback_deliverable: None,
             },
-            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+            StatusUpdate::SkillActivated {
+                skill_names,
+                feedback,
+            } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
+                feedback,
             },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }
@@ -809,8 +920,8 @@ impl Channel for GatewayChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let thread_id = match response.thread_id {
-            Some(tid) => tid,
+        let thread_id: String = match response.thread_id {
+            Some(tid) => tid.into(),
             None => {
                 // Proactive broadcasts (mission notifications, self-repair,
                 // extension activation) don't always have a thread context.

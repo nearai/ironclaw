@@ -13,7 +13,7 @@ use axum::{
 };
 
 use crate::channels::web::auth::AdminUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::secrets::CreateSecretParams;
 
 /// PUT /api/admin/users/{user_id}/secrets/{name} — create or update a secret.

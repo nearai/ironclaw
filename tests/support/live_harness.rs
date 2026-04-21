@@ -397,7 +397,7 @@ impl LiveTestHarness {
         // Tool activity from status events
         for event in self.rig.captured_status_events() {
             match event {
-                StatusUpdate::SkillActivated { skill_names } => {
+                StatusUpdate::SkillActivated { skill_names, .. } => {
                     log.push_str(&format!("  ◆ skills: {}\n", skill_names.join(", ")));
                 }
                 StatusUpdate::ToolStarted { name, .. } => {
@@ -706,7 +706,7 @@ impl LiveTestHarnessBuilder {
         let source_user_id = config.owner_id.clone();
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
-        let (provider, cheap_llm, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
+        let (provider, cheap_llm, _, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
             .await
             .expect("Failed to build LLM provider chain for live test");
 

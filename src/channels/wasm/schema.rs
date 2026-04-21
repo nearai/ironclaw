@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::channels::wasm::capabilities::{
     ChannelCapabilities, EmitRateLimitConfig, MIN_POLL_INTERVAL_MS,
 };
+use crate::channels::wasm::is_reserved_runtime_config_key;
 use crate::tools::wasm::{CapabilitiesFile as ToolCapabilitiesFile, RateLimitSchema};
 
 /// Root schema for a channel capabilities JSON file.
@@ -127,6 +128,13 @@ impl ChannelCapabilitiesFile {
                  user has no link to obtain credentials"
             );
         }
+
+        // Validate manifest-driven runtime-config secret injection. Called
+        // purely for its side effect: emitting warnings for unsafe mapping
+        // entries (empty keys, reserved runtime keys, undeclared secret
+        // names). The runtime path uses `validated_secret_config_mappings`
+        // (silent filter).
+        let _ = self.validated_secret_config_mappings_with_warnings();
     }
 
     /// Convert to runtime ChannelCapabilities.
@@ -205,6 +213,90 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.managed_by_host)
             .unwrap_or(true)
     }
+
+    /// Return setup.secret_config_mappings after applying security constraints.
+    ///
+    /// Only mappings for declared `setup.required_secrets` are allowed, and
+    /// mappings cannot target reserved runtime config keys.
+    pub fn validated_secret_config_mappings(&self) -> Vec<SecretConfigMappingSchema> {
+        self.collect_validated_secret_config_mappings(false)
+    }
+
+    fn validated_secret_config_mappings_with_warnings(&self) -> Vec<SecretConfigMappingSchema> {
+        self.collect_validated_secret_config_mappings(true)
+    }
+
+    fn collect_validated_secret_config_mappings(
+        &self,
+        emit_warnings: bool,
+    ) -> Vec<SecretConfigMappingSchema> {
+        let required_secret_names: HashSet<String> = self
+            .setup
+            .required_secrets
+            .iter()
+            .map(|secret| secret.name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+
+        self.setup
+            .secret_config_mappings
+            .iter()
+            .filter_map(|mapping| {
+                let config_key = mapping.config_key.trim();
+                let secret_name = mapping.secret_name.trim();
+
+                if config_key.is_empty() {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            secret_name = %mapping.secret_name,
+                            "Ignoring setup.secret_config_mappings entry with empty config_key"
+                        );
+                    }
+                    return None;
+                }
+
+                if is_reserved_runtime_config_key(config_key) {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            "Ignoring setup.secret_config_mappings entry targeting reserved runtime config key"
+                        );
+                    }
+                    return None;
+                }
+
+                if secret_name.is_empty() {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            "Ignoring setup.secret_config_mappings entry with empty secret_name"
+                        );
+                    }
+                    return None;
+                }
+
+                if !required_secret_names.contains(&secret_name.to_ascii_lowercase()) {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            secret_name = %secret_name,
+                            "Ignoring setup.secret_config_mappings entry for undeclared secret (must be listed in setup.required_secrets)"
+                        );
+                    }
+                    return None;
+                }
+
+                Some(SecretConfigMappingSchema {
+                    config_key: config_key.to_string(),
+                    secret_name: secret_name.to_string(),
+                })
+            })
+            .collect()
+    }
 }
 
 /// Schema for channel capabilities.
@@ -239,6 +331,14 @@ impl ChannelCapabilitiesSchema {
 
             if let Some(prefix) = &channel.workspace_prefix {
                 caps.workspace_prefix = prefix.clone();
+            }
+
+            if !channel.durable_workspace_paths.is_empty() {
+                caps.durable_workspace_paths = channel
+                    .durable_workspace_paths
+                    .iter()
+                    .map(|path| caps.prefix_workspace_path(path))
+                    .collect();
             }
 
             if let Some(rate) = &channel.emit_rate_limit {
@@ -276,6 +376,10 @@ pub struct ChannelSpecificCapabilitiesSchema {
     /// Workspace prefix for storage (overrides default).
     #[serde(default)]
     pub workspace_prefix: Option<String>,
+
+    /// Workspace paths that are safe to persist across restarts.
+    #[serde(default)]
+    pub durable_workspace_paths: Vec<String>,
 
     /// Rate limiting for emit_message.
     #[serde(default)]
@@ -341,6 +445,14 @@ pub struct SetupSchema {
     #[serde(default)]
     pub required_secrets: Vec<SecretSetupSchema>,
 
+    /// Optional mapping from secret names to runtime config keys.
+    ///
+    /// Use this when a channel needs raw secret values in its runtime config
+    /// (for example, provider token exchanges that require secrets in request
+    /// bodies). This is explicit opt-in to avoid over-injecting secrets.
+    #[serde(default)]
+    pub secret_config_mappings: Vec<SecretConfigMappingSchema>,
+
     /// Optional validation endpoint to verify configuration.
     /// Placeholders like {secret_name} are replaced with actual values.
     #[serde(default)]
@@ -371,6 +483,15 @@ pub struct SecretSetupSchema {
     /// Auto-generate configuration if the user doesn't provide a value.
     #[serde(default)]
     pub auto_generate: Option<AutoGenerateSchema>,
+}
+
+/// Mapping from a secret in the secrets store to a runtime config key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretConfigMappingSchema {
+    /// Config key to inject into the channel runtime config.
+    pub config_key: String,
+    /// Secret name in the secrets store.
+    pub secret_name: String,
 }
 
 /// Configuration for auto-generating a secret value.
@@ -626,6 +747,27 @@ mod tests {
     }
 
     #[test]
+    fn test_durable_workspace_paths_are_prefixed() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "workspace_prefix": "channels/slack/",
+                    "durable_workspace_paths": ["state/active_threads"]
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.durable_workspace_paths,
+            vec!["channels/slack/state/active_threads".to_string()]
+        );
+    }
+
+    #[test]
     fn test_emit_rate_limit() {
         let json = r#"{
             "name": "test",
@@ -718,12 +860,25 @@ mod tests {
                         "auto_generate": { "length": 64 }
                     }
                 ],
+                "secret_config_mappings": [
+                    {
+                        "config_key": "bot_token",
+                        "secret_name": "telegram_bot_token"
+                    }
+                ],
                 "validation_endpoint": "https://api.telegram.org/bot{telegram_bot_token}/getMe"
             }
         }"#;
 
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.setup.required_secrets.len(), 2);
+        assert_eq!(file.setup.secret_config_mappings.len(), 1);
+        assert_eq!(file.setup.secret_config_mappings[0].config_key, "bot_token");
+        assert_eq!(
+            file.setup.secret_config_mappings[0].secret_name,
+            "telegram_bot_token"
+        );
+        assert_eq!(file.validated_secret_config_mappings().len(), 1);
         assert_eq!(file.setup.required_secrets[0].name, "telegram_bot_token");
         assert!(!file.setup.required_secrets[0].optional);
         assert!(file.setup.required_secrets[1].optional);
@@ -735,6 +890,34 @@ mod tests {
                 .length,
             64
         );
+    }
+
+    #[test]
+    fn test_validated_secret_config_mappings_filters_unsafe_entries() {
+        let json = r#"{
+            "name": "feishu",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "feishu_app_id",
+                        "prompt": "Enter your Feishu app id from open.feishu.cn"
+                    }
+                ],
+                "secret_config_mappings": [
+                    { "config_key": "app_id", "secret_name": "feishu_app_id" },
+                    { "config_key": "webhook_secret", "secret_name": "feishu_app_id" },
+                    { "config_key": "bot_username", "secret_name": "feishu_app_id" },
+                    { "config_key": "stolen_key", "secret_name": "openai_api_key" },
+                    { "config_key": "", "secret_name": "feishu_app_id" }
+                ]
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let mappings = file.validated_secret_config_mappings();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].config_key, "app_id");
+        assert_eq!(mappings[0].secret_name, "feishu_app_id");
     }
 
     #[test]

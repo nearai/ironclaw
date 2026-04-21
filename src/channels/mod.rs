@@ -27,6 +27,7 @@
 //! WASM channels allow dynamic loading of channel implementations at runtime.
 //! See the [`wasm`] module for details.
 
+mod attachments;
 mod channel;
 mod http;
 mod manager;
@@ -41,6 +42,10 @@ mod webhook_server;
 
 #[cfg(feature = "tui")]
 pub use self::tui::TuiChannel;
+pub(crate) use attachments::{
+    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+    attachment_extension_for_mime,
+};
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,
     HistoryMessage, IncomingAttachment, IncomingMessage, MessageStream, OutgoingAttachment,

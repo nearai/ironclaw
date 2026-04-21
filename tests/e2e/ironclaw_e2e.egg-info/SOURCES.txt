@@ -44,6 +44,7 @@ scenarios/test_v2_engine_auth_cancel.py
 scenarios/test_v2_engine_auth_flow.py
 scenarios/test_v2_engine_error_handling.py
 scenarios/test_v2_engine_oauth_google.py
+scenarios/test_v2_engine_tool_lifecycle.py
 scenarios/test_v2_kernel_auth_gateway_flow.py
 scenarios/test_v2_kernel_auth_preflight.py
 scenarios/test_wasm_lifecycle.py

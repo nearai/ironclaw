@@ -86,6 +86,7 @@ mod host;
 mod loader;
 mod router;
 mod runtime;
+mod runtime_config_keys;
 mod schema;
 pub mod setup;
 pub(crate) mod signature;
@@ -105,8 +106,13 @@ pub use loader::{
 };
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
+pub(crate) use runtime_config_keys::{
+    RUNTIME_CONFIG_KEY_BOT_USERNAME, RUNTIME_CONFIG_KEY_OWNER_ID, RUNTIME_CONFIG_KEY_TUNNEL_URL,
+    RUNTIME_CONFIG_KEY_WEBHOOK_SECRET, is_reserved_runtime_config_key,
+};
 pub use schema::{
-    ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
+    ChannelCapabilitiesFile, ChannelConfig, SecretConfigMappingSchema, SecretSetupSchema,
+    SetupSchema, WebhookSchema,
 };
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
 pub(crate) use setup::{is_reserved_wasm_channel_name, owner_id_from_capabilities};

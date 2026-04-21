@@ -45,6 +45,8 @@ use ironclaw_skills::SkillRegistry;
 /// `Done` after a pause (e.g. while awaiting tool approval) is incorrect because
 /// the thread is not in a terminal state, and would also trip the web UI's
 /// missing-response safety net (see #2079).
+pub(crate) const BRIDGE_PENDING_SENTINEL: &str = "\u{0}__bridge_pending__";
+
 #[derive(Debug)]
 pub(crate) enum HandleOutcome {
     /// Shutdown signal (e.g. `/quit`). Run loop should break.
@@ -65,6 +67,7 @@ impl HandleOutcome {
     fn from_legacy(opt: Option<String>) -> Self {
         match opt {
             None => HandleOutcome::Shutdown,
+            Some(s) if s == BRIDGE_PENDING_SENTINEL => HandleOutcome::Pending,
             Some(s) if s.is_empty() => HandleOutcome::NoResponse,
             Some(s) => HandleOutcome::Respond(OutgoingResponse::text(s)),
         }
@@ -590,22 +593,22 @@ impl Agent {
     /// [`TenantCtx`] provides a [`TenantScope`] that auto-binds `user_id` on
     /// every database operation and a per-user rate limiter.
     pub(super) async fn tenant_ctx(&self, user_id: &str) -> crate::tenant::TenantCtx {
-        use crate::ownership::{Identity, OwnerId, UserRole};
-        // Bridge: creates Member identity from raw string.
+        use crate::ownership::{UserId, UserRole};
+        // Bridge: creates Regular identity from raw string.
         // Will be replaced by OwnershipCache lookup in Task 9.
-        let identity = Identity::new(OwnerId::from(user_id), UserRole::Member);
+        let identity = UserId::from_trusted(user_id.to_string(), UserRole::Regular);
         self.tenant_ctx_with_identity(identity).await
     }
 
-    /// Build a tenant-scoped execution context from a resolved `Identity`.
+    /// Build a tenant-scoped execution context from a resolved [`crate::ownership::UserId`].
     ///
     /// Preferred over [`tenant_ctx`](Self::tenant_ctx) once the call site has a
-    /// full `Identity` available.
+    /// full `UserId` available.
     pub(super) async fn tenant_ctx_with_identity(
         &self,
-        identity: crate::ownership::Identity,
+        identity: crate::ownership::UserId,
     ) -> crate::tenant::TenantCtx {
-        let user_id = identity.owner_id.as_str();
+        let user_id = identity.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
         let store = self.deps.store.as_ref().map(|db| {
@@ -686,9 +689,9 @@ impl Agent {
         &self,
         message_content: &str,
         user_id: &str,
-    ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
+    ) -> (Vec<ironclaw_skills::LoadedSkill>, String, Vec<String>) {
         let Some(registry) = self.skill_registry() else {
-            return (vec![], message_content.to_string());
+            return (vec![], message_content.to_string(), vec![]);
         };
         // Snapshot the skill list + distinct setup markers under the read
         // lock, then drop the guard before any await. The marker checks
@@ -708,7 +711,7 @@ impl Agent {
             }
             Err(e) => {
                 tracing::error!("Skill registry lock poisoned: {}", e);
-                return (vec![], message_content.to_string());
+                return (vec![], message_content.to_string(), vec![]);
             }
         };
 
@@ -748,7 +751,7 @@ impl Agent {
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
-        let scored = ironclaw_skills::prefilter_skills(
+        let outcome = ironclaw_skills::prefilter_skills(
             &rewritten,
             &available,
             skills_cfg.max_active_skills,
@@ -756,10 +759,20 @@ impl Agent {
             &satisfied,
         );
 
+        // Feedback notes: start with the selector's own notes (chain-load,
+        // budget, marker-skipped companions) and prepend a note for each
+        // explicit `/mention` force-activation so the UI can explain why
+        // a skill loaded even when it didn't score.
+        let mut feedback: Vec<String> = explicit
+            .iter()
+            .map(|s| format!("{}: force-activated via /mention", s.name()))
+            .collect();
+        feedback.extend(outcome.notes);
+
         // Merge: explicit mentions first, then scored (dedup by name)
         let mut selected: Vec<ironclaw_skills::LoadedSkill> =
             explicit.into_iter().cloned().collect();
-        for skill in scored {
+        for skill in outcome.selected {
             if !selected
                 .iter()
                 .any(|s| s.manifest.name == skill.manifest.name)
@@ -780,7 +793,7 @@ impl Agent {
             );
         }
 
-        (selected, rewritten)
+        (selected, rewritten, feedback)
     }
 
     /// Send initial engine thread list and routines to the TUI channel so
@@ -1282,7 +1295,7 @@ impl Agent {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         content: response.content.clone(),
-                        thread_id: message.thread_id.clone(),
+                        thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
                     };
                     match self.hooks().run(&event).await {
                         Err(err) => {
@@ -1546,7 +1559,7 @@ impl Agent {
                 user_id: message.user_id.clone(),
                 channel: message.channel.clone(),
                 content: content.clone(),
-                thread_id: message.thread_id.clone(),
+                thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
@@ -1701,6 +1714,7 @@ impl Agent {
             submission,
             Submission::ExecApproval { .. }
                 | Submission::ApprovalResponse { .. }
+                | Submission::ExternalCallback { .. }
                 | Submission::GateAuthResolution { .. }
         ) {
             message
@@ -2098,7 +2112,7 @@ impl Agent {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         content: content.clone(),
-                        thread_id: message.thread_id.clone(),
+                        thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
                     };
                     let content = match self.hooks().run(&hook_event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {

@@ -33,6 +33,8 @@ pub struct Attachment {
     pub source_url: Option<String>,
     /// Opaque key for host-side storage (e.g., after download/caching).
     pub storage_key: Option<String>,
+    /// Relative path to a project-local copy saved on disk, if persisted.
+    pub local_path: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
     /// Extensible metadata from the channel payload.
@@ -540,6 +542,26 @@ impl ChannelWorkspaceStore {
                 data.insert(write.path.clone(), write.content.clone());
             }
         }
+    }
+
+    /// Restore a previously-persisted subset of workspace values.
+    pub fn restore_snapshot(&self, snapshot: &std::collections::HashMap<String, String>) {
+        if snapshot.is_empty() {
+            return;
+        }
+        if let Ok(mut data) = self.data.write() {
+            for (path, content) in snapshot {
+                data.insert(path.clone(), content.clone());
+            }
+        }
+    }
+
+    /// Take a point-in-time snapshot of the current workspace store.
+    pub fn snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.data
+            .read()
+            .map(|data| data.clone())
+            .unwrap_or_default()
     }
 
     /// Append a text frame to a JSON queue stored at `path`.
@@ -1100,6 +1122,7 @@ mod tests {
             size_bytes: size,
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             extras_json: String::new(),
             data: Vec::new(),

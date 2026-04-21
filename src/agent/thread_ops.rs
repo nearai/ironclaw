@@ -252,6 +252,11 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    // TODO(external-thread-id): accept `&ExternalThreadId` instead of `&str`
+    // once the downstream `Uuid::parse_str` call and internal `session_manager`
+    // boundary are converted. The typed parameter is blocked on
+    // `SessionManager::resolve_thread` which still takes `Option<&str>`; moving
+    // it in one step would invert this PR's "boundary only" scope.
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,
@@ -2221,7 +2226,7 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        ext_name: String,
+        ext_name: ironclaw_common::ExtensionName,
         instructions: String,
         auth_data: &ParsedAuthData,
     ) {
@@ -2327,11 +2332,11 @@ impl Agent {
 
         let result = if let Some(auth_manager) = auth_manager {
             auth_manager
-                .submit_auth_token(&pending.extension_name, token, &message.user_id)
+                .submit_auth_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
             ext_mgr
-                .configure_token(&pending.extension_name, token, &message.user_id)
+                .configure_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else {
             return Ok(Some("Extension manager not available.".to_string()));
@@ -3232,6 +3237,7 @@ mod tests {
             size_bytes: Some(128),
             source_url: Some("https://example.com/photo.jpg".to_string()),
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: vec![1, 2, 3],
             duration_secs: None,
@@ -3611,6 +3617,76 @@ mod tests {
                 ..
             } if *status_request_id == request_id && tool_name == "shell"
         )));
+    }
+
+    #[tokio::test]
+    async fn test_process_user_input_allows_attachment_only_message() {
+        use crate::agent::session::{Session, Thread};
+        use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
+        use uuid::Uuid;
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+
+        let message = IncomingMessage::new("test", "test-user", "").with_attachments(vec![
+            IncomingAttachment {
+                id: "att_1".to_string(),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some("files-only.txt".to_string()),
+                size_bytes: Some(41),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: Some("Files-only regression attachment.".to_string()),
+                data: b"Files-only regression attachment.".to_vec(),
+                duration_secs: None,
+            },
+        ]);
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "",
+            )
+            .await
+            .expect("attachment-only message handled");
+
+        match result {
+            SubmissionResult::Response { content } => {
+                assert_eq!(content.to_ascii_lowercase(), "ok")
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread exists");
+        let turn = thread.turns.last().expect("turn should be created");
+        assert!(
+            turn.user_input.contains("<attachments>"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input.contains("files-only.txt"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input
+                .contains("Files-only regression attachment."),
+            "{}",
+            turn.user_input
+        );
     }
 
     #[tokio::test]
