@@ -57,6 +57,7 @@ from scripts.live_canary.common import (
     api_request,
     bootstrap_python,
     cargo_build,
+    env_secret,
     env_str,
     install_playwright,
     load_e2e_helpers,
@@ -1094,11 +1095,54 @@ async def async_main(args: argparse.Namespace) -> int:
         stop_gateway_stack(stack)
 
 
+# Secrets that the CI workflow materialises to per-secret files under
+# `$RUNNER_TEMP/auth-secrets/` instead of declaring as job-level `env:`,
+# so that accidental log-masking bypasses and subprocess env dumps can't
+# spill them. See `.github/workflows/live-canary.yml` — the Materialize
+# step writes each file and exports `<NAME>_PATH`. `_hydrate_secrets`
+# below reads each file back into `os.environ` so downstream code and
+# subprocesses (notably `mock_llm.py`, which inherits the parent env)
+# see the raw value without every call site having to know about the
+# path-based alternative.
+_HYDRATED_SECRET_NAMES: tuple[str, ...] = (
+    "AUTH_LIVE_GOOGLE_ACCESS_TOKEN",
+    "AUTH_LIVE_GOOGLE_REFRESH_TOKEN",
+    "AUTH_LIVE_GITHUB_TOKEN",
+    "AUTH_LIVE_NOTION_ACCESS_TOKEN",
+    "AUTH_LIVE_NOTION_REFRESH_TOKEN",
+    "AUTH_LIVE_NOTION_CLIENT_SECRET",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "GITHUB_OAUTH_CLIENT_SECRET",
+    "AUTH_BROWSER_GOOGLE_PASSWORD",
+    "AUTH_BROWSER_GITHUB_PASSWORD",
+    "AUTH_BROWSER_NOTION_PASSWORD",
+)
+
+
+def _hydrate_secrets() -> None:
+    """Read each `<NAME>_PATH`-materialised secret into `os.environ`.
+
+    Leaves any secret that is already set directly in env untouched —
+    that's the local-dev path via `config.env`. In CI the job env
+    deliberately omits the raw values; the Materialize step writes
+    them to files and sets `<NAME>_PATH`, and this function pulls them
+    back into the parent Python's env so the rest of the harness (and
+    `mock_llm.py` as a subprocess) keeps working unchanged.
+    """
+    for name in _HYDRATED_SECRET_NAMES:
+        if os.environ.get(name):
+            continue
+        value = env_secret(name)
+        if value is not None:
+            os.environ[name] = value
+
+
 def main() -> int:
     args = parse_args()
     mode_cfg = MODE_CONFIG[args.mode]
     reexec_env = mode_cfg["reexec_env"]
     try:
+        _hydrate_secrets()
         if args.list_cases:
             return asyncio.run(async_main(args))
         if not args.skip_python_bootstrap and os.environ.get(reexec_env) != "1":

@@ -91,8 +91,44 @@ def env_str(name: str, default: str | None = None) -> str | None:
     return value or None
 
 
+def env_secret(name: str) -> str | None:
+    """Read a canary secret, preferring the `<NAME>_PATH` file variant.
+
+    The CI workflow materialises sensitive secrets (tokens, client
+    secrets, passwords) into mode-0600 tempfiles rather than exposing
+    them directly as job env vars, and then exports `<NAME>_PATH`
+    pointing at the file. This helper reads from that file when the
+    path is set; otherwise it falls back to the raw env var so local
+    development via `config.env` (see
+    `scripts/auth_live_canary/config.example.env`) keeps working
+    unchanged.
+
+    Trailing newlines are stripped so a file written with
+    `printf '%s\\n' "$SECRET"` matches a raw env var carrying the
+    same value. Empty files collapse to `None` (same shape as an
+    unset var).
+    """
+    path = env_str(f"{name}_PATH")
+    if path:
+        try:
+            value = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        value = value.rstrip("\r\n")
+        return value or None
+    return env_str(name)
+
+
 def required_env(name: str, *, message: str | None = None) -> str:
     value = env_str(name)
+    if value:
+        return value
+    raise CanaryError(message or f"{name} is required")
+
+
+def required_secret(name: str, *, message: str | None = None) -> str:
+    """File-aware variant of `required_env` for sensitive secrets."""
+    value = env_secret(name)
     if value:
         return value
     raise CanaryError(message or f"{name} is required")

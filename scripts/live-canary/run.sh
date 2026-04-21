@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# Defensive: explicitly disable command-trace so a future edit adding
+# `set -x` (or an inherited `-x` from the caller) can't interpolate
+# job-level secrets that appear in environment-derived command args
+# into workflow logs. See
+# `.github/workflows/live-canary.yml` auth-live-seeded / auth-browser-
+# consent lanes — sensitive secrets are materialised to files in the
+# runner tempdir, and callers read them via
+# `scripts/live_canary/common.py::env_secret`, but this guard is
+# belt-and-braces for anything else that might transit env vars.
+set +x
 set -euo pipefail
 
 # Unified live-canary dispatcher.
