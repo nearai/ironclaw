@@ -53,19 +53,6 @@ pub fn is_engine_v2_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the gateway should append engine-error debug detail to the
-/// user-visible reply.
-///
-/// Off by default. Operators flip `IRONCLAW_DEBUG_ERRORS=1` to surface
-/// the low-level detail (Monty trace, Python traceback, upstream HTTP
-/// body) preserved in `EngineError::Orchestrator` / `ThreadOutcome::Failed`.
-/// Raw detail still flows to `tracing::debug!` unconditionally.
-fn gateway_debug_errors_enabled() -> bool {
-    std::env::var("IRONCLAW_DEBUG_ERRORS")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-        .unwrap_or(false)
-}
-
 /// Shorthand for building an `Error` from an engine-related failure.
 fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::from(crate::error::JobError::ContextError {
@@ -90,6 +77,11 @@ fn bridge_outcome_for_failed_thread(
     user_id: &str,
     channel: &str,
 ) -> BridgeOutcome {
+    // Raw error + low-level detail are always logged. `tracing::warn!` flows
+    // through `log_layer` into the gateway's log event stream, so operators
+    // see both the sanitized user reply (via the Debug Inspector error
+    // activity) and the raw diagnostic trail side-by-side. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
@@ -97,17 +89,7 @@ fn bridge_outcome_for_failed_thread(
         debug_detail = ?debug_detail,
         "engine v2: thread failed; showing user-friendly summary",
     );
-    let user_text = crate::bridge::user_facing_errors::user_facing_thread_failure(error);
-    // Low-level detail preserved from typed errors (e.g. `OrchestratorFailure`)
-    // is never user-facing by default — see `.claude/rules/error-handling.md`.
-    // Operators flip `IRONCLAW_DEBUG_ERRORS=1` to append it to the reply so
-    // they can triage without tailing logs.
-    let reply = if let Some(detail) = debug_detail.filter(|_| gateway_debug_errors_enabled()) {
-        format!("{user_text}\n\n[debug] {detail}")
-    } else {
-        user_text
-    };
-    BridgeOutcome::Respond(reply)
+    BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
 }
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
@@ -3995,12 +3977,32 @@ async fn await_thread_outcome(
         ThreadOutcome::Failed {
             error,
             debug_detail,
-        } => Ok(bridge_outcome_for_failed_thread(
-            &error,
-            debug_detail.as_deref(),
-            &message.user_id,
-            &message.channel,
-        )),
+        } => {
+            // Surface the failure to the gateway's Debug Inspector (and
+            // any SSE consumer listening for `error` events). The chat
+            // reply itself stays sanitized — the Debug Inspector gets
+            // both the sanitized `message` and the raw `debug_detail`
+            // so operators can triage from the inspector panel instead
+            // of tailing logs.
+            if let Some(ref sse) = state.sse {
+                let sanitized =
+                    crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: sanitized,
+                        debug_detail: debug_detail.clone(),
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            Ok(bridge_outcome_for_failed_thread(
+                &error,
+                debug_detail.as_deref(),
+                &message.user_id,
+                &message.channel,
+            ))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,

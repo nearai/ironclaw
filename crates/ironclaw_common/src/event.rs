@@ -314,8 +314,19 @@ pub enum AppEvent {
     },
     #[serde(rename = "error")]
     Error {
+        /// Sanitized, channel-agnostic message shown to users. Never
+        /// carries tracebacks, file paths, HTTP bodies, or internal
+        /// wrapping — see `bridge::user_facing_errors`.
         message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Low-level diagnostic detail (Monty trace, Python traceback,
+        /// upstream HTTP body) preserved from the typed engine error so
+        /// the gateway's Debug Inspector can surface it. Logged at the
+        /// failure edge and always serialized onto the SSE `error`
+        /// event when present. Not user-facing — the chat reply stays
+        /// sanitized.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        debug_detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "heartbeat")]
@@ -627,6 +638,7 @@ mod tests {
             },
             AppEvent::Error {
                 message: String::new(),
+                debug_detail: None,
                 thread_id: None,
             },
             AppEvent::Heartbeat,

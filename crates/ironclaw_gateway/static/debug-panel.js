@@ -356,7 +356,15 @@
     es.addEventListener('error', function (e) {
       try {
         var data = JSON.parse(e.data);
-        addActivity('error', t('debug.activityError'), timeNow(), 'failure', data.message || null, { labelKey: 'debug.activityError' });
+        // debug_detail carries the low-level trace (Monty/Python traceback,
+        // upstream HTTP body) preserved from the typed engine error. The
+        // sanitized `message` goes to chat; the inspector shows both so
+        // operators can triage without tailing logs.
+        var body = data.message || '';
+        if (data.debug_detail) {
+          body += (body ? '\n\n' : '') + '[debug] ' + data.debug_detail;
+        }
+        addActivity('error', t('debug.activityError'), timeNow(), 'failure', body || null, { labelKey: 'debug.activityError' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
