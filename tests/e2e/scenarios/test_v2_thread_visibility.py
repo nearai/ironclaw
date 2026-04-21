@@ -1,18 +1,17 @@
-"""E2E regression: engine v2 threads are visible in sidebar and history.
+"""E2E regression: engine threads stay out of chat sidebar while history works.
 
-Covers the behavior PR #2532 introduced in `chat_threads_handler` and
-`chat_history_handler`:
+Covers the intended split between the chat sidebar and engine APIs:
 
-- An engine v2 thread created from a `/api/chat/send` call shows up in the
-  `/api/chat/threads` sidebar with `channel == "engine"`.
-- `/api/chat/history?thread_id=<engine-thread-id>` returns the messages
-  synthesized from engine thread transcript even when the v1 conversation
-  table has no row for that id (deep-link-by-id path).
+- A foreground engine thread spawned by `/api/chat/send` must remain
+  discoverable via `/api/engine/threads`, but it must *not* surface as an
+  `engine` entry inside `/api/chat/threads`.
+- `/api/chat/history?thread_id=<engine-thread-id>` must still synthesize the
+  transcript for callers that explicitly deep-link to that engine thread id.
 
-Prior behavior silently dropped these threads from the sidebar and
-returned an empty history on deep-link; the fixture drives the HTTP
-surface directly so the regression survives independent of frontend
-polish.
+The staging regression merged engine foreground threads into the normal chat
+sidebar, which made ordinary prompts look like separate `ENGINE`
+conversations. This fixture keeps that bug from coming back while preserving
+explicit engine-thread history access.
 """
 
 import asyncio
@@ -156,26 +155,28 @@ async def _wait_for_assistant_response(
     )
 
 
-async def _engine_only_threads(base_url: str) -> list[dict]:
-    """Return sidebar entries whose channel is engine (the v2-merge path)."""
+async def _chat_sidebar_threads(base_url: str) -> list[dict]:
     r = await api_get(base_url, "/api/chat/threads", timeout=15)
     r.raise_for_status()
-    return [t for t in r.json().get("threads", []) if t.get("channel") == "engine"]
+    return r.json().get("threads", [])
+
+
+async def _engine_threads(base_url: str) -> list[dict]:
+    r = await api_get(base_url, "/api/engine/threads", timeout=15)
+    r.raise_for_status()
+    return r.json().get("threads", [])
 
 
 class TestV2ThreadVisibility:
-    async def test_engine_only_thread_appears_in_sidebar_with_engine_channel(
+    async def test_engine_thread_stays_out_of_chat_sidebar(
         self, v2_visibility_server
     ):
-        """Send without a client-supplied thread_id: the v1 flow dual-writes
-        into the shared assistant conversation, but the engine spins up a
-        fresh thread id that has no matching v1 row. The PR's merge should
-        surface that engine thread in the sidebar with `channel=engine`.
+        """Assistant sends still spawn engine threads, but those execution
+        threads must stay out of the normal chat sidebar.
         """
         base = v2_visibility_server
 
-        baseline = await _engine_only_threads(base)
-        baseline_ids = {t["id"] for t in baseline}
+        baseline_engine_ids = {t["id"] for t in await _engine_threads(base)}
 
         send_r = await api_post(
             base,
@@ -185,22 +186,25 @@ class TestV2ThreadVisibility:
         )
         assert send_r.status_code in (200, 202), send_r.text
 
-        new_engine_entry = None
+        engine_thread = None
         for _ in range(60):
-            merged = await _engine_only_threads(base)
-            new_entries = [t for t in merged if t["id"] not in baseline_ids]
-            if new_entries:
-                new_engine_entry = new_entries[0]
+            engine_threads = await _engine_threads(base)
+            new_threads = [t for t in engine_threads if t["id"] not in baseline_engine_ids]
+            if new_threads:
+                engine_thread = new_threads[0]
                 break
             await asyncio.sleep(0.5)
 
-        assert new_engine_entry is not None, (
-            "a new engine-only thread must appear in the sidebar after an "
-            "assistant send with no thread_id; PR #2532 added this merge path"
+        assert engine_thread is not None, "engine thread never materialized"
+
+        sidebar_threads = await _chat_sidebar_threads(base)
+        assert all(t.get("channel") != "engine" for t in sidebar_threads), (
+            "chat sidebar must not show engine execution threads as normal "
+            f"conversations, got {sidebar_threads}"
         )
-        assert new_engine_entry.get("title"), (
-            f"engine sidebar entry must carry a goal as title, got "
-            f"{new_engine_entry}"
+        assert all(t.get("id") != engine_thread["id"] for t in sidebar_threads), (
+            "the newly spawned engine thread must stay discoverable via the "
+            "/api/engine/threads surface, not /api/chat/threads"
         )
 
     async def test_history_synthesizes_messages_for_deep_linked_engine_thread(
@@ -211,7 +215,7 @@ class TestV2ThreadVisibility:
         """
         base = v2_visibility_server
 
-        baseline_ids = {t["id"] for t in await _engine_only_threads(base)}
+        baseline_engine_ids = {t["id"] for t in await _engine_threads(base)}
 
         await api_post(
             base,
@@ -222,17 +226,15 @@ class TestV2ThreadVisibility:
 
         engine_thread_id = None
         for _ in range(60):
-            merged = await _engine_only_threads(base)
-            new = [t for t in merged if t["id"] not in baseline_ids]
-            if new:
-                engine_thread_id = new[0]["id"]
+            engine_threads = await _engine_threads(base)
+            new_threads = [t for t in engine_threads if t["id"] not in baseline_engine_ids]
+            if new_threads:
+                engine_thread_id = new_threads[0]["id"]
                 break
             await asyncio.sleep(0.5)
 
-        assert engine_thread_id is not None, "engine-only thread never materialized"
+        assert engine_thread_id is not None, "engine thread never materialized"
 
-        # Deep-link by engine thread id. Before PR #2532 this returned an
-        # empty turn list because the v1 conversation lookup missed.
         turns = await _wait_for_assistant_response(
             base, engine_thread_id, timeout=45
         )

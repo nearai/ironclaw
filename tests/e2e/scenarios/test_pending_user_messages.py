@@ -5,8 +5,12 @@ The frontend fix tracks optimistically-shown messages in a
 clears the DOM before the agent loop has persisted them.
 """
 
+import asyncio
+
 from helpers import (
+    AUTH_TOKEN,
     SEL,
+    api_get,
     send_chat_and_wait_for_terminal_message,
 )
 
@@ -24,6 +28,27 @@ async def _create_new_thread(page) -> str:
     await page.locator("#thread-new-btn").click()
     await page.wait_for_function("() => !!currentThreadId", timeout=10000)
     return await page.evaluate("() => currentThreadId")
+
+
+async def _reload_and_switch_to_thread(page, base_url: str, thread_id: str) -> None:
+    await page.goto(f"{base_url}/?token={AUTH_TOKEN}", timeout=15000)
+    await page.wait_for_selector(SEL["auth_screen"], state="hidden", timeout=10000)
+    await _wait_for_connected(page, timeout=10000)
+    await page.evaluate("(id) => switchThread(id)", thread_id)
+    await page.wait_for_function("(id) => currentThreadId === id", arg=thread_id, timeout=10000)
+
+
+async def _wait_for_in_progress_turn(base_url: str, thread_id: str, *, timeout: float = 15.0) -> dict:
+    last_payload = {}
+    for _ in range(int(timeout * 5)):
+        response = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+        last_payload = payload
+        if payload.get("in_progress"):
+            return payload
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"Timed out waiting for in-progress turn: {last_payload}")
 
 
 async def test_user_message_visible_after_send(page):
@@ -126,6 +151,56 @@ async def test_pending_message_survives_sse_reconnect(page):
         await page.evaluate(
             "() => { if (window._testOrigApiFetch) { window.apiFetch = window._testOrigApiFetch; } }"
         )
+
+
+async def test_in_progress_attachment_turn_survives_reload(page, ironclaw_server):
+    """Reloading during a durable in-progress attachment turn keeps its file card."""
+    await _wait_for_connected(page, timeout=5000)
+
+    thread_id = await page.evaluate("() => currentThreadId")
+    assert thread_id, "expected an active thread before send"
+
+    attachment_input = page.locator(SEL["attachment_input"])
+    chat_input = page.locator(SEL["chat_input"])
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "pending-note.txt",
+                "mimeType": "text/plain",
+                "buffer": b"Attachment survives in-progress reload.",
+            }
+        ]
+    )
+
+    await chat_input.fill("issue 1780 loop forever")
+    await chat_input.press("Enter")
+
+    await page.wait_for_function(
+        """() => {
+            const pending = _pendingUserMessages.get(currentThreadId);
+            return pending && pending.some((p) =>
+                p.content === 'issue 1780 loop forever' &&
+                Array.isArray(p.attachments) &&
+                p.attachments.some((att) => att.filename === 'pending-note.txt')
+            );
+        }""",
+        timeout=5000,
+    )
+
+    await _wait_for_in_progress_turn(ironclaw_server, thread_id, timeout=15.0)
+    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+
+    await page.wait_for_function(
+        """() => {
+            const users = document.querySelectorAll('#chat-messages .message.user');
+            const lastUser = users.length ? users[users.length - 1] : null;
+            return !!lastUser
+              && lastUser.querySelectorAll('.message-attachment-file').length >= 1
+              && (lastUser.innerText || '').includes('pending-note.txt');
+        }""",
+        timeout=15000,
+    )
 
 
 async def test_pending_entry_cleared_when_send_fails(page):

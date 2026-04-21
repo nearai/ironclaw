@@ -63,6 +63,7 @@ mod tests {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: true,
             session_manager: Some(session_manager),
             log_broadcaster: None,
             log_level_handle: None,

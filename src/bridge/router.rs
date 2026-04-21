@@ -74,6 +74,42 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
     })
 }
 
+/// Build the `BridgeOutcome` for a `ThreadOutcome::Failed`.
+///
+/// Raw engine failures can include Python tracebacks, internal file paths,
+/// and upstream HTTP bodies (see #2546). This helper keeps the raw error
+/// in the server-side logs and returns a short, user-facing summary
+/// derived from the error's shape.
+///
+/// Extracted into a named function so the sanitization flow (log + map to
+/// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
+/// by unit tests without spinning up the full engine.
+fn bridge_outcome_for_failed_thread(
+    error: &str,
+    debug_detail: Option<&str>,
+    user_id: &str,
+    channel: &str,
+) -> BridgeOutcome {
+    tracing::warn!(
+        user_id = %user_id,
+        channel = %channel,
+        error = %error,
+        debug_detail = ?debug_detail,
+        "engine v2: thread failed; showing user-friendly summary",
+    );
+    let user_text = crate::bridge::user_facing_errors::user_facing_thread_failure(error);
+    // Low-level detail preserved from typed errors (e.g. `OrchestratorFailure`)
+    // is never user-facing by default — see `.claude/rules/error-handling.md`.
+    // Operators flip `IRONCLAW_DEBUG_ERRORS=1` to append it to the reply so
+    // they can triage without tailing logs.
+    let reply = if let Some(detail) = debug_detail.filter(|_| gateway_debug_errors_enabled()) {
+        format!("{user_text}\n\n[debug] {detail}")
+    } else {
+        user_text
+    };
+    BridgeOutcome::Respond(reply)
+}
+
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
 
 #[derive(Debug, Clone)]
@@ -3959,23 +3995,12 @@ async fn await_thread_outcome(
         ThreadOutcome::Failed {
             error,
             debug_detail,
-        } => {
-            // Low-level detail is never user-facing by default. Gateway
-            // debug mode (IRONCLAW_DEBUG_ERRORS=1) appends it to the
-            // reply so operators can triage without tailing logs;
-            // otherwise it's logged at debug and dropped from the
-            // response — see `.claude/rules/error-handling.md`.
-            if let Some(ref detail) = debug_detail {
-                tracing::debug!(error, detail, "engine thread failed");
-            }
-            let reply =
-                if let Some(detail) = debug_detail.filter(|_| gateway_debug_errors_enabled()) {
-                    format!("Error: {error}\n\n[debug] {detail}")
-                } else {
-                    format!("Error: {error}")
-                };
-            Ok(BridgeOutcome::Respond(reply))
-        }
+        } => Ok(bridge_outcome_for_failed_thread(
+            &error,
+            debug_detail.as_deref(),
+            &message.user_id,
+            &message.channel,
+        )),
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -5938,6 +5963,71 @@ mod tests {
 
     static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+
+    // ──────────────────────────────────────────────────────────────────
+    // `bridge_outcome_for_failed_thread` — caller-level coverage.
+    //
+    // These tests drive the same helper that `handle_with_engine_inner`
+    // calls when it receives a `ThreadOutcome::Failed { error }`. They
+    // are the regression fence for issue #2546 (raw Python traceback
+    // from a 502 reaching the user). The sanitization logic proper
+    // lives in `bridge::user_facing_errors` and has its own unit tests;
+    // these assert that the router arm (log + sanitize + wrap) is
+    // actually wired up — per the "Test Through the Caller" rule.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn failed_thread_outcome_hides_python_traceback_from_user() {
+        let raw = "Orchestrator error: effect execution error: Orchestrator error after resume: \
+             Traceback (most recent call last): \
+             File \"orchestrator.py\", line 907, in  \
+             File \"orchestrator.py\", line 548, in run_loop \
+             RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "web");
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert_eq!(
+            text,
+            "The AI model is temporarily unavailable. Please try again in a few moments."
+        );
+        // Defense-in-depth: none of the leaky internals must surface.
+        assert!(!text.contains("Traceback"));
+        assert!(!text.contains("orchestrator.py"));
+        assert!(!text.contains("effect execution error"));
+        assert!(!text.contains("nearai_chat"));
+    }
+
+    #[test]
+    fn failed_thread_outcome_maps_unknown_error_to_generic_message() {
+        let outcome = bridge_outcome_for_failed_thread(
+            "some unexpected internal failure",
+            None,
+            "alice",
+            "web",
+        );
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert_eq!(
+            text,
+            "Something went wrong while processing your message. Please try again."
+        );
+        assert!(!text.contains("some unexpected internal failure"));
+    }
+
+    #[test]
+    fn failed_thread_outcome_maps_context_too_large() {
+        let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "web");
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert!(
+            text.starts_with("The request was too large"),
+            "unexpected text: {text}"
+        );
+    }
 
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,

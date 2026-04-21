@@ -29,8 +29,7 @@ pub async fn tool_policy_get_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
-    if pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),
@@ -73,8 +72,7 @@ pub async fn tool_policy_put_handler(
     AdminUser(_admin): AdminUser,
     Json(policy): Json<AdminToolPolicy>,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
-    if pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),
