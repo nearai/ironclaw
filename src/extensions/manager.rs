@@ -391,6 +391,15 @@ pub struct ExtensionManager {
     /// specific client in the globally-registered wrapper (which would
     /// let the second activating user's credentials shadow the first).
     mcp_clients: Arc<crate::tools::mcp::McpClientStore>,
+    /// Per-server async mutex that serialises `activate_mcp` and the
+    /// `McpServer` arm of `remove` on the same server name. Without this,
+    /// user B's `remove` (which unregisters the server's global tool
+    /// wrappers once it's the last user out) can interleave with user C's
+    /// `activate` (which re-registers the wrappers and inserts C's
+    /// client), leaving the store with C's client but the registry with
+    /// C's wrappers already unregistered. Parallelism across *different*
+    /// servers is preserved.
+    mcp_lifecycle_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 
     // WASM tool infrastructure
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -660,6 +669,7 @@ impl ExtensionManager {
             mcp_session_manager,
             mcp_process_manager,
             mcp_clients: Arc::new(crate::tools::mcp::McpClientStore::new()),
+            mcp_lifecycle_locks: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
@@ -1175,6 +1185,21 @@ impl ExtensionManager {
         Arc::clone(&self.mcp_clients)
     }
 
+    /// Fetch (lazy-creating if needed) the per-server activation/removal
+    /// lock. Caller should `.lock().await` the returned mutex and hold
+    /// the guard for the duration of the lifecycle transition
+    /// (activate's `insert + register`, or remove's `remove +
+    /// unregister`). Parallelism across different servers is preserved
+    /// because each server gets its own mutex.
+    async fn mcp_lifecycle_lock(&self, server_name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.mcp_lifecycle_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(server_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
     /// Inject a pre-created MCP client (from startup loading) into the
     /// manager and register its tool wrappers with the global
     /// `ToolRegistry`. Wrappers hold `mcp_client_store()` and resolve the
@@ -1201,6 +1226,14 @@ impl ExtensionManager {
             );
             return Vec::new();
         }
+        // Take the per-server lifecycle lock so that if startup inject
+        // somehow overlaps with a user-initiated activate/remove for the
+        // same server (not expected in practice — startup runs before
+        // channels are open — but cheap defense-in-depth) the
+        // store-insert and tool-wrapper registration stay atomic.
+        let lifecycle_lock = self.mcp_lifecycle_lock(&name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+
         self.mcp_clients
             .insert(user_id, &name, client.clone())
             .await;
@@ -2261,10 +2294,24 @@ impl ExtensionManager {
                     .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
-                let removed_last_active_client = {
-                    self.mcp_clients.remove(user_id, &name).await;
-                    !self.mcp_clients.any_active_for_server(&name).await
-                };
+                // Hold the per-server lifecycle lock for the entire
+                // remove-and-unregister sequence. Without it a concurrent
+                // `activate` (user C) could slip between our "last user
+                // out" check and the `tool_registry.unregister` loop,
+                // leaving C with a client in the store but no registered
+                // wrappers. Atomicity on the client side is handled by
+                // `remove_and_check_empty`, which holds the store's
+                // write lock across both the remove and the emptiness
+                // probe — see `.claude/rules/safety-and-sandbox.md`
+                // "Cache Keys Must Be Complete" and the TOCTOU scenario
+                // in review comment on src/extensions/manager.rs.
+                let lifecycle_lock = self.mcp_lifecycle_lock(&name).await;
+                let _lifecycle_guard = lifecycle_lock.lock().await;
+
+                let removed_last_active_client = self
+                    .mcp_clients
+                    .remove_and_check_empty(user_id, &name)
+                    .await;
 
                 let mut tool_names = Vec::new();
                 if removed_last_active_client {
@@ -5427,6 +5474,14 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        // Serialise activate/remove on this server so a concurrent
+        // `remove` (last-user-out, unregistering global tool wrappers)
+        // can't interleave with our `insert + register` below and leave
+        // the registry with this user's client present but the wrappers
+        // gone. Parallelism across different servers is preserved.
+        let lifecycle_lock = self.mcp_lifecycle_lock(name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+
         // Check if already activated for this user. Note: another user may
         // already have the same server active (their client sits in
         // `mcp_clients` under a different key), in which case the global

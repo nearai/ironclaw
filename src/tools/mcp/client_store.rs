@@ -69,6 +69,24 @@ impl McpClientStore {
             .remove(&McpClientKey::new(user_id, server_name))
     }
 
+    /// Atomically remove `(user_id, server_name)` and report whether the
+    /// server has zero remaining users after the removal. Holds the write
+    /// lock across both the `remove` and the emptiness check so a
+    /// concurrent `insert` (user C activating) or `remove` (user B) can't
+    /// slip between the two and produce a stale "last user out" decision.
+    ///
+    /// Callers use the returned boolean to decide whether the server's
+    /// global tool wrappers should be unregistered from the
+    /// `ToolRegistry`. That decision is still racy against a concurrent
+    /// activation that *starts after* this call returns — the
+    /// extension-manager-level per-server lifecycle lock is what
+    /// serialises activate and remove end-to-end.
+    pub async fn remove_and_check_empty(&self, user_id: &str, server_name: &str) -> bool {
+        let mut clients = self.clients.write().await;
+        clients.remove(&McpClientKey::new(user_id, server_name));
+        !clients.keys().any(|key| key.server_name == server_name)
+    }
+
     /// Look up the client for `(user_id, server_name)`. Returns `None` if
     /// the user hasn't activated the server.
     pub async fn get(&self, user_id: &str, server_name: &str) -> Option<Arc<McpClient>> {
@@ -122,6 +140,44 @@ mod tests {
             &store.get("user-b", "notion").await.expect("b"),
             &client_b
         ));
+    }
+
+    #[tokio::test]
+    async fn remove_and_check_empty_reports_last_user_out() {
+        let store = McpClientStore::new();
+        let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
+
+        store.insert("user-a", "notion", client_a).await;
+        store.insert("user-b", "notion", client_b).await;
+
+        assert!(
+            !store.remove_and_check_empty("user-a", "notion").await,
+            "removing user-a while user-b still holds notion must not report empty"
+        );
+        assert!(
+            store.remove_and_check_empty("user-b", "notion").await,
+            "removing user-b (last user) must report empty"
+        );
+        assert!(
+            !store.contains("user-b", "notion").await,
+            "removal must have actually taken effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_and_check_empty_is_idempotent_on_missing_user() {
+        let store = McpClientStore::new();
+        let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        store.insert("user-a", "notion", client).await;
+
+        assert!(
+            !store
+                .remove_and_check_empty("user-never-activated", "notion")
+                .await,
+            "removing a user who never activated must leave the existing user's client in place"
+        );
+        assert!(store.contains("user-a", "notion").await);
     }
 
     #[tokio::test]
