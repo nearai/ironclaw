@@ -468,6 +468,17 @@ pub enum AppEvent {
         goal: String,
     },
 
+    /// A child thread completed (terminal state reached).
+    ///
+    /// Symmetric to `ChildThreadSpawned`: the UI uses the pair to mark
+    /// child branches finished in tree views. Bridged from engine
+    /// `EventKind::ChildCompleted`.
+    #[serde(rename = "child_thread_completed")]
+    ChildThreadCompleted {
+        parent_thread_id: String,
+        child_thread_id: String,
+    },
+
     /// A mission spawned a new thread.
     #[serde(rename = "mission_thread_spawned")]
     MissionThreadSpawned {
@@ -494,6 +505,25 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         mission_id: Option<String>,
         /// Thread scope for SSE filtering.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// CodeAct (Python / Monty) execution failed.
+    ///
+    /// Bridged from engine `EventKind::CodeExecutionFailed`. `category`
+    /// is the snake_case `CodeExecutionFailure` display string
+    /// (`syntax_error`, `runtime_error`, `name_lookup`, `vm_panic`,
+    /// `resource_limit`, `tool_error`, `os_denied`) — the engine type is
+    /// not re-exported into `ironclaw_common`, so the wire form is a
+    /// string the frontend can match on.
+    #[serde(rename = "code_execution_failed")]
+    CodeExecutionFailed {
+        category: String,
+        error: String,
+        duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_hash: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -533,8 +563,10 @@ impl AppEvent {
             Self::TurnMetrics { .. } => "turn_metrics",
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
+            Self::ChildThreadCompleted { .. } => "child_thread_completed",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
             Self::PlanUpdate { .. } => "plan_update",
+            Self::CodeExecutionFailed { .. } => "code_execution_failed",
         }
     }
 
@@ -729,6 +761,17 @@ mod tests {
                 status: String::new(),
                 steps: vec![],
                 mission_id: None,
+                thread_id: None,
+            },
+            AppEvent::ChildThreadCompleted {
+                parent_thread_id: String::new(),
+                child_thread_id: String::new(),
+            },
+            AppEvent::CodeExecutionFailed {
+                category: String::new(),
+                error: String::new(),
+                duration_ms: 0,
+                code_hash: None,
                 thread_id: None,
             },
         ];
