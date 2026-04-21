@@ -96,6 +96,37 @@ impl ThreadManager {
     ) -> Result<ThreadId, EngineError> {
         self.spawn_thread_with_history(
             goal,
+            None,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            Vec::new(),
+            serde_json::Map::new(),
+        )
+        .await
+    }
+
+    /// Spawn a new thread with an explicit sidebar title.
+    ///
+    /// Callers with a semantic short label (e.g. mission name) should
+    /// use this; everything else can rely on `spawn_thread` + the
+    /// read-side fallback that derives a short title from `goal`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_title(
+        &self,
+        goal: impl Into<String>,
+        title: Option<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+    ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history(
+            goal,
+            title,
             thread_type,
             project_id,
             config,
@@ -122,6 +153,7 @@ impl ThreadManager {
     pub async fn spawn_thread_with_history(
         &self,
         goal: impl Into<String>,
+        title: Option<String>,
         thread_type: ThreadType,
         project_id: ProjectId,
         config: ThreadConfig,
@@ -135,6 +167,9 @@ impl ThreadManager {
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
         }
+        // Set the title before save_thread + start_thread so the
+        // executor's in-memory thread observes it atomically.
+        thread.title = title;
         let thread_id = thread.id;
 
         // Apply initial metadata before save_thread + start_thread so the
@@ -1039,6 +1074,83 @@ mod tests {
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Hello!"));
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_defaults_title_to_none() {
+        // Regression: without explicit title, the persisted thread has
+        // title = None — so the gateway falls back to deriving from goal
+        // rather than showing stale data.
+        let mgr = make_manager(MockLlm::text("done"));
+        let tid = mgr
+            .spawn_thread(
+                "some long goal",
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_title_persists_title() {
+        // Regression: mission-spawned threads pass `Some(mission.name)` so
+        // the sidebar shows the short label instead of the multi-paragraph
+        // meta-prompt that lives in `goal`.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_goal = "a".repeat(2000);
+        let tid = mgr
+            .spawn_thread_with_title(
+                &long_goal,
+                Some("Daily summary".to_string()),
+                ThreadType::Mission,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Daily summary"));
+        assert_eq!(loaded.goal.len(), 2000);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_history_persists_derived_title() {
+        // Regression: foreground gateway threads pass a derived short
+        // title; without this, the sidebar would show the full first
+        // user message.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_message =
+            "first line of a user message\nsecond line that should be ignored".to_string();
+        let derived = Thread::derive_title_from_message(&long_message);
+        assert_eq!(derived.as_deref(), Some("first line of a user message"));
+
+        let tid = mgr
+            .spawn_thread_with_history(
+                long_message,
+                derived.clone(),
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+                Vec::new(),
+                serde_json::Map::new(),
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, derived);
     }
 
     #[tokio::test]

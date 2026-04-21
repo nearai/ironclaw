@@ -204,6 +204,12 @@ const ACTIVE_SKILLS_METADATA_KEY: &str = "active_skills";
 pub struct Thread {
     pub id: ThreadId,
     pub goal: String,
+    /// Short human-readable label for the thread, used by channel UIs
+    /// (e.g. the gateway sidebar). `goal` is the execution prompt and
+    /// may be a multi-paragraph meta-prompt; `title` is the compact
+    /// label the user sees.
+    #[serde(default)]
+    pub title: Option<String>,
     pub thread_type: ThreadType,
     pub state: ThreadState,
     pub project_id: ProjectId,
@@ -243,6 +249,7 @@ impl Thread {
         Self {
             id: ThreadId::new(),
             goal: goal.into(),
+            title: None,
             thread_type,
             state: ThreadState::Created,
             project_id,
@@ -267,6 +274,28 @@ impl Thread {
     pub fn with_parent(mut self, parent_id: ThreadId) -> Self {
         self.parent_id = Some(parent_id);
         self
+    }
+
+    /// Derive a short sidebar title from a free-form user message.
+    ///
+    /// Takes the first non-empty line, trims trailing whitespace, and
+    /// truncates by character count (not bytes) so multibyte input
+    /// doesn't panic. Returns `None` if the message is all whitespace.
+    pub fn derive_title_from_message(message: &str) -> Option<String> {
+        const MAX_CHARS: usize = 60;
+        let first_line = message.lines().find(|l| !l.trim().is_empty())?;
+        let trimmed = first_line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let count = trimmed.chars().count();
+        if count <= MAX_CHARS {
+            Some(trimmed.to_string())
+        } else {
+            let mut out: String = trimmed.chars().take(MAX_CHARS - 1).collect();
+            out.push('…');
+            Some(out)
+        }
     }
 
     pub fn owner_id(&self) -> OwnerId<'_> {
@@ -535,6 +564,77 @@ mod tests {
         )
         .with_parent(parent.id);
         assert_eq!(child.parent_id, Some(parent.id));
+    }
+
+    // ── Title derivation ─────────────────────────────────────
+
+    #[test]
+    fn derive_title_short_single_line() {
+        assert_eq!(
+            Thread::derive_title_from_message("Hello world"),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_title_uses_first_nonempty_line() {
+        let msg = "\n\n  \nactual first line\nsecond line\n";
+        assert_eq!(
+            Thread::derive_title_from_message(msg),
+            Some("actual first line".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_title_trims_trailing_whitespace() {
+        assert_eq!(
+            Thread::derive_title_from_message("  spaced out   "),
+            Some("spaced out".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_title_truncates_long_input_by_chars() {
+        let long = "a".repeat(120);
+        let title = Thread::derive_title_from_message(&long).expect("some title");
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn derive_title_is_utf8_safe_on_multibyte_input() {
+        // 120 multibyte chars — byte-slicing would panic; char-count works.
+        let emoji = "😀".repeat(120);
+        let title = Thread::derive_title_from_message(&emoji).expect("some title");
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn derive_title_returns_none_for_blank_input() {
+        assert_eq!(Thread::derive_title_from_message(""), None);
+        assert_eq!(Thread::derive_title_from_message("   \n\t\n  "), None);
+    }
+
+    #[test]
+    fn new_thread_has_no_title_by_default() {
+        let t = make_thread();
+        assert_eq!(t.title, None);
+    }
+
+    #[test]
+    fn thread_without_title_deserializes_legacy_json() {
+        // Regression: existing persisted threads lack a `title` field.
+        // `#[serde(default)]` must let them load as `title: None`.
+        let t = make_thread();
+        let mut value: serde_json::Value = serde_json::to_value(&t).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("title")
+            .expect("serialized thread should have had a title key");
+        let restored: Thread = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.title, None);
     }
 
     #[test]

@@ -1464,6 +1464,7 @@ fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
     Some(Thread {
         id: ThreadId(id),
         goal: summary.goal.clone(),
+        title: None,
         thread_type: ironclaw_engine::ThreadType::Mission,
         state,
         project_id: ironclaw_engine::ProjectId(uuid::Uuid::nil()),

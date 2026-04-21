@@ -744,16 +744,21 @@ pub(crate) async fn chat_threads_handler(
                         if existing_ids.contains(&uuid) {
                             continue;
                         }
+                        // Prefer the explicit short `title` set at thread
+                        // creation (mission name, derived first-line of the
+                        // user message). Fall back to a derived short label
+                        // from `goal` for legacy threads persisted before
+                        // the `title` field existed.
+                        let sidebar_title = eng.title.clone().or_else(|| {
+                            ironclaw_engine::Thread::derive_title_from_message(&eng.goal)
+                        });
                         threads.push(ThreadInfo {
                             id: uuid,
                             state: eng.state,
                             turn_count: eng.step_count,
                             created_at: eng.created_at,
                             updated_at: eng.updated_at.clone(),
-                            // Engine threads carry their goal as the only
-                            // human-readable label; reuse it as the sidebar
-                            // title so the user can tell threads apart.
-                            title: Some(eng.goal),
+                            title: sidebar_title,
                             thread_type: Some(eng.thread_type),
                             channel: Some("engine".to_string()),
                         });

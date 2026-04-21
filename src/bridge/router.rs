@@ -4570,6 +4570,8 @@ fn thread_event_to_app_events(
 pub struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub thread_type: String,
     pub state: String,
     pub project_id: String,
@@ -4819,6 +4821,7 @@ fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
     EngineThreadInfo {
         id: t.id.to_string(),
         goal: t.goal.clone(),
+        title: t.title.clone(),
         thread_type: format!("{:?}", t.thread_type),
         state: format!("{:?}", t.state),
         project_id: t.project_id.to_string(),

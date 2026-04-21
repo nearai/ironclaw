@@ -750,11 +750,14 @@ impl MissionManager {
         let meta_prompt =
             build_meta_prompt(&mission, &project_docs, &trigger_payload, &context_blocks);
 
-        // Spawn thread with meta-prompt as initial user message
+        // Spawn thread with meta-prompt as initial user message.
+        // `title = mission.name` so the sidebar shows the short label
+        // instead of the multi-paragraph meta-prompt (which is `goal`).
         let thread_id = self
             .thread_manager
-            .spawn_thread(
+            .spawn_thread_with_title(
                 &meta_prompt,
+                Some(mission.name.clone()),
                 ThreadType::Mission,
                 mission.project_id,
                 ThreadConfig::default(),
