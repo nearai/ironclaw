@@ -3648,10 +3648,27 @@ async fn handle_with_engine_inner(
                 .ok()
         };
         if let Some(cid) = v1_conv_id {
-            let _ = db
+            // Only set the sidebar title when the first user message
+            // actually persists — otherwise the sidebar can show a
+            // metadata title for a conversation whose first user row
+            // never landed (ghost-title regression). Mirrors the gating
+            // in `thread_ops::persist_user_message`.
+            //
+            // Title is derived from the raw user `content`, not the
+            // attachment-augmented `effective_content`, so an
+            // image-only or attachment-only first turn does not claim
+            // the title slot with the synthesized `<attachments>` block
+            // or extracted attachment text. `set_title_if_missing`
+            // already skips empty/whitespace input, so an attachment-
+            // only turn simply leaves the title unset until a later
+            // turn carries real user text.
+            if db
                 .add_conversation_message(cid, "user", effective_content)
-                .await;
-            crate::db::set_title_if_missing(db.as_ref(), cid, effective_content).await;
+                .await
+                .is_ok()
+            {
+                crate::db::set_title_if_missing(db.as_ref(), cid, content).await;
+            }
         }
     }
 

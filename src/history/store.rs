@@ -3414,4 +3414,143 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// PG mirror of `src/db/libsql/conversations.rs`
+    /// `test_metadata_title_used_as_fallback`.
+    ///
+    /// Regression for #2237: when no user messages have been persisted,
+    /// `list_conversations_all_channels` must fall back to the
+    /// `metadata.title` field that `set_title_if_missing` writes. The
+    /// libSQL test pins this for the embedded path; this mirror pins
+    /// the PostgreSQL path so a regression in the PG SQL (e.g. JSON
+    /// extraction operator drift, precedence error in the `COALESCE` /
+    /// `UNION` rewrite) surfaces at the integration tier instead of in
+    /// production.
+    ///
+    /// Integration tier — ignored by default. Requires a reachable
+    /// PostgreSQL with migrations applied. Run with:
+    ///
+    /// ```text
+    /// cargo test -p ironclaw --features integration --lib \
+    ///     history::store::tests::test_metadata_title_used_as_fallback_pg -- --ignored
+    /// ```
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_metadata_title_used_as_fallback_pg() {
+        use crate::config::Config;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let conv_id = Uuid::new_v4();
+        let user_id = format!("pg-title-fallback-{}", Uuid::new_v4());
+
+        store
+            .ensure_conversation(conv_id, "gateway", &user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let title_val = serde_json::json!("What is the weather today?");
+        store
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        let convs = store
+            .list_conversations_all_channels(&user_id, 50)
+            .await
+            .unwrap();
+        let conv = convs.iter().find(|c| c.id == conv_id).expect("conv listed");
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("What is the weather today?"),
+            "PG list must fall back to metadata.title when no user messages exist"
+        );
+
+        let conn = store.conn().await.unwrap();
+        conn.execute(
+            "DELETE FROM conversations WHERE id = $1",
+            &[&conv_id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// PG mirror of `src/db/libsql/conversations.rs`
+    /// `test_message_title_takes_precedence_over_metadata`.
+    ///
+    /// Pins the precedence order: once a first user message is
+    /// persisted, the derived title (from the message body) takes over
+    /// and the `metadata.title` set at conversation creation is
+    /// shadowed. Protects against a regression where the PG SQL
+    /// accidentally prefers `metadata.title` even when a message row
+    /// exists.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_message_title_takes_precedence_over_metadata_pg() {
+        use crate::config::Config;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let conv_id = Uuid::new_v4();
+        let user_id = format!("pg-title-precedence-{}", Uuid::new_v4());
+
+        store
+            .ensure_conversation(conv_id, "gateway", &user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let title_val = serde_json::json!("metadata title");
+        store
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        store
+            .add_conversation_message(conv_id, "user", "actual user message")
+            .await
+            .unwrap();
+
+        let convs = store
+            .list_conversations_all_channels(&user_id, 50)
+            .await
+            .unwrap();
+        let conv = convs.iter().find(|c| c.id == conv_id).expect("conv listed");
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("actual user message"),
+            "first user message must shadow metadata.title on the PG path"
+        );
+
+        let conn = store.conn().await.unwrap();
+        conn.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id = $1",
+            &[&conv_id.to_string()],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM conversations WHERE id = $1",
+            &[&conv_id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
 }

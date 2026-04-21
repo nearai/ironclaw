@@ -684,6 +684,7 @@ impl Agent {
                 &message.user_id,
                 turn_number,
                 effective_content,
+                content,
                 turn_started_at,
             )
             .await;
@@ -1028,6 +1029,19 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
+    /// Persist the first-turn user message row and (on success) seed the
+    /// sidebar title from `title_source`.
+    ///
+    /// `user_input` is the attachment-augmented payload that the engine
+    /// actually processes and gets stored as the conversation row body.
+    /// `title_source` is the raw user-entered text before attachment
+    /// augmentation; deriving the sidebar title from the raw text means
+    /// an image- or attachment-only first turn doesn't claim the title
+    /// slot with the synthesized `<attachments>` block or extracted
+    /// attachment OCR. `set_title_if_missing` already skips empty input,
+    /// so attachment-only turns naturally defer title-setting to a
+    /// later turn that carries real text.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
@@ -1035,6 +1049,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         user_input: &str,
+        title_source: &str,
         started_at: DateTime<Utc>,
     ) -> Option<Uuid> {
         let store = match self.store() {
@@ -1087,7 +1102,7 @@ impl Agent {
         };
 
         if result.is_some() {
-            crate::db::set_title_if_missing(store.as_ref(), thread_id, user_input).await;
+            crate::db::set_title_if_missing(store.as_ref(), thread_id, title_source).await;
         }
 
         result
@@ -3946,6 +3961,230 @@ mod tests {
             thread.pending_approval.as_ref().unwrap().request_id,
             correct_request_id,
             "Restored pending approval should have the original request_id"
+        );
+    }
+
+    /// Caller-level regression for PR #2700 review comments.
+    ///
+    /// Drives `persist_user_message` through a real `Agent` + real
+    /// `LibSqlBackend` store — the actual production persist path — and
+    /// pins three invariants that unit tests of `set_title_if_missing`
+    /// alone cannot pin:
+    ///
+    /// 1. **Title source.** When the first user turn carries
+    ///    attachments, the sidebar title must be derived from the raw
+    ///    user text (`title_source`), not the augmented `user_input`
+    ///    that includes the synthesized `<attachments>` block.
+    /// 2. **Empty-raw skip.** An image- or attachment-only first turn
+    ///    (empty raw text, augmented body) must leave the title unset
+    ///    so a later turn with real text can claim the slot.
+    /// 3. **Plain text.** A straightforward first user message with no
+    ///    attachments still seeds the title correctly — negative
+    ///    control for the edits above.
+    ///
+    /// Driving through the real caller matters because a regression in
+    /// the caller-side wiring (e.g. swapping `title_source` back to
+    /// `user_input`, or dropping the `result.is_some()` gate) would
+    /// leave all predicate-level unit tests green.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_user_message_title_uses_raw_text_not_augmented_payload() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        // Build a real libSQL-backed store and wire it into a test agent.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("title_source.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("libsql backend");
+        backend.run_migrations().await.expect("migrations");
+        let store: Arc<dyn Database> = Arc::new(backend);
+
+        let (channels, _statuses) = {
+            let statuses = Arc::new(TokioMutex::new(Vec::new()));
+            let channels = Arc::new(crate::channels::ChannelManager::new());
+            channels
+                .add(Box::new(RecordingStatusChannel {
+                    statuses: Arc::clone(&statuses),
+                }))
+                .await;
+            (channels, statuses)
+        };
+
+        struct StaticLlmProvider;
+        #[async_trait::async_trait]
+        impl crate::llm::LlmProvider for StaticLlmProvider {
+            fn model_name(&self) -> &str {
+                "static-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
+                unreachable!("LLM not invoked by this test")
+            }
+            async fn complete_with_tools(
+                &self,
+                _request: crate::llm::ToolCompletionRequest,
+            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+                unreachable!("LLM not invoked by this test")
+            }
+        }
+
+        let deps = crate::agent::AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(Arc::clone(&store)),
+            settings_store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            tools: Arc::new(crate::tools::ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: crate::config::SkillsConfig::default(),
+            hooks: Arc::new(crate::hooks::HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(crate::agent::cost_guard::CostGuard::new(
+                crate::agent::cost_guard::CostGuardConfig::default(),
+            )),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+        let agent = Agent::new(
+            crate::config::AgentConfig {
+                name: "title-source-regression".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 5,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        );
+
+        // --- Case 1: attachment-augmented payload, real user text.
+        // Title must come from the raw text, not the augmented block.
+        let thread_a = Uuid::new_v4();
+        store
+            .ensure_conversation(thread_a, "web", "user-1", None, Some("web"))
+            .await
+            .expect("ensure");
+        let raw_a = "Summarise the attached report";
+        let augmented_a = format!(
+            "{raw_a}\n<attachments>\n<attachment name=\"report.pdf\">\nQ3 revenue was $4.2M across\nthree product lines and margin compressed to 38%.\n</attachment>\n</attachments>"
+        );
+        agent
+            .persist_user_message(
+                thread_a,
+                "web",
+                "user-1",
+                1,
+                &augmented_a,
+                raw_a,
+                Utc::now(),
+            )
+            .await
+            .expect("augmented-with-raw persist succeeds");
+        let meta_a = store
+            .get_conversation_metadata(thread_a)
+            .await
+            .expect("meta")
+            .expect("exists");
+        assert_eq!(
+            meta_a.get("title").and_then(|v| v.as_str()),
+            Some(raw_a),
+            "title must be derived from raw user text, not the augmented payload \
+             (augmented_a would contain the <attachments> block)"
+        );
+
+        // --- Case 2: attachment-only first turn (empty raw text).
+        // Title must remain unset so a later real-text turn can claim it.
+        let thread_b = Uuid::new_v4();
+        store
+            .ensure_conversation(thread_b, "web", "user-2", None, Some("web"))
+            .await
+            .expect("ensure");
+        let augmented_b = "<attachments>\n<attachment name=\"photo.png\">[binary image]</attachment>\n</attachments>";
+        agent
+            .persist_user_message(thread_b, "web", "user-2", 1, augmented_b, "", Utc::now())
+            .await
+            .expect("attachment-only persist succeeds");
+        let meta_b = store
+            .get_conversation_metadata(thread_b)
+            .await
+            .expect("meta")
+            .expect("exists");
+        assert!(
+            meta_b
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.is_empty())
+                .unwrap_or(true),
+            "attachment-only first turn must NOT claim the title slot, got {:?}",
+            meta_b.get("title")
+        );
+
+        // --- Case 3: plain-text first turn (no attachments).
+        // Raw == augmented; title should be set to that text.
+        let thread_c = Uuid::new_v4();
+        store
+            .ensure_conversation(thread_c, "web", "user-3", None, Some("web"))
+            .await
+            .expect("ensure");
+        let plain = "what's the weather in Paris today?";
+        agent
+            .persist_user_message(thread_c, "web", "user-3", 1, plain, plain, Utc::now())
+            .await
+            .expect("plain persist succeeds");
+        let meta_c = store
+            .get_conversation_metadata(thread_c)
+            .await
+            .expect("meta")
+            .expect("exists");
+        assert_eq!(
+            meta_c.get("title").and_then(|v| v.as_str()),
+            Some(plain),
+            "plain-text first turn should seed the title"
         );
     }
 
