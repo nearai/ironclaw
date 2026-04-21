@@ -314,8 +314,18 @@ pub enum AppEvent {
     },
     #[serde(rename = "error")]
     Error {
+        /// Sanitized, channel-agnostic message shown to users. Never
+        /// carries tracebacks, file paths, HTTP bodies, or internal
+        /// wrapping — see `bridge::user_facing_errors`.
+        ///
+        /// Low-level diagnostic detail (Monty traces, Python tracebacks,
+        /// upstream HTTP bodies) deliberately does NOT travel on this
+        /// payload: every authenticated SSE consumer (chat UI, devtools,
+        /// custom clients) sees the same `error` frame, so the raw text
+        /// is kept server-side only — logged at `debug!` and preserved
+        /// on the engine's typed `OrchestratorFailure::debug_detail`.
         message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "heartbeat")]

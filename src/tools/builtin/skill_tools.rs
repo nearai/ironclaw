@@ -1602,14 +1602,52 @@ fn extract_skill_bundle_from_zip(
         if file.is_dir() {
             continue;
         }
+        // Reject early if the declared size already blows the budget — this is
+        // a cheap reject for honestly-labelled archives. The authoritative
+        // check is the post-read length comparison below, because a malicious
+        // archive can forge `size()` (the `zip` crate surfaces central-directory
+        // metadata, which is attacker-controlled).
         if file.size() > MAX_ZIP_ENTRY_BYTES {
             return Err(ToolError::ExecutionFailed(format!(
                 "ZIP entry too large to decompress safely: {}",
                 file.name()
             )));
         }
+
+        let entry_name = file.name().to_string();
+        let mut path = normalize_archive_path(Path::new(&entry_name))?;
+        if let Some(root) = &strip_root
+            && let Ok(stripped) = path.strip_prefix(root)
+        {
+            path = stripped.to_path_buf();
+        }
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+
+        // Cap the actual read at MAX_ZIP_ENTRY_BYTES + 1 so a forged metadata
+        // size cannot trick us into materializing an unbounded decompressed
+        // payload. If we hit the limit, the next byte exists — the entry is
+        // oversized regardless of what the header claims.
+        let mut contents = Vec::new();
+        (&mut file)
+            .take(MAX_ZIP_ENTRY_BYTES + 1)
+            .read_to_end(&mut contents)
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to read ZIP entry {}: {e}",
+                    path.display()
+                ))
+            })?;
+        if contents.len() as u64 > MAX_ZIP_ENTRY_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP entry too large to decompress safely: {}",
+                entry_name
+            )));
+        }
+
         total_unzipped_bytes = total_unzipped_bytes
-            .checked_add(file.size())
+            .checked_add(contents.len() as u64)
             .ok_or_else(|| {
                 ToolError::ExecutionFailed(
                     "ZIP archive decompressed size overflowed safety budget".to_string(),
@@ -1621,21 +1659,6 @@ fn extract_skill_bundle_from_zip(
                 total_unzipped_bytes, MAX_TOTAL_UNZIPPED_BYTES
             )));
         }
-
-        let mut path = normalize_archive_path(Path::new(file.name()))?;
-        if let Some(root) = &strip_root
-            && let Ok(stripped) = path.strip_prefix(root)
-        {
-            path = stripped.to_path_buf();
-        }
-        if path.as_os_str().is_empty() {
-            continue;
-        }
-
-        let mut contents = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut contents).map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read ZIP entry {}: {e}", path.display()))
-        })?;
 
         if path.file_name().is_some_and(|name| name == "SKILL.md") {
             skill_dirs.insert(path.parent().unwrap_or(Path::new("")).to_path_buf());
@@ -2739,6 +2762,51 @@ mod tests {
             err.to_string()
                 .contains("ZIP entry too large to decompress safely"),
             "Oversized entry should be rejected, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_zip_extract_forged_metadata_rejected() {
+        // A malicious ZIP can report a tiny `uncompressed_size` in the central
+        // directory (which `ZipFile::size()` exposes) while shipping a much
+        // larger actual payload that `read_to_end()` still yields. The
+        // extractor's decompression budget must be enforced against the
+        // *actual* bytes read, not the attacker-controlled metadata —
+        // otherwise a few KB of archive can expand to arbitrary memory.
+        //
+        // Build an honest oversized Stored ZIP, then rewrite the
+        // `uncompressed_size` fields in both the local file header and the
+        // central-directory header to claim 10 bytes.
+        let oversized_body = vec![b'A'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
+        let mut zip = build_zip_archive(
+            &[("SKILL.md", oversized_body.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
+
+        // Local file header signature 0x04034b50 (little-endian 50 4B 03 04);
+        // uncompressed_size is at offset 22 within the header.
+        let lfh_sig: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
+        let lfh_offset = zip
+            .windows(4)
+            .position(|w| w == lfh_sig)
+            .expect("local file header not found");
+        zip[lfh_offset + 22..lfh_offset + 26].copy_from_slice(&10u32.to_le_bytes());
+
+        // Central-directory file header signature 0x02014b50; uncompressed_size
+        // is at offset 24 within the header. `ZipFile::size()` reads from here.
+        let cdh_sig: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+        let cdh_offset = zip
+            .windows(4)
+            .position(|w| w == cdh_sig)
+            .expect("central-directory header not found");
+        zip[cdh_offset + 24..cdh_offset + 28].copy_from_slice(&10u32.to_le_bytes());
+
+        let err = super::extract_skill_from_zip(&zip).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
+            "Forged-metadata ZIP must be rejected based on actual bytes read, got: {}",
             err
         );
     }
