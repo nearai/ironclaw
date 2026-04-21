@@ -31,15 +31,15 @@ activation:
 
 # Tech Debt Tracker
 
-Track technical debt from conversation and PR review comments. Debt items live in `commitments/tech-debt/` and are resurfaced weekly.
+Track technical debt from conversation and PR review comments. Debt items live in `projects/commitments/tech-debt/` and are resurfaced weekly.
 
 ## Mode A: Passive detection
 
 When the user says something implying tech debt ("this is a hack but it works", "we should really refactor the auth module", "adding another TODO"), silently extract it.
 
 **Action:**
-1. Check for duplicates via `memory_search` in `commitments/tech-debt/`.
-2. Write to `commitments/tech-debt/<slug>.md`:
+1. Check for duplicates via `memory_search` in `projects/commitments/tech-debt/`.
+2. Write to `projects/commitments/tech-debt/<slug>.md`:
 
 ```
 ---
@@ -86,14 +86,14 @@ For each match, create a tech-debt item with `source: pr-review` and `source_pr:
 
 User says: "add tech debt: the caching layer needs TTL eviction."
 
-Write directly to `commitments/tech-debt/`, confirm briefly.
+Write directly to `projects/commitments/tech-debt/`, confirm briefly.
 
 ## Mode D: Listing
 
 User says: "show tech debt" or "debt backlog"
 
 **Action:**
-1. `memory_tree("commitments/tech-debt/", depth=1)` — list files (skip README.md)
+1. `memory_tree("projects/commitments/tech-debt/", depth=1)` — list files (skip README.md)
 2. `memory_read` each for title, severity, detected_at, repo, source
 3. Display grouped by severity, then age:
 
@@ -119,13 +119,13 @@ For large items, use `/plan <description>` to create a structured fix plan.
 
 User says: "resolved the caching TTL debt"
 
-Move to `commitments/resolved/` with original type preserved. Confirm.
+Move to `projects/commitments/resolved/` with original type preserved. Confirm.
 
 ## Mode F: Promotion to commitment
 
 User says: "let's fix the auth refactor" or "promote the caching debt"
 
-Create commitment in `commitments/open/` with `tags: [tech-debt]` and `resolution_path: agent_can_handle` if it's a code task. For complex items, suggest: "This looks like a multi-step refactor. Use `/plan <description>` to create a structured fix plan."
+Create commitment in `projects/commitments/open/` with `tags: [tech-debt]` and `resolution_path: agent_can_handle` if it's a code task. For complex items, suggest: "This looks like a multi-step refactor. Use `/plan <description>` to create a structured fix plan."
 
 ## Filename conventions
 

@@ -18,7 +18,7 @@ pub async fn get_handler(
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<SystemPromptResponse>, (StatusCode, String)> {
     // Gate behind multi-tenant mode.
-    if state.workspace_pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "System prompt management requires multi-tenant mode".to_string(),
@@ -68,7 +68,7 @@ pub async fn put_handler(
     }
 
     // Gate behind multi-tenant mode.
-    if state.workspace_pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "System prompt management requires multi-tenant mode".to_string(),
