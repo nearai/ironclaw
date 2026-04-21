@@ -68,6 +68,16 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
 /// in the server-side logs and returns a short, user-facing summary
 /// derived from the error's shape.
 ///
+/// `sse_will_deliver_to_user` signals that the caller already broadcast
+/// an `AppEvent::Error` on a per-user SSE stream that the originating
+/// channel renders to the user (today: the web gateway). In that case
+/// returning `Respond(sanitized)` would double-render the same failed
+/// turn — once as the SSE error card and again as a normal `response`
+/// frame emitted by `GatewayChannel::respond()`. When set we return
+/// `NoResponse`; otherwise we return `Respond(sanitized)` so channels
+/// without an SSE-as-primary-surface (telegram, relay, cli) still
+/// deliver the sanitized failure to the user.
+///
 /// Extracted into a named function so the sanitization flow (log + map to
 /// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
 /// by unit tests without spinning up the full engine.
@@ -76,14 +86,16 @@ fn bridge_outcome_for_failed_thread(
     debug_detail: Option<&str>,
     user_id: &str,
     channel: &str,
+    sse_will_deliver_to_user: bool,
 ) -> BridgeOutcome {
     // `warn!` carries only the size of `debug_detail`, not its contents —
     // a full Python traceback or upstream HTTP body can be multi-KB and
     // would flood higher-severity logs with internal text that's already
-    // available on the SSE `error` event and at `debug!` level. Operators
-    // who need the full detail look at the Debug Inspector (always) or
-    // `RUST_LOG=ironclaw::bridge::router=debug` (on demand). The chat
-    // reply stays sanitized per `.claude/rules/error-handling.md`.
+    // available at `debug!` level. Operators who need the full detail
+    // flip `RUST_LOG=ironclaw::bridge::router=debug`. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`, and
+    // `debug_detail` is deliberately NOT broadcast on the SSE `error`
+    // event — that payload reaches every authenticated consumer.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
@@ -99,8 +111,16 @@ fn bridge_outcome_for_failed_thread(
             "engine v2: thread failure debug detail",
         );
     }
-    BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    if sse_will_deliver_to_user {
+        BridgeOutcome::NoResponse
+    } else {
+        BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    }
 }
+
+/// The channel name used by the web gateway on [`IncomingMessage::channel`].
+/// Defined in `channels::web::GatewayChannel::name()`.
+const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
 
@@ -3988,20 +4008,30 @@ async fn await_thread_outcome(
             error,
             debug_detail,
         } => {
-            // Surface the failure to the gateway's Debug Inspector (and
-            // any SSE consumer listening for `error` events). The chat
-            // reply itself stays sanitized — the Debug Inspector gets
-            // both the sanitized `message` and the raw `debug_detail`
-            // so operators can triage from the inspector panel instead
-            // of tailing logs.
+            // Emit the sanitized failure on SSE so the web gateway's
+            // chat surface (and the Debug Inspector) renders a structured
+            // error card with activity cleanup + input re-enable. The
+            // raw `debug_detail` is deliberately NOT broadcast — SSE
+            // error frames reach every authenticated consumer, so raw
+            // tracebacks and upstream HTTP bodies must stay server-side
+            // only (logged at `debug!` inside
+            // `bridge_outcome_for_failed_thread`).
+            //
+            // When the originating channel is the gateway itself, that
+            // SSE frame IS the user-visible surface — returning
+            // `Respond(sanitized)` on top of it would double-render the
+            // same failure. For non-gateway channels the SSE frame is
+            // only a secondary per-user stream, so we still return
+            // `Respond(sanitized)` so the primary channel (telegram,
+            // relay, …) delivers the sanitized failure.
+            let sanitized = crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+            let sse_will_deliver_to_user =
+                state.sse.is_some() && message.channel == GATEWAY_CHANNEL_NAME;
             if let Some(ref sse) = state.sse {
-                let sanitized =
-                    crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
                 sse.broadcast_for_user(
                     &message.user_id,
                     AppEvent::Error {
                         message: sanitized,
-                        debug_detail: debug_detail.clone(),
                         thread_id: Some(thread_id.to_string()),
                     },
                 );
@@ -4011,6 +4041,7 @@ async fn await_thread_outcome(
                 debug_detail.as_deref(),
                 &message.user_id,
                 &message.channel,
+                sse_will_deliver_to_user,
             ))
         }
         ThreadOutcome::GatePaused {
@@ -5995,7 +6026,9 @@ mod tests {
              File \"orchestrator.py\", line 907, in  \
              File \"orchestrator.py\", line 548, in run_loop \
              RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
-        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "web");
+        // Non-gateway channel: SSE is not the primary surface, so the
+        // user-visible delivery comes through `Respond(sanitized)`.
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -6016,7 +6049,8 @@ mod tests {
             "some unexpected internal failure",
             None,
             "alice",
-            "web",
+            "telegram",
+            false,
         );
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
@@ -6031,13 +6065,29 @@ mod tests {
     #[test]
     fn failed_thread_outcome_maps_context_too_large() {
         let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
-        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
         assert!(
             text.starts_with("The request was too large"),
             "unexpected text: {text}"
+        );
+    }
+
+    /// When the SSE stream is already rendering the failure to the
+    /// originating channel (gateway web UI), the helper must return
+    /// `NoResponse` so `channel.respond()` does not broadcast a second
+    /// SSE `response` frame for the same turn. Regression fence for the
+    /// double-render bug flagged on PR #2753 by serrrfirat.
+    #[test]
+    fn failed_thread_outcome_is_no_response_when_sse_will_deliver() {
+        let raw = "Orchestrator error: Llm { reason: \"HTTP 502 Bad Gateway\" }";
+        let outcome =
+            bridge_outcome_for_failed_thread(raw, Some("debug only"), "alice", "gateway", true);
+        assert!(
+            matches!(outcome, BridgeOutcome::NoResponse),
+            "expected NoResponse to avoid double-rendering an SSE-delivered failure, got {outcome:?}",
         );
     }
 

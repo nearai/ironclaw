@@ -1724,7 +1724,6 @@ mod tests {
         let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
         assert!(acc.process(AppEvent::Error {
             message: "something broke".to_string(),
-            debug_detail: None,
             thread_id: Some("t".to_string()),
         }));
         let resp = acc.finish();

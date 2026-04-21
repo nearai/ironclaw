@@ -143,13 +143,27 @@ fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFai
     debug!(prefix, err_msg, "orchestrator VM failure");
 
     let lower = err_msg.to_ascii_lowercase();
-    // Narrow substring set — "duration" alone caught unrelated errors
-    // and drifted away from `executor/scripting.rs::classify_runtime_error`.
-    let hit_time_limit = lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("duration limit")
+    // Reserve `TimeLimit` for unmistakable Monty wall-clock markers — the
+    // user-facing message tells operators to raise
+    // `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`, which is wrong advice for
+    // upstream LLM / network timeouts. Bare `"timeout"` / `"timed out"`
+    // used to catch those (e.g. `reqwest`'s `"Request timed out"`,
+    // provider `"Connection timed out"`) and point users at the budget
+    // knob instead of the real failure class. Those now fall through to
+    // `Other` (generic internal failure). References: serrrfirat review
+    // on PR #2753, commit 82d06410.
+    //
+    // The predicates we keep are either the explicit env-var name in the
+    // VM's own error text, the phrase the Monty runtime uses for its
+    // duration limit, or the sentinel emitted by the engine when the
+    // orchestrator itself times out a step. Duplicating `ResourceLimits`
+    // wording is OK — those strings live alongside this classifier in the
+    // same crate.
+    let hit_time_limit = lower.contains("duration limit")
         || lower.contains("max_duration")
-        || lower.contains("maximum duration");
+        || lower.contains("maximum duration")
+        || lower.contains("execution duration exceeded")
+        || lower.contains("orchestrator timed out");
     let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
     let hit_resource_limit = lower.contains("resource limit")
         || lower.contains("out of fuel")
@@ -2712,8 +2726,10 @@ mod tests {
 
     #[test]
     fn failure_reason_maps_timeout_to_user_safe_message() {
-        let failure =
-            classify_orchestrator_failure("Orchestrator error after resume", "execution timed out");
+        let failure = classify_orchestrator_failure(
+            "Orchestrator error after resume",
+            "ResourceLimits: duration limit exceeded",
+        );
         assert!(
             matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
             "expected TimeLimit variant, got: {:?}",
@@ -2728,6 +2744,42 @@ mod tests {
             rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
             "reason must point operators at the override env var, got: {rendered}"
         );
+    }
+
+    /// Regression for serrrfirat review on PR #2753 (commit 82d06410) —
+    /// the classifier used to treat any `"timeout"` / `"timed out"`
+    /// substring as a wall-clock exhaustion, so upstream LLM / network
+    /// timeouts (`"Request timed out"`, `"Connection timed out"`) were
+    /// mapped to `TimeLimit` and the user-facing message advised raising
+    /// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS` — completely wrong for a
+    /// provider-side timeout. Those now fall through to `Other` so the
+    /// budget knob is only suggested when the failure is actually a
+    /// Monty wall-clock limit.
+    #[test]
+    fn failure_reason_does_not_treat_upstream_timeout_as_time_limit() {
+        for upstream in [
+            "Request timed out",
+            "Connection timed out",
+            "LLM call failed: timeout waiting for response",
+            "upstream provider timeout after 30s",
+        ] {
+            let failure = classify_orchestrator_failure("Orchestrator runtime error", upstream);
+            assert!(
+                !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+                "upstream timeout {upstream:?} must NOT classify as TimeLimit, got: {:?}",
+                failure.kind,
+            );
+            assert!(
+                matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+                "upstream timeout {upstream:?} should fall through to Other, got: {:?}",
+                failure.kind,
+            );
+            let rendered = failure.user_message();
+            assert!(
+                !rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+                "user message for upstream timeout must not advise raising the budget knob, got: {rendered}",
+            );
+        }
     }
 
     #[test]

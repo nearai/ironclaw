@@ -657,6 +657,15 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
     // 3. Probe the backing store — this is the #1537 axis. A missing DB
     //    handle here is the hosted-TEE symptom: master key present, but
     //    the store factory has nothing to build against.
+    //
+    //    Use `connect_without_migrations` + `secrets::create_secrets_store`
+    //    rather than `db::create_secrets_store`. The former exercises the
+    //    exact runtime dispatch used by `AppBuilder::init_secrets`
+    //    (`DatabaseHandles` → `Option<Arc<dyn SecretsStore>>`), so the
+    //    missing-handle failure mode in #1537 is actually reachable from
+    //    the diagnostic. The latter would build a *fresh* backend and
+    //    run migrations — side-effectful, and not the same code path
+    //    that failed in production.
     let config = match crate::config::Config::from_env().await {
         Ok(c) => c,
         Err(e) => {
@@ -677,14 +686,31 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
             }
         };
 
-    match crate::db::create_secrets_store(&config.database, crypto).await {
-        Ok(_store) => CheckResult::Pass(format!(
+    // `connect_without_migrations` opens a backend connection but does NOT
+    // run migrations — the minimum side effect required to probe whether
+    // the runtime dispatch would yield a store. Migrations only run at
+    // normal startup through `AppBuilder`.
+    let handles = match crate::db::connect_without_migrations(&config.database).await {
+        Ok((_db, handles)) => handles,
+        Err(e) => {
+            return CheckResult::Fail(format!(
+                "master key present ({source_label}){settings_note} but database unreachable: \
+                 {e}. Runtime will fall back to an ephemeral in-memory secrets store (see #1537); \
+                 credentials saved via `ironclaw tool auth` will not persist across restarts"
+            ));
+        }
+    };
+
+    match crate::secrets::create_secrets_store(crypto, &handles) {
+        Some(_store) => CheckResult::Pass(format!(
             "master key source: {source_label}; backing store reachable{settings_note}"
         )),
-        Err(e) => CheckResult::Fail(format!(
-            "master key present ({source_label}){settings_note} but backing store unavailable: \
-             {e}. Runtime falls back to an ephemeral in-memory store (see #1537); \
-             credentials saved via `ironclaw tool auth` will not persist across restarts"
+        None => CheckResult::Fail(format!(
+            "master key present ({source_label}){settings_note} but no backing store handle \
+             available for backend '{}'. This is the #1537 hosted-TEE symptom: runtime will \
+             fall back to an ephemeral in-memory store, and credentials saved via `ironclaw tool \
+             auth` will not persist across restarts",
+            config.database.backend
         )),
     }
 }
