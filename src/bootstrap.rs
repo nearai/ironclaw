@@ -667,7 +667,11 @@ mod tests {
         unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
         // Should succeed with tokio's default worker count.
         let result = build_runtime_from_env();
-        assert!(result.is_ok(), "default (unset) should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "default (unset) should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -676,7 +680,11 @@ mod tests {
         unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "1") };
         let result = build_runtime_from_env();
         unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
-        assert!(result.is_ok(), "positive value should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "positive value should succeed: {:?}",
+            result.err()
+        );
     }
     use tempfile::tempdir;
 
