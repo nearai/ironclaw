@@ -19,6 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         gnupg \
         jq \
+        # actions/runner native deps. The runner binary is .NET 6-based
+        # and its `./config.sh` aborts with
+        #   Libicu's dependencies is missing for Dotnet Core 6.0
+        # without these three. `./bin/installdependencies.sh` inside the
+        # runner tarball would install them at runtime under sudo, but
+        # we bake them into the image so first-boot succeeds from a
+        # cold cache with no network round-trip.
+        libicu70 \
+        libkrb5-3 \
+        liblttng-ust1 \
         libssl-dev \
         pkg-config \
         tar \
