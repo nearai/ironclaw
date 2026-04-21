@@ -22,6 +22,25 @@ WORK_DIR="${RUNNER_DATA}/_work"
 
 mkdir -p "${RUNNER_DIR}" "${WORK_DIR}" "${HOME}" "${RUNNER_TOOL_CACHE}" "${RUNNER_TEMP}"
 
+# Recovery path. If the volume holds a stale `.runner` sentinel for a
+# registration that GitHub has since deleted (because the UI "Remove"
+# button was clicked, or GitHub auto-GC'd a runner that went offline
+# for long enough), `./run.sh` fails with
+#   "Failed to create a session. The runner registration has been deleted
+#    from the server, please re-configure."
+# and the `[[ ! -f .runner ]]` gate below would keep short-circuiting
+# re-registration forever. Set RUNNER_FORCE_REREGISTER=1 + a fresh
+# GH_RUNNER_TOKEN on the service to wipe the sentinel on next boot,
+# re-register, and then unset the var once Idle.
+if [[ "${RUNNER_FORCE_REREGISTER:-0}" == "1" && -f "${RUNNER_DIR}/.runner" ]]; then
+    echo "[entrypoint] RUNNER_FORCE_REREGISTER=1 — wiping stale registration state"
+    rm -f \
+        "${RUNNER_DIR}/.runner" \
+        "${RUNNER_DIR}/.credentials" \
+        "${RUNNER_DIR}/.credentials_rsaparams" \
+        "${RUNNER_DIR}/.path"
+fi
+
 # Sentinel written by ./config.sh on successful registration. Absent → first
 # boot (or a wiped volume); present → rebooting an already-registered runner.
 if [[ ! -f "${RUNNER_DIR}/.runner" ]]; then
