@@ -372,7 +372,7 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(input_values, tracker, PrintWriter::CollectString(&mut stdout))
     }));
 
     let mut progress = match run_result {
@@ -512,7 +512,7 @@ pub async fn execute_orchestrator(
 
                 // Resume the orchestrator VM
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -540,7 +540,7 @@ pub async fn execute_orchestrator(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lookup.resume(
                         NameLookupResult::Undefined,
-                        PrintWriter::Collect(&mut stdout),
+                        PrintWriter::CollectString(&mut stdout),
                     )
                 })) {
                     Ok(Ok(p)) => progress = p,
@@ -2610,7 +2610,7 @@ mod tests {
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
         let mut progress = runner
-            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .start(vec![], tracker, PrintWriter::CollectString(&mut stdout))
             .expect("Failed to start orchestrator test");
 
         loop {
@@ -2621,7 +2621,7 @@ mod tests {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         );
                         return val;
                     }
@@ -2630,14 +2630,14 @@ mod tests {
                         _ => ExtFunctionResult::Return(MontyObject::None),
                     };
                     progress = call
-                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        .resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
                     progress = lookup
                         .resume(
                             NameLookupResult::Undefined,
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         )
                         .expect("name lookup resume failed");
                 }
