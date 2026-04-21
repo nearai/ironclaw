@@ -9,7 +9,10 @@ mod support;
 #[cfg(feature = "libsql")]
 mod attachment_tests {
     use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -22,6 +25,11 @@ mod attachment_tests {
         "/tests/fixtures/llm_traces/spot"
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
+
+    fn engine_v2_attachment_root_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn engine_v2_project_root() -> PathBuf {
         let base_dir = ironclaw::bootstrap::ironclaw_base_dir();
@@ -217,6 +225,7 @@ mod attachment_tests {
 
     #[tokio::test]
     async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
+        let _guard = engine_v2_attachment_root_lock().lock().await;
         let project_root = engine_v2_project_root();
 
         for channel in ["telegram", "whatsapp"] {
