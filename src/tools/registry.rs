@@ -266,9 +266,9 @@ impl ToolRegistry {
         self.role_lookup.as_ref()
     }
 
-    /// Register a tool. Rejects dynamic tools that would shadow a built-in
-    /// `Tool` or an engine-v2 capability action, and names containing `.`
-    /// (conflicts with settings path parsing).
+    /// Register a tool. Rejects dynamic tools that would shadow a protected
+    /// built-in `Tool` or an engine-v2 capability action, and names
+    /// containing `.` (conflicts with settings path parsing).
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
