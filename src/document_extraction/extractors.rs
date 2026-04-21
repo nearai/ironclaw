@@ -777,7 +777,10 @@ mod tests {
         // Use a small per-entry limit so the entry triggers truncation.
         let result =
             bounded_read_zip_entry_with_limits(&mut file, &mut total, 10, MAX_DECOMPRESSED_TOTAL);
-        assert!(result.is_err(), "should reject entry exceeding per-entry limit");
+        assert!(
+            result.is_err(),
+            "should reject entry exceeding per-entry limit"
+        );
         assert!(
             matches!(result.unwrap_err(), ExtractionError::EntryTooLarge { .. }),
             "error should be EntryTooLarge"
@@ -806,7 +809,10 @@ mod tests {
         let mut file = archive.by_index(0).unwrap();
         let result =
             bounded_read_zip_entry_with_limits(&mut file, &mut total, 10, MAX_DECOMPRESSED_TOTAL);
-        assert!(result.is_err(), "pre-check should reject based on declared size");
+        assert!(
+            result.is_err(),
+            "pre-check should reject based on declared size"
+        );
         assert!(
             matches!(result.unwrap_err(), ExtractionError::EntryTooLarge { .. }),
             "error should be EntryTooLarge"
@@ -844,7 +850,10 @@ mod tests {
         let r1 = bounded_read_zip_entry_with_limits(&mut f1, &mut total, 1024, max_total);
         assert!(r1.is_err(), "second entry should exceed total budget");
         assert!(
-            matches!(r1.unwrap_err(), ExtractionError::TotalSizeLimitExceeded { .. }),
+            matches!(
+                r1.unwrap_err(),
+                ExtractionError::TotalSizeLimitExceeded { .. }
+            ),
             "error should be TotalSizeLimitExceeded"
         );
     }
@@ -865,7 +874,10 @@ mod tests {
         let data = cursor.into_inner();
 
         let result = extract_office_xml(&data, "word/document.xml");
-        assert!(result.is_err(), "extract_office_xml must reject oversized entry");
+        assert!(
+            result.is_err(),
+            "extract_office_xml must reject oversized entry"
+        );
     }
 
     /// Caller-level: extract_pptx must reject when a slide exceeds per-entry limit.
@@ -886,6 +898,9 @@ mod tests {
         let result = extract_pptx(&data);
         // extract_pptx swallows per-entry errors (continues to next slide),
         // so with one oversized slide and no valid slides, it returns an error.
-        assert!(result.is_err(), "extract_pptx must fail when only slide is oversized");
+        assert!(
+            result.is_err(),
+            "extract_pptx must fail when only slide is oversized"
+        );
     }
 }
