@@ -514,7 +514,11 @@ pub async fn set_title_if_missing(
             .get("title")
             .and_then(|t| t.as_str())
             .is_some_and(|s| !s.is_empty()),
-        Ok(None) | Err(_) => return,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::debug!("failed to read metadata for title-set: {e}");
+            return;
+        }
     };
 
     if !has_title {

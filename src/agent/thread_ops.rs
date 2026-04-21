@@ -1086,7 +1086,9 @@ impl Agent {
             }
         };
 
-        crate::db::set_title_if_missing(store.as_ref(), thread_id, user_input).await;
+        if result.is_some() {
+            crate::db::set_title_if_missing(store.as_ref(), thread_id, user_input).await;
+        }
 
         result
     }
