@@ -445,6 +445,8 @@ pub async fn execute_code_with_skills(
         known_actions.insert(name.clone());
     }
 
+    register_host_shim_names(&mut known_actions);
+
     // Parse and compile (wrap in catch_unwind — Monty 0.0.x can panic)
     let runner = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         MontyRun::new(code.to_string(), "step.py", input_names)
@@ -658,6 +660,57 @@ pub async fn execute_code_with_skills(
                     continue;
                 }
 
+                let shim_dispatch = match build_shim_dispatch(&action_name, &params) {
+                    Ok(dispatch) => dispatch,
+                    Err(ext_result) => {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        })) {
+                            Ok(Ok(p)) => progress = p,
+                            Ok(Err(e)) => {
+                                stdout.push_str(&format!("\nError: {e}"));
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout,
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(classify_runtime_error(&e.to_string())),
+                                });
+                            }
+                            Err(_) => {
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout: format!(
+                                        "{stdout}\nVmPanic: Monty VM panicked during shim resume"
+                                    ),
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(CodeExecutionFailure::VmPanic),
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let dispatch_action_name = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.action_name.as_str())
+                    .unwrap_or(action_name.as_str());
+                let dispatch_params = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.parameters.clone())
+                    .unwrap_or_else(|| params.clone());
+                let result_adapter = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.result_adapter)
+                    .unwrap_or(ToolResultAdapter::Raw);
+
                 // If an LLM call already inserted a pending future, just
                 // resume_pending and continue — no preflight needed.
                 if pending_futures.contains_key(&monty_call_id) {
@@ -702,8 +755,8 @@ pub async fn execute_code_with_skills(
                 // If approved, spawn tokio task and resume_pending().
 
                 let preflight = preflight_action(
-                    &action_name,
-                    &params,
+                    dispatch_action_name,
+                    &dispatch_params,
                     thread,
                     effects,
                     leases,
@@ -719,12 +772,12 @@ pub async fn execute_code_with_skills(
                     PreflightResult::Approved(lease) => {
                         // Spawn async execution
                         let effects = effects.clone();
-                        let name = action_name.clone();
-                        let params_clone = params.clone();
+                        let name = dispatch_action_name.to_string();
+                        let params_clone = dispatch_params.clone();
                         let lease_clone = lease.clone();
                         let mut ctx = context.clone();
                         ctx.current_call_id = Some(str_call_id.clone());
-                        let ps = crate::types::event::summarize_params(&name, &params);
+                        let ps = crate::types::event::summarize_params(&name, &dispatch_params);
 
                         let handle = tokio::spawn(async move {
                             let execution_start = Instant::now();
@@ -738,11 +791,12 @@ pub async fn execute_code_with_skills(
                             monty_call_id,
                             PendingFuture::Tool {
                                 handle,
-                                action_name,
+                                action_name: dispatch_action_name.to_string(),
                                 call_id: str_call_id,
                                 lease_id: lease.id,
-                                parameters: params.clone(),
+                                parameters: dispatch_params.clone(),
                                 params_summary: ps,
+                                result_adapter,
                             },
                         );
 
@@ -851,6 +905,7 @@ pub async fn execute_code_with_skills(
                                 lease_id,
                                 parameters,
                                 params_summary,
+                                result_adapter,
                             } => {
                                 resolve_tool_future(
                                     handle,
@@ -859,6 +914,7 @@ pub async fn execute_code_with_skills(
                                     lease_id,
                                     parameters,
                                     params_summary,
+                                    result_adapter,
                                     leases,
                                     context,
                                     &mut action_results,
@@ -1069,6 +1125,228 @@ pub fn code_hash(code: &str) -> String {
     format!("{hash:016x}")
 }
 
+// ── Host-backed shim helpers ────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolResultAdapter {
+    Raw,
+    ReadText,
+    WriteText,
+    HttpGet,
+    Run,
+}
+
+struct ShimDispatch {
+    action_name: String,
+    parameters: serde_json::Value,
+    result_adapter: ToolResultAdapter,
+}
+
+fn register_host_shim_names(known_actions: &mut std::collections::HashSet<String>) {
+    let available = known_actions.clone();
+    if available.contains("read_file") {
+        known_actions.insert("read_text".into());
+    }
+    if available.contains("write_file") {
+        known_actions.insert("write_text".into());
+    }
+    if available.contains("http") {
+        known_actions.insert("http_get".into());
+    }
+    if available.contains("shell") {
+        known_actions.insert("run".into());
+    }
+}
+
+fn build_shim_dispatch(
+    requested_action: &str,
+    params: &serde_json::Value,
+) -> Result<Option<ShimDispatch>, ExtFunctionResult> {
+    match requested_action {
+        "read_text" => Ok(Some(ShimDispatch {
+            action_name: "read_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "read_text")?,
+            }),
+            result_adapter: ToolResultAdapter::ReadText,
+        })),
+        "write_text" => Ok(Some(ShimDispatch {
+            action_name: "write_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "write_text")?,
+                "content": required_string_param_with_aliases(
+                    params,
+                    &["text", "content"],
+                    1,
+                    "write_text",
+                )?,
+            }),
+            result_adapter: ToolResultAdapter::WriteText,
+        })),
+        "http_get" => {
+            let mut map = serde_json::Map::new();
+            map.insert("method".into(), serde_json::Value::String("GET".into()));
+            map.insert(
+                "url".into(),
+                serde_json::Value::String(required_string_param(params, "url", 0, "http_get")?),
+            );
+            if let Some(headers) = optional_param(params, "headers", 1) {
+                if !headers.is_null() {
+                    map.insert("headers".into(), headers.clone());
+                }
+            }
+            Ok(Some(ShimDispatch {
+                action_name: "http".into(),
+                parameters: serde_json::Value::Object(map),
+                result_adapter: ToolResultAdapter::HttpGet,
+            }))
+        }
+        "run" => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "command".into(),
+                serde_json::Value::String(required_string_param(params, "command", 0, "run")?),
+            );
+            if let Some(timeout) = optional_param(params, "timeout", 1) {
+                if !timeout.is_null() {
+                    map.insert("timeout".into(), timeout.clone());
+                }
+            }
+            if let Some(workdir) = optional_param(params, "workdir", 2) {
+                if !workdir.is_null() {
+                    map.insert("workdir".into(), workdir.clone());
+                }
+            }
+            Ok(Some(ShimDispatch {
+                action_name: "shell".into(),
+                parameters: serde_json::Value::Object(map),
+                result_adapter: ToolResultAdapter::Run,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn optional_param<'a>(
+    params: &'a serde_json::Value,
+    name: &str,
+    position: usize,
+) -> Option<&'a serde_json::Value> {
+    params.get(name).or_else(|| {
+        params
+            .get("_args")
+            .and_then(|args| args.as_array())
+            .and_then(|args| args.get(position))
+    })
+}
+
+fn required_string_param(
+    params: &serde_json::Value,
+    name: &str,
+    position: usize,
+    shim_name: &str,
+) -> Result<String, ExtFunctionResult> {
+    required_string_param_with_aliases(params, &[name], position, shim_name)
+}
+
+fn required_string_param_with_aliases(
+    params: &serde_json::Value,
+    names: &[&str],
+    position: usize,
+    shim_name: &str,
+) -> Result<String, ExtFunctionResult> {
+    for name in names {
+        if let Some(value) = optional_param(params, name, position) {
+            return value.as_str().map(String::from).ok_or_else(|| {
+                ExtFunctionResult::Error(MontyException::new(
+                    ExcType::TypeError,
+                    Some(format!("{shim_name}() argument '{name}' must be a string")),
+                ))
+            });
+        }
+    }
+
+    Err(ExtFunctionResult::Error(MontyException::new(
+        ExcType::TypeError,
+        Some(format!(
+            "{shim_name}() missing required argument '{}'",
+            names.first().copied().unwrap_or("value")
+        )),
+    )))
+}
+
+fn adapt_tool_output(adapter: ToolResultAdapter, output: &serde_json::Value) -> serde_json::Value {
+    match adapter {
+        ToolResultAdapter::Raw => output.clone(),
+        ToolResultAdapter::ReadText => adapt_read_text_output(output),
+        ToolResultAdapter::WriteText => serde_json::json!({
+            "ok": output.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+            "path": output.get("path").cloned().unwrap_or(serde_json::Value::Null),
+            "bytes_written": output
+                .get("bytes_written")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        }),
+        ToolResultAdapter::HttpGet => adapt_http_get_output(output),
+        ToolResultAdapter::Run => serde_json::json!({
+            "ok": output.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+            "exit_code": output.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
+            "stdout": output.get("output").cloned().unwrap_or(serde_json::Value::Null),
+            "stderr": output.get("stderr").cloned().unwrap_or(serde_json::Value::Null),
+            "sandboxed": output.get("sandboxed").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+    }
+}
+
+fn adapt_read_text_output(output: &serde_json::Value) -> serde_json::Value {
+    if let Some(content) = output.get("content").and_then(|v| v.as_str()) {
+        let plain = content
+            .lines()
+            .map(|line| {
+                line.split_once('│')
+                    .map(|(_, rest)| rest.strip_prefix(' ').unwrap_or(rest))
+                    .unwrap_or(line)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::Value::String(plain)
+    } else if let Some(content) = output.as_str() {
+        serde_json::Value::String(content.to_string())
+    } else {
+        output.clone()
+    }
+}
+
+fn adapt_http_get_output(output: &serde_json::Value) -> serde_json::Value {
+    let status = output
+        .get("status")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
+    let body = output
+        .get("body")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let json_body = if body.is_object() || body.is_array() {
+        body.clone()
+    } else {
+        serde_json::Value::Null
+    };
+    let text = match &body {
+        serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_json::Value::Null => serde_json::Value::String(String::new()),
+        other => serde_json::Value::String(other.to_string()),
+    };
+    serde_json::json!({
+        "ok": (200..300).contains(&status),
+        "status": status,
+        "headers": output.get("headers").cloned().unwrap_or(serde_json::Value::Null),
+        "body": body,
+        "text": text,
+        "json_body": json_body,
+    })
+}
+
 // ── Pending future tracking ─────────────────────────────────
 
 /// A deferred computation spawned as a tokio task, pending resolution
@@ -1082,6 +1360,7 @@ enum PendingFuture {
         lease_id: crate::types::capability::LeaseId,
         parameters: serde_json::Value,
         params_summary: Option<String>,
+        result_adapter: ToolResultAdapter,
     },
     /// LLM call (llm_query / llm_query_batched / rlm_query).
     Llm {
@@ -1646,6 +1925,7 @@ async fn resolve_tool_future(
     lease_id: crate::types::capability::LeaseId,
     parameters: serde_json::Value,
     params_summary: Option<String>,
+    result_adapter: ToolResultAdapter,
     leases: &LeaseManager,
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
@@ -1688,7 +1968,7 @@ async fn resolve_tool_future(
                     params_summary,
                 });
             }
-            let monty_val = json_to_monty(&result.output);
+            let monty_val = json_to_monty(&adapt_tool_output(result_adapter, &result.output));
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
@@ -1943,6 +2223,7 @@ mod tests {
     struct MockEffects {
         results: Mutex<Vec<Result<ActionResult, EngineError>>>,
         actions: Vec<ActionDef>,
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     impl MockEffects {
@@ -1950,7 +2231,12 @@ mod tests {
             Self {
                 results: Mutex::new(results),
                 actions,
+                calls: Mutex::new(Vec::new()),
             }
+        }
+
+        fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -1959,10 +2245,11 @@ mod tests {
         async fn execute_action(
             &self,
             name: &str,
-            _params: serde_json::Value,
+            params: serde_json::Value,
             _lease: &CapabilityLease,
             _ctx: &ThreadExecutionContext,
         ) -> Result<ActionResult, EngineError> {
+            self.calls.lock().unwrap().push((name.into(), params));
             let mut results = self.results.lock().unwrap();
             if results.is_empty() {
                 Ok(ActionResult {
@@ -2104,6 +2391,158 @@ FINAL(str(result))
             result.stdout
         );
         assert_eq!(result.action_results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shim_read_text_uses_read_file_and_strips_line_numbers() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: serde_json::json!({
+                    "content": "     1│ alpha\n     2│ beta",
+                    "total_lines": 2,
+                    "lines_shown": 2,
+                    "truncated_by_default": false,
+                    "path": "notes.txt"
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+text = await read_text("notes.txt")
+FINAL(text)
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("alpha\nbeta"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "notes.txt"}));
+    }
+
+    #[tokio::test]
+    async fn shim_write_text_uses_write_file() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("write_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "write_file".into(),
+                output: serde_json::json!({
+                    "path": "out.txt",
+                    "bytes_written": 5,
+                    "success": true
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+result = await write_text("out.txt", "hello")
+FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|5"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "write_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "out.txt", "content": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_get_uses_http_and_normalizes_response() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("http")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "http".into(),
+                output: serde_json::json!({
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"answer": 42}
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+resp = await http_get("https://example.com/api")
+FINAL(str(resp["ok"]) + "|" + str(resp["status"]) + "|" + str(resp["json_body"]["answer"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|200|42"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "http");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"method": "GET", "url": "https://example.com/api"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_run_uses_shell_and_normalizes_process_result() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("shell")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "shell".into(),
+                output: serde_json::json!({
+                    "output": "hi\n",
+                    "exit_code": 0,
+                    "success": true,
+                    "sandboxed": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+proc = await run("echo hi", timeout=5)
+FINAL(str(proc["ok"]) + "|" + str(proc["exit_code"]) + "|" + proc["stdout"])
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|0|hi\n"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "shell");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "shell");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"command": "echo hi", "timeout": 5})
+        );
     }
 
     // ── asyncio.gather parallel execution ───────────────────
