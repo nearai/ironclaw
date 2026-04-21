@@ -5,6 +5,8 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,6 +22,9 @@ use ironclaw_skills::catalog::{
 use ironclaw_skills::registry::SkillRegistry;
 
 const MAX_CHAIN_DEPS: usize = 10;
+const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Hard cap on the chain-installer BFS queue to prevent unbounded growth
 /// from nested `requires.skills` fan-out. Even though we stop enqueueing
@@ -59,6 +64,86 @@ impl From<SkillFetchError> for ToolError {
     fn from(value: SkillFetchError) -> Self {
         ToolError::ExecutionFailed(value.to_string())
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SkillInstallPayload {
+    pub(crate) skill_md: String,
+    pub(crate) extra_files: Vec<ironclaw_skills::registry::InstallFile>,
+    pub(crate) install_metadata: Option<ironclaw_skills::registry::InstalledSkillMetadata>,
+}
+
+#[derive(Debug)]
+struct ZipSkillBundle {
+    skill_md: String,
+    extra_files: Vec<ironclaw_skills::registry::InstallFile>,
+    bundle_subdir: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubRepoRef {
+    owner: String,
+    repo: String,
+    branch: String,
+    subdir: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubRepoRequest {
+    owner: String,
+    repo: String,
+    tree_segments: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubBlobRequest {
+    owner: String,
+    repo: String,
+    blob_segments: Vec<String>,
+}
+
+fn is_safe_github_component(component: &str) -> bool {
+    !component.is_empty()
+        && component
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn validate_github_repo_components(owner: &str, repo: &str) -> Result<(), SkillFetchError> {
+    if !is_safe_github_component(owner) {
+        return Err(SkillFetchError::from_message(format!(
+            "Invalid GitHub owner in skill URL: {}",
+            owner
+        )));
+    }
+    if !is_safe_github_component(repo) {
+        return Err(SkillFetchError::from_message(format!(
+            "Invalid GitHub repository in skill URL: {}",
+            repo
+        )));
+    }
+    Ok(())
+}
+
+fn validate_github_repo_ref(repo: &GitHubRepoRef) -> Result<(), SkillFetchError> {
+    validate_github_repo_components(&repo.owner, &repo.repo)
+}
+
+fn validate_derived_fetch_url(url: &str) -> Result<reqwest::Url, SkillFetchError> {
+    validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))
+}
+
+fn validate_payload_skill_size(
+    payload: SkillInstallPayload,
+) -> Result<SkillInstallPayload, SkillFetchError> {
+    if payload.skill_md.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+        return Err(SkillFetchError::from_message(format!(
+            "Skill content too large: {} bytes (max {} bytes)",
+            payload.skill_md.len(),
+            ironclaw_skills::MAX_PROMPT_FILE_SIZE
+        )));
+    }
+    Ok(payload)
 }
 
 #[derive(Debug, Default)]
@@ -122,7 +207,7 @@ async fn install_missing_skill_dependencies<F, Fut>(
 ) -> Result<ChainInstallReport, ToolError>
 where
     F: Fn(String) -> Fut,
-    Fut: Future<Output = Result<String, SkillFetchError>>,
+    Fut: Future<Output = Result<SkillInstallPayload, SkillFetchError>>,
 {
     let (user_dir, initial_missing) = {
         let guard = registry_read(registry);
@@ -165,12 +250,14 @@ where
 
         let download_url = ironclaw_skills::catalog::skill_download_url(registry_url, &dep_name);
         match fetcher(download_url).await {
-            Ok(dep_content) => {
-                let normalized = ironclaw_skills::normalize_line_endings(&dep_content);
-                match ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
+            Ok(dep_bundle) => {
+                let normalized = ironclaw_skills::normalize_line_endings(&dep_bundle.skill_md);
+                match ironclaw_skills::registry::SkillRegistry::prepare_install_bundle_to_disk(
                     &user_dir,
                     &dep_name,
                     &normalized,
+                    &dep_bundle.extra_files,
+                    dep_bundle.install_metadata.as_ref(),
                 )
                 .await
                 {
@@ -308,6 +395,44 @@ fn build_skill_install_output(
         "message": message,
     });
 
+    append_chain_install_report_fields(&mut output, report);
+
+    output
+}
+
+fn build_already_installed_output(name: &str, report: &ChainInstallReport) -> serde_json::Value {
+    let status = if report.has_warnings() {
+        "already_installed_with_warnings"
+    } else {
+        "already_installed"
+    };
+    let message = if report.has_warnings() {
+        format!(
+            "Skill '{}' is already active; dependency installation finished with warnings.",
+            name
+        )
+    } else if report.installed.is_empty() {
+        format!("Skill '{}' is already active — no install needed.", name)
+    } else {
+        format!(
+            "Skill '{}' is already active; companion skills were installed.",
+            name
+        )
+    };
+
+    let mut output = serde_json::json!({
+        "name": name,
+        "status": status,
+        "trust": "installed",
+        "message": message,
+    });
+
+    append_chain_install_report_fields(&mut output, report);
+
+    output
+}
+
+fn append_chain_install_report_fields(output: &mut serde_json::Value, report: &ChainInstallReport) {
     if !report.installed.is_empty() {
         output["chain_installed"] = serde_json::json!(&report.installed);
     }
@@ -337,8 +462,6 @@ fn build_skill_install_output(
             report.pending_explicit_install.join(", ")
         ));
     }
-
-    output
 }
 
 // ── skill_list ──────────────────────────────────────────────────────────
@@ -673,42 +796,59 @@ impl Tool for SkillInstallTool {
             .map(str::to_string);
 
         // Idempotent: if a skill with this name is already loaded (from any
-        // source — local SKILL.md, bundled, previously installed), return
-        // success immediately without hitting the catalog. Without this
-        // shortcut, an agent that mis-interprets an active persona bundle
-        // as "needs to be installed" will trigger a 404 against the
-        // ClawHub registry for skills that exist only locally.
-        {
+        // source — local SKILL.md, bundled, previously installed), avoid
+        // reinstalling the top-level skill. Dependency installs are not a
+        // no-op: when explicitly requested, walk the loaded skill's companion
+        // list instead of returning early.
+        let loaded_required_skills = {
             let guard = self
                 .registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-            if guard.has(name) {
-                return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "name": name,
-                        "status": "already_installed",
-                        "trust": "installed",
-                        "message": format!(
-                            "Skill '{}' is already active — no install needed.",
-                            name
-                        ),
-                    }),
-                    start.elapsed(),
-                ));
+            if let Some(loaded_skill) = guard.find_by_name(name) {
+                let required_skills = loaded_skill.manifest.requires.skills.clone();
+                if install_dependencies && !required_skills.is_empty() {
+                    Some(required_skills)
+                } else {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(name, &report),
+                        start.elapsed(),
+                    ));
+                }
+            } else {
+                None
             }
+        };
+
+        if let Some(required_skills) = loaded_required_skills {
+            let chain_report = install_missing_skill_dependencies(
+                &self.registry,
+                self.catalog.registry_url(),
+                required_skills,
+                |url| async move { fetch_skill_payload(&url).await },
+            )
+            .await?;
+
+            return Ok(ToolOutput::success(
+                build_already_installed_output(name, &chain_report),
+                start.elapsed(),
+            ));
         }
 
-        let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
+        let install_payload = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
-            raw.to_string()
+            SkillInstallPayload {
+                skill_md: raw.to_string(),
+                ..SkillInstallPayload::default()
+            }
         } else if let Some(url) = params
             .get("url")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
             // Fetch from explicit URL
-            fetch_skill_content(url).await.map_err(ToolError::from)?
+            fetch_skill_payload(url).await.map_err(ToolError::from)?
         } else {
             // Look up in catalog and fetch
             let download_key = resolve_catalog_download_key(
@@ -722,12 +862,12 @@ impl Tool for SkillInstallTool {
                 self.catalog.registry_url(),
                 &download_key,
             );
-            fetch_skill_content(&download_url)
+            fetch_skill_payload(&download_url)
                 .await
                 .map_err(ToolError::from)?
         };
 
-        let normalized = ironclaw_skills::normalize_line_endings(&content);
+        let normalized = ironclaw_skills::normalize_line_endings(&install_payload.skill_md);
 
         // Check for duplicates and get install_dir under a brief read lock.
         let (user_dir, skill_name_from_parse, install_content) = {
@@ -759,10 +899,12 @@ impl Tool for SkillInstallTool {
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
         let (skill_name, loaded_skill) =
-            ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
+            ironclaw_skills::registry::SkillRegistry::prepare_install_bundle_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
                 &install_content,
+                &install_payload.extra_files,
+                install_payload.install_metadata.as_ref(),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -843,7 +985,7 @@ impl Tool for SkillInstallTool {
                 &self.registry,
                 self.catalog.registry_url(),
                 required_skills,
-                |url| async move { fetch_skill_content(&url).await },
+                |url| async move { fetch_skill_payload(&url).await },
             )
             .await?
         };
@@ -854,6 +996,26 @@ impl Tool for SkillInstallTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        let install_deps = params
+            .get("install_dependencies")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // No-op shortcut: if a skill with this name is already loaded (bundled,
+        // user, workspace, or previously installed), `execute` will return
+        // `already_installed` without touching the catalog. Asking for approval
+        // on a guaranteed no-op is pure friction, so we mirror the idempotent
+        // path here. Dependency-chain installs may still fetch companion
+        // skills, so they must go through the approval path below.
+        if !install_deps
+            && let Some(name) = params.get("name").and_then(|v| v.as_str())
+            && !name.is_empty()
+            && let Ok(guard) = self.registry.read()
+            && guard.has(name)
+        {
+            return ApprovalRequirement::Never;
+        }
+
         // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
         // with its own prompt-injection surface. When the LLM sets
         // `install_dependencies=true` we force a per-call approval prompt
@@ -862,10 +1024,6 @@ impl Tool for SkillInstallTool {
         // skill, not an unbounded companion set. Single-skill installs
         // retain the normal `UnlessAutoApproved` behavior so routine flows
         // don't regress.
-        let install_deps = params
-            .get("install_dependencies")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         if install_deps {
             ApprovalRequirement::Always
         } else {
@@ -1037,32 +1195,92 @@ fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// Fetch SKILL.md content from a URL with SSRF protection.
-///
-/// The ClawHub registry returns skill downloads as ZIP archives containing
-/// `SKILL.md` and `_meta.json`. This function detects ZIP responses (by the
-/// `PK\x03\x04` magic bytes) and extracts `SKILL.md` automatically. Plain
-/// text responses are returned as-is.
-pub(crate) async fn fetch_skill_content(url: &str) -> Result<String, SkillFetchError> {
-    let parsed =
-        validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))?;
-    let client = build_safe_fetch_client(&parsed)
+fn parse_github_blob_ref(parsed: &reqwest::Url) -> Option<GitHubBlobRequest> {
+    if parsed.host_str()? != "github.com" {
+        return None;
+    }
+
+    let parts: Vec<_> = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if parts.len() < 5 || parts[2] != "blob" {
+        return None;
+    }
+
+    let repo = parts[1].trim_end_matches(".git").to_string();
+    if repo.is_empty() {
+        return None;
+    }
+
+    Some(GitHubBlobRequest {
+        owner: parts[0].to_string(),
+        repo,
+        blob_segments: parts[3..]
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
+    })
+}
+
+fn parse_github_repo_ref(parsed: &reqwest::Url) -> Option<GitHubRepoRequest> {
+    if parsed.host_str()? != "github.com" {
+        return None;
+    }
+
+    let parts: Vec<_> = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let owner = parts[0].to_string();
+    let repo = parts[1].trim_end_matches(".git").to_string();
+    if repo.is_empty() {
+        return None;
+    }
+
+    if parts.len() == 2 {
+        return Some(GitHubRepoRequest {
+            owner,
+            repo,
+            tree_segments: None,
+        });
+    }
+
+    if parts.len() >= 4 && parts[2] == "tree" {
+        return Some(GitHubRepoRequest {
+            owner,
+            repo,
+            tree_segments: Some(
+                parts[3..]
+                    .iter()
+                    .map(|segment| (*segment).to_string())
+                    .collect(),
+            ),
+        });
+    }
+
+    None
+}
+
+async fn fetch_url_bytes(parsed: &reqwest::Url) -> Result<Vec<u8>, SkillFetchError> {
+    let client = build_safe_fetch_client(parsed)
         .await
         .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
-
     let response = client.get(parsed.clone()).send().await.map_err(|e| {
-        SkillFetchError::from_message(format!("Failed to fetch skill from {}: {}", url, e))
+        SkillFetchError::from_message(format!("Failed to fetch skill from {}: {}", parsed, e))
     })?;
 
     if !response.status().is_success() {
         return Err(SkillFetchError::from_http_status(
             response.status().as_u16(),
-            url,
+            parsed.as_str(),
         ));
     }
 
-    // Limit download size to prevent memory exhaustion from large responses.
-    const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MB
     let bytes = response.bytes().await.map_err(|e| {
         SkillFetchError::from_message(format!("Failed to read response body: {}", e))
     })?;
@@ -1074,121 +1292,509 @@ pub(crate) async fn fetch_skill_content(url: &str) -> Result<String, SkillFetchE
         )));
     }
 
-    // Detect ZIP archive (PK\x03\x04 magic) and extract SKILL.md
-    let content = if bytes.starts_with(b"PK\x03\x04") {
-        extract_skill_from_zip(&bytes).map_err(|e| SkillFetchError::from_message(e.to_string()))?
-    } else {
-        String::from_utf8(bytes.to_vec()).map_err(|e| {
-            SkillFetchError::from_message(format!("Response is not valid UTF-8: {}", e))
-        })?
-    };
+    Ok(bytes.to_vec())
+}
 
-    // Basic size check
-    if content.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+fn build_github_api_base_url(owner: &str, repo: &str) -> Result<reqwest::Url, SkillFetchError> {
+    validate_github_repo_components(owner, repo)?;
+    validate_derived_fetch_url(&format!("https://api.github.com/repos/{owner}/{repo}"))
+}
+
+fn build_github_contents_url(
+    owner: &str,
+    repo: &str,
+    path: Option<&str>,
+    git_ref: &str,
+) -> Result<reqwest::Url, SkillFetchError> {
+    let mut url = build_github_api_base_url(owner, repo)?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            SkillFetchError::from_message("Failed to build GitHub contents URL".to_string())
+        })?;
+        segments.push("contents");
+        if let Some(path) = path {
+            for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+                segments.push(segment);
+            }
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", git_ref);
+    Ok(url)
+}
+
+async fn fetch_github_api_response(
+    url: &reqwest::Url,
+    context: &str,
+) -> Result<reqwest::Response, SkillFetchError> {
+    let client = build_safe_fetch_client(url)
+        .await
+        .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
+    let response = client.get(url.clone()).send().await.map_err(|e| {
+        SkillFetchError::from_message(format!("Failed to {context} via {url}: {e}"))
+    })?;
+
+    if !response.status().is_success() {
+        return Err(SkillFetchError::from_http_status(
+            response.status().as_u16(),
+            url.as_str(),
+        ));
+    }
+
+    Ok(response)
+}
+
+async fn resolve_github_default_branch(owner: &str, repo: &str) -> Result<String, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct RepoMetadata {
+        default_branch: String,
+    }
+
+    let api_url = build_github_api_base_url(owner, repo)?;
+    let response = fetch_github_api_response(&api_url, "resolve the default branch").await?;
+    let meta = response
+        .json::<RepoMetadata>()
+        .await
+        .map_err(|e| SkillFetchError::from_message(format!("Invalid GitHub repo metadata: {e}")))?;
+    if meta.default_branch.trim().is_empty() {
+        return Err(SkillFetchError::from_message(
+            "GitHub repo metadata did not include a default branch".to_string(),
+        ));
+    }
+    Ok(meta.default_branch)
+}
+
+async fn resolve_github_ref_commit_sha(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<String, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct CommitSummary {
+        sha: String,
+    }
+
+    let mut commits_url = build_github_api_base_url(owner, repo)?;
+    {
+        let mut segments = commits_url.path_segments_mut().map_err(|_| {
+            SkillFetchError::from_message("Failed to build GitHub commits URL".to_string())
+        })?;
+        segments.push("commits");
+    }
+    commits_url
+        .query_pairs_mut()
+        .append_pair("sha", git_ref)
+        .append_pair("per_page", "1");
+
+    let response = fetch_github_api_response(&commits_url, "resolve the GitHub ref").await?;
+    let commits = response.json::<Vec<CommitSummary>>().await.map_err(|e| {
+        SkillFetchError::from_message(format!("Invalid GitHub commit metadata: {e}"))
+    })?;
+    let sha = commits
+        .into_iter()
+        .next()
+        .map(|commit| commit.sha)
+        .filter(|sha| !sha.trim().is_empty())
+        .ok_or_else(|| {
+            SkillFetchError::from_message(format!(
+                "GitHub ref '{git_ref}' did not resolve to a commit"
+            ))
+        })?;
+
+    if !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(SkillFetchError::from_message(format!(
-            "Skill content too large: {} bytes (max {} bytes)",
-            content.len(),
-            ironclaw_skills::MAX_PROMPT_FILE_SIZE
+            "GitHub returned an invalid commit SHA for ref '{git_ref}'"
         )));
     }
 
-    Ok(content)
+    Ok(sha)
 }
 
-/// Extract `SKILL.md` from a ZIP archive returned by the ClawHub download API.
-///
-/// Walks ZIP local file headers looking for an entry named `SKILL.md`.
-/// Supports Store (method 0) and Deflate (method 8) compression.
-fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
+async fn github_ref_path_exists(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    path: Option<&str>,
+) -> Result<bool, SkillFetchError> {
+    let contents_url = build_github_contents_url(owner, repo, path, git_ref)?;
+    match fetch_github_api_response(&contents_url, "resolve the GitHub path").await {
+        Ok(_) => Ok(true),
+        Err(err) if matches!(err.status, Some(404)) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
 
-    // SKILL.md files should never be larger than 1 MB.
-    const MAX_DECOMPRESSED: usize = 1_024 * 1_024;
+async fn resolve_github_tree_request(
+    repo: GitHubRepoRequest,
+) -> Result<GitHubRepoRef, SkillFetchError> {
+    validate_github_repo_components(&repo.owner, &repo.repo)?;
 
-    let mut offset = 0;
-    while offset + 30 <= data.len() {
-        // Local file header signature = PK\x03\x04
-        if data[offset..offset + 4] != [0x50, 0x4B, 0x03, 0x04] {
-            break;
-        }
-
-        let compression = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
-        let compressed_size = u32::from_le_bytes([
-            data[offset + 18],
-            data[offset + 19],
-            data[offset + 20],
-            data[offset + 21],
-        ]) as usize;
-        let uncompressed_size = u32::from_le_bytes([
-            data[offset + 22],
-            data[offset + 23],
-            data[offset + 24],
-            data[offset + 25],
-        ]) as usize;
-        let name_len = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
-        let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
-
-        let name_start = offset + 30;
-        let name_end = name_start + name_len;
-        if name_end > data.len() {
-            break;
-        }
-        let file_name = std::str::from_utf8(&data[name_start..name_end]).unwrap_or("");
-
-        let data_start = name_end
-            .checked_add(extra_len)
-            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header offset overflow".to_string()))?;
-        let data_end = data_start
-            .checked_add(compressed_size)
-            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header size overflow".to_string()))?;
-
-        if file_name == "SKILL.md" {
-            if data_end > data.len() {
-                return Err(ToolError::ExecutionFailed(
-                    "ZIP archive truncated".to_string(),
+    let branch = match repo.tree_segments {
+        Some(segments) => {
+            if segments.is_empty() {
+                return Err(SkillFetchError::from_message(
+                    "GitHub tree URL is missing a branch or tag name".to_string(),
                 ));
             }
 
-            if uncompressed_size > MAX_DECOMPRESSED {
-                return Err(ToolError::ExecutionFailed(
-                    "ZIP entry too large to decompress safely".to_string(),
-                ));
+            for split in (1..=segments.len()).rev() {
+                let candidate_ref = segments[..split].join("/");
+                let candidate_subdir =
+                    (split < segments.len()).then(|| segments[split..].join("/"));
+                if github_ref_path_exists(
+                    &repo.owner,
+                    &repo.repo,
+                    &candidate_ref,
+                    candidate_subdir.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(GitHubRepoRef {
+                        owner: repo.owner,
+                        repo: repo.repo,
+                        branch: candidate_ref,
+                        subdir: candidate_subdir,
+                    });
+                }
             }
 
-            let raw = &data[data_start..data_end];
-            let decompressed = match compression {
-                0 => raw.to_vec(), // Store
-                8 => {
-                    // Deflate -- wrap with a read limit to guard against ZIP bombs
-                    // where the declared size is small but decompressed output is huge.
-                    let mut decoder = DeflateDecoder::new(raw).take(MAX_DECOMPRESSED as u64);
-                    let mut buf = Vec::with_capacity(uncompressed_size.min(MAX_DECOMPRESSED));
-                    decoder.read_to_end(&mut buf).map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Failed to decompress SKILL.md: {}", e))
-                    })?;
-                    buf
-                }
-                other => {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Unsupported ZIP compression method: {}",
-                        other
-                    )));
-                }
-            };
-
-            return String::from_utf8(decompressed).map_err(|e| {
-                ToolError::ExecutionFailed(format!("SKILL.md in archive is not valid UTF-8: {}", e))
-            });
+            return Err(SkillFetchError::from_message(
+                "Could not resolve the GitHub tree URL to a valid ref and subdirectory".to_string(),
+            ));
         }
+        None => resolve_github_default_branch(&repo.owner, &repo.repo).await?,
+    };
 
-        // Skip to next entry
-        offset = data_end;
+    Ok(GitHubRepoRef {
+        owner: repo.owner,
+        repo: repo.repo,
+        branch,
+        subdir: None,
+    })
+}
+
+async fn resolve_github_blob_download_url(
+    blob: GitHubBlobRequest,
+) -> Result<reqwest::Url, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct GitHubContentsFile {
+        r#type: String,
+        download_url: Option<String>,
     }
 
-    Err(ToolError::ExecutionFailed(
-        "ZIP archive does not contain SKILL.md".to_string(),
+    validate_github_repo_components(&blob.owner, &blob.repo)?;
+    if blob.blob_segments.len() < 2 {
+        return Err(SkillFetchError::from_message(
+            "GitHub blob URL is missing a ref or file path".to_string(),
+        ));
+    }
+
+    for split in (1..blob.blob_segments.len()).rev() {
+        let candidate_ref = blob.blob_segments[..split].join("/");
+        let candidate_path = blob.blob_segments[split..].join("/");
+        let contents_url = build_github_contents_url(
+            &blob.owner,
+            &blob.repo,
+            Some(&candidate_path),
+            &candidate_ref,
+        )?;
+
+        let response =
+            match fetch_github_api_response(&contents_url, "resolve the GitHub blob").await {
+                Ok(response) => response,
+                Err(err) if matches!(err.status, Some(404)) => continue,
+                Err(err) => return Err(err),
+            };
+        let metadata = response.json::<GitHubContentsFile>().await.map_err(|e| {
+            SkillFetchError::from_message(format!("Invalid GitHub blob metadata: {e}"))
+        })?;
+        if metadata.r#type != "file" {
+            continue;
+        }
+        let download_url = metadata.download_url.ok_or_else(|| {
+            SkillFetchError::from_message(
+                "GitHub blob metadata did not include a raw download URL".to_string(),
+            )
+        })?;
+        return validate_derived_fetch_url(&download_url);
+    }
+
+    Err(SkillFetchError::from_message(
+        "Could not resolve the GitHub blob URL to a valid ref and file path".to_string(),
     ))
+}
+
+fn normalize_archive_path(path: &Path) -> Result<PathBuf, ToolError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "ZIP archive contains unsafe path: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(ToolError::ExecutionFailed(
+            "ZIP archive entry resolved to empty path".to_string(),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn strip_common_archive_root(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut root: Option<std::ffi::OsString> = None;
+    let mut has_nested = false;
+
+    for path in paths {
+        let mut components = path.components();
+        let Some(Component::Normal(first)) = components.next() else {
+            return None;
+        };
+        has_nested |= components.next().is_some();
+        match &root {
+            Some(existing) if existing != first => return None,
+            None => root = Some(first.to_os_string()),
+            _ => {}
+        }
+    }
+
+    if !has_nested {
+        return None;
+    }
+
+    root.map(PathBuf::from)
+}
+
+fn extract_skill_bundle_from_zip(
+    data: &[u8],
+    requested_subdir: Option<&str>,
+) -> Result<ZipSkillBundle, ToolError> {
+    let reader = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to open ZIP archive: {e}")))?;
+
+    let mut raw_paths = Vec::new();
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|e| ToolError::ExecutionFailed(format!("Invalid ZIP entry: {e}")))?;
+        if file.is_dir() {
+            continue;
+        }
+        raw_paths.push(normalize_archive_path(Path::new(file.name()))?);
+    }
+
+    let strip_root = strip_common_archive_root(&raw_paths);
+    let mut files = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut skill_dirs = HashSet::<PathBuf>::new();
+    let mut total_unzipped_bytes = 0u64;
+
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| ToolError::ExecutionFailed(format!("Invalid ZIP entry: {e}")))?;
+        if file.is_dir() {
+            continue;
+        }
+        if file.size() > MAX_ZIP_ENTRY_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP entry too large to decompress safely: {}",
+                file.name()
+            )));
+        }
+        total_unzipped_bytes = total_unzipped_bytes
+            .checked_add(file.size())
+            .ok_or_else(|| {
+                ToolError::ExecutionFailed(
+                    "ZIP archive decompressed size overflowed safety budget".to_string(),
+                )
+            })?;
+        if total_unzipped_bytes > MAX_TOTAL_UNZIPPED_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP archive expands to {} bytes (max {} bytes)",
+                total_unzipped_bytes, MAX_TOTAL_UNZIPPED_BYTES
+            )));
+        }
+
+        let mut path = normalize_archive_path(Path::new(file.name()))?;
+        if let Some(root) = &strip_root
+            && let Ok(stripped) = path.strip_prefix(root)
+        {
+            path = stripped.to_path_buf();
+        }
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let mut contents = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut contents).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to read ZIP entry {}: {e}", path.display()))
+        })?;
+
+        if path.file_name().is_some_and(|name| name == "SKILL.md") {
+            skill_dirs.insert(path.parent().unwrap_or(Path::new("")).to_path_buf());
+        }
+        files.push((path, contents));
+    }
+
+    let requested_dir = if let Some(subdir) = requested_subdir {
+        let normalized = normalize_archive_path(Path::new(subdir))?;
+        if !skill_dirs.contains(&normalized) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP archive does not contain SKILL.md under {}",
+                normalized.display()
+            )));
+        }
+        normalized
+    } else {
+        match skill_dirs.len() {
+            0 => {
+                return Err(ToolError::ExecutionFailed(
+                    "ZIP archive does not contain SKILL.md".to_string(),
+                ));
+            }
+            1 => skill_dirs.into_iter().next().unwrap_or_default(),
+            _ => {
+                let mut dirs = skill_dirs
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>();
+                dirs.sort();
+                return Err(ToolError::ExecutionFailed(format!(
+                    "ZIP archive contains multiple skills; specify a subdirectory URL instead: {}",
+                    dirs.join(", ")
+                )));
+            }
+        }
+    };
+
+    let mut skill_md = None;
+    let mut extra_files = Vec::new();
+    for (path, contents) in files {
+        let Ok(relative) = path.strip_prefix(&requested_dir) else {
+            continue;
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        if relative == Path::new("SKILL.md") {
+            if contents.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "SKILL.md in archive is too large: {} bytes (max {} bytes)",
+                    contents.len(),
+                    ironclaw_skills::MAX_PROMPT_FILE_SIZE
+                )));
+            }
+            skill_md = Some(String::from_utf8(contents).map_err(|e| {
+                ToolError::ExecutionFailed(format!("SKILL.md in archive is not valid UTF-8: {e}"))
+            })?);
+            continue;
+        }
+        extra_files.push(ironclaw_skills::registry::InstallFile {
+            relative_path: relative.to_path_buf(),
+            contents,
+        });
+    }
+
+    let skill_md = skill_md.ok_or_else(|| {
+        ToolError::ExecutionFailed("ZIP archive does not contain SKILL.md".to_string())
+    })?;
+
+    Ok(ZipSkillBundle {
+        skill_md,
+        extra_files,
+        bundle_subdir: (!requested_dir.as_os_str().is_empty())
+            .then(|| requested_dir.display().to_string()),
+    })
+}
+
+async fn fetch_github_repo_payload(
+    source_url: &str,
+    repo_request: GitHubRepoRequest,
+) -> Result<SkillInstallPayload, SkillFetchError> {
+    let repo = resolve_github_tree_request(repo_request).await?;
+    validate_github_repo_ref(&repo)?;
+    let commit_sha = resolve_github_ref_commit_sha(&repo.owner, &repo.repo, &repo.branch).await?;
+
+    let archive_url = validate_derived_fetch_url(&format!(
+        "https://codeload.github.com/{}/{}/legacy.zip/{}",
+        repo.owner, repo.repo, commit_sha
+    ))?;
+    let bytes = fetch_url_bytes(&archive_url).await?;
+    let bundle = extract_skill_bundle_from_zip(&bytes, repo.subdir.as_deref())
+        .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
+
+    validate_payload_skill_size(SkillInstallPayload {
+        skill_md: bundle.skill_md,
+        extra_files: bundle.extra_files,
+        install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
+            source_url: Some(source_url.to_string()),
+            source_subdir: bundle.bundle_subdir.or(repo.subdir),
+        }),
+    })
+}
+
+pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload, SkillFetchError> {
+    let parsed =
+        validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))?;
+
+    if let Some(blob) = parse_github_blob_ref(&parsed) {
+        let raw_url = resolve_github_blob_download_url(blob).await?;
+        let bytes = fetch_url_bytes(&raw_url).await?;
+        let skill_md = String::from_utf8(bytes).map_err(|e| {
+            SkillFetchError::from_message(format!("Response is not valid UTF-8: {e}"))
+        })?;
+        return validate_payload_skill_size(SkillInstallPayload {
+            skill_md,
+            install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
+                source_url: Some(url.to_string()),
+                source_subdir: None,
+            }),
+            ..SkillInstallPayload::default()
+        });
+    }
+
+    if let Some(repo) = parse_github_repo_ref(&parsed) {
+        return fetch_github_repo_payload(url, repo).await;
+    }
+
+    let bytes = fetch_url_bytes(&parsed).await?;
+    let payload = if bytes.starts_with(b"PK\x03\x04") {
+        let bundle = extract_skill_bundle_from_zip(&bytes, None)
+            .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
+        SkillInstallPayload {
+            skill_md: bundle.skill_md,
+            extra_files: bundle.extra_files,
+            ..SkillInstallPayload::default()
+        }
+    } else {
+        SkillInstallPayload {
+            skill_md: String::from_utf8(bytes).map_err(|e| {
+                SkillFetchError::from_message(format!("Response is not valid UTF-8: {e}"))
+            })?,
+            ..SkillInstallPayload::default()
+        }
+    };
+
+    validate_payload_skill_size(payload)
+}
+
+#[allow(dead_code)]
+/// Backward-compatible wrapper used by older tests that only care about SKILL.md.
+pub(crate) async fn fetch_skill_content(url: &str) -> Result<String, SkillFetchError> {
+    Ok(fetch_skill_payload(url).await?.skill_md)
+}
+
+#[allow(dead_code)]
+/// Extract `SKILL.md` from a ZIP archive returned by the ClawHub download API.
+fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
+    Ok(extract_skill_bundle_from_zip(data, None)?.skill_md)
 }
 
 // ── skill_remove ────────────────────────────────────────────────────────
@@ -1353,6 +1959,102 @@ mod tests {
         assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    /// Regression: when a persona bundle is already loaded (via bundled
+    /// content, user dir, or prior install), an LLM force-activation like
+    /// `/ceo-setup` used to trigger a redundant `skill_install` call which
+    /// tripped the approval prompt even though `execute` would immediately
+    /// return `already_installed`. The shortcut in `requires_approval`
+    /// prevents that user-visible friction.
+    #[tokio::test]
+    async fn skill_install_skips_approval_when_already_loaded() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(
+                &dir,
+                "ceo-setup",
+                &skill_content("ceo-setup", &[]),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "ceo-setup"})),
+            ApprovalRequirement::Never,
+            "already-loaded skills must not prompt for approval"
+        );
+
+        // Sanity: an unknown name still follows the normal gated path.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "not-loaded"})),
+            ApprovalRequirement::UnlessAutoApproved,
+        );
+
+        // Sanity: install_dependencies=true still forces approval even when
+        // the top-level skill is loaded, because companions may not be.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({
+                "name": "ceo-setup",
+                "install_dependencies": true,
+            })),
+            ApprovalRequirement::Always,
+            "install_dependencies=true must prompt even if the main skill is loaded",
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_execute_honors_dependencies_when_already_loaded() {
+        let registry = test_registry();
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(
+                &dir,
+                "bundle",
+                &skill_content("bundle", &["dep-a"]),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "bundle",
+                    "install_dependencies": true,
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .expect("execute should succeed even when dependency fetch fails");
+
+        assert_eq!(output.result["status"], "already_installed_with_warnings");
+        let failures = output.result["chain_install_failed"]
+            .as_array()
+            .expect("dependency install should have been attempted");
+        let failure = failures[0].as_str().unwrap();
+        assert!(failure.starts_with("dep-a:"));
+        assert!(failure.contains("Only HTTPS URLs are allowed"));
+
+        let guard = registry.read().unwrap();
+        assert!(guard.has("bundle"));
+        assert!(!guard.has("dep-a"));
     }
 
     #[test]
@@ -1526,6 +2228,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_github_blob_ref_preserves_slashed_ref_segments() {
+        let parsed = reqwest::Url::parse(
+            "https://github.com/nearai/ironclaw/blob/feature/foo/skills/demo/SKILL.md",
+        )
+        .unwrap();
+
+        let blob = super::parse_github_blob_ref(&parsed).expect("blob ref");
+        assert_eq!(blob.owner, "nearai");
+        assert_eq!(blob.repo, "ironclaw");
+        assert_eq!(
+            blob.blob_segments,
+            vec!["feature", "foo", "skills", "demo", "SKILL.md"]
+        );
+    }
+
+    #[test]
+    fn test_parse_github_repo_ref_preserves_slashed_tree_segments() {
+        let parsed =
+            reqwest::Url::parse("https://github.com/nearai/ironclaw/tree/feature/foo/skills/demo")
+                .unwrap();
+
+        let repo = super::parse_github_repo_ref(&parsed).expect("repo ref");
+        assert_eq!(repo.owner, "nearai");
+        assert_eq!(repo.repo, "ironclaw");
+        assert_eq!(
+            repo.tree_segments,
+            Some(vec![
+                "feature".to_string(),
+                "foo".to_string(),
+                "skills".to_string(),
+                "demo".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_validate_github_repo_components_rejects_unsafe_segments() {
+        let err = super::validate_github_repo_components("nearai", "../ironclaw").unwrap_err();
+        assert!(err.to_string().contains("Invalid GitHub repository"));
+    }
+
+    #[test]
     fn test_validate_resolved_addrs_rejects_loopback_hostname() {
         let addrs = vec![
             "127.0.0.1:443".parse::<std::net::SocketAddr>().unwrap(),
@@ -1550,30 +2294,8 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_deflate() {
-        // Build a real ZIP with flate2 + manual header construction.
-        use flate2::Compression;
-        use flate2::write::DeflateEncoder;
-        use std::io::Write;
-
         let skill_md = b"---\nname: test\n---\n# Test Skill\n";
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(skill_md).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        let mut zip = Vec::new();
-        // Local file header
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x14, 0x00]); // version needed (2.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x08, 0x00]); // compression: deflate
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32 (unused)
-        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(&compressed);
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Deflated);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: test\n---\n# Test Skill\n");
@@ -1582,24 +2304,140 @@ mod tests {
     #[test]
     fn test_extract_skill_from_zip_store() {
         let skill_md = b"---\nname: stored\n---\n# Stored\n";
-
-        let mut zip = Vec::new();
-        // Local file header
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed (1.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // compressed = uncompressed
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes());
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(skill_md);
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Stored);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: stored\n---\n# Stored\n");
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_github_repo_zip() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file(
+                "Pika-Skills-main/pikastream-video-meeting/SKILL.md",
+                options,
+            )
+            .unwrap();
+        writer
+            .write_all(b"---\nname: pikastream-video-meeting\n---\n\n# Skill\n")
+            .unwrap();
+        writer
+            .start_file(
+                "Pika-Skills-main/pikastream-video-meeting/requirements.txt",
+                options,
+            )
+            .unwrap();
+        writer.write_all(b"requests>=2.32.5\n").unwrap();
+        writer
+            .start_file(
+                "Pika-Skills-main/pikastream-video-meeting/scripts/run.py",
+                options,
+            )
+            .unwrap();
+        writer.write_all(b"print('ok')\n").unwrap();
+        let zip = writer.finish().unwrap().into_inner();
+
+        let bundle = super::extract_skill_bundle_from_zip(&zip, None).unwrap();
+        assert_eq!(
+            bundle.bundle_subdir.as_deref(),
+            Some("pikastream-video-meeting")
+        );
+        assert!(bundle.skill_md.contains("pikastream-video-meeting"));
+        assert_eq!(bundle.extra_files.len(), 2);
+        assert!(
+            bundle
+                .extra_files
+                .iter()
+                .any(|f| f.relative_path == Path::new("requirements.txt"))
+        );
+        assert!(
+            bundle
+                .extra_files
+                .iter()
+                .any(|f| f.relative_path == Path::new("scripts/run.py"))
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_zip_rejects_multiple_skills_without_subdir() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("bundle-main/skill-a/SKILL.md", options)
+            .unwrap();
+        writer.write_all(b"---\nname: skill-a\n---\n").unwrap();
+        writer
+            .start_file("bundle-main/skill-b/SKILL.md", options)
+            .unwrap();
+        writer.write_all(b"---\nname: skill-b\n---\n").unwrap();
+        let zip = writer.finish().unwrap().into_inner();
+
+        let err = super::extract_skill_bundle_from_zip(&zip, None).unwrap_err();
+        assert!(
+            err.to_string().contains("multiple skills"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_zip_rejects_large_total_unzipped_size() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("bundle-main/skill-a/SKILL.md", options)
+            .unwrap();
+        writer
+            .write_all(b"---\nname: skill-a\n---\n\nPrompt\n")
+            .unwrap();
+        for idx in 0..11 {
+            writer
+                .start_file(format!("bundle-main/skill-a/blob-{idx}.bin"), options)
+                .unwrap();
+            writer.write_all(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        }
+        let zip = writer.finish().unwrap().into_inner();
+
+        let err = super::extract_skill_bundle_from_zip(&zip, Some("skill-a")).unwrap_err();
+        assert!(
+            err.to_string().contains("expands to"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_zip_rejects_oversized_skill_md() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("bundle-main/skill-a/SKILL.md", options)
+            .unwrap();
+        writer
+            .write_all(&vec![
+                b'a';
+                (ironclaw_skills::MAX_PROMPT_FILE_SIZE as usize) + 1
+            ])
+            .unwrap();
+        let zip = writer.finish().unwrap().into_inner();
+
+        let err = super::extract_skill_bundle_from_zip(&zip, Some("skill-a")).unwrap_err();
+        assert!(
+            err.to_string().contains("SKILL.md in archive is too large"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1626,7 +2464,10 @@ mod tests {
                     async move {
                         responses
                             .get(&url)
-                            .cloned()
+                            .map(|skill_md| SkillInstallPayload {
+                                skill_md: skill_md.clone(),
+                                ..SkillInstallPayload::default()
+                            })
                             .ok_or_else(|| SkillFetchError::from_http_status(404, &url))
                     }
                 }
@@ -1707,7 +2548,10 @@ mod tests {
                     async move {
                         responses
                             .get(&url)
-                            .cloned()
+                            .map(|skill_md| SkillInstallPayload {
+                                skill_md: skill_md.clone(),
+                                ..SkillInstallPayload::default()
+                            })
                             .ok_or_else(|| SkillFetchError::from_http_status(404, &url))
                     }
                 }
@@ -1756,7 +2600,7 @@ mod tests {
             &registry,
             "https://clawhub.example",
             vec!["../../escape".to_string()],
-            |_url| async move { Ok(String::new()) },
+            |_url| async move { Ok(SkillInstallPayload::default()) },
         )
         .await
         .unwrap();
@@ -1806,19 +2650,7 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_missing_skill_md() {
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        zip.extend_from_slice(&[0x0A, 0x00]); // version
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&2u32.to_le_bytes()); // compressed size
-        zip.extend_from_slice(&2u32.to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&10u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"_meta.json");
-        zip.extend_from_slice(b"{}");
+        let zip = build_zip_archive(&[("_meta.json", b"{}")], zip::CompressionMethod::Stored);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(err.to_string().contains("does not contain SKILL.md"));
@@ -1826,22 +2658,24 @@ mod tests {
 
     // ── ZIP extraction security regression tests ────────────────────────
 
-    /// Helper: build a minimal ZIP local file header with Store compression.
+    fn build_zip_archive(
+        entries: &[(&str, &[u8])],
+        compression: zip::CompressionMethod,
+    ) -> Vec<u8> {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default().compression_method(compression);
+        for (file_name, content) in entries {
+            writer.start_file(*file_name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     fn build_zip_entry_store(file_name: &str, content: &[u8]) -> Vec<u8> {
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed (1.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store (0)
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&(file_name.len() as u16).to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(file_name.as_bytes());
-        zip.extend_from_slice(content);
-        zip
+        build_zip_archive(&[(file_name, content)], zip::CompressionMethod::Stored)
     }
 
     #[test]
@@ -1855,9 +2689,10 @@ mod tests {
     #[test]
     fn test_zip_extract_ignores_non_skill_entries() {
         // ZIP with README.md and src/main.rs but no SKILL.md -- should error.
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&build_zip_entry_store("README.md", b"# Readme"));
-        zip.extend_from_slice(&build_zip_entry_store("src/main.rs", b"fn main() {}"));
+        let zip = build_zip_archive(
+            &[("README.md", b"# Readme"), ("src/main.rs", b"fn main() {}")],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
@@ -1869,55 +2704,40 @@ mod tests {
 
     #[test]
     fn test_zip_extract_path_traversal_rejected() {
-        // An entry named "../../SKILL.md" must NOT match the exact "SKILL.md" check.
+        // Parent components are invalid and must be rejected during path normalization.
         let content = b"---\nname: evil\n---\n# Malicious path traversal\n";
         let zip = build_zip_entry_store("../../SKILL.md", content);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("does not contain SKILL.md"),
-            "Path traversal entry should not match SKILL.md, got: {}",
+            err.to_string().contains("unsafe path"),
+            "Path traversal entry should be rejected during normalization, got: {}",
             err
         );
     }
 
     #[test]
-    fn test_zip_extract_nested_path_not_matched() {
-        // An entry named "subdir/SKILL.md" must NOT match the exact "SKILL.md" check.
+    fn test_zip_extract_nested_single_skill_supported() {
+        // A ZIP containing a single nested skill directory should still extract SKILL.md.
         let content = b"---\nname: nested\n---\n# Nested\n";
         let zip = build_zip_entry_store("subdir/SKILL.md", content);
 
-        let err = super::extract_skill_from_zip(&zip).unwrap_err();
-        assert!(
-            err.to_string().contains("does not contain SKILL.md"),
-            "Nested path should not match SKILL.md, got: {}",
-            err
-        );
+        let result = super::extract_skill_from_zip(&zip).unwrap();
+        assert_eq!(result, std::str::from_utf8(content).unwrap());
     }
 
     #[test]
     fn test_zip_extract_oversized_rejected() {
-        // Create a ZIP entry whose declared uncompressed_size exceeds MAX_DECOMPRESSED (1 MB).
-        let oversized_claim: u32 = 2 * 1024 * 1024; // 2 MB
-        let small_body = b"tiny";
-
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(small_body.len() as u32).to_le_bytes()); // compressed size (actual)
-        zip.extend_from_slice(&oversized_claim.to_le_bytes()); // uncompressed size (forged)
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(small_body);
+        let oversized_body = vec![b'x'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
+        let zip = build_zip_archive(
+            &[("blob.bin", oversized_body.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("too large"),
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
             "Oversized entry should be rejected, got: {}",
             err
         );

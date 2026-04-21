@@ -1,0 +1,85 @@
+id: bull-2024-03
+description: |
+  Multi-protocol portfolio recorded against the dune-replay backend.
+  The fixture address holds positions across all 5 real protocols
+  shipped in M2:
+
+    * Aave v3 USDC supply on Base @ 3.2% (below 4% floor)
+    * Lido stETH on Ethereum @ 3.4%
+    * Uniswap v3 USDC/ETH LP on Ethereum @ 9.2% fee APY
+    * Morpho Blue USDC supply on Base @ 5.4%
+    * Native ETH on Base (untagged → wallet)
+    * Compound v3 USDC supply on Ethereum (from positions endpoint)
+
+  This is the M2 regression scenario. It proves the Dune parser feeds
+  the analyzer correctly and that the strategy stage finds the
+  below-floor Aave position. M3 will replace the synthetic fixture
+  data with a real recorded address.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xBU11000000000000000000000000000000000003"]
+      source: dune-replay
+    expect:
+      positions_min: 5
+      contains_protocol_ids:
+        - aave-v3
+        - lido
+        - uniswap-v3
+        - morpho-blue
+        - compound-v3
+      source: dune-replay
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          version: 1
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+
+          # Stablecoin Yield Floor
+
+          Move idle stablecoins yielding under 4% to a higher-yielding
+          venue within risk budget.
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      ready_proposals_min: 1
+      first_strategy_id: stablecoin-yield-floor
+    capture:
+      first_ready_plan_var: plan
+
+  - name: build_intent
+    action: build_intent
+    params:
+      plan: $plan
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+      solver: fixture
+    expect:
+      bundle_legs_min: 1
+      bundle_schema_version: portfolio-intent/1

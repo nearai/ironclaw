@@ -114,7 +114,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Streaming draft replies | ✅ | ❌ | Partial replies via draft message updates |
 | Configurable stream modes | ✅ | ❌ | Per-channel stream behavior |
-| Thread ownership | ✅ | 🚧 | Reply participation memory now persists with TTL-bounded tracking; full thread-level ownership tracking is still missing |
+| Thread ownership | ✅ | 🚧 | Reply participation memory is restart-stable and TTL-bounded; once the bot joins a thread, follow-ups inherit channel visibility. Full thread-level ownership tracking is still missing |
 | Download-file action | ✅ | ❌ | On-demand attachment downloads via message actions |
 
 ### Mattermost-Specific Features (since Mar 2026)
@@ -248,7 +248,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NVIDIA API | ✅ | ✅ | P3 | Via `nvidia` adapter and `providers.json` |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
-| OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
+| OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter); OpenAI-style image inputs default missing `image_url.detail` to `auto` |
 | GitHub Copilot | ✅ | ✅ | - | Dedicated provider with OAuth token exchange (`GithubCopilotProvider`) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
@@ -283,7 +283,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Audio transcription | ✅ | ❌ | P2 | |
 | Video support | ✅ | ❌ | P3 | |
 | PDF analysis tool | ✅ | ❌ | P2 | Native Anthropic/Gemini path with text/image extraction fallback |
-| PDF parsing | ✅ | ❌ | P2 | `pdfjs-dist` fallback path |
+| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments parse via `pdf-extract`; no `pdfjs-dist` fallback path |
 | MIME detection | ✅ | ❌ | P2 | |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding |

@@ -1,0 +1,347 @@
+/* IronClaw Web Gateway */
+
+/* Shared theme tokens are loaded from /theme.css. */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  animation: focusExpand 200ms ease;
+}
+
+@keyframes focusExpand {
+  from { outline-offset: 0px; outline-color: transparent; }
+  to { outline-offset: 2px; outline-color: var(--accent); }
+}
+
+body {
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Keyboard accessibility focus rings */
+.chat-input-wrapper textarea:focus-visible,
+.chat-input button:focus-visible,
+.tab-bar button:focus-visible,
+.tree-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --- Mobile responsive --- */
+
+@media (max-width: 768px) {
+  /* Tab bar: horizontal scroll */
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 8px;
+  }
+
+  .tab-bar button:not(.status-logs-btn) {
+    padding: 8px 12px;
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  .tab-bar button[data-active-count]:not([data-active-count="0"])::after {
+    min-width: 16px;
+    height: 16px;
+    margin-left: 6px;
+    padding: 0 4px;
+    font-size: 10px;
+  }
+
+  /* Chat messages: wider */
+  .message {
+    max-width: 95%;
+  }
+
+  /* Thread sidebar: hidden behind toggle */
+  .thread-sidebar {
+    width: 36px;
+  }
+
+  .thread-sidebar .thread-new-btn,
+  .thread-sidebar .thread-list,
+  .thread-sidebar .assistant-item {
+    display: none;
+  }
+
+  .thread-sidebar .threads-section-header > span,
+  .thread-sidebar .threads-section-header > .spacer,
+  .thread-sidebar .threads-section-header > .thread-new-btn {
+    display: none;
+  }
+
+  .thread-sidebar .threads-section-header {
+    padding: 0;
+    justify-content: center;
+  }
+
+  .thread-sidebar .thread-toggle-btn {
+    min-width: 36px;
+    min-height: 44px;
+  }
+
+  .thread-sidebar.expanded-mobile {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 240px;
+    z-index: 50;
+  }
+
+  .thread-sidebar.expanded-mobile .thread-new-btn,
+  .thread-sidebar.expanded-mobile .assistant-item {
+    display: flex;
+  }
+
+  .thread-sidebar.expanded-mobile .thread-list {
+    display: block;
+  }
+
+  .thread-sidebar.expanded-mobile .threads-section-header > span,
+  .thread-sidebar.expanded-mobile .threads-section-header > .spacer,
+  .thread-sidebar.expanded-mobile .threads-section-header > .thread-new-btn {
+    display: initial;
+  }
+
+  .thread-sidebar.expanded-mobile::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: -1;
+  }
+
+  /* Memory: vertical stack */
+  .memory-container {
+    flex-direction: column;
+  }
+
+  .memory-sidebar {
+    width: 100%;
+    max-height: 200px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Job detail sub-tabs: wrap */
+  .job-detail-tabs {
+    flex-wrap: wrap;
+  }
+
+  .job-detail-header {
+    flex-wrap: wrap;
+  }
+
+  .job-detail-header h2 {
+    min-width: 100%;
+    order: -1;
+  }
+
+  /* Job files: vertical */
+  .job-files {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .job-files-sidebar {
+    width: 100%;
+    max-height: 180px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Settings layout: drill-down on mobile */
+  .settings-layout { flex-direction: column; }
+  .settings-sidebar {
+    width: 100%;
+    flex-direction: column;
+    border-right: none;
+    padding: 8px 0;
+  }
+  .settings-subtab {
+    border-left: none;
+    padding: 14px 20px;
+    text-align: left;
+    font-size: var(--text-base);
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-subtab::after {
+    content: '\203A';
+    float: right;
+    color: var(--text-secondary);
+    font-size: 18px;
+  }
+  .settings-subtab.active {
+    border-left-color: transparent;
+    color: var(--text);
+  }
+  .settings-layout > .settings-content {
+    display: none;
+  }
+  .settings-layout.settings-detail-active > .settings-sidebar {
+    display: none;
+  }
+  .settings-layout.settings-detail-active > .settings-content {
+    display: flex;
+  }
+  .settings-back-btn {
+    display: flex;
+  }
+
+  .settings-theme-toggle {
+    display: block;
+    padding: 14px 20px;
+    text-align: left;
+    font-size: var(--text-base);
+    background: none;
+    border: none;
+    border-top: 1px solid var(--border);
+    color: var(--text-secondary);
+    cursor: pointer;
+    margin-top: auto;
+  }
+
+  /* Extension install form */
+  .ext-install-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ext-install-form input {
+    width: 100%;
+  }
+
+  /* Chat input: ensure visibility on mobile */
+  .chat-input {
+    min-height: 52px;
+  }
+
+  .chat-input-wrapper textarea {
+    min-height: 36px;
+    max-height: 100px;
+  }
+
+  .chat-input button {
+    padding: 6px 16px;
+    font-size: var(--text-base);
+  }
+}
+
+/* Loading skeletons */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  gap: var(--space-4);
+}
+
+.skeleton-bar {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, rgba(255,255,255,0.06) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Screen-reader only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ============================================================
+   Light Theme
+   ============================================================ */
+
+/* ============================================================
+   Theme transition (delayed via JS to avoid FOUC)
+   ============================================================ */
+
+body.theme-transition,
+body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* CSS-only icon switching via data-theme-mode on <html> */
+.theme-icon { display: none; }
+[data-theme-mode="dark"]  .icon-dark   { display: block; }
+[data-theme-mode="light"] .icon-light  { display: block; }
+[data-theme-mode="system"] .icon-system { display: block; }
+
+/* ============================================================
+   Phase 6: Accessibility & Mobile Polish
+   ============================================================ */
+
+/* Touch target audit */
+@media (pointer: coarse) {
+  .approval-card button,
+  .message-copy-btn,
+  .toggle-switch,
+  .welcome-chip,
+  .code-block-copy,
+  .copy-btn,
+  .tree-row {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* Mobile bottom sheet modals */
+@media (max-width: 768px) {
+  .modal-overlay {
+    align-items: flex-end;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 12px 12px 0 0;
+    animation: bottomSheetSlideIn 300ms var(--ease-out-expo);
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+}
+
+@keyframes bottomSheetSlideIn {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}

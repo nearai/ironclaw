@@ -1,0 +1,79 @@
+/* --- Skills tab --- */
+
+.skill-search-box {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-bottom: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+}
+
+.skill-search-box input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.skill-search-box input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.skill-search-box button {
+  padding: 8px 20px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 0.2s, transform 0.2s;
+}
+
+.skill-search-box button:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.skill-trust {
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: 9999px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.skill-trust.trust-trusted {
+  background: var(--accent-subtle);
+  color: var(--success);
+}
+
+.skill-trust.trust-installed {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.skill-version {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+@keyframes skillFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.skill-search-result {
+  animation: skillFadeIn 0.3s ease-out both;
+}

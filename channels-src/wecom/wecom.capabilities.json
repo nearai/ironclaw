@@ -8,6 +8,13 @@
     "secret_name": "wecom_bot_id",
     "display_name": "WeCom",
     "instructions": "Create a WeCom intelligent bot and collect Bot ID and Bot Secret for the primary websocket session path. Optionally configure a self-built app with Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey for Agent API fallback and callback inbound.",
+    "secret_config_mappings": [
+      { "config_key": "corp_id", "secret_name": "wecom_corp_id" },
+      { "config_key": "corp_secret", "secret_name": "wecom_corp_secret" },
+      { "config_key": "agent_id", "secret_name": "wecom_agent_id" },
+      { "config_key": "callback_token", "secret_name": "wecom_callback_token" },
+      { "config_key": "callback_encoding_aes_key", "secret_name": "wecom_callback_encoding_aes_key" }
+    ],
     "setup_url": "https://open.work.weixin.qq.com/",
     "token_hint": "Bot ID/Secret come from WeCom bot setup; Corp ID looks like wwxxxx..., Agent ID is numeric, callback EncodingAESKey is 43 characters",
     "env_var": "WECOM_BOT_ID"

@@ -9,8 +9,10 @@ mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
 mod router;
+pub mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
+mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;
@@ -70,6 +72,17 @@ pub use router::{
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
 
+// `engine_retrospectives_for_test` is a test-only reachability surface —
+// integration tests live in a separate crate, so `#[cfg(test)]` wouldn't
+// expose it. `#[doc(hidden)]` keeps it out of public docs and signals
+// that it is not a supported API.
+#[cfg(feature = "libsql")]
+#[doc(hidden)]
+pub use router::engine_retrospectives_for_test;
+
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]
 pub(crate) use router::handle_mission_notification;
+
+#[cfg(test)]
+pub(crate) use router::test_support;

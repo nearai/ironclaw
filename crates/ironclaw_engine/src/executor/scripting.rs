@@ -1186,6 +1186,7 @@ async fn preflight_action(
                         parameters: params.clone(),
                         resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
                         resume_output: None,
+                        paused_lease: None,
                     },
                 );
             }
@@ -2014,6 +2015,7 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            thread_goal: Some(thread.goal.clone()),
         }
     }
 

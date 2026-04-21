@@ -1,0 +1,79 @@
+/* ── Routines ──────────────────────────────────── */
+
+.routines-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.routines-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: 20px;
+}
+
+.routines-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.routines-table th,
+.routines-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+
+.routines-table th {
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: 0.5px;
+}
+
+.routines-table tr:hover td {
+  background: var(--hover-surface);
+}
+
+.routine-row {
+  cursor: pointer;
+}
+
+.routine-detail {
+  padding: 16px 0;
+}
+
+.badge.enabled { background: var(--accent-subtle); color: var(--success); }
+.badge.disabled { background: var(--bg-tertiary); color: var(--text-secondary); }
+.badge.failing { background: var(--danger-subtle); color: var(--danger); }
+
+.btn-trigger {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-trigger:hover {
+  background: var(--accent-subtle);
+}
+
+.btn-toggle {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  color: var(--warning);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-toggle:hover {
+  background: var(--warning-subtle);
+}
