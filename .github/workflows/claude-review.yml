@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, ready_for_review]
 
 permissions:
   contents: read
@@ -17,7 +17,10 @@ concurrency:
 jobs:
   review:
     name: Claude Code Review
-    if: contains(github.event.pull_request.labels.*.name, 'staging-promotion')
+    if: >
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.login != 'release-plz[bot]' &&
+      github.event.pull_request.user.login != 'ironclaw-ci[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

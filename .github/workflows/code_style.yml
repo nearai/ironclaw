@@ -1,13 +1,13 @@
 name: Code Style
 on:
   pull_request:
-  # Pushes to main/staging refresh the rust-cache entries that PR jobs
-  # restore from. PR jobs themselves are restore-only (see `save-if`
-  # on the rust-cache steps below).
+  merge_group:
+  # Pushes to main refresh the rust-cache entries that PR and merge-queue
+  # jobs restore from. PR and merge-queue jobs themselves are restore-only
+  # (see `save-if` on the rust-cache steps below).
   push:
     branches:
       - main
-      - staging
 
 permissions:
   contents: read
@@ -49,7 +49,7 @@ jobs:
           fi
 
   # ── Dynamic matrix: SLIM (1 leg) for non-main PRs; FULL (3 legs) for PRs
-  # to main and pushes to long-lived branches.
+  # to main, merge_group runs, and pushes to main.
   clippy-matrix:
     name: Configure clippy matrix
     needs: changes
@@ -63,10 +63,10 @@ jobs:
           FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--all-features"}]'
 
-          # Full matrix on push (cache-warming + verification across configs)
-          # and on PRs targeting main (final promotion gate). Other PRs use
-          # SLIM since lint findings are almost never feature-gated.
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.base_ref }}" = "main" ]; then
+          # Full matrix on pushes to main (cache-warming + verification),
+          # merge_group runs, and PRs targeting main. Other PRs use SLIM
+          # since lint findings are almost never feature-gated.
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "merge_group" ] || [ "${{ github.base_ref }}" = "main" ]; then
             echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
           else
             echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
@@ -142,10 +142,10 @@ jobs:
         # Single shared slot across the clippy matrix. The all-features leg
         # builds a superset of the other configs; subset legs (push only)
         # restore from it. Only all-features writes the slot, and only on
-        # main/staging pushes — preventing a subset leg from winning the
+        # main pushes — preventing a subset leg from winning the
         # cache race and pinning the slot to a partial build.
         shared-key: clippy
-        save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+        save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     # `--benches` is intentionally omitted: lints rarely diverge in bench code,
     # and pulling in `criterion` adds ~30s+ of dependency compilation per run.
     # `bench-compile` in test.yml provides the type-check signal for benches.
@@ -155,12 +155,12 @@ jobs:
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
     needs: [changes, clippy-matrix]
-    # PR-to-main runs the full Windows matrix; pushes to long-lived branches
-    # run it for cache warming. Other PRs skip Windows lint — windows-build
-    # in test.yml provides the Windows compile signal.
+    # PRs to main and merge_group runs execute the full Windows matrix;
+    # pushes to main run it for cache warming. Other PRs skip Windows lint —
+    # windows-build in test.yml provides the Windows compile signal.
     if: >
       needs.changes.outputs.has_code == 'true' &&
-      (github.event_name == 'push' || github.base_ref == 'main')
+      (github.event_name == 'push' || github.event_name == 'merge_group' || github.base_ref == 'main')
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -181,7 +181,7 @@ jobs:
         # job. windows-build runs on push (where save-if allows writes), so
         # clippy-windows restores from a warm cache on PRs.
         key: windows-${{ matrix.name }}
-        save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+        save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     # `--benches` omitted; see comment on the Linux clippy job above.
     - name: Check lints
       run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
@@ -189,8 +189,9 @@ jobs:
   no-panics:
     name: No panics in production code
     needs: changes
-    # Diff is computed against the PR base SHA, which is unavailable on push.
-    # Gate to PRs only; the roll-up tolerates a skipped result on push.
+    # Diff is computed against the PR base SHA, which is unavailable on
+    # push and merge_group. Gate to PRs only; the roll-up tolerates a skipped
+    # result outside pull_request.
     if: github.event_name == 'pull_request' && needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
