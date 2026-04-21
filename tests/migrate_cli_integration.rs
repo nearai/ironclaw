@@ -339,3 +339,34 @@ async fn hermes_command_migrates_custom_provider_and_session_history() {
         .expect("soul doc");
     assert!(imported_doc.content.contains("Hermes remembers this"));
 }
+
+#[tokio::test]
+async fn rerun_migration_is_idempotent() {
+    let (services, _tmp) = make_services().await;
+    let source = TempDir::new().expect("source tempdir");
+    create_openclaw_source(source.path()).await;
+
+    let cmd = MigrateCommand::Openclaw {
+        path: Some(source.path().to_path_buf()),
+        dry_run: false,
+        user_id: None,
+    };
+
+    // First run
+    let stats1 = run_migrate_command_with_services(&cmd, &services)
+        .await
+        .expect("first migration");
+    assert!(stats1.engine_threads >= 1);
+    assert!(stats1.legacy_conversations >= 1);
+
+    // Second run — must not error (idempotency)
+    let stats2 = run_migrate_command_with_services(&cmd, &services)
+        .await
+        .expect("re-run migration should succeed");
+
+    // On re-run, unchanged documents should be skipped
+    assert!(
+        stats2.skipped > 0 || stats2.workspace_documents == 0,
+        "re-run should skip unchanged documents or write zero new ones"
+    );
+}

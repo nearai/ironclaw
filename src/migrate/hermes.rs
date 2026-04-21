@@ -60,6 +60,8 @@ struct HermesSession {
     messages: Vec<HermesMessage>,
 }
 
+type ScopeResult = (HashMap<String, Value>, Vec<ImportedSecret>, Vec<String>);
+
 #[derive(Debug, Clone)]
 struct HermesScope {
     name: String,
@@ -94,7 +96,7 @@ pub async fn migrate(
         let env = read_env_file(&primary.root.join(".env"))?;
         let auth = read_optional_json(&primary.root.join("auth.json"))?;
         let (settings_patch, secrets, notes) =
-            map_primary_scope(&primary.name, &config, &env, auth.as_ref());
+            map_primary_scope(&primary.name, &config, &env, auth.as_ref())?;
         for note in notes {
             stats.push_note(note);
         }
@@ -309,7 +311,7 @@ fn map_primary_scope(
     config: &HermesConfigData,
     env: &HashMap<String, SecretString>,
     auth: Option<&Value>,
-) -> (HashMap<String, Value>, Vec<ImportedSecret>, Vec<String>) {
+) -> Result<ScopeResult, MigrationError> {
     let mut patch = HashMap::new();
     let mut secrets = Vec::new();
     let mut notes = Vec::new();
@@ -319,13 +321,13 @@ fn map_primary_scope(
             .and_then(Value::as_str)
             .map(ToString::to_string)
     });
-    if config.model_provider.is_none() {
-        if let Some(provider) = active_provider.as_ref() {
-            notes.push(format!(
-                "Hermes config had no active model.provider; used auth.json active_provider='{}'.",
-                provider
-            ));
-        }
+    if config.model_provider.is_none()
+        && let Some(provider) = active_provider.as_ref()
+    {
+        notes.push(format!(
+            "Hermes config had no active model.provider; used auth.json active_provider='{}'.",
+            provider
+        ));
     }
 
     let mut custom_providers = Vec::new();
@@ -435,13 +437,15 @@ fn map_primary_scope(
     if !custom_providers.is_empty() {
         patch.insert(
             "llm_custom_providers".to_string(),
-            serde_json::to_value(custom_providers).unwrap_or(Value::Null),
+            serde_json::to_value(custom_providers)
+                .map_err(|e| MigrationError::Serialization(e.to_string()))?,
         );
     }
     if !builtin_overrides.is_empty() {
         patch.insert(
             "llm_builtin_overrides".to_string(),
-            serde_json::to_value(builtin_overrides).unwrap_or(Value::Null),
+            serde_json::to_value(builtin_overrides)
+                .map_err(|e| MigrationError::Serialization(e.to_string()))?,
         );
     }
 
@@ -468,7 +472,7 @@ fn map_primary_scope(
         );
     }
 
-    (patch, dedupe_secrets(secrets), notes)
+    Ok((patch, dedupe_secrets(secrets), notes))
 }
 
 fn provider_base_url(config: &HermesConfigData, provider: &str) -> Option<String> {
@@ -757,10 +761,10 @@ fn hermes_message_role(message: &HermesMessage) -> ImportedMessageRole {
 }
 
 fn hermes_message_content(message: &HermesMessage) -> String {
-    if message.content.is_empty() {
-        if let Some(tool) = message.tool_name.as_ref() {
-            return format!("[{tool}] (empty output)");
-        }
+    if message.content.is_empty()
+        && let Some(tool) = message.tool_name.as_ref()
+    {
+        return format!("[{tool}] (empty output)");
     }
     message.content.clone()
 }

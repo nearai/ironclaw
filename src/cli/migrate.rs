@@ -153,11 +153,23 @@ fn print_summary(cmd: &MigrateCommand, stats: &MigrationStats) {
         }
     }
 
-    if !stats.notes.is_empty() {
+    let (security_notes, general_notes): (Vec<_>, Vec<_>) = stats
+        .notes
+        .iter()
+        .partition(|note| note.contains("auth.json") || note.contains("credential"));
+    if !security_notes.is_empty() {
+        println!();
+        println!("SECURITY:");
+        for note in &security_notes {
+            println!("  !! {note}");
+        }
+        println!("  !! Consider rotating migrated credentials after verifying the import.");
+    }
+    if !general_notes.is_empty() {
         println!();
         println!("Notes:");
-        for note in &stats.notes {
-            println!("  - {}", note);
+        for note in &general_notes {
+            println!("  - {note}");
         }
     }
 }

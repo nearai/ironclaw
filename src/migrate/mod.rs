@@ -351,14 +351,15 @@ impl MigrationServices {
             memory_doc.created_at = existing.created_at;
         }
 
-        let existing_doc_json = existing_doc
-            .as_ref()
-            .and_then(|value| serde_json::to_value(value).ok());
-        let new_doc_json = serde_json::to_value(&memory_doc).ok();
         let workspace_unchanged = existing_workspace
             .as_ref()
             .is_some_and(|value| value.content == doc.content && value.metadata == metadata);
-        let doc_unchanged = existing_doc_json == new_doc_json;
+        let doc_unchanged = existing_doc.as_ref().is_some_and(|ed| {
+            ed.content == memory_doc.content
+                && ed.metadata == memory_doc.metadata
+                && ed.title == memory_doc.title
+                && ed.tags == memory_doc.tags
+        });
 
         if workspace_unchanged && doc_unchanged {
             stats.skipped += 1;
@@ -471,7 +472,7 @@ impl MigrationServices {
         thread.messages = conversation
             .messages
             .iter()
-            .map(|message| imported_message_to_thread_message(message))
+            .map(imported_message_to_thread_message)
             .collect();
 
         let mut surface = ConversationSurface::new(synthetic_channel.clone(), self.user_id.clone());
@@ -526,8 +527,7 @@ impl MigrationServices {
         }
 
         let thread_id_text = thread_id.0.to_string();
-        let ensured = self
-            .db
+        self.db
             .ensure_conversation(
                 legacy_conv_id,
                 &synthetic_channel,
@@ -537,11 +537,6 @@ impl MigrationServices {
             )
             .await
             .map_err(|e| MigrationError::Database(e.to_string()))?;
-        if !ensured {
-            return Err(MigrationError::Database(format!(
-                "legacy conversation id collision for {legacy_conv_id}"
-            )));
-        }
 
         if let Some(metadata_obj) = metadata.as_object() {
             for (key, value) in metadata_obj {
@@ -642,11 +637,9 @@ pub(crate) fn slugify(value: &str) -> String {
         if ch.is_ascii_alphanumeric() {
             out.push(ch);
             last_dash = false;
-        } else if matches!(ch, '-' | '_' | '/' | ' ' | '.') {
-            if !last_dash && !out.is_empty() {
-                out.push('-');
-                last_dash = true;
-            }
+        } else if matches!(ch, '-' | '_' | '/' | ' ' | '.') && !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
         }
     }
     let out = out.trim_matches('-').to_string();

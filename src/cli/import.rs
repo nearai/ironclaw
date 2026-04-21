@@ -1,6 +1,8 @@
 //! Deprecated CLI alias for `ironclaw migrate`.
 
 #[cfg(feature = "migrate")]
+/// **Deprecated**: use [`MigrateCommand`](crate::cli::migrate::MigrateCommand) instead.
+/// This alias will be removed in a future release.
 pub type ImportCommand = crate::cli::migrate::MigrateCommand;
 
 #[cfg(feature = "migrate")]

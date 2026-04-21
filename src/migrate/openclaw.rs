@@ -317,13 +317,11 @@ fn map_openclaw_config(
         }
         if let (Some(api_key), Some(provider)) =
             (embeddings.api_key.clone(), embeddings.provider.as_deref())
+            && normalize_builtin_provider(provider).as_deref() == Some("openai")
         {
-            if normalize_builtin_provider(provider).as_deref() == Some("openai") {
-                secrets.push(
-                    ImportedSecret::new(builtin_secret_name("openai"), api_key)
-                        .with_provider("openai"),
-                );
-            }
+            secrets.push(
+                ImportedSecret::new(builtin_secret_name("openai"), api_key).with_provider("openai"),
+            );
         }
     }
 
