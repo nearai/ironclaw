@@ -491,7 +491,9 @@ impl McpClient {
             }
         }
         if let Some(ref session_manager) = self.session_manager
-            && let Some(session_id) = session_manager.get_session_id(&self.server_name).await
+            && let Some(session_id) = session_manager
+                .get_session_id(&self.user_id, &self.server_name)
+                .await
         {
             headers.insert("Mcp-Session-Id".to_string(), session_id);
         }
@@ -504,9 +506,11 @@ impl McpClient {
     /// reports that the current session ID is no longer valid.
     async fn reinitialize_session(&self) -> Result<InitializeResult, ToolError> {
         if let Some(ref session_manager) = self.session_manager {
-            session_manager.terminate(&self.server_name).await;
             session_manager
-                .get_or_create(&self.server_name, &self.server_url)
+                .terminate(&self.user_id, &self.server_name)
+                .await;
+            session_manager
+                .get_or_create(&self.user_id, &self.server_name, &self.server_url)
                 .await;
         }
 
@@ -535,7 +539,9 @@ impl McpClient {
             })?;
 
         if let Some(ref session_manager) = self.session_manager {
-            session_manager.mark_initialized(&self.server_name).await;
+            session_manager
+                .mark_initialized(&self.user_id, &self.server_name)
+                .await;
         }
 
         let notification = McpRequest::initialized_notification();
@@ -651,7 +657,9 @@ impl McpClient {
             .initialized
             .get_or_try_init(|| async {
                 if let Some(ref session_manager) = self.session_manager
-                    && session_manager.is_initialized(&self.server_name).await
+                    && session_manager
+                        .is_initialized(&self.user_id, &self.server_name)
+                        .await
                 {
                     return Ok(InitializeResult::default());
                 }

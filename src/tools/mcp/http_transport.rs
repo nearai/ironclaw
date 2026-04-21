@@ -136,15 +136,19 @@ impl McpTransport for HttpMcpTransport {
         })?;
 
         // Extract session ID from response headers before consuming the body.
+        // Scope by `(session_user_id, server_name)` so a second user's
+        // initialize handshake can't overwrite the first user's stored
+        // session ID and silently redirect their subsequent requests to
+        // the wrong server-side session.
         if let Some(ref session_manager) = self.session_manager
-            && let Some(ref _user_id) = self.session_user_id
+            && let Some(ref user_id) = self.session_user_id
             && let Some(session_id) = response
                 .headers()
                 .get("Mcp-Session-Id")
                 .and_then(|v| v.to_str().ok())
         {
             session_manager
-                .update_session_id(&self.server_name, Some(session_id.to_string()))
+                .update_session_id(user_id, &self.server_name, Some(session_id.to_string()))
                 .await;
         }
 

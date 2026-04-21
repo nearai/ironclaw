@@ -46,6 +46,8 @@ pub struct MockMcpServer {
 pub struct RecordedMcpRequest {
     pub method: String,
     pub authorization: Option<String>,
+    /// The inbound `Mcp-Session-Id` header, if the client echoed one back.
+    pub session_id: Option<String>,
 }
 
 impl MockMcpServer {
@@ -97,6 +99,10 @@ struct MockState {
     tool_response_idx: std::sync::Mutex<HashMap<String, usize>>,
     /// Recorded MCP requests for auth/assertion tests.
     recorded_requests: std::sync::Mutex<Vec<RecordedMcpRequest>>,
+    /// Monotonic counter for initialize responses; stamps a distinct
+    /// `Mcp-Session-Id` per handshake so multi-user isolation tests can
+    /// observe that each activation binds its own session.
+    session_counter: std::sync::Mutex<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -144,6 +150,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         tool_responses: response_map,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
+        session_counter: std::sync::Mutex::new(0),
     });
 
     let app = Router::new()
@@ -262,6 +269,10 @@ async fn handle_mcp(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let inbound_session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     state
         .recorded_requests
         .lock()
@@ -273,6 +284,7 @@ async fn handle_mcp(
             } else {
                 Some(auth.to_string())
             },
+            session_id: inbound_session_id,
         });
 
     if !auth.starts_with("Bearer ")
@@ -304,21 +316,33 @@ async fn handle_mcp(
         return StatusCode::OK.into_response();
     }
 
+    let mut response_session_id: Option<String> = None;
     let response = match req.method.as_str() {
-        "initialize" => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": req.id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "mock-mcp-server",
-                    "version": "1.0.0"
-                },
-                "capabilities": {
-                    "tools": {}
+        "initialize" => {
+            // Mint a fresh session per handshake — that's how real MCP
+            // servers behave, and it's what lets the isolation test assert
+            // that user-A and user-B never share a session ID.
+            let session_id = {
+                let mut counter = state.session_counter.lock().unwrap();
+                *counter += 1;
+                format!("mock-session-{}", *counter)
+            };
+            response_session_id = Some(session_id);
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": "mock-mcp-server",
+                        "version": "1.0.0"
+                    },
+                    "capabilities": {
+                        "tools": {}
+                    }
                 }
-            }
-        }),
+            })
+        }
         "tools/list" => {
             let tools: Vec<serde_json::Value> = state
                 .tools
@@ -373,5 +397,14 @@ async fn handle_mcp(
         }),
     };
 
-    Json(response).into_response()
+    if let Some(session_id) = response_session_id {
+        (
+            StatusCode::OK,
+            [("mcp-session-id", session_id.as_str())],
+            Json(response),
+        )
+            .into_response()
+    } else {
+        Json(response).into_response()
+    }
 }

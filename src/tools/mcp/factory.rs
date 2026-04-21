@@ -400,7 +400,9 @@ mod tests {
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
         // Use the normalised server name (hyphens → underscores) that the factory applies.
         let normalised_name = McpServerName::new("session_test").expect("valid");
-        session_manager.get_or_create(&normalised_name, &url).await;
+        session_manager
+            .get_or_create("test-user", &normalised_name, &url)
+            .await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;
@@ -417,8 +419,11 @@ mod tests {
             .await
             .expect("request should succeed");
 
-        // Verify the session manager captured the session ID from the response.
-        let captured = session_manager.get_session_id(&normalised_name).await;
+        // Verify the session manager captured the session ID from the response
+        // under the same `(user_id, server_name)` key the transport wrote with.
+        let captured = session_manager
+            .get_session_id("test-user", &normalised_name)
+            .await;
         assert_eq!(
             captured.as_deref(),
             Some(SESSION_ID),
