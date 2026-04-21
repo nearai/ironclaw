@@ -490,6 +490,8 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            client_thread_id: None,
+            client_response_id: None,
         }
     }
 

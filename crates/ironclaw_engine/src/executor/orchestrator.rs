@@ -83,6 +83,22 @@ fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
         .and_then(ValidTimezone::parse)
 }
 
+fn thread_client_thread_id(thread: &Thread) -> Option<String> {
+    thread
+        .metadata
+        .get("client_thread_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn thread_client_response_id(thread: &Thread) -> Option<String> {
+    thread
+        .metadata
+        .get("client_response_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -738,6 +754,8 @@ async fn handle_execute_code_step(
         current_call_id: None,
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        client_thread_id: thread_client_thread_id(thread),
+        client_response_id: thread_client_response_id(thread),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -913,6 +931,8 @@ async fn handle_execute_action(
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        client_thread_id: thread_client_thread_id(thread),
+        client_response_id: thread_client_response_id(thread),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1454,6 +1474,8 @@ async fn handle_execute_actions_parallel(
             // through the parallel batch path.
             source_channel: thread_source_channel(thread),
             user_timezone: thread_user_timezone(thread),
+            client_thread_id: thread_client_thread_id(thread),
+            client_response_id: thread_client_response_id(thread),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1480,6 +1502,8 @@ async fn handle_execute_actions_parallel(
         // for the duration of the parallel batch.
         let parallel_source_channel = thread_source_channel(thread);
         let parallel_user_timezone = thread_user_timezone(thread);
+        let parallel_client_thread_id = thread_client_thread_id(thread);
+        let parallel_client_response_id = thread_client_response_id(thread);
 
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
@@ -1497,6 +1521,8 @@ async fn handle_execute_actions_parallel(
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,
+                client_thread_id: parallel_client_thread_id.clone(),
+                client_response_id: parallel_client_response_id.clone(),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 

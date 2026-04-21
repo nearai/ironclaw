@@ -685,10 +685,13 @@ pub async fn create_response_handler(
 
     // Each POST gets its own unique response UUID.
     let response_uuid = Uuid::new_v4();
+    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
 
-    // Build the message for the agent loop.
+    // `response_id` flows through to ToolContext so tools can stamp the full
+    // per-turn resp_... into outbound notifications (see abound_send_wire).
     let mut metadata = serde_json::json!({
         "thread_id": &thread_id_str,
+        "response_id": &resp_id,
         "user_id": &user.user_id,
         "source": "responses_api",
     });
@@ -698,8 +701,6 @@ pub async fn create_response_handler(
     let msg = IncomingMessage::new("gateway", &user.user_id, &content)
         .with_thread(&thread_id_str)
         .with_metadata(metadata);
-
-    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
