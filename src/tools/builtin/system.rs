@@ -127,6 +127,7 @@ impl Tool for SystemVersionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::EngineVersion;
 
     #[test]
     fn version_tool_name() {
@@ -159,7 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn system_tools_list_includes_capability_actions() {
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
         let mut caps = ironclaw_engine::CapabilityRegistry::new();
         caps.register(sample_capability());
         registry.set_capability_registry(Arc::new(caps)).await;
