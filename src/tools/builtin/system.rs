@@ -78,6 +78,11 @@ impl Tool for SystemToolsListTool {
             }
         }
 
+        // Sort the combined list by name. `tool_definitions()` sorts its
+        // output, but `CapabilityRegistry::list()` is HashMap-ordered —
+        // sorting here keeps the output deterministic across runs.
+        tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
         Ok(ToolOutput::success(
             json!({ "tools": tools, "count": tools.len() }),
             start.elapsed(),
