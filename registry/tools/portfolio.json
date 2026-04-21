@@ -19,7 +19,12 @@
     "capabilities": "portfolio-tool.capabilities.json",
     "crate_name": "portfolio-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "sha256": "99d0ef6522735a99d41116bfdeed06e5b6107193905173050abf6b140d4215a9",
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.26.0/tool-portfolio-0.1.0-wasm32-wasip2.tar.gz"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Dune Analytics",
