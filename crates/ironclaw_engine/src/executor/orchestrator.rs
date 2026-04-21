@@ -778,16 +778,29 @@ async fn handle_llm_complete(
                 LlmResponse::Text(text) => {
                     serde_json::json!({"type": "text", "content": text, "usage": usage})
                 }
-                LlmResponse::Code { code, .. } => {
-                    serde_json::json!({"type": "code", "code": code, "usage": usage})
+                LlmResponse::Code {
+                    code,
+                    assistant_content,
+                } => {
+                    serde_json::json!({
+                        "type": "code",
+                        "code": code,
+                        "content": assistant_content.as_ref().map(|content| content.text().to_string()),
+                        "assistant_content": assistant_content,
+                        "usage": usage
+                    })
                 }
-                LlmResponse::ActionCalls { calls, content } => {
+                LlmResponse::ActionCalls {
+                    calls,
+                    assistant_content,
+                } => {
                     // Single source of truth for the Python interchange
                     // shape — must round-trip via `python_json_to_action_calls`.
                     let calls_json = action_calls_to_python_json(&calls);
                     serde_json::json!({
                         "type": "actions",
-                        "content": content,
+                        "content": assistant_content.as_ref().map(|content| content.text().to_string()),
+                        "assistant_content": assistant_content,
                         "calls": calls_json,
                         "usage": usage
                     })
@@ -2326,6 +2339,7 @@ fn build_orchestrator_inputs(
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
+                "assistant_content": m.assistant_content,
                 "action_name": m.action_name,
                 "action_call_id": m.action_call_id,
                 "action_calls": calls_json,
@@ -2387,6 +2401,8 @@ struct PythonActionCall {
     name: String,
     call_id: String,
     params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rationale: Option<String>,
 }
 
 impl From<&ActionCall> for PythonActionCall {
@@ -2395,6 +2411,7 @@ impl From<&ActionCall> for PythonActionCall {
             name: c.action_name.clone(),
             call_id: c.id.clone(),
             params: c.parameters.clone(),
+            rationale: c.rationale.clone(),
         }
     }
 }
@@ -2405,6 +2422,7 @@ impl From<PythonActionCall> for ActionCall {
             id: p.call_id,
             action_name: p.name,
             parameters: p.params,
+            rationale: p.rationale,
         }
     }
 }
@@ -2552,12 +2570,18 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             .get("action_calls")
             .filter(|v| !v.is_null())
             .and_then(python_json_to_action_calls);
+        let assistant_content = item
+            .get("assistant_content")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
 
         let message = match role {
             "System" | "system" => ThreadMessage::system(content),
             "Assistant" | "assistant" => {
                 if let Some(calls) = action_calls {
-                    ThreadMessage::assistant_with_actions(Some(content.to_string()), calls)
+                    ThreadMessage::assistant_with_action_content(assistant_content, calls)
+                } else if let Some(assistant_content) = assistant_content {
+                    ThreadMessage::assistant_with_typed_content(assistant_content)
                 } else {
                     ThreadMessage::assistant(content)
                 }
@@ -2721,6 +2745,7 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+    use crate::types::step::AssistantContent;
 
     // ── Orchestrator budget / error mapping ─────────────────────
 
@@ -3750,6 +3775,7 @@ mod tests {
             id: "call_abc123".to_string(),
             action_name: "google_drive_tool".to_string(),
             parameters: serde_json::json!({"query": "expenses"}),
+            rationale: None,
         };
 
         let python_json = serde_json::to_value(PythonActionCall::from(&original))
@@ -3777,11 +3803,13 @@ mod tests {
                 id: "call_1".to_string(),
                 action_name: "notion_notion_search".to_string(),
                 parameters: serde_json::json!({"query": "name"}),
+                rationale: None,
             },
             ActionCall {
                 id: "call_2".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"action": "list"}),
+                rationale: None,
             },
         ];
         let json = action_calls_to_python_json(&calls);
@@ -3807,6 +3835,44 @@ mod tests {
         assert_eq!(parsed[0].parameters, serde_json::json!({"q": "foo"}));
         assert_eq!(parsed[1].action_name, "google_drive_tool");
         assert_eq!(parsed[1].id, "call_abc");
+    }
+
+    #[test]
+    fn json_to_thread_messages_preserves_typed_assistant_content_and_tool_rationale() {
+        let working_messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "I should inspect the page before answering.",
+                "assistant_content": {
+                    "kind": "internal_reasoning",
+                    "text": "I should inspect the page before answering."
+                },
+                "action_calls": [
+                    {
+                        "name": "web_fetch",
+                        "call_id": "call_fetch_1",
+                        "params": {"url": "https://example.com"},
+                        "rationale": "Need the page contents before I can summarize it."
+                    }
+                ]
+            }
+        ]);
+
+        let messages = json_to_thread_messages(&working_messages).expect("must parse");
+        assert_eq!(messages.len(), 1);
+
+        let assistant = &messages[0];
+        assert!(matches!(
+            assistant.assistant_content.as_ref(),
+            Some(AssistantContent::InternalReasoning(text))
+                if text == "I should inspect the page before answering."
+        ));
+        let calls = assistant.action_calls.as_ref().expect("assistant action calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].rationale.as_deref(),
+            Some("Need the page contents before I can summarize it.")
+        );
     }
 
     #[test]
@@ -3987,6 +4053,7 @@ mod tests {
                 id: "call_resume_test".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"query": "budget"}),
+                rationale: None,
             }],
         );
 
@@ -4029,6 +4096,50 @@ mod tests {
     /// accept both formats — which is fine, but the PythonActionCall
     /// interchange type can then be removed. This test documents the
     /// current contract: canonical names are rejected by the parser.
+    #[test]
+    fn bootstrap_context_round_trips_typed_assistant_content_and_rationale() {
+        let msg = ThreadMessage::assistant_with_action_content(
+            Some(AssistantContent::InternalReasoning(
+                "I should inspect the page before answering.".to_string(),
+            )),
+            vec![ActionCall {
+                id: "call_fetch_1".to_string(),
+                action_name: "web_fetch".to_string(),
+                parameters: serde_json::json!({"url": "https://example.com"}),
+                rationale: Some("Need the page contents before I can summarize it.".to_string()),
+            }],
+        );
+
+        let calls_json = msg
+            .action_calls
+            .as_ref()
+            .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+        let serialized = serde_json::json!([{
+            "role": "Assistant",
+            "content": msg.content,
+            "assistant_content": msg.assistant_content,
+            "action_name": msg.action_name,
+            "action_call_id": msg.action_call_id,
+            "action_calls": calls_json,
+        }]);
+
+        let parsed = json_to_thread_messages(&serialized).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+
+        let assistant = &parsed[0];
+        assert!(matches!(
+            assistant.assistant_content.as_ref(),
+            Some(AssistantContent::InternalReasoning(text))
+                if text == "I should inspect the page before answering."
+        ));
+        let calls = assistant.action_calls.as_ref().expect("assistant action calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].rationale.as_deref(),
+            Some("Need the page contents before I can summarize it.")
+        );
+    }
+
     #[test]
     fn canonical_action_call_field_names_do_not_round_trip() {
         let serialized_with_canonical_names = serde_json::json!([{

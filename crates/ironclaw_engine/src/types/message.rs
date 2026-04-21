@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::provenance::Provenance;
-use crate::types::step::ActionCall;
+use crate::types::step::{ActionCall, AssistantContent};
 
 /// Role of a message participant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,11 @@ pub enum MessageRole {
 pub struct ThreadMessage {
     pub role: MessageRole,
     pub content: String,
+    /// Optional typed assistant-content semantics. This supplements the legacy
+    /// `content` string so persisted rows and existing callers remain
+    /// backwards-compatible while engine-v2 adapters gain stronger semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_content: Option<AssistantContent>,
     pub provenance: Provenance,
     /// For ActionResult messages: the call ID this is responding to.
     pub action_call_id: Option<String>,
@@ -40,6 +45,7 @@ impl ThreadMessage {
         Self {
             role: MessageRole::System,
             content: content.into(),
+            assistant_content: None,
             provenance: Provenance::System,
             action_call_id: None,
             action_name: None,
@@ -53,6 +59,7 @@ impl ThreadMessage {
         Self {
             role: MessageRole::User,
             content: content.into(),
+            assistant_content: None,
             provenance: Provenance::User,
             action_call_id: None,
             action_name: None,
@@ -63,9 +70,16 @@ impl ThreadMessage {
 
     /// Create an assistant text message.
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_with_typed_content(AssistantContent::Final(content.into()))
+    }
+
+    /// Create an assistant message with explicit typed content.
+    pub fn assistant_with_typed_content(content: AssistantContent) -> Self {
+        let raw_content = content.text().to_string();
         Self {
             role: MessageRole::Assistant,
-            content: content.into(),
+            content: raw_content,
+            assistant_content: Some(content),
             provenance: Provenance::LlmGenerated,
             action_call_id: None,
             action_name: None,
@@ -79,6 +93,28 @@ impl ThreadMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.unwrap_or_default(),
+            assistant_content: None,
+            provenance: Provenance::LlmGenerated,
+            action_call_id: None,
+            action_name: None,
+            action_calls: Some(calls),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Create an assistant message with action calls and typed content.
+    pub fn assistant_with_action_content(
+        content: Option<AssistantContent>,
+        calls: Vec<ActionCall>,
+    ) -> Self {
+        let raw_content = content
+            .as_ref()
+            .map(|content| content.text().to_string())
+            .unwrap_or_default();
+        Self {
+            role: MessageRole::Assistant,
+            content: raw_content,
+            assistant_content: content,
             provenance: Provenance::LlmGenerated,
             action_call_id: None,
             action_name: None,
@@ -97,6 +133,7 @@ impl ThreadMessage {
         Self {
             role: MessageRole::ActionResult,
             content: content.into(),
+            assistant_content: None,
             provenance: Provenance::ToolOutput {
                 action_name: name.clone(),
             },
