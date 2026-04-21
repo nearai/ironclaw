@@ -197,6 +197,8 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
         user_timezone: Option<&str>,
+        client_thread_id: Option<&str>,
+        client_response_id: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -226,12 +228,23 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "injecting message into active thread"
                 );
-                // Known limitation: a tz change mid-turn (user travels between
-                // messages of the same active thread) is not propagated. The
-                // running ExecutionLoop holds an in-memory copy of the Thread
-                // and cannot be updated externally without a new signal type.
-                // Updating the persisted record here would not affect the live
-                // step. Rare in practice; defer to a follow-up if needed.
+                // Known limitation: the running loop holds an in-memory Thread
+                // copy; set_thread_metadata writes only reach it on reload, so
+                // tz/client_response_id changes mid-turn are best-effort. Safe
+                // because the thread_uuid half stays stable — a stale
+                // response_uuid still routes previous_response_id correctly.
+                if let Some(rid) = client_response_id
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "client_response_id", rid)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh client_response_id on inject"
+                    );
+                }
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
@@ -259,6 +272,18 @@ impl ConversationManager {
                         thread_id = %thread_id,
                         error = %e,
                         "failed to refresh user_timezone on resume; thread will use previous value"
+                    );
+                }
+                if let Some(rid) = client_response_id
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "client_response_id", rid)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh client_response_id on resume; thread will use previous value"
                     );
                 }
                 self.thread_manager
@@ -301,6 +326,18 @@ impl ConversationManager {
                     initial_metadata.insert(
                         "user_timezone".into(),
                         serde_json::Value::String(tz.to_string()),
+                    );
+                }
+                if let Some(cid) = client_thread_id {
+                    initial_metadata.insert(
+                        "client_thread_id".into(),
+                        serde_json::Value::String(cid.to_string()),
+                    );
+                }
+                if let Some(rid) = client_response_id {
+                    initial_metadata.insert(
+                        "client_response_id".into(),
+                        serde_json::Value::String(rid.to_string()),
                     );
                 }
 
@@ -844,6 +881,8 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -911,6 +950,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
             )
             .await
@@ -1011,6 +1052,8 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1060,6 +1103,8 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
+                None,
             )
             .await
         });
@@ -1070,6 +1115,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
             )
             .await
@@ -1146,6 +1193,8 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
+                None,
                 None,
             )
             .await

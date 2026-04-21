@@ -832,11 +832,20 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
-        // Propagate thread_id into metadata so tools (e.g. abound_send_wire)
-        // can reference it as notify_thread_id in outbound notifications.
-        job_ctx.metadata = serde_json::json!({
-            "notify_thread_id": context.thread_id.to_string(),
+        // notify_thread_id: stable thread id for routing (falls back to engine
+        // ThreadId for legacy channels). notify_response_id: full per-turn
+        // resp_... for tools that round-trip it to external services.
+        let notify_thread_id = context
+            .client_thread_id
+            .clone()
+            .unwrap_or_else(|| context.thread_id.to_string());
+        let mut job_metadata = serde_json::json!({
+            "notify_thread_id": notify_thread_id,
         });
+        if let Some(ref rid) = context.client_response_id {
+            job_metadata["notify_response_id"] = serde_json::Value::String(rid.clone());
+        }
+        job_ctx.metadata = job_metadata;
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.
@@ -1736,6 +1745,58 @@ mod tests {
         }
     }
 
+    /// Test tool that captures the `notify_thread_id` and `notify_response_id`
+    /// it observes in `JobContext.metadata`. Lets tests assert that the
+    /// engine-v2 adapter plumbs the channel-supplied ids into the tool-visible
+    /// context (which is what `abound_send_wire` reads for outbound
+    /// notifications).
+    #[derive(Default)]
+    struct CapturedNotifyIds {
+        thread_id: Option<String>,
+        response_id: Option<String>,
+    }
+
+    struct NotifyThreadIdCaptureTool {
+        captured: Arc<tokio::sync::Mutex<CapturedNotifyIds>>,
+    }
+
+    #[async_trait]
+    impl Tool for NotifyThreadIdCaptureTool {
+        fn name(&self) -> &str {
+            "notify_thread_id_capture"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that captures notify_thread_id / notify_response_id"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            let mut slot = self.captured.lock().await;
+            slot.thread_id = ctx
+                .metadata
+                .get("notify_thread_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            slot.response_id = ctx
+                .metadata
+                .get("notify_response_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
     fn lease() -> ironclaw_engine::CapabilityLease {
         ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -1764,6 +1825,8 @@ mod tests {
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
             user_timezone: None,
+            client_thread_id: None,
+            client_response_id: None,
         }
     }
 
@@ -2485,6 +2548,8 @@ mod tests {
             current_call_id: None,
             source_channel: None,
             user_timezone: None,
+            client_thread_id: None,
+            client_response_id: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2580,6 +2645,8 @@ mod tests {
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
             user_timezone: None,
+            client_thread_id: None,
+            client_response_id: None,
         };
 
         let result = adapter
@@ -2678,5 +2745,186 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    /// When the caller supplies `client_thread_id` (the Responses API thread
+    /// UUID decoded from `previous_response_id`), the adapter must stamp
+    /// that exact value into `JobContext.metadata["notify_thread_id"]` so
+    /// tools like `abound_send_wire` send the stable, client-visible id in
+    /// outbound notifications — not the engine's internal `ThreadId`.
+    #[tokio::test]
+    async fn notify_thread_id_uses_client_thread_id_when_set() {
+        use ironclaw_safety::SafetyConfig;
+
+        let captured = Arc::new(tokio::sync::Mutex::new(CapturedNotifyIds::default()));
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(NotifyThreadIdCaptureTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let client_thread_id = "f3cd4882-f5b1-44ac-a47f-0ee5e742b0bd".to_string();
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: engine_thread_id,
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_notify_1".to_string()),
+            source_channel: None,
+            user_timezone: None,
+            client_thread_id: Some(client_thread_id.clone()),
+            client_response_id: None,
+        };
+
+        adapter
+            .execute_action(
+                "notify_thread_id_capture",
+                serde_json::json!({}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool executed");
+
+        let observed = captured.lock().await;
+        assert_eq!(
+            observed.thread_id.as_deref(),
+            Some(client_thread_id.as_str()),
+            "tool should see the client-supplied thread id, not the engine id"
+        );
+        assert_ne!(
+            observed.thread_id.as_deref(),
+            Some(engine_thread_id.to_string().as_str()),
+            "tool must not see the engine's internal ThreadId when a client id was supplied"
+        );
+    }
+
+    /// Legacy callers (CLI, TUI, non-Responses-API channels) don't supply a
+    /// client thread id. The adapter must fall back to the engine's internal
+    /// `ThreadId` so existing tool behavior is preserved.
+    #[tokio::test]
+    async fn notify_thread_id_falls_back_to_engine_thread_id_when_absent() {
+        use ironclaw_safety::SafetyConfig;
+
+        let captured = Arc::new(tokio::sync::Mutex::new(CapturedNotifyIds::default()));
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(NotifyThreadIdCaptureTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        adapter
+            .execute_action(
+                "notify_thread_id_capture",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(engine_thread_id, Some("call_notify_2")),
+            )
+            .await
+            .expect("tool executed");
+
+        let observed = captured.lock().await;
+        assert_eq!(
+            observed.thread_id.as_deref(),
+            Some(engine_thread_id.to_string().as_str()),
+            "fallback must be the engine ThreadId"
+        );
+        assert!(
+            observed.response_id.is_none(),
+            "notify_response_id must be absent when no client_response_id is supplied"
+        );
+    }
+
+    /// When the caller supplies `client_response_id` (the full per-turn
+    /// `resp_{response_uuid}{thread_uuid}` from the current Responses API
+    /// POST), the adapter must stamp that exact value into
+    /// `JobContext.metadata["notify_response_id"]` so tools can include it
+    /// in outbound notifications. The integrator can then paste it straight
+    /// into `previous_response_id` to continue the conversation after an
+    /// out-of-band approval callback.
+    #[tokio::test]
+    async fn notify_response_id_is_stamped_when_client_response_id_is_set() {
+        use ironclaw_safety::SafetyConfig;
+
+        let captured = Arc::new(tokio::sync::Mutex::new(CapturedNotifyIds::default()));
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(NotifyThreadIdCaptureTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let client_thread_id = "f3cd4882-f5b1-44ac-a47f-0ee5e742b0bd".to_string();
+        let client_response_id =
+            "resp_70c9f2b6940e495c8cb5b5a290ca661df3cd4882f5b144aca47f0ee5e742b0bd".to_string();
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_notify_resp".to_string()),
+            source_channel: None,
+            user_timezone: None,
+            client_thread_id: Some(client_thread_id.clone()),
+            client_response_id: Some(client_response_id.clone()),
+        };
+
+        adapter
+            .execute_action(
+                "notify_thread_id_capture",
+                serde_json::json!({}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool executed");
+
+        let observed = captured.lock().await;
+        assert_eq!(
+            observed.thread_id.as_deref(),
+            Some(client_thread_id.as_str()),
+            "notify_thread_id should carry the client thread uuid"
+        );
+        assert_eq!(
+            observed.response_id.as_deref(),
+            Some(client_response_id.as_str()),
+            "notify_response_id should carry the full per-turn resp_... id"
+        );
     }
 }

@@ -401,6 +401,16 @@ async fn execute_pending_gate_action(
             .get("user_timezone")
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
+        client_thread_id: thread
+            .metadata
+            .get("client_thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        client_response_id: thread
+            .metadata
+            .get("client_response_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     state.effect_adapter.reset_call_count();
@@ -2397,7 +2407,20 @@ async fn handle_with_engine_inner(
         .as_deref()
         .and_then(ironclaw_engine::ValidTimezone::parse);
 
-    // Handle the message — spawns a new thread or injects into active one
+    // Handle the message — spawns a new thread or injects into active one.
+    //
+    // `conversation_scope()` carries the channel-supplied stable thread id
+    // (e.g. the thread UUID embedded in a Responses API `previous_response_id`).
+    // `response_id` in message metadata carries the full per-turn
+    // `resp_{response_uuid}{thread_uuid}`. Stamping both into thread metadata
+    // lets tools like `abound_send_wire` attach them to outbound notifications
+    // so remote-client callbacks can correlate back to a specific turn.
+    let client_thread_id = message.conversation_scope().map(str::to_string);
+    let client_response_id = message
+        .metadata
+        .get("response_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let thread_id = state
         .conversation_manager
         .handle_user_message(
@@ -2407,6 +2430,8 @@ async fn handle_with_engine_inner(
             &message.user_id,
             thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
+            client_thread_id.as_deref(),
+            client_response_id.as_deref(),
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;

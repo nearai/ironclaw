@@ -29,6 +29,12 @@ pub struct ThreadExecutionContext {
     /// Validated IANA timezone of the user (e.g. "America/New_York").
     /// Used by mission_create to default cron timezone, and exposed to CodeAct scripts.
     pub user_timezone: Option<ValidTimezone>,
+    /// Channel-supplied stable thread id (Responses API thread half).
+    /// Stable across turns. `None` for callers that don't supply one.
+    pub client_thread_id: Option<String>,
+    /// Channel-supplied per-turn response id (full Responses API `resp_...`).
+    /// Changes every turn. `None` for callers that don't supply one.
+    pub client_response_id: Option<String>,
 }
 
 /// Abstraction over capability action execution.

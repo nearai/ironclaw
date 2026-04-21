@@ -431,15 +431,28 @@ impl Tool for AboundSendWireTool {
                 .unwrap_or_default()
                 .as_secs();
 
+            // Abound's `notify_thread_id` field carries the full per-turn
+            // Responses API `resp_{response_uuid}{thread_uuid}` — the exact
+            // string the client saw on `response.id` — so the integrator
+            // can paste it straight into `previous_response_id` after the
+            // approval callback. Fall back to the bare client thread id
+            // (or the engine ThreadId) only when no response id is present,
+            // which is the case for non-Responses-API channels.
+            let response_id = ctx
+                .metadata
+                .get("notify_response_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
             let thread_id = ctx
                 .metadata
                 .get("notify_thread_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let notify_id = response_id.unwrap_or(thread_id);
 
             tracing::debug!(
                 user_id = %ctx.user_id,
-                thread_id = %thread_id,
+                notify_id = %notify_id,
                 ctx_metadata = %ctx.metadata,
                 "abound_send_wire: send action — resolving notify_thread_id"
             );
@@ -447,7 +460,7 @@ impl Tool for AboundSendWireTool {
             let notif_body = json!({
                 "message_id": format!("wire_approval_{ts}"),
                 "action_type": "notification",
-                "notify_thread_id": thread_id,
+                "notify_thread_id": notify_id,
                 "meta_data": {
                     "type": "wire_approval",
                     "amount": amount,
@@ -902,16 +915,25 @@ impl Tool for AboundRateAlertTool {
 
         // Step 2: Send notification if threshold exceeded or force_notify
         let notification_sent = if should_notify {
+            // See `abound_send_wire(send)` for the `notify_thread_id` contract:
+            // it carries the full `resp_...` when the caller is the Responses
+            // API, and falls back to the bare client thread id otherwise.
+            let response_id = ctx
+                .metadata
+                .get("notify_response_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
             let thread_id = ctx
                 .metadata
                 .get("notify_thread_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let notify_id = response_id.unwrap_or(thread_id);
 
             let notif_body = json!({
                 "message_id": message_id,
                 "action_type": "notification",
-                "notify_thread_id": thread_id,
+                "notify_thread_id": notify_id,
                 "meta_data": {
                     "alert": format!("{from}/{to} rate alert"),
                     "current_rate": current_rate,
@@ -976,28 +998,4 @@ mod tests {
         assert!(validate_currency_code("").is_err());
     }
 
-    #[test]
-    fn send_notification_carries_notify_thread_id() {
-        let thread_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
-        let ctx_metadata = json!({ "notify_thread_id": thread_id });
-
-        let extracted = ctx_metadata
-            .get("notify_thread_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let notif_body = json!({
-            "message_id": "wire_approval_123",
-            "action_type": "notification",
-            "notify_thread_id": extracted,
-            "meta_data": {
-                "type": "wire_approval",
-            },
-        });
-
-        assert_eq!(
-            notif_body["notify_thread_id"].as_str(),
-            Some(thread_id),
-        );
-    }
 }
