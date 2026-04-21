@@ -47,10 +47,164 @@ pub enum BridgeOutcome {
 use std::collections::HashSet;
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
+/// Returns true when engine v2 should handle traffic.
+///
+/// Precedence (first match wins):
+/// 1. `IRONCLAW_LEGACY_ENGINE=true` → **false** (hard opt-out; keeps v1 even
+///    if v2 is the default or explicitly enabled).
+/// 2. `ENGINE_V2=true` / `ENGINE_V2=1` → **true** (explicit opt-in).
+/// 3. Default → **false** until issue #2800 PR-F merges the actual flip.
+///
+/// For per-user canary routing, see [`is_engine_v2_enabled_for_user`].
 pub fn is_engine_v2_enabled() -> bool {
-    std::env::var("ENGINE_V2")
-        .map(|v| v == "true" || v == "1")
+    decide_engine_v2(
+        std::env::var("IRONCLAW_LEGACY_ENGINE").ok().as_deref(),
+        std::env::var("ENGINE_V2").ok().as_deref(),
+        None, // canary ignored without a user_id
+        None,
+    )
+}
+
+/// Returns true when engine v2 should handle **this specific user's** traffic.
+///
+/// Same precedence as [`is_engine_v2_enabled`], with an additional step between
+/// explicit opt-in and the default: if `ENGINE_V2_CANARY_PCT=N` is set,
+/// `hash(user_id) % 100 < N` routes the user to v2. This lets staged rollouts
+/// pick a reproducible cohort from `user_id` alone, without any per-user state.
+pub fn is_engine_v2_enabled_for_user(user_id: &str) -> bool {
+    decide_engine_v2(
+        std::env::var("IRONCLAW_LEGACY_ENGINE").ok().as_deref(),
+        std::env::var("ENGINE_V2").ok().as_deref(),
+        std::env::var("ENGINE_V2_CANARY_PCT").ok().as_deref(),
+        Some(user_id),
+    )
+}
+
+/// Pure-function core of the gating decision. Separated from env reads so the
+/// precedence rules are exhaustively unit-testable without mutating process
+/// globals (env vars are process-wide and race across test threads).
+fn decide_engine_v2(
+    legacy_flag: Option<&str>,
+    v2_flag: Option<&str>,
+    canary_pct: Option<&str>,
+    user_id: Option<&str>,
+) -> bool {
+    // 1. Hard opt-out wins.
+    if legacy_flag
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "on"))
         .unwrap_or(false)
+    {
+        return false;
+    }
+    // 2. Explicit opt-in wins.
+    if v2_flag.map(|v| v == "true" || v == "1").unwrap_or(false) {
+        return true;
+    }
+    // 3. Canary, only when user_id is available and the pct parses.
+    if let (Some(pct_raw), Some(user_id)) = (canary_pct, user_id)
+        && let Ok(pct) = pct_raw.trim().parse::<u32>()
+    {
+        let pct = pct.min(100);
+        if pct == 0 {
+            return false;
+        }
+        if pct >= 100 {
+            return true;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user_id.hash(&mut hasher);
+        let bucket = (hasher.finish() % 100) as u32;
+        return bucket < pct;
+    }
+    false
+}
+
+#[cfg(test)]
+mod gating_tests {
+    use super::decide_engine_v2;
+
+    /// `IRONCLAW_LEGACY_ENGINE=true` must force v1 even when the explicit
+    /// opt-in is also set. Regression for the hard opt-out contract in #2800.
+    #[test]
+    fn legacy_opt_out_beats_explicit_opt_in() {
+        assert!(!decide_engine_v2(
+            Some("true"),
+            Some("true"),
+            Some("100"),
+            Some("u1")
+        ));
+        assert!(!decide_engine_v2(Some("1"), Some("1"), None, None));
+        assert!(!decide_engine_v2(Some("ON"), None, None, None));
+    }
+
+    #[test]
+    fn explicit_opt_in_turns_on_v2() {
+        assert!(decide_engine_v2(None, Some("true"), None, None));
+        assert!(decide_engine_v2(None, Some("1"), None, None));
+    }
+
+    #[test]
+    fn default_without_any_flags_is_v1() {
+        assert!(!decide_engine_v2(None, None, None, None));
+        // Random string in ENGINE_V2 that isn't "true"/"1" must not enable v2.
+        assert!(!decide_engine_v2(None, Some("yes"), None, None));
+    }
+
+    #[test]
+    fn canary_zero_pct_disables() {
+        assert!(!decide_engine_v2(None, None, Some("0"), Some("u1")));
+    }
+
+    #[test]
+    fn canary_hundred_pct_enables_all_users() {
+        assert!(decide_engine_v2(None, None, Some("100"), Some("u1")));
+        assert!(decide_engine_v2(None, None, Some("100"), Some("u2")));
+        // Values above 100 clamp to 100 rather than overflow-wrap.
+        assert!(decide_engine_v2(None, None, Some("250"), Some("u1")));
+    }
+
+    /// Canary must be deterministic for a given user_id. Two consecutive
+    /// calls must agree, so users aren't shuffled between engines turn-by-turn.
+    #[test]
+    fn canary_is_stable_for_user_id() {
+        let a = decide_engine_v2(None, None, Some("50"), Some("user-abc"));
+        let b = decide_engine_v2(None, None, Some("50"), Some("user-abc"));
+        assert_eq!(a, b);
+    }
+
+    /// A 50% canary across a representative cohort must produce roughly
+    /// 50% distribution — not 0% or 100% (which would indicate a broken hash).
+    #[test]
+    fn canary_50_pct_splits_cohort() {
+        let enabled = (0..200)
+            .filter(|i| decide_engine_v2(None, None, Some("50"), Some(&format!("user-{i}"))))
+            .count();
+        // Allow a generous band: 30-70% of 200 = 60-140.
+        assert!(
+            (60..=140).contains(&enabled),
+            "expected 60-140 users in v2 cohort, got {enabled}"
+        );
+    }
+
+    /// Canary is ignored when user_id is missing — unreachable from
+    /// `is_engine_v2_enabled()`, but the invariant is that env-only callers
+    /// never observe non-deterministic canary noise.
+    #[test]
+    fn canary_ignored_without_user_id() {
+        assert!(!decide_engine_v2(None, None, Some("100"), None));
+    }
+
+    /// Invalid canary string falls back to default (v1), does not panic.
+    #[test]
+    fn canary_invalid_string_falls_back_to_default() {
+        assert!(!decide_engine_v2(
+            None,
+            None,
+            Some("not-a-number"),
+            Some("u1")
+        ));
+    }
 }
 
 /// Shorthand for building an `Error` from an engine-related failure.

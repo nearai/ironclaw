@@ -57,6 +57,7 @@ pub use router::{
     // Initialization
     init_engine,
     is_engine_v2_enabled,
+    is_engine_v2_enabled_for_user,
     list_engine_missions,
     list_engine_projects,
     list_engine_thread_events,

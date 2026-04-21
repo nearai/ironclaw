@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(engine)* `IRONCLAW_LEGACY_ENGINE=true` hard opt-out forces v1 even when v2 is the default or explicitly enabled. Canary rollout mechanism `ENGINE_V2_CANARY_PCT=N` routes N% of users (by stable `user_id` hash) to engine v2 while others stay on v1. See `docs/engine-v2.md`. Refs #2800.
+- *(engine)* `create_job` / `cancel_job` are aliased to `mission_create` / `mission_complete` when running on engine v2. `build_software` remains v1-only. Refs #2800.
+- *(engine)* engine v2 now records per-action success rate and latency via `ReliabilityRecordingEffects`. Kill switch: `ENGINE_V2_RELIABILITY_HINTS=false`. Refs #2800.
+
 ### Changed
 
 - *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.
 - *(web)* extension setup/auth `ActionResponse` payloads no longer include the legacy `verification` field; clients should use `onboarding_state` / `onboarding` data instead of that deprecated wire field.
+- *(llm)* per-call USD cost formula extracted to a single shared helper (`src/llm/costs.rs::compute_call_cost_decimal`) so v1 and v2 bill identical numbers for the same LLM call. Refs #2800.
 ## [0.25.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.24.0...ironclaw-v0.25.0) - 2026-04-11
 
 ### Added
