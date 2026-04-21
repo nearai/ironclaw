@@ -1813,6 +1813,36 @@ Test skill
     }
 
     #[tokio::test]
+    async fn check_http_requires_binding_approval_when_active_skills_unknown() {
+        let store = test_store();
+        store
+            .create(
+                "user1",
+                crate::secrets::CreateSecretParams::new("github_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+        let settings_store: Arc<dyn SettingsStore + Send + Sync> =
+            Arc::new(MemorySettingsStore::new());
+        let mgr = make_auth_manager(store).with_settings_store_override(settings_store);
+        let registry = make_registry_with_approval_mapping(
+            "github_token",
+            "api.github.com",
+            "github-workflow",
+        );
+
+        let params = serde_json::json!({"url": "https://api.github.com/repos"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry, &[])
+            .await;
+
+        assert!(
+            matches!(result, AuthCheckResult::BindingApprovalRequired(_)),
+            "Expected BindingApprovalRequired when active skill provenance is unavailable, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn check_http_expired_credential_without_refresh_is_missing() {
         let store = test_store();
         let params = crate::secrets::CreateSecretParams::new("github_token", "ghp_test123")
