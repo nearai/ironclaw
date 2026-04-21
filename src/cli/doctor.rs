@@ -631,21 +631,17 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
 
     // Determine which source won. Mirrors `SecretsConfig::resolve`'s
     // order: env first, keychain second, but without the auto-generate
-    // fallback.
-    let source = if std::env::var("SECRETS_MASTER_KEY")
+    // fallback — so the only two reachable outcomes are `Env` or
+    // `Keychain`. `KeySource::None` is *not* reachable here because the
+    // `Some(master_key_hex) else Skip` guard above already returned.
+    let env_wins = std::env::var("SECRETS_MASTER_KEY")
         .ok()
         .filter(|s| !s.is_empty())
-        .is_some()
-    {
-        crate::settings::KeySource::Env
+        .is_some();
+    let (source, source_label) = if env_wins {
+        (crate::settings::KeySource::Env, "env / ~/.ironclaw/.env")
     } else {
-        crate::settings::KeySource::Keychain
-    };
-
-    let source_label = match source {
-        crate::settings::KeySource::Keychain => "OS keychain",
-        crate::settings::KeySource::Env => "env / ~/.ironclaw/.env",
-        crate::settings::KeySource::None => "unset",
+        (crate::settings::KeySource::Keychain, "OS keychain")
     };
 
     // 2. Surface a warning when settings disagree with the resolved runtime

@@ -173,7 +173,6 @@ fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFai
     } else {
         OrchestratorFailureKind::Other {
             prefix: prefix.to_string(),
-            message: err_msg.to_string(),
         }
     };
 
@@ -2746,15 +2745,37 @@ mod tests {
         );
     }
 
+    /// Regression for Copilot review on PR #2753 (commit 042c2ee7) —
+    /// `Other`'s user-facing Display used to embed the raw `err_msg`.
+    /// Surfaces like `runtime/mission.rs::process_mission_outcome_and_notify`
+    /// render `format!("Mission failed: {error}")` directly, bypassing the
+    /// channel-edge sanitizer in `bridge::user_facing_errors`, so any
+    /// unclassified Monty output would leak tracebacks / internal paths
+    /// there. The generic user-facing text now reads "internal orchestrator
+    /// failure"; the raw message is preserved in `debug_detail`.
     #[test]
-    fn failure_reason_passes_through_unknown_errors() {
+    fn failure_reason_hides_unknown_raw_message_from_user_text() {
         let failure =
             classify_orchestrator_failure("Orchestrator runtime error", "NameError: foo undefined");
         assert!(matches!(
             failure.kind,
             OrchestratorFailureKind::Other { .. }
         ));
-        assert!(failure.user_message().contains("NameError"));
+        let rendered = failure.user_message();
+        assert!(
+            !rendered.contains("NameError"),
+            "Other variant must not surface raw err_msg in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "Other variant should render the generic fallback, got: {rendered}"
+        );
+        // Raw detail is still available for operator triage via debug_detail.
+        assert!(
+            failure.debug_detail().contains("NameError"),
+            "debug_detail must preserve the raw err_msg, got: {}",
+            failure.debug_detail()
+        );
     }
 
     /// Regression for Copilot review on PR #2753 — substring `"duration"`

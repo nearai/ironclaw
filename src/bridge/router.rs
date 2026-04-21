@@ -77,18 +77,28 @@ fn bridge_outcome_for_failed_thread(
     user_id: &str,
     channel: &str,
 ) -> BridgeOutcome {
-    // Raw error + low-level detail are always logged. `tracing::warn!` flows
-    // through `log_layer` into the gateway's log event stream, so operators
-    // see both the sanitized user reply (via the Debug Inspector error
-    // activity) and the raw diagnostic trail side-by-side. The chat reply
-    // stays sanitized per `.claude/rules/error-handling.md`.
+    // `warn!` carries only the size of `debug_detail`, not its contents —
+    // a full Python traceback or upstream HTTP body can be multi-KB and
+    // would flood higher-severity logs with internal text that's already
+    // available on the SSE `error` event and at `debug!` level. Operators
+    // who need the full detail look at the Debug Inspector (always) or
+    // `RUST_LOG=ironclaw::bridge::router=debug` (on demand). The chat
+    // reply stays sanitized per `.claude/rules/error-handling.md`.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
         error = %error,
-        debug_detail = ?debug_detail,
+        debug_detail_bytes = debug_detail.map(|d| d.len()),
         "engine v2: thread failed; showing user-friendly summary",
     );
+    if let Some(detail) = debug_detail {
+        tracing::debug!(
+            user_id = %user_id,
+            channel = %channel,
+            detail,
+            "engine v2: thread failure debug detail",
+        );
+    }
     BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
 }
 

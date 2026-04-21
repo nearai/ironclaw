@@ -28,8 +28,16 @@ pub enum OrchestratorFailureKind {
     #[error("{prefix}: Monty VM panicked during {phase}")]
     VmPanic { prefix: String, phase: &'static str },
 
-    #[error("{prefix}: {message}")]
-    Other { prefix: String, message: String },
+    /// Unclassified Monty failure. The raw message is deliberately NOT
+    /// part of the Display rendering — it can carry internal file paths,
+    /// Python tracebacks, or upstream HTTP bodies that haven't matched
+    /// any of the explicit classifiers above. Channel-edge surfaces that
+    /// bypass `bridge::user_facing_errors::user_facing_thread_failure`
+    /// (mission notifications, third-party integrations) would otherwise
+    /// leak it. The full raw text lives in `OrchestratorFailure::debug_detail`
+    /// for operator triage — see the PR #2753 review discussion.
+    #[error("{prefix}: internal orchestrator failure")]
+    Other { prefix: String },
 }
 
 /// Structured orchestrator failure: user-safe classification plus preserved
