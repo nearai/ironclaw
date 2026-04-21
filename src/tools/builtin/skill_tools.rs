@@ -2294,30 +2294,8 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_deflate() {
-        // Build a real ZIP with flate2 + manual header construction.
-        use flate2::Compression;
-        use flate2::write::DeflateEncoder;
-        use std::io::Write;
-
         let skill_md = b"---\nname: test\n---\n# Test Skill\n";
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(skill_md).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        let mut zip = Vec::new();
-        // Local file header
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x14, 0x00]); // version needed (2.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x08, 0x00]); // compression: deflate
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32 (unused)
-        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(&compressed);
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Deflated);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: test\n---\n# Test Skill\n");
@@ -2326,21 +2304,7 @@ mod tests {
     #[test]
     fn test_extract_skill_from_zip_store() {
         let skill_md = b"---\nname: stored\n---\n# Stored\n";
-
-        let mut zip = Vec::new();
-        // Local file header
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed (1.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // compressed = uncompressed
-        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes());
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(skill_md);
+        let zip = build_zip_archive(&[("SKILL.md", skill_md)], zip::CompressionMethod::Stored);
 
         let result = super::extract_skill_from_zip(&zip).unwrap();
         assert_eq!(result, "---\nname: stored\n---\n# Stored\n");
@@ -2686,19 +2650,7 @@ mod tests {
 
     #[test]
     fn test_extract_skill_from_zip_missing_skill_md() {
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
-        zip.extend_from_slice(&[0x0A, 0x00]); // version
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&2u32.to_le_bytes()); // compressed size
-        zip.extend_from_slice(&2u32.to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&10u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"_meta.json");
-        zip.extend_from_slice(b"{}");
+        let zip = build_zip_archive(&[("_meta.json", b"{}")], zip::CompressionMethod::Stored);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(err.to_string().contains("does not contain SKILL.md"));
@@ -2706,22 +2658,24 @@ mod tests {
 
     // ── ZIP extraction security regression tests ────────────────────────
 
-    /// Helper: build a minimal ZIP local file header with Store compression.
+    fn build_zip_archive(
+        entries: &[(&str, &[u8])],
+        compression: zip::CompressionMethod,
+    ) -> Vec<u8> {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default().compression_method(compression);
+        for (file_name, content) in entries {
+            writer.start_file(*file_name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     fn build_zip_entry_store(file_name: &str, content: &[u8]) -> Vec<u8> {
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed (1.0)
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store (0)
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-        zip.extend_from_slice(&(file_name.len() as u16).to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(file_name.as_bytes());
-        zip.extend_from_slice(content);
-        zip
+        build_zip_archive(&[(file_name, content)], zip::CompressionMethod::Stored)
     }
 
     #[test]
@@ -2735,9 +2689,10 @@ mod tests {
     #[test]
     fn test_zip_extract_ignores_non_skill_entries() {
         // ZIP with README.md and src/main.rs but no SKILL.md -- should error.
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&build_zip_entry_store("README.md", b"# Readme"));
-        zip.extend_from_slice(&build_zip_entry_store("src/main.rs", b"fn main() {}"));
+        let zip = build_zip_archive(
+            &[("README.md", b"# Readme"), ("src/main.rs", b"fn main() {}")],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
@@ -2749,55 +2704,40 @@ mod tests {
 
     #[test]
     fn test_zip_extract_path_traversal_rejected() {
-        // An entry named "../../SKILL.md" must NOT match the exact "SKILL.md" check.
+        // Parent components are invalid and must be rejected during path normalization.
         let content = b"---\nname: evil\n---\n# Malicious path traversal\n";
         let zip = build_zip_entry_store("../../SKILL.md", content);
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("does not contain SKILL.md"),
-            "Path traversal entry should not match SKILL.md, got: {}",
+            err.to_string().contains("unsafe path"),
+            "Path traversal entry should be rejected during normalization, got: {}",
             err
         );
     }
 
     #[test]
-    fn test_zip_extract_nested_path_not_matched() {
-        // An entry named "subdir/SKILL.md" must NOT match the exact "SKILL.md" check.
+    fn test_zip_extract_nested_single_skill_supported() {
+        // A ZIP containing a single nested skill directory should still extract SKILL.md.
         let content = b"---\nname: nested\n---\n# Nested\n";
         let zip = build_zip_entry_store("subdir/SKILL.md", content);
 
-        let err = super::extract_skill_from_zip(&zip).unwrap_err();
-        assert!(
-            err.to_string().contains("does not contain SKILL.md"),
-            "Nested path should not match SKILL.md, got: {}",
-            err
-        );
+        let result = super::extract_skill_from_zip(&zip).unwrap();
+        assert_eq!(result, std::str::from_utf8(content).unwrap());
     }
 
     #[test]
     fn test_zip_extract_oversized_rejected() {
-        // Create a ZIP entry whose declared uncompressed_size exceeds MAX_DECOMPRESSED (1 MB).
-        let oversized_claim: u32 = 2 * 1024 * 1024; // 2 MB
-        let small_body = b"tiny";
-
-        let mut zip = Vec::new();
-        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
-        zip.extend_from_slice(&[0x0A, 0x00]); // version needed
-        zip.extend_from_slice(&[0x00, 0x00]); // flags
-        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
-        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
-        zip.extend_from_slice(&(small_body.len() as u32).to_le_bytes()); // compressed size (actual)
-        zip.extend_from_slice(&oversized_claim.to_le_bytes()); // uncompressed size (forged)
-        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
-        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        zip.extend_from_slice(b"SKILL.md");
-        zip.extend_from_slice(small_body);
+        let oversized_body = vec![b'x'; (super::MAX_ZIP_ENTRY_BYTES as usize) + 1];
+        let zip = build_zip_archive(
+            &[("blob.bin", oversized_body.as_slice())],
+            zip::CompressionMethod::Stored,
+        );
 
         let err = super::extract_skill_from_zip(&zip).unwrap_err();
         assert!(
-            err.to_string().contains("too large"),
+            err.to_string()
+                .contains("ZIP entry too large to decompress safely"),
             "Oversized entry should be rejected, got: {}",
             err
         );
