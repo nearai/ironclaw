@@ -71,8 +71,8 @@ impl Tool for SystemToolsListTool {
             for cap in cap_registry.list() {
                 for action in &cap.actions {
                     tools.push(json!({
-                        "name": action.name,
-                        "description": action.description,
+                        "name": action.name.as_str(),
+                        "description": action.description.as_str(),
                     }));
                 }
             }
