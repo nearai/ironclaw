@@ -942,6 +942,7 @@ mod tests {
     /// saying `None` used to hide an env-resolved runtime key from the
     /// diagnostic.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test — other tests read the same env vars
     async fn check_secrets_reports_env_source_when_env_key_is_set() {
         struct EnvGuard(&'static str, Option<String>);
         impl Drop for EnvGuard {
