@@ -856,6 +856,32 @@ pub(crate) fn parse_timestamp_str(raw: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+pub(crate) fn normalize_builtin_provider(provider: &str) -> Option<String> {
+    let normalized = provider.trim().to_ascii_lowercase().replace('-', "_");
+    let mapped = match normalized.as_str() {
+        "claude" => "anthropic",
+        "copilot" => "github_copilot",
+        "openai_compatible" | "openrouter" | "vllm" | "lmstudio" | "lm_studio" => {
+            "openai_compatible"
+        }
+        "openai" | "anthropic" | "nearai" | "github_copilot" | "ollama" | "tinfoil" | "bedrock" => {
+            normalized.as_str()
+        }
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+pub(crate) fn dedupe_secrets(secrets: Vec<ImportedSecret>) -> Vec<ImportedSecret> {
+    let mut by_name = HashMap::new();
+    for secret in secrets {
+        by_name.insert(secret.name.clone(), secret);
+    }
+    let mut deduped: Vec<_> = by_name.into_values().collect();
+    deduped.sort_by(|a, b| a.name.cmp(&b.name));
+    deduped
+}
+
 pub(crate) fn compatible_scalar_settings_patch(
     candidates: &HashMap<String, Value>,
 ) -> (HashMap<String, Value>, Vec<String>) {

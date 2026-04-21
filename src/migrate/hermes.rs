@@ -10,8 +10,8 @@ use crate::settings::{
 
 use super::{
     ImportedConversation, ImportedDocument, ImportedMessage, ImportedMessageRole, ImportedSecret,
-    MigrationError, MigrationServices, MigrationStats, collect_markdown_files,
-    normalize_relative_path, parse_timestamp_str, slugify,
+    MigrationError, MigrationServices, MigrationStats, collect_markdown_files, dedupe_secrets,
+    normalize_builtin_provider, normalize_relative_path, parse_timestamp_str, slugify,
 };
 
 #[derive(Debug, Clone)]
@@ -537,16 +537,6 @@ fn provider_secret(
     )
 }
 
-fn dedupe_secrets(secrets: Vec<ImportedSecret>) -> Vec<ImportedSecret> {
-    let mut by_name = HashMap::new();
-    for secret in secrets {
-        by_name.insert(secret.name.clone(), secret);
-    }
-    let mut deduped: Vec<_> = by_name.into_values().collect();
-    deduped.sort_by(|a, b| a.name.cmp(&b.name));
-    deduped
-}
-
 fn builtin_env_secret_mappings() -> &'static [(&'static str, &'static str)] {
     &[
         ("OPENAI_API_KEY", "openai"),
@@ -555,22 +545,6 @@ fn builtin_env_secret_mappings() -> &'static [(&'static str, &'static str)] {
         ("TINFOIL_API_KEY", "tinfoil"),
         ("OPENAI_COMPATIBLE_API_KEY", "openai_compatible"),
     ]
-}
-
-fn normalize_builtin_provider(provider: &str) -> Option<String> {
-    let normalized = provider.trim().to_ascii_lowercase().replace('-', "_");
-    let mapped = match normalized.as_str() {
-        "claude" => "anthropic",
-        "copilot" => "github_copilot",
-        "openai_compatible" | "openrouter" | "vllm" | "lmstudio" | "lm_studio" => {
-            "openai_compatible"
-        }
-        "openai" | "anthropic" | "nearai" | "github_copilot" | "ollama" | "tinfoil" | "bedrock" => {
-            normalized.as_str()
-        }
-        _ => return None,
-    };
-    Some(mapped.to_string())
 }
 
 async fn import_scope_markdown(

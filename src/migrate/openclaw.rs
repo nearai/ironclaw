@@ -13,8 +13,11 @@ use crate::settings::{
 use super::{
     ImportedConversation, ImportedDocument, ImportedMessage, ImportedMessageRole, ImportedSecret,
     MigrationError, MigrationServices, MigrationStats, collect_markdown_files,
-    compatible_scalar_settings_patch, normalize_relative_path, slugify,
+    compatible_scalar_settings_patch, dedupe_secrets, normalize_builtin_provider,
+    normalize_relative_path, slugify,
 };
+
+type ConfigResult = (HashMap<String, Value>, Vec<ImportedSecret>, Vec<String>);
 
 #[derive(Debug, Clone)]
 pub struct OpenClawMigrationOptions {
@@ -38,7 +41,7 @@ pub async fn migrate(
     let config = reader.read_config()?;
     let mut stats = MigrationStats::default();
 
-    let (settings_patch, secrets, config_notes) = map_openclaw_config(&config);
+    let (settings_patch, secrets, config_notes) = map_openclaw_config(&config)?;
     for note in config_notes {
         stats.push_note(note);
     }
@@ -225,9 +228,7 @@ struct ProviderResolution {
     notes: Vec<String>,
 }
 
-fn map_openclaw_config(
-    config: &OpenClawConfig,
-) -> (HashMap<String, Value>, Vec<ImportedSecret>, Vec<String>) {
+fn map_openclaw_config(config: &OpenClawConfig) -> Result<ConfigResult, MigrationError> {
     let mut patch = HashMap::new();
     let mut secrets = Vec::new();
     let mut notes = Vec::new();
@@ -254,7 +255,8 @@ fn map_openclaw_config(
         if let Some(custom_provider) = resolution.custom_provider {
             patch.insert(
                 "llm_custom_providers".to_string(),
-                serde_json::to_value(vec![custom_provider]).unwrap_or(Value::Null),
+                serde_json::to_value(vec![custom_provider])
+                    .map_err(|e| MigrationError::Serialization(e.to_string()))?,
             );
         }
         if let Some(base_url) = base_url.as_ref() {
@@ -279,7 +281,8 @@ fn map_openclaw_config(
             overrides.insert(provider_id, override_value);
             patch.insert(
                 "llm_builtin_overrides".to_string(),
-                serde_json::to_value(overrides).unwrap_or(Value::Null),
+                serde_json::to_value(overrides)
+                    .map_err(|e| MigrationError::Serialization(e.to_string()))?,
             );
         }
         if let (Some(secret_name), Some(api_key)) = (resolution.secret_name, api_key.clone()) {
@@ -335,17 +338,7 @@ fn map_openclaw_config(
         ));
     }
 
-    (patch, dedupe_secrets(secrets), notes)
-}
-
-fn dedupe_secrets(secrets: Vec<ImportedSecret>) -> Vec<ImportedSecret> {
-    let mut by_name = HashMap::new();
-    for secret in secrets {
-        by_name.insert(secret.name.clone(), secret);
-    }
-    let mut deduped: Vec<_> = by_name.into_values().collect();
-    deduped.sort_by(|a, b| a.name.cmp(&b.name));
-    deduped
+    Ok((patch, dedupe_secrets(secrets), notes))
 }
 
 fn resolve_provider(
@@ -452,20 +445,4 @@ fn resolve_provider(
             }
         }
     }
-}
-
-fn normalize_builtin_provider(provider: &str) -> Option<String> {
-    let normalized = provider.trim().to_ascii_lowercase().replace('-', "_");
-    let mapped = match normalized.as_str() {
-        "claude" => "anthropic",
-        "copilot" => "github_copilot",
-        "openai_compatible" | "openrouter" | "vllm" | "lmstudio" | "lm_studio" => {
-            "openai_compatible"
-        }
-        "openai" | "anthropic" | "nearai" | "github_copilot" | "ollama" | "tinfoil" | "bedrock" => {
-            normalized.as_str()
-        }
-        _ => return None,
-    };
-    Some(mapped.to_string())
 }
