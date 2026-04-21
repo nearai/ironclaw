@@ -1004,7 +1004,11 @@ impl EffectBridgeAdapter {
             }
         }
 
-        let active_skill_names = self.active_skill_names(context.thread_id).await;
+        let active_skill_names = if context.active_skill_names.is_empty() {
+            self.active_skill_names(context.thread_id).await
+        } else {
+            context.active_skill_names.clone()
+        };
 
         {
             let has_mgr = self.auth_manager.read().await.is_some();
@@ -2373,8 +2377,8 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
 }
 
 fn extract_secret_binding_approval(error_msg: &str) -> Option<SecretBindingApproval> {
-    if let Some(json_start) = error_msg.find('{')
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start..])
+    if let Some(json_start) = error_msg.rfind(": {")
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start + 2..])
     {
         return parsed
             .get("approval")
@@ -2466,6 +2470,31 @@ mod tests {
         assert!(!adapter.auto_approved.read().await.contains("shell"));
         adapter.auto_approve_tool("shell").await;
         assert!(adapter.auto_approved.read().await.contains("shell"));
+    }
+
+    #[test]
+    fn extract_secret_binding_approval_ignores_braces_in_tool_name() {
+        let approval = SecretBindingApproval {
+            secret_name: "github_token".to_string(),
+            artifact_kind: crate::secrets::CredentialArtifactKind::Skill,
+            artifact_name: "github".to_string(),
+            artifact_fingerprint: "fingerprint-v1".to_string(),
+            host: "api.github.com".to_string(),
+            location: crate::secrets::CredentialLocation::AuthorizationBearer,
+            approved_at: chrono::Utc::now(),
+        };
+        let payload = serde_json::json!({
+            "error": crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_ERROR,
+            "approval": approval,
+        });
+
+        let parsed =
+            extract_secret_binding_approval(&format!("Tool 'my{{tool}}' failed: {}", payload))
+                .expect("approval should parse from trailing JSON payload");
+
+        assert_eq!(parsed.secret_name, "github_token");
+        assert_eq!(parsed.artifact_name, "github");
+        assert_eq!(parsed.host, "api.github.com");
     }
 
     #[tokio::test]
@@ -2653,6 +2682,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
@@ -3532,6 +3562,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some(
@@ -3551,6 +3582,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some(
@@ -3570,6 +3602,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
@@ -3587,6 +3620,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
@@ -3607,6 +3641,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
@@ -3625,6 +3660,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
@@ -3838,6 +3874,7 @@ mod tests {
                 user_id: "test_user".to_string(),
                 step_id: ironclaw_engine::StepId::new(),
                 current_call_id: None,
+                active_skill_names: Vec::new(),
                 source_channel: Some("gateway".to_string()),
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
@@ -4119,6 +4156,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
@@ -4143,6 +4181,113 @@ mod tests {
                 panic!("Expected GatePaused for authentication preflight, got: {other:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_ignores_skill_scoped_mapping_without_active_skill_context() {
+        use crate::secrets::SecretsStore;
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialMapping,
+        };
+        use crate::testing::credentials::test_secrets_store;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        struct HttpOkTool;
+
+        #[async_trait]
+        impl Tool for HttpOkTool {
+            fn name(&self) -> &str {
+                "http"
+            }
+
+            fn description(&self) -> &str {
+                "Test HTTP tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" }
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({"ok": true}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let secrets = Arc::new(test_secrets_store());
+        secrets
+            .create(
+                "test_user",
+                crate::secrets::CreateSecretParams::new("github_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+
+        let cred_reg = Arc::new(SharedCredentialRegistry::new());
+        cred_reg.add_mappings(vec![
+            CredentialMapping::bearer("github_token", "api.github.com").with_provenance(
+                CredentialBindingProvenance {
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "skill-fingerprint-v1".to_string(),
+                    binding_policy: CredentialBindingPolicy::RequireApproval,
+                },
+            ),
+        ]);
+
+        let tools =
+            Arc::new(ToolRegistry::new().with_credentials(Arc::clone(&cred_reg), secrets.clone()));
+        tools.register(Arc::new(HttpOkTool)).await;
+
+        use ironclaw_safety::SafetyConfig;
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                None,
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .execute_action(
+                "http",
+                serde_json::json!({
+                    "url": "https://api.github.com/repos/nearai/ironclaw/issues",
+                    "method": "GET"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_http_scope_1")),
+            )
+            .await;
+
+        let result = result.expect(
+            "plain http calls must not inherit skill-scoped auth when no skill context is active",
+        );
+        assert!(
+            !result.is_error,
+            "fake http tool should run without auth gating"
+        );
     }
 
     #[tokio::test]
@@ -4215,6 +4360,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
@@ -4325,6 +4471,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_install".to_string()),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,

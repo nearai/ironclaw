@@ -287,13 +287,9 @@ impl AuthManager {
                 false
             }
             Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
-                if active_skill_names.is_empty() {
-                    true
-                } else {
-                    active_skill_names
-                        .iter()
-                        .any(|name| name == &provenance.artifact_name)
-                }
+                active_skill_names
+                    .iter()
+                    .any(|name| name == &provenance.artifact_name)
             }
             _ => true,
         }
@@ -1813,7 +1809,7 @@ Test skill
     }
 
     #[tokio::test]
-    async fn check_http_requires_binding_approval_when_active_skills_unknown() {
+    async fn check_http_ignores_skill_scoped_mapping_when_active_skills_unknown() {
         let store = test_store();
         store
             .create(
@@ -1837,8 +1833,8 @@ Test skill
             .await;
 
         assert!(
-            matches!(result, AuthCheckResult::BindingApprovalRequired(_)),
-            "Expected BindingApprovalRequired when active skill provenance is unavailable, got {result:?}"
+            matches!(result, AuthCheckResult::NoAuthRequired),
+            "Expected NoAuthRequired when no matching skill context is active, got {result:?}"
         );
     }
 

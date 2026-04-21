@@ -456,13 +456,9 @@ fn mapping_applies_to_http_call(
     match mapping.provenance.as_ref() {
         Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::WasmTool => false,
         Some(provenance) if provenance.artifact_kind == CredentialArtifactKind::Skill => {
-            if active_skill_names.is_empty() {
-                true
-            } else {
-                active_skill_names
-                    .iter()
-                    .any(|name| name == &provenance.artifact_name)
-            }
+            active_skill_names
+                .iter()
+                .any(|name| name == &provenance.artifact_name)
         }
         _ => true,
     }
@@ -2104,6 +2100,33 @@ mod tests {
             !serialized.contains("ghp_supersecretvalue1234567890"),
             "raw token leaked into interceptor request: {serialized}"
         );
+    }
+
+    #[test]
+    fn skill_scoped_credentials_require_matching_active_skill_context() {
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialMapping,
+        };
+
+        let mapping = CredentialMapping::bearer("github_token", "api.github.com").with_provenance(
+            CredentialBindingProvenance {
+                artifact_kind: CredentialArtifactKind::Skill,
+                artifact_name: "github".to_string(),
+                artifact_fingerprint: "skill-fingerprint-v1".to_string(),
+                binding_policy: CredentialBindingPolicy::AutoBind,
+            },
+        );
+
+        assert!(!super::mapping_applies_to_http_call(&mapping, &[]));
+        assert!(!super::mapping_applies_to_http_call(
+            &mapping,
+            &["other-skill".to_string()]
+        ));
+        assert!(super::mapping_applies_to_http_call(
+            &mapping,
+            &["github".to_string()]
+        ));
     }
 
     // ── Credential dedup regression ───────────────────────────────────

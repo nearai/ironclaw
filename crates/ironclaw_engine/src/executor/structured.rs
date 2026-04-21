@@ -537,6 +537,11 @@ mod tests {
             user_id: "test".into(),
             step_id: StepId::new(),
             current_call_id: None,
+            active_skill_names: thread
+                .active_skills()
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect(),
             source_channel: None,
             user_timezone: None,
             thread_goal: Some(thread.goal.clone()),

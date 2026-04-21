@@ -106,9 +106,13 @@ pub async fn grant_binding_approval(
 
     let mut approvals = load_approvals_inner(store, user_id).await?;
     let approval_id = approval.approval_id();
-    approvals.retain(|item| item.approval_id() != approval_id);
     approvals.push(approval);
     let approvals = dedup_approvals(approvals);
+    debug_assert!(
+        approvals
+            .iter()
+            .any(|item| item.approval_id() == approval_id)
+    );
     save_approvals_inner(store, user_id, &approvals).await
 }
 

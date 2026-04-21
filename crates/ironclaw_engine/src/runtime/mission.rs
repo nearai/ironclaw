@@ -2552,6 +2552,7 @@ async fn dispatch_protected_write(
         user_id: doc.user_id.clone(),
         step_id: StepId::new(),
         current_call_id: None,
+        active_skill_names: Vec::new(),
         source_channel: None,
         user_timezone: None,
         thread_goal: None,

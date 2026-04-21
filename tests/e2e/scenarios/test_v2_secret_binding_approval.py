@@ -1,19 +1,11 @@
-"""E2E test: engine-v2 secret binding approval flow for user-authored skills.
+"""E2E coverage for secret binding approvals and self-service user secrets.
 
-This scenario covers the durable approval path that sits between
-self-service `/api/secrets` management and runtime credential injection:
+This file covers two related behaviors:
 
-1. Start an isolated ENGINE_V2 gateway with a user-authored `github` skill
-   whose credential mapping points at a localhost mock API.
-2. Create a real member user through the admin API and act as that member.
-3. Store `github_token` via the self-service `/api/secrets` endpoint.
-4. Send an explicit `/github ...` prompt and assert the thread pauses with
-   `pending_gate.gate_name == "secret_binding_approval"`.
-5. Approve the gate and verify the HTTP call completes with injected auth and
-   the approval appears in `/api/secrets`.
-6. Re-run the same prompt and verify the persisted approval suppresses the gate.
-7. Revoke the approval via `/api/secrets/{name}/approvals/revoke` and confirm
-   the gate reappears on the next request.
+1. Members can manage their own secrets through the self-service `/api/secrets`
+   API without requiring owner/admin credentials.
+2. The durable `secret_binding_approval` flow pauses, approves, persists, and
+   re-prompts correctly for the deterministic engine-v2 github skill scenario.
 """
 
 import asyncio
@@ -448,6 +440,26 @@ def _find_secret(secrets_payload: dict, name: str) -> dict:
         if secret.get("name") == name:
             return secret
     raise AssertionError(f"Secret {name!r} not found in payload: {secrets_payload}")
+
+
+async def test_member_self_service_secret_round_trip(binding_approval_server):
+    base_url = binding_approval_server["base_url"]
+
+    member = await _create_member_user(base_url)
+    member_token = member["token"]
+
+    await _put_secret(base_url, member_token, "github_token", "ghp_member_secret")
+
+    member_secrets = await _list_secrets(base_url, member_token)
+    github_secret = _find_secret(member_secrets, "github_token")
+    assert github_secret["name"] == "github_token", github_secret
+    assert github_secret.get("approvals") in (None, []), github_secret
+
+    owner_secrets = await _list_secrets(base_url, AUTH_TOKEN)
+    assert all(
+        secret.get("name") != "github_token"
+        for secret in owner_secrets.get("secrets", [])
+    ), owner_secrets
 
 
 async def test_owner_secret_binding_approval_round_trip(binding_approval_server, mock_api):

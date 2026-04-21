@@ -724,6 +724,11 @@ async fn handle_execute_code_step(
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
         current_call_id: None,
+        active_skill_names: thread
+            .active_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect(),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
         thread_goal: Some(thread.goal.clone()),
@@ -899,6 +904,11 @@ async fn handle_execute_action(
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
         current_call_id: Some(call_id.clone()),
+        active_skill_names: thread
+            .active_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect(),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
         thread_goal: Some(thread.goal.clone()),
@@ -1458,6 +1468,11 @@ async fn handle_execute_actions_parallel(
             user_id: thread.user_id.clone(),
             step_id,
             current_call_id: Some(pc.call_id.clone()),
+            active_skill_names: thread
+                .active_skills()
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect(),
             // Read source_channel from thread metadata so downstream tools
             // (e.g. mission_create) can default notify_channels to the
             // originating channel. Hardcoding `None` here was a bug — it
@@ -1506,6 +1521,11 @@ async fn handle_execute_actions_parallel(
                 user_id: thread.user_id.clone(),
                 step_id,
                 current_call_id: Some(pc_call_id.clone()),
+                active_skill_names: thread
+                    .active_skills()
+                    .into_iter()
+                    .map(|skill| skill.name)
+                    .collect(),
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,

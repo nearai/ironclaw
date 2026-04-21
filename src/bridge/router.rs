@@ -1032,6 +1032,11 @@ async fn execute_pending_gate_action(
         user_id: thread.user_id.clone(),
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some(resolved_call_id.clone()),
+        active_skill_names: thread
+            .active_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect(),
         source_channel: Some(pending.source_channel.clone()),
         user_timezone: thread
             .metadata

@@ -89,6 +89,7 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         user_id: "test-user".into(),
         step_id: StepId::new(),
         current_call_id: Some("call_test_1".into()),
+        active_skill_names: Vec::new(),
         source_channel: None,
         user_timezone: None,
         thread_goal: None,
