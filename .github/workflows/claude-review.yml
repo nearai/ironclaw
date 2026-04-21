@@ -17,8 +17,10 @@ concurrency:
 jobs:
   review:
     name: Claude Code Review
+    # Forked pull_request runs do not receive repository secrets.
     if: >
       !github.event.pull_request.draft &&
+      !github.event.pull_request.head.repo.fork &&
       github.event.pull_request.user.login != 'release-plz[bot]' &&
       github.event.pull_request.user.login != 'ironclaw-ci[bot]'
     runs-on: ubuntu-latest
