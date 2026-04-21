@@ -220,11 +220,11 @@ impl ToolRegistry {
         self.engine_version
     }
 
-    /// Install the engine v2 capability registry. `pub(crate)` so the
-    /// `bridge::router::wire_capability_registry` helper is the only
-    /// real call site — keeps the adapter/registry dual-wiring invariant
-    /// enforceable. Tests inside the crate can still call it directly.
-    pub(crate) async fn set_capability_registry(
+    /// Install the engine capability registry so `available_actions()` can
+    /// surface actions from engine-native capabilities (missions, etc.) to
+    /// the LLM. Called once at bridge setup after `router.rs` has finished
+    /// registering all capabilities.
+    pub async fn set_capability_registry(
         &self,
         registry: Arc<ironclaw_engine::CapabilityRegistry>,
     ) {
