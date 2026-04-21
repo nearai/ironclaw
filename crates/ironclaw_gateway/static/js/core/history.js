@@ -129,6 +129,13 @@ function loadHistory(before) {
             || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
           );
           if (hasPendingVisuals) {
+            const div = addMessage('user', nextPending.content, {
+              attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+              copyText: nextPending.copyText || nextPending.content,
+            });
+            if (nextPending.images && nextPending.images.length > 0) {
+              appendImagesToMessage(div, nextPending.images);
+            }
             pendingQueue.shift();
           } else {
             addMessage('user', data.in_progress.user_input);
