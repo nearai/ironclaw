@@ -163,6 +163,8 @@ pub struct MissionManager {
     rate_limit: FireRateLimit,
     /// Optional budget gate consulted before each fire.
     budget_gate: Option<Arc<dyn BudgetGate>>,
+    /// Conversation insights extraction interval (every N completed threads).
+    insights_interval: u32,
 }
 
 /// Minimum gap between successive `fire_mission` attempts for the same
@@ -187,6 +189,7 @@ impl MissionManager {
             user_fire_log: RwLock::new(HashMap::new()),
             rate_limit: FireRateLimit::default(),
             budget_gate: None,
+            insights_interval: 5,
         }
     }
 
@@ -223,6 +226,13 @@ impl MissionManager {
     /// Override the per-user fire-rate limit. Defaults to 100 fires/hour.
     pub fn with_rate_limit(mut self, limit: FireRateLimit) -> Self {
         self.rate_limit = limit;
+        self
+    }
+
+    /// Override the conversation insights extraction interval.
+    /// Every N completed threads, insights are extracted from conversations.
+    pub fn with_insights_interval(mut self, interval: u32) -> Self {
+        self.insights_interval = interval.max(1);
         self
     }
 
@@ -498,12 +508,13 @@ impl MissionManager {
         Ok(())
     }
 
-    /// Resume a paused mission.
+    /// Resume a paused or failed mission.
     ///
     /// Shared missions can only be managed by shared owners (system user).
-    /// Only `Paused` missions can be resumed — `Completed` and `Failed` are
-    /// terminal states and must not be resurrected by a stray resume call,
-    /// so anything else is rejected with a `Store` error.
+    /// `Paused` missions resume normally, and `Failed` missions may be
+    /// explicitly resumed after the caller fixes the underlying problem.
+    /// `Completed` remains terminal, so anything else is rejected with a
+    /// `Store` error.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
         let mut mission = self
             .store
@@ -523,10 +534,13 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        if mission.status != MissionStatus::Paused {
+        if !matches!(
+            mission.status,
+            MissionStatus::Paused | MissionStatus::Failed
+        ) {
             return Err(EngineError::Store {
                 reason: format!(
-                    "mission {id} is in state {:?}, only Paused missions can be resumed",
+                    "mission {id} is in state {:?}, only Paused or Failed missions can be resumed",
                     mission.status
                 ),
             });
@@ -1157,8 +1171,8 @@ impl MissionManager {
         const SKILL_EXTRACTION_MIN_STEPS: usize = 5;
         /// Minimum distinct action executions for skill extraction.
         const SKILL_EXTRACTION_MIN_ACTIONS: usize = 3;
-        /// Completed thread interval for conversation insights.
-        const CONVERSATION_INSIGHTS_INTERVAL: u32 = 5;
+
+        let insights_interval = mgr.insights_interval;
 
         tokio::spawn(async move {
             // Track completed thread count per conversation for insights trigger.
@@ -1326,7 +1340,7 @@ impl MissionManager {
                             let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
                             *count += 1;
 
-                            if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
+                            if (*count).is_multiple_of(insights_interval) {
                                 // Collect recent thread goals for context
                                 let thread_goals: Vec<String> = match mgr
                                     .store
@@ -1336,7 +1350,7 @@ impl MissionManager {
                                     Ok(threads) => threads
                                         .iter()
                                         .rev()
-                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .take(insights_interval as usize)
                                         .map(|t| t.goal.clone())
                                         .collect(),
                                     Err(_) => vec![thread.goal.clone()],
@@ -2248,11 +2262,23 @@ async fn process_mission_outcome_and_notify(
         }
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
+            // A terminal thread failure means the mission did not merely
+            // produce a disappointing result — the execution itself crashed.
+            // Leave a durable failed status so cron/event schedulers stop
+            // re-firing the same broken mission until the user explicitly
+            // resumes it after fixing the underlying problem.
+            mission.status = MissionStatus::Failed;
             mission.approach_history.push(format!("FAILED: {error}"));
             notify_response = Some(format!("Mission failed: {error}"));
             is_error = true;
         }
         ThreadOutcome::MaxIterations => {
+            // MaxIterations is also terminal for the just-fired mission run:
+            // without a failed lifecycle transition the scheduler will treat
+            // the mission as still Active and keep spawning fresh threads on
+            // every due tick, which is the runaway-loop behavior reported in
+            // #2736.
+            mission.status = MissionStatus::Failed;
             mission
                 .approach_history
                 .push("Hit max iterations without completing".into());
@@ -2544,6 +2570,7 @@ async fn dispatch_protected_write(
         current_call_id: None,
         source_channel: None,
         user_timezone: None,
+        thread_goal: None,
     };
 
     effects
@@ -3495,9 +3522,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_mission_rejects_terminal_states() {
-        // Regression: resume_mission must not resurrect Completed/Failed
-        // missions. Only Paused → Active is permitted.
+    async fn resume_mission_rejects_non_resumable_states() {
+        // Regression: resume_mission must not silently succeed for states
+        // that are not explicitly recoverable.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
@@ -3514,7 +3541,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Active → resume must fail (only Paused is resumable).
+        // Active → resume must fail (only Paused/Failed are resumable).
         let err = mgr
             .resume_mission(id, "alice")
             .await
@@ -3809,6 +3836,124 @@ mod tests {
             mission.status,
             MissionStatus::Completed,
             "mission should be completed when goal is achieved"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_outcome_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "GitHub Poller",
+                "Poll the GitHub API and summarize updates",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::Failed {
+                error: "github api returned 404".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("github api returned 404")),
+            "failure should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "failed missions must not keep spawning new threads until resumed"
+        );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a failed cron mission should re-arm its schedule"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_some(),
+            "explicit resume should make failed missions fireable again"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_iterations_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Long Runner",
+                "Keep checking the endpoint until it succeeds",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::MaxIterations,
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("max iterations")),
+            "max-iterations outcome should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "max-iterations missions must not keep spawning new threads until resumed"
+        );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a max-iterations cron mission should re-arm its schedule"
         );
     }
 

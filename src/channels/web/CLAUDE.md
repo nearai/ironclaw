@@ -262,6 +262,8 @@ Legacy cleanup note:
 | GET | `/api/debug/prompt` | Inspect the current system prompt components (workspace identity files) |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
+| POST | `/api/v1/responses` | OpenAI Responses API (routes through the full agent loop). Also served as `/v1/responses` for backward compatibility (ironclaw#2201). |
+| GET | `/api/v1/responses/{id}` | Retrieve a historical Responses-API response. Also served as `/v1/responses/{id}` for backward compatibility. |
 
 ### Static / Project files
 | Method | Path | Description |

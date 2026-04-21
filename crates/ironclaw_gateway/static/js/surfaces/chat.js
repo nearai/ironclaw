@@ -129,8 +129,20 @@ async function sendMessage() {
   }));
   const displayContent = content
     || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '(images attached)');
+  const pendingCopyTextParts = [];
+  if (displayContent) pendingCopyTextParts.push(displayContent);
+  pendingAttachmentsForDisplay.forEach((att) => {
+    const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
+    pendingCopyTextParts.push(
+      suffix
+        ? `[Attachment] ${att.filename || 'attachment'} (${suffix})`
+        : `[Attachment] ${att.filename || 'attachment'}`
+    );
+  });
+  const pendingCopyText = pendingCopyTextParts.join('\n');
   const userMsg = addMessage('user', displayContent, {
     attachments: pendingAttachmentsForDisplay,
+    copyText: pendingCopyText,
   });
   if (attachedImageDataUrls.length > 0) {
     appendImagesToMessage(userMsg, attachedImageDataUrls);
@@ -149,7 +161,6 @@ async function sendMessage() {
   let pendingId = null;
   const pendingThreadId = currentThreadId;
   if (currentThreadId) {
-    const displayContent = content || '(images attached)';
     if (!_pendingUserMessages.has(currentThreadId)) {
       _pendingUserMessages.set(currentThreadId, []);
     }
@@ -157,6 +168,8 @@ async function sendMessage() {
     _pendingUserMessages.get(currentThreadId).push({
       id: pendingId,
       content: displayContent,
+      copyText: pendingCopyText,
+      attachments: pendingAttachmentsForDisplay.map((att) => ({ ...att })),
       images: attachedImageDataUrls,
       timestamp: Date.now(),
     });
@@ -310,8 +323,8 @@ document.getElementById('attach-btn').addEventListener('click', () => {
 });
 
 document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
-  e.target.value = '';
+  const files = Array.from(e.target.files || []);
+  handleImageFiles(files);
 });
 
 document.getElementById('chat-input').addEventListener('paste', (e) => {
@@ -441,6 +454,8 @@ function resolveGeneratedImageForRender(threadId, image) {
 
 // --- Slash Autocomplete ---
 
+let _slashSkillEntries = [];
+
 function showSlashAutocomplete(matches) {
   const el = document.getElementById('slash-autocomplete');
   if (!el || matches.length === 0) { hideSlashAutocomplete(); return; }
@@ -466,6 +481,51 @@ function showSlashAutocomplete(matches) {
     el.appendChild(row);
   });
   el.style.display = 'block';
+}
+
+function setSlashSkillEntries(skills) {
+  if (!Array.isArray(skills)) {
+    _slashSkillEntries = [];
+    const input = document.getElementById('chat-input');
+    if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+    return;
+  }
+  _slashSkillEntries = skills
+    .filter((skill) => skill && typeof skill.name === 'string' && skill.name.trim() !== '')
+    .map((skill) => ({
+      cmd: '/' + skill.name.trim(),
+      desc: (skill.description || '').trim() || 'Skill',
+      kind: 'skill',
+    }))
+    .sort((a, b) => a.cmd.localeCompare(b.cmd));
+  const input = document.getElementById('chat-input');
+  if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+}
+
+function getSlashAutocompleteItems() {
+  const items = SLASH_COMMANDS.map((cmd) => ({
+    cmd: cmd.cmd,
+    desc: cmd.desc,
+    kind: 'command',
+  }));
+  const seen = new Set(items.map((item) => item.cmd.toLowerCase()));
+  _slashSkillEntries.forEach((item) => {
+    const key = item.cmd.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  });
+  return items;
+}
+
+function refreshSlashSkillEntries() {
+  return apiFetch('/api/skills')
+    .then(function(data) {
+      setSlashSkillEntries((data && data.skills) || []);
+    })
+    .catch(function() {
+      // Preserve the last known skill list on transient fetch failures.
+    });
 }
 
 function hideSlashAutocomplete() {
@@ -495,8 +555,9 @@ function filterSlashCommands(value) {
   if (!value.startsWith('/')) { hideSlashAutocomplete(); return; }
   // Only show autocomplete when the input is just a slash command prefix (no spaces except /thread new)
   const lower = value.toLowerCase();
-  const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(lower));
-  if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === lower.trimEnd())) {
+  const exactLower = lower.trimEnd();
+  const matches = getSlashAutocompleteItems().filter((c) => c.cmd.toLowerCase().startsWith(lower));
+  if (matches.length === 0 || (matches.length === 1 && matches[0].cmd.toLowerCase() === exactLower)) {
     hideSlashAutocomplete();
   } else {
     showSlashAutocomplete(matches);
@@ -545,12 +606,23 @@ function inferAttachmentMimeType(file) {
   if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
   if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.doc')) return 'application/msword';
   if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (name.endsWith('.xls')) return 'application/vnd.ms-excel';
   if (name.endsWith('.md')) return 'text/markdown';
   if (name.endsWith('.csv')) return 'text/csv';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.xml')) return 'application/xml';
+  if (name.endsWith('.rtf')) return 'application/rtf';
   if (name.endsWith('.txt')) return 'text/plain';
+  if (name.endsWith('.mp3')) return 'audio/mpeg';
+  if (name.endsWith('.ogg')) return 'audio/ogg';
+  if (name.endsWith('.wav')) return 'audio/wav';
+  if (name.endsWith('.m4a')) return 'audio/x-m4a';
+  if (name.endsWith('.mp4')) return 'audio/mp4';
+  if (name.endsWith('.aac')) return 'audio/aac';
+  if (name.endsWith('.flac')) return 'audio/flac';
+  if (name.endsWith('.webm')) return 'audio/webm';
   return 'application/octet-stream';
 }
 
@@ -628,8 +700,8 @@ const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per messag
 const MAX_STAGED_ATTACHMENTS = 5;
 
 function handleAttachmentFiles(files) {
-  let projectedCount = stagedAttachments.length;
-  let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0);
+  let projectedCount = stagedAttachments.length + pendingAttachmentCount;
+  let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
   Array.from(files).forEach(file => {
     const mimeType = inferAttachmentMimeType(file);
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
@@ -646,11 +718,16 @@ function handleAttachmentFiles(files) {
     }
     projectedCount += 1;
     projectedTotalBytes += file.size;
+    pendingAttachmentCount += 1;
+    pendingAttachmentBytes += file.size;
+
     const reader = new FileReader();
     let resolveRead;
     const readPromise = new Promise((resolve) => { resolveRead = resolve; });
     pendingAttachmentReads.push(readPromise);
     const finalizeRead = () => {
+      pendingAttachmentCount = Math.max(0, pendingAttachmentCount - 1);
+      pendingAttachmentBytes = Math.max(0, pendingAttachmentBytes - file.size);
       const idx = pendingAttachmentReads.indexOf(readPromise);
       if (idx !== -1) pendingAttachmentReads.splice(idx, 1);
       resolveRead();

@@ -384,6 +384,7 @@ impl AppBuilder {
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
+        cheap_llm: Option<&Arc<dyn LlmProvider>>,
     ) -> Result<
         (
             Arc<SafetyLayer>,
@@ -393,6 +394,7 @@ impl AppBuilder {
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
             Option<Arc<dyn HttpInterceptor>>,
+            Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>>,
         ),
         anyhow::Error,
     > {
@@ -446,7 +448,7 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();
-        let workspace = if let Some(ref db) = self.db {
+        let (workspace, workspace_resolver) = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
             };
@@ -472,39 +474,43 @@ impl AppBuilder {
             // workspace. Even outside authenticated multi-tenant mode, some
             // channels and test harnesses route non-owner users through
             // per-user tenant workspaces seeded on demand.
-            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+            //
+            // Whether the deployment is multi-tenant is configuration, not a
+            // property we should infer from the current DB contents. An admin
+            // may start in multi-tenant mode before creating any tenant users.
+            let is_multi_tenant = self.config.is_multi_tenant_deployment();
 
             // In multi-tenant mode, enable admin system prompt on the owner
             // workspace so the dispatcher reads SYSTEM.md from __admin__ scope.
-            //
-            // NOTE: `is_multi_tenant` is evaluated once at startup. If the
-            // server starts with no users (single-user mode) and users are
-            // added later, the owner workspace frozen in `Arc` will NOT have
-            // `admin_prompt_enabled`. A server restart is required after the
-            // first user is created to activate admin prompts on the owner
-            // workspace. Tenant workspaces created via `WorkspacePool` are
-            // unaffected — they always call `.with_admin_prompt()`.
             if is_multi_tenant {
                 ws = ws.with_admin_prompt();
             }
 
             let ws = Arc::new(ws);
-            let pool = Arc::new(crate::channels::web::platform::state::WorkspacePool::new(
-                Arc::clone(db),
-                embeddings.clone(),
-                emb_cache_config,
-                self.config.search.clone(),
-                self.config.workspace.clone(),
-            ));
-            tools.register_memory_tools_with_resolver(pool);
+            let pool: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver> =
+                Arc::new(crate::channels::web::platform::state::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
+            let pool_for_hooks = Arc::clone(&pool);
+            let reasoning_llm: Option<Arc<dyn LlmProvider>> =
+                cheap_llm.map(Arc::clone).or_else(|| Some(Arc::clone(llm)));
+            tools.register_memory_tools_with_resolver(
+                pool,
+                reasoning_llm,
+                self.config.search.reasoning_enabled,
+            );
             tracing::debug!(
                 multi_tenant = is_multi_tenant,
                 "Memory tools configured with per-user workspace resolver"
             );
 
-            Some(ws)
+            (Some(ws), Some(pool_for_hooks))
         } else {
-            None
+            (None, None)
         };
 
         // Register image/vision tools if we have a workspace and LLM API credentials
@@ -571,6 +577,7 @@ impl AppBuilder {
             builder,
             credential_registry,
             http_interceptor,
+            workspace_resolver,
         ))
     }
 
@@ -980,11 +987,35 @@ impl AppBuilder {
                 let (llm, cheap, recording, reload) = self.init_llm().await?;
                 (llm, cheap, recording, Some(reload))
             };
-        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
-            self.init_tools(&llm).await?;
+        let (
+            safety,
+            tools,
+            embeddings,
+            workspace,
+            builder,
+            credential_registry,
+            http_interceptor,
+            workspace_resolver,
+        ) = self.init_tools(&llm, cheap_llm.as_ref()).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
+
+        // Register session summary hook (writes conversation summary on session end).
+        if let (Some(db), Some(ws_resolver)) = (&self.db, &workspace_resolver) {
+            let summary_llm = cheap_llm
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(|| Arc::clone(&llm));
+            hooks
+                .register(Arc::new(crate::hooks::SessionSummaryHook::new(
+                    Arc::clone(db) as Arc<dyn crate::db::ConversationStore>,
+                    Arc::clone(ws_resolver),
+                    summary_llm,
+                )))
+                .await;
+        }
+
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 

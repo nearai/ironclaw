@@ -175,6 +175,16 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
     }
 }
 
+/// Rate limit for reasoning LLM calls: max 10 per minute, 60 per hour.
+const REASONING_RATE_LIMIT: crate::tools::tool::ToolRateLimitConfig =
+    crate::tools::tool::ToolRateLimitConfig {
+        requests_per_minute: 10,
+        requests_per_hour: 60,
+    };
+
+/// Timeout for reasoning LLM calls (prevents unbounded waits).
+const REASONING_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Tool for searching workspace memory.
 ///
 /// Performs hybrid search (FTS + semantic) across all memory documents.
@@ -182,18 +192,44 @@ fn map_write_err(e: crate::error::WorkspaceError) -> ToolError {
 /// prior work, decisions, preferences, or any historical context.
 pub struct MemorySearchTool {
     resolver: Arc<dyn WorkspaceResolver>,
+    llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+    reasoning_enabled: bool,
+    /// Per-user rate limiter for reasoning LLM calls.
+    reasoning_limiter: Arc<crate::tools::rate_limiter::RateLimiter>,
 }
 
 impl MemorySearchTool {
     /// Create a new memory search tool with a workspace resolver.
     pub fn new(resolver: Arc<dyn WorkspaceResolver>) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            llm: None,
+            reasoning_enabled: false,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
+        }
+    }
+
+    /// Create a memory search tool with optional reasoning-augmented recall.
+    pub fn with_reasoning(
+        resolver: Arc<dyn WorkspaceResolver>,
+        llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_enabled: bool,
+    ) -> Self {
+        Self {
+            resolver,
+            llm,
+            reasoning_enabled,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
+        }
     }
 
     /// Create from a fixed workspace (backward compatibility).
     pub fn from_workspace(workspace: Arc<Workspace>) -> Self {
         Self {
             resolver: Arc::new(FixedWorkspaceResolver::new(workspace)),
+            llm: None,
+            reasoning_enabled: false,
+            reasoning_limiter: Arc::new(crate::tools::rate_limiter::RateLimiter::new()),
         }
     }
 }
@@ -224,6 +260,11 @@ impl Tool for MemorySearchTool {
                     "default": 5,
                     "minimum": 1,
                     "maximum": 20
+                },
+                "reasoning": {
+                    "type": "boolean",
+                    "description": "When true, synthesize search results into a coherent summary using LLM reasoning. Default: controlled by SEARCH_REASONING_ENABLED config.",
+                    "default": false
                 }
             },
             "required": ["query"]
@@ -252,9 +293,103 @@ impl Tool for MemorySearchTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
         let result_count = results.len();
+
+        let use_reasoning = params
+            .get("reasoning")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(self.reasoning_enabled);
+
+        if use_reasoning
+            && let Some(ref llm) = self.llm
+            && !results.is_empty()
+        {
+            // Check per-user rate limit before firing the LLM call.
+            let rate_check = self
+                .reasoning_limiter
+                .check_and_record(
+                    &ctx.user_id,
+                    "memory_search_reasoning",
+                    &REASONING_RATE_LIMIT,
+                )
+                .await;
+            if !rate_check.is_allowed() {
+                tracing::debug!(
+                    user_id = %ctx.user_id,
+                    "Reasoning LLM call rate-limited, returning raw results"
+                );
+            } else {
+                let fragments: String = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        format!(
+                            "[{}] (path: {}, score: {:.2})\n{}",
+                            i + 1,
+                            r.document_path,
+                            r.score,
+                            r.content
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                let llm_messages = vec![
+                    crate::llm::ChatMessage::system(include_str!(
+                        "../../../crates/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
+                    )),
+                    crate::llm::ChatMessage::user(format!(
+                        "Query: {query}\n\nMemory fragments:\n{fragments}"
+                    )),
+                ];
+
+                let request = crate::llm::CompletionRequest::new(llm_messages).with_max_tokens(500);
+
+                match tokio::time::timeout(REASONING_LLM_TIMEOUT, llm.complete(request)).await {
+                    Ok(Ok(response)) => {
+                        // Memory chunks may contain attacker-controlled text that
+                        // flows through the synthesis and back into future LLM
+                        // contexts. Match SessionSummaryHook's sanitization.
+                        let sanitizer = ironclaw_safety::Sanitizer::new();
+                        let sanitized = sanitizer.sanitize(response.content.trim());
+                        if sanitized.was_modified {
+                            tracing::debug!(
+                                user_id = %ctx.user_id,
+                                warnings = sanitized.warnings.len(),
+                                "Reasoning synthesis contained suspicious patterns; content was sanitized"
+                            );
+                        }
+                        let synthesis = sanitized.content;
+                        let output = serde_json::json!({
+                            "query": query,
+                            "synthesis": synthesis,
+                            "results": results.iter().map(|r| serde_json::json!({
+                                "content": r.content,
+                                "score": r.score,
+                                "path": r.document_path,
+                                "document_id": r.document_id.to_string(),
+                                "is_hybrid_match": r.is_hybrid(),
+                            })).collect::<Vec<_>>(),
+                            "result_count": result_count,
+                            "reasoning_used": true,
+                        });
+                        return Ok(ToolOutput::success(output, start.elapsed()));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!("Reasoning synthesis failed, returning raw results: {e}");
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "Reasoning synthesis timed out after {:?}, returning raw results",
+                            REASONING_LLM_TIMEOUT
+                        );
+                    }
+                }
+            }
+        }
+
         let output = serde_json::json!({
             "query": query,
-            "results": results.into_iter().map(|r| serde_json::json!({
+            "results": results.iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
                 "path": r.document_path,
@@ -1578,6 +1713,246 @@ mod tests {
 
             // Same user_id should return the same cached Arc (pointer equality)
             assert!(Arc::ptr_eq(&ws1, &ws2));
+        }
+    }
+
+    /// Caller-level tests for reasoning-augmented recall. These drive
+    /// `MemorySearchTool::execute` (the call site) with an LLM mock,
+    /// verifying the full wiring: config flag, LLM dispatch, fallback on
+    /// failure, and rate limiting.
+    #[cfg(feature = "libsql")]
+    mod reasoning_recall_tests {
+        use super::*;
+        use crate::llm::{
+            CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use rust_decimal::Decimal;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// LLM mock that records call count and returns a canned synthesis.
+        struct CountingMockLlm {
+            call_count: AtomicU32,
+            response: String,
+        }
+
+        impl CountingMockLlm {
+            fn new(response: &str) -> Self {
+                Self {
+                    call_count: AtomicU32::new(0),
+                    response: response.to_string(),
+                }
+            }
+
+            fn calls(&self) -> u32 {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for CountingMockLlm {
+            fn model_name(&self) -> &str {
+                "counting-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: self.response.clone(),
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unimplemented!()
+            }
+        }
+
+        /// LLM mock that always fails.
+        struct FailingMockLlm {
+            call_count: AtomicU32,
+        }
+
+        impl FailingMockLlm {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicU32::new(0),
+                }
+            }
+
+            fn calls(&self) -> u32 {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for FailingMockLlm {
+            fn model_name(&self) -> &str {
+                "failing-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(LlmError::RequestFailed {
+                    provider: "mock".into(),
+                    reason: "simulated failure".into(),
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unimplemented!()
+            }
+        }
+
+        async fn make_test_db() -> Arc<dyn crate::db::Database> {
+            use crate::db::libsql::LibSqlBackend;
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let db_path = temp_dir.path().join("reasoning_test.db");
+            let backend = LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend");
+            <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+                .await
+                .expect("migrations");
+            std::mem::forget(temp_dir);
+            Arc::new(backend)
+        }
+
+        async fn make_workspace_with_doc(user_id: &str) -> Arc<Workspace> {
+            let db = make_test_db().await;
+            let ws = Arc::new(Workspace::new_with_db(user_id, db));
+            // Seed a document so search returns results.
+            ws.write("test/notes.md", "Project Alpha: use Rust for the backend.")
+                .await
+                .expect("seed doc");
+            ws
+        }
+
+        #[tokio::test]
+        async fn reasoning_enabled_fires_llm_and_returns_synthesis() {
+            let ws = make_workspace_with_doc("alice").await;
+
+            // Sanity check: FTS must return the seeded doc, otherwise the
+            // synthesis branch below would be unreachable and the test
+            // assertions would silently never run.
+            let preflight = ws.search("Rust backend", 5).await.expect("search");
+            assert!(
+                !preflight.is_empty(),
+                "FTS preflight returned no results — seed data is not indexed; \
+                 the synthesis branch would never execute"
+            );
+
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(CountingMockLlm::new("Synthesized: use Rust"));
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                true,
+            );
+
+            let ctx = JobContext::with_user("alice", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend"});
+            let output = tool
+                .execute(params, &ctx) // safety: test-only tool execution; no DB transaction boundary involved
+                .await
+                .expect("execute should succeed");
+
+            assert_eq!(
+                llm.calls(),
+                1,
+                "synthesis branch must call the LLM exactly once"
+            );
+
+            let json = &output.result;
+            assert_eq!(json["reasoning_used"], true);
+            assert_eq!(
+                json["synthesis"].as_str(),
+                Some("Synthesized: use Rust"),
+                "synthesis must be the (sanitized) LLM response"
+            );
+            assert!(
+                json.get("results").and_then(|r| r.as_array()).is_some(),
+                "raw results must still be returned alongside synthesis"
+            );
+        }
+
+        #[tokio::test]
+        async fn reasoning_disabled_does_not_fire_llm() {
+            let ws = make_workspace_with_doc("bob").await;
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(CountingMockLlm::new("should not appear"));
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                false, // disabled
+            );
+
+            let ctx = JobContext::with_user("bob", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend"});
+            let result = tool.execute(params, &ctx).await; // safety: test-only tool execution; no DB transaction boundary involved
+
+            assert!(result.is_ok());
+            assert_eq!(
+                llm.calls(),
+                0,
+                "LLM should not be called when reasoning is disabled"
+            );
+        }
+
+        #[tokio::test]
+        async fn reasoning_llm_failure_falls_back_to_raw_results() {
+            let ws = make_workspace_with_doc("charlie").await;
+            let resolver: Arc<dyn WorkspaceResolver> = Arc::new(FixedWorkspaceResolver::new(ws));
+            let llm = Arc::new(FailingMockLlm::new());
+            let tool = MemorySearchTool::with_reasoning(
+                resolver,
+                Some(llm.clone() as Arc<dyn LlmProvider>),
+                true,
+            );
+
+            let ctx = JobContext::with_user("charlie", "test", "test");
+            let params = serde_json::json!({"query": "Rust backend", "reasoning": true});
+            let result = tool.execute(params, &ctx).await; // safety: test-only tool execution; no DB transaction boundary involved
+
+            // Should succeed with raw results (no synthesis), not propagate the LLM error.
+            assert!(
+                result.is_ok(),
+                "execute should succeed even with LLM failure"
+            );
+            let output = result.unwrap();
+            let json = &output.result;
+
+            // If LLM was called (there were search results), verify no synthesis field
+            if llm.calls() > 0 {
+                assert!(
+                    json.get("synthesis").is_none(),
+                    "Should not have synthesis on LLM failure"
+                );
+            }
         }
     }
 }

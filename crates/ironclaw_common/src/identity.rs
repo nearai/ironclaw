@@ -388,11 +388,11 @@ impl PartialEq<&str> for ExternalThreadId {
 
 /// Maximum length for an [`McpServerName`], measured in bytes.
 ///
-/// MCP server names are used as tool-name prefixes in LLM providers (which
+/// Alias of [`MAX_NAME_LEN`] to prevent drift between the two limits. MCP
+/// server names are used as tool-name prefixes in LLM providers (which
 /// typically require `^[a-zA-Z0-9_-]+$`), as components of secret-store keys
 /// (e.g. `mcp_<name>_access_token`), and as filesystem-adjacent identifiers.
-/// 64 bytes matches the shared `MAX_NAME_LEN` used for other identity names.
-pub const MAX_MCP_SERVER_NAME_LEN: usize = 64;
+pub const MAX_MCP_SERVER_NAME_LEN: usize = MAX_NAME_LEN;
 
 /// Why a candidate string is not a valid MCP server name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
