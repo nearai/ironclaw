@@ -446,7 +446,9 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
                 result,
                 result_preview,
                 error: c["error"].as_str().map(tool_error_for_display),
-                rationale: c["rationale"].as_str().map(String::from),
+                // Hide internal tool-selection rationale from normal web
+                // history responses.
+                rationale: None,
             }
         })
         .collect()
@@ -553,11 +555,9 @@ pub fn build_turns_from_db_messages(
                         );
                     }
                     Ok(serde_json::Value::Object(obj)) => {
-                        // New wrapped format with narrative
-                        turn.narrative = obj
-                            .get("narrative")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
+                        // Wrapped format may carry internal reasoning
+                        // narrative, but normal web history intentionally
+                        // suppresses it.
                         if let Some(serde_json::Value::Array(calls)) = obj.get("calls") {
                             turn.tool_calls = parse_tool_call_infos(calls);
                             turn.generated_images = collect_generated_images_from_tool_results(
@@ -912,15 +912,15 @@ mod tests {
         ];
         let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 1);
-        assert_eq!(
-            turns[0].narrative.as_deref(),
-            Some("Searching memory for context before proceeding.")
+        assert!(
+            turns[0].narrative.is_none(),
+            "web history should not expose internal reasoning narrative"
         );
         assert_eq!(turns[0].tool_calls.len(), 2);
         assert_eq!(turns[0].tool_calls[0].name, "memory_search");
-        assert_eq!(
-            turns[0].tool_calls[0].rationale.as_deref(),
-            Some("consult prior context")
+        assert!(
+            turns[0].tool_calls[0].rationale.is_none(),
+            "web history should not expose per-tool rationale"
         );
         assert!(turns[0].tool_calls[0].has_result);
         assert_eq!(turns[0].tool_calls[1].name, "shell");

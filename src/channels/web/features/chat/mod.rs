@@ -1046,7 +1046,9 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                     result: tool_result_preview(tc.result.as_ref()),
                     result_preview: None,
                     error: tc.error.as_deref().map(tool_error_for_display),
-                    rationale: tc.rationale.clone(),
+                    // Hide internal tool-selection rationale from normal web
+                    // history responses.
+                    rationale: None,
                 }
             })
             .collect(),
@@ -1056,7 +1058,8 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                 .iter()
                 .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
         ),
-        narrative: t.narrative.clone(),
+        // Hide internal tool-planning narrative from normal web history.
+        narrative: None,
     }
 }
 
@@ -1352,6 +1355,35 @@ mod tests {
         assert!(
             info.tool_calls[0].result_preview.is_none(),
             "in-memory path has no separate preview — leave `result_preview` empty to match DB semantics"
+        );
+    }
+
+    #[test]
+    fn test_in_memory_turn_info_hides_internal_reasoning() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("Summarize this page");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.narrative =
+                Some("I should fetch the page, inspect it, then summarize it.".to_string());
+            turn.record_tool_call_with_reasoning(
+                "web_fetch",
+                serde_json::json!({"url": "https://example.com"}),
+                Some("Need to inspect the page before answering.".to_string()),
+                Some("call_fetch_1".to_string()),
+            );
+        }
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert!(
+            info.narrative.is_none(),
+            "web chat history should not expose internal reasoning narrative"
+        );
+        assert_eq!(info.tool_calls.len(), 1);
+        assert!(
+            info.tool_calls[0].rationale.is_none(),
+            "web chat history should not expose per-tool rationale"
         );
     }
 
