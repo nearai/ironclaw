@@ -75,7 +75,14 @@ MOCK_MISSIONS = {
             "cadence_type": "daily",
             "cadence_description": "Every day at 9:00 AM",
             "thread_count": 42,
-            "last_run": "2026-04-12T09:00:00Z",
+            "run_summary": {
+                "total_runs": 42,
+                "completed_runs": 39,
+                "failed_runs": 2,
+                "in_progress_runs": 1,
+                "last_run_at": "2026-04-12T09:00:00Z",
+                "last_run_state": "In Progress",
+            },
         },
         {
             "id": "m-002",
@@ -84,7 +91,14 @@ MOCK_MISSIONS = {
             "cadence_type": "weekly",
             "cadence_description": "Every Monday at 10:00 AM",
             "thread_count": 6,
-            "last_run": "2026-04-07T10:00:00Z",
+            "run_summary": {
+                "total_runs": 6,
+                "completed_runs": 5,
+                "failed_runs": 1,
+                "in_progress_runs": 0,
+                "last_run_at": "2026-04-07T10:00:00Z",
+                "last_run_state": "Completed",
+            },
         },
         {
             "id": "m-003",
@@ -93,7 +107,14 @@ MOCK_MISSIONS = {
             "cadence_type": "monthly",
             "cadence_description": "1st of each month",
             "thread_count": 3,
-            "last_run": "2026-04-01T12:00:00Z",
+            "run_summary": {
+                "total_runs": 3,
+                "completed_runs": 3,
+                "failed_runs": 0,
+                "in_progress_runs": 0,
+                "last_run_at": "2026-04-01T12:00:00Z",
+                "last_run_state": "Completed",
+            },
         },
         {
             "id": "m-004",
@@ -102,7 +123,14 @@ MOCK_MISSIONS = {
             "cadence_type": "daily",
             "cadence_description": "Every day at 11:00 AM",
             "thread_count": 15,
-            "last_run": "2026-04-10T11:00:00Z",
+            "run_summary": {
+                "total_runs": 15,
+                "completed_runs": 13,
+                "failed_runs": 2,
+                "in_progress_runs": 0,
+                "last_run_at": "2026-04-10T11:00:00Z",
+                "last_run_state": "Failed",
+            },
         },
     ],
 }

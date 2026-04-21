@@ -47,6 +47,28 @@
   padding: 16px 0;
 }
 
+.missions-run-summary {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+.mission-run-counts {
+  color: var(--text);
+  display: inline-block;
+}
+
+.mission-last-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mission-last-run-time {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
 .mission-progress-live {
   color: var(--accent);
   font-weight: 500;
@@ -99,4 +121,3 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-

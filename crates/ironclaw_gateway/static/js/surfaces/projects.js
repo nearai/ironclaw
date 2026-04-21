@@ -1,6 +1,7 @@
 let currentMissionId = null;
 let crOverview = null; // cached overview response
 let crCurrentProjectId = null; // currently drilled-into project
+let crCurrentMissionList = []; // missions shown in the current project drill view
 
 function applyEngineModeToTabs() {
   document.querySelectorAll('.tab-bar [data-v2-only]').forEach(function(el) {
@@ -94,6 +95,7 @@ function renderCrCards(projects) {
 
 function drillIntoProject(projectId) {
   crCurrentProjectId = projectId;
+  crCurrentMissionList = [];
   document.getElementById('cr-cards').style.display = 'none';
   var drill = document.getElementById('cr-drill');
   drill.style.display = '';
@@ -131,6 +133,7 @@ function drillIntoProject(projectId) {
   ]).then(function(res) {
     var missions = res[0].missions || [];
     var threads = res[1].threads || [];
+    crCurrentMissionList = missions;
     renderCrDrillMissions(missions);
     renderCrDrillActivity(threads, missions);
   }).catch(function(err) {
@@ -143,6 +146,7 @@ function drillIntoProject(projectId) {
 
 function crBackToOverview() {
   crCurrentProjectId = null;
+  crCurrentMissionList = [];
   destroyProjectWidgets();
   document.getElementById('cr-drill').style.display = 'none';
   document.getElementById('cr-detail').style.display = 'none';
@@ -162,14 +166,19 @@ function renderCrDrillMissions(missions) {
     var statusClass = m.status === 'Active' ? 'in_progress'
       : m.status === 'Completed' ? 'completed'
       : m.status === 'Paused' ? 'pending' : 'failed';
+    var runSummary = normalizeMissionRunSummary(m.run_summary, m.thread_count);
+    var lastRunText = runSummary.last_run_at && runSummary.last_run_state
+      ? I18n.t('missions.lastRun') + ': ' + missionRunStateLabel(runSummary.last_run_state) + ' · ' + formatRelativeTime(runSummary.last_run_at)
+      : I18n.t('missions.noRuns');
     html += '<button class="cr-mission-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<div class="cr-mc-head">'
       + '<span class="cr-mc-name">' + escapeHtml(m.name) + '</span>'
       + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>'
       + '<div class="cr-mc-sub">'
       + escapeHtml(m.cadence_description || m.cadence_type || 'manual')
-      + ' · ' + m.thread_count + ' threads'
       + '</div>'
+      + '<div class="cr-mc-meta">' + escapeHtml(renderMissionRunCountsText(runSummary)) + '</div>'
+      + '<div class="cr-mc-meta">' + escapeHtml(lastRunText) + '</div>'
       + '</button>';
   });
   el.innerHTML = html;
@@ -224,17 +233,22 @@ function renderMissionDetailInCr(m) {
   var statusClass = m.status === 'Active' ? 'in_progress'
     : m.status === 'Completed' ? 'completed'
     : m.status === 'Paused' ? 'pending' : 'failed';
+  var runSummary = normalizeMissionRunSummary(m.run_summary, m.thread_count);
   var html = '<div class="cr-detail-header">'
     + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(m.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>';
   html += '<div class="job-description"><h3>Goal</h3>'
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+  html += '<div class="job-description"><h3>' + escapeHtml(I18n.t('missions.runSummary')) + '</h3>'
+    + renderMissionRunSummaryCards(runSummary, m.thread_count)
+    + '</div>';
   html += '<div class="job-meta-grid">'
     + metaItem('Cadence', m.cadence_description || m.cadence_type)
     + metaItem('Threads today', m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
     + metaItem('Total threads', m.thread_count)
     + metaItem('Created', formatDate(m.created_at))
+    + metaItem(I18n.t('missions.lastRun'), runSummary.last_run_at ? formatDate(runSummary.last_run_at) : I18n.t('missions.noRuns'))
     + metaItem('Next fire', m.next_fire_at ? formatDate(m.next_fire_at) : '\u2014')
     + '</div>';
   if (m.current_focus) {
@@ -255,9 +269,9 @@ function renderMissionDetailInCr(m) {
   if (m.status === 'Paused') html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ';
   html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire now</button>';
   html += '</div>';
-  // Spawned threads.
+  // Run history.
   if (m.threads && m.threads.length) {
-    html += '<div class="job-description"><h3>Spawned Threads</h3>';
+    html += '<div class="job-description"><h3>' + escapeHtml(I18n.t('missions.runs')) + '</h3>';
     m.threads.forEach(function(t) {
       var tState = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
         : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
@@ -415,7 +429,10 @@ function renderMissionThreadProgress(threadId) {
 
 function missionThreadIds(mission) {
   if (!mission || !Array.isArray(mission.threads)) return [];
-  return mission.threads.map((thread) => thread.id).filter(Boolean).sort();
+  return mission.threads
+    .map((thread) => [thread.id, thread.state, thread.updated_at, thread.created_at].join(':'))
+    .filter(Boolean)
+    .sort();
 }
 
 function haveMissionThreadsChanged(previousMission, nextMission) {
@@ -428,6 +445,91 @@ function haveMissionThreadsChanged(previousMission, nextMission) {
   return false;
 }
 
+function normalizeMissionRunSummary(summary, threadCount) {
+  const fallbackTotal = Number(threadCount) || 0;
+  return {
+    total_runs: Number(summary && summary.total_runs) || fallbackTotal,
+    completed_runs: Number(summary && summary.completed_runs) || 0,
+    failed_runs: Number(summary && summary.failed_runs) || 0,
+    in_progress_runs: Number(summary && summary.in_progress_runs) || 0,
+    last_run_at: summary && summary.last_run_at ? summary.last_run_at : null,
+    last_run_state: summary && summary.last_run_state ? summary.last_run_state : null,
+  };
+}
+
+function missionRunSummarySignature(summary, threadCount) {
+  const normalized = normalizeMissionRunSummary(summary, threadCount);
+  return [
+    normalized.total_runs,
+    normalized.completed_runs,
+    normalized.failed_runs,
+    normalized.in_progress_runs,
+    normalized.last_run_at || '',
+    normalized.last_run_state || '',
+  ].join('|');
+}
+
+function missionRunBadgeClass(state) {
+  if (state === 'Completed') return 'completed';
+  if (state === 'Failed') return 'failed';
+  return 'in_progress';
+}
+
+function missionRunStateLabel(state) {
+  if (state === 'Completed') return I18n.t('missions.runState.completed');
+  if (state === 'Failed') return I18n.t('missions.runState.failed');
+  return I18n.t('missions.runState.inProgress');
+}
+
+function renderMissionRunCountsText(summary) {
+  const normalized = normalizeMissionRunSummary(summary, summary && summary.total_runs);
+  if (!normalized.total_runs) return I18n.t('missions.noRuns');
+
+  const parts = [];
+  if (normalized.completed_runs > 0) {
+    parts.push(normalized.completed_runs + ' ' + I18n.t('missions.runState.completed').toLowerCase());
+  }
+  if (normalized.failed_runs > 0) {
+    parts.push(normalized.failed_runs + ' ' + I18n.t('missions.runState.failed').toLowerCase());
+  }
+  if (normalized.in_progress_runs > 0) {
+    parts.push(normalized.in_progress_runs + ' ' + I18n.t('missions.runState.inProgress').toLowerCase());
+  }
+  if (parts.length === 0) {
+    parts.push(normalized.total_runs + ' ' + I18n.t('missions.runs').toLowerCase());
+  }
+  return parts.join(' · ');
+}
+
+function renderMissionRunCounts(summary, threadCount) {
+  return '<span class="mission-run-counts">'
+    + escapeHtml(renderMissionRunCountsText(normalizeMissionRunSummary(summary, threadCount)))
+    + '</span>';
+}
+
+function renderMissionLastRun(summary, threadCount) {
+  const normalized = normalizeMissionRunSummary(summary, threadCount);
+  if (!normalized.last_run_at || !normalized.last_run_state) {
+    return '<span class="mission-progress-idle">' + escapeHtml(I18n.t('missions.noRuns')) + '</span>';
+  }
+  return '<div class="mission-last-run">'
+    + '<span class="badge ' + missionRunBadgeClass(normalized.last_run_state) + '">'
+    + escapeHtml(missionRunStateLabel(normalized.last_run_state))
+    + '</span>'
+    + '<span class="mission-last-run-time">' + escapeHtml(formatDate(normalized.last_run_at)) + '</span>'
+    + '</div>';
+}
+
+function renderMissionRunSummaryCards(summary, threadCount) {
+  const normalized = normalizeMissionRunSummary(summary, threadCount);
+  return '<div class="missions-summary missions-run-summary">'
+    + summaryCard(I18n.t('missions.totalRuns'), normalized.total_runs, '')
+    + summaryCard(I18n.t('missions.runState.completed'), normalized.completed_runs, 'completed')
+    + summaryCard(I18n.t('missions.runState.failed'), normalized.failed_runs, 'failed')
+    + summaryCard(I18n.t('missions.runState.inProgress'), normalized.in_progress_runs, 'active')
+    + '</div>';
+}
+
 function applyMissionDetailUpdate(mission) {
   if (!mission || !mission.id) return;
   const previousMission = missionDetailCache.get(mission.id) || null;
@@ -436,11 +538,22 @@ function applyMissionDetailUpdate(mission) {
   activeWorkStore.rememberMissionThreads(mission);
 
   if (currentMissionData && currentMissionData.id === mission.id) {
-    const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission);
+    const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission)
+      || currentMissionData.status !== mission.status
+      || currentMissionData.current_focus !== mission.current_focus
+      || currentMissionData.next_fire_at !== mission.next_fire_at
+      || missionRunSummarySignature(currentMissionData.run_summary, currentMissionData.thread_count)
+        !== missionRunSummarySignature(mission.run_summary, mission.thread_count);
     currentMissionData = mission;
-    if (currentTab === 'missions' && !currentEngineThreadDetail && shouldRerenderDetail) {
-      renderMissionDetail(currentMissionData);
-      return;
+    if (!currentEngineThreadDetail && shouldRerenderDetail) {
+      if (currentTab === 'missions') {
+        renderMissionDetail(currentMissionData);
+        return;
+      }
+      if (currentTab === 'projects') {
+        renderMissionDetailInCr(currentMissionData);
+        return;
+      }
     }
   }
 
@@ -454,14 +567,42 @@ function applyMissionDetailUpdate(mission) {
         thread_count: mission.thread_count,
         current_focus: mission.current_focus,
         next_fire_at: mission.next_fire_at,
+        run_summary: mission.run_summary,
       };
       if (
         updatedEntry.status !== entry.status
         || updatedEntry.thread_count !== entry.thread_count
         || updatedEntry.current_focus !== entry.current_focus
         || updatedEntry.next_fire_at !== entry.next_fire_at
+        || missionRunSummarySignature(updatedEntry.run_summary, updatedEntry.thread_count)
+          !== missionRunSummarySignature(entry.run_summary, entry.thread_count)
       ) {
         missionListChanged = true;
+      }
+      return updatedEntry;
+    });
+  }
+  let projectMissionListChanged = false;
+  if (crCurrentMissionList.length > 0) {
+    crCurrentMissionList = crCurrentMissionList.map((entry) => {
+      if (!entry || entry.id !== mission.id) return entry;
+      const updatedEntry = {
+        ...entry,
+        status: mission.status,
+        thread_count: mission.thread_count,
+        current_focus: mission.current_focus,
+        next_fire_at: mission.next_fire_at,
+        run_summary: mission.run_summary,
+      };
+      if (
+        updatedEntry.status !== entry.status
+        || updatedEntry.thread_count !== entry.thread_count
+        || updatedEntry.current_focus !== entry.current_focus
+        || updatedEntry.next_fire_at !== entry.next_fire_at
+        || missionRunSummarySignature(updatedEntry.run_summary, updatedEntry.thread_count)
+          !== missionRunSummarySignature(entry.run_summary, entry.thread_count)
+      ) {
+        projectMissionListChanged = true;
       }
       return updatedEntry;
     });
@@ -470,6 +611,10 @@ function applyMissionDetailUpdate(mission) {
   if (currentTab === 'missions' && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
     renderMissionsList(currentMissionList);
     return;
+  }
+
+  if (currentTab === 'projects' && crCurrentProjectId && projectMissionListChanged) {
+    renderCrDrillMissions(crCurrentMissionList);
   }
 
   if (previousMission && haveMissionThreadsChanged(previousMission, mission)) {
@@ -608,6 +753,7 @@ function renderMissionsList(missions) {
 
   empty.style.display = 'none';
   tbody.innerHTML = missions.map((m) => {
+    const runSummary = normalizeMissionRunSummary(m.run_summary, m.thread_count);
     const statusClass = m.status === 'Active' ? 'in_progress'
       : m.status === 'Completed' ? 'completed'
       : m.status === 'Paused' ? 'pending'
@@ -619,6 +765,8 @@ function renderMissionsList(missions) {
       + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
+      + '<td>' + renderMissionRunCounts(runSummary, m.thread_count) + '</td>'
+      + '<td>' + renderMissionLastRun(runSummary, m.thread_count) + '</td>'
       + '<td>' + renderMissionProgressCell(m.id) + '</td>'
       + '<td>'
       + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ' : '')
@@ -665,6 +813,7 @@ function renderMissionDetail(m) {
     : m.status === 'Completed' ? 'completed'
     : m.status === 'Paused' ? 'pending'
     : 'failed';
+  const runSummary = normalizeMissionRunSummary(m.run_summary, m.thread_count);
 
   let html = '<div class="job-detail-header">'
     + '<button class="btn-back" data-action="close-mission-detail">' + escapeHtml(I18n.t('common.back')) + '</button>'
@@ -676,12 +825,17 @@ function renderMissionDetail(m) {
   html += '<div class="job-description"><h3>Goal</h3>'
     + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
 
+  html += '<div class="job-description"><h3>' + escapeHtml(I18n.t('missions.runSummary')) + '</h3>'
+    + renderMissionRunSummaryCards(runSummary, m.thread_count)
+    + '</div>';
+
   html += '<div class="job-meta-grid">'
     + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
     + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
     + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
+    + metaItem(I18n.t('missions.lastRun'), runSummary.last_run_at ? formatDate(runSummary.last_run_at) : I18n.t('missions.noRuns'))
     + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
     + '</div>';
 
@@ -711,7 +865,7 @@ function renderMissionDetail(m) {
   }
 
   if (m.threads && m.threads.length > 0) {
-    html += '<div class="job-description"><h3>Spawned Threads</h3>'
+    html += '<div class="job-description"><h3>' + escapeHtml(I18n.t('missions.runs')) + '</h3>'
       + '<table class="missions-table"><thead><tr>'
       + '<th>Goal</th><th>Type</th><th>State</th><th>' + escapeHtml(I18n.t('missions.progress')) + '</th><th>Steps</th><th>Tokens</th><th>Created</th>'
       + '</tr></thead><tbody>';
@@ -872,4 +1026,3 @@ function formatRelativeTime(isoString) {
 }
 
 // --- Users (admin) ---
-

@@ -231,6 +231,12 @@
   color: var(--text-secondary);
 }
 
+.cr-mc-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
 /* Activity rows */
 .cr-activity-row {
   display: flex;

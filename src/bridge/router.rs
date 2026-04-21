@@ -4788,10 +4788,24 @@ pub struct EngineMissionInfo {
     /// "webhook: /github", "manual"). Renders nicer than `cadence_type` alone.
     pub cadence_description: String,
     pub thread_count: usize,
+    pub run_summary: EngineMissionRunSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_focus: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Aggregated mission run history derived from spawned mission threads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EngineMissionRunSummary {
+    pub total_runs: u64,
+    pub completed_runs: u64,
+    pub failed_runs: u64,
+    pub in_progress_runs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_state: Option<String>,
 }
 
 /// Mission detail with full strategy and budget info.
@@ -4944,6 +4958,117 @@ fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
         total_tokens: t.total_tokens_used,
         created_at: t.created_at.to_rfc3339(),
         updated_at: t.updated_at.to_rfc3339(),
+    }
+}
+
+fn mission_run_state(thread: &ironclaw_engine::Thread) -> &'static str {
+    match thread.state {
+        ironclaw_engine::ThreadState::Done | ironclaw_engine::ThreadState::Completed => "Completed",
+        ironclaw_engine::ThreadState::Failed => "Failed",
+        ironclaw_engine::ThreadState::Created
+        | ironclaw_engine::ThreadState::Running
+        | ironclaw_engine::ThreadState::Waiting
+        | ironclaw_engine::ThreadState::Suspended => "In Progress",
+    }
+}
+
+fn mission_run_threads_from_lookup(
+    mission: &ironclaw_engine::Mission,
+    threads_by_id: &std::collections::HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>,
+) -> Vec<ironclaw_engine::Thread> {
+    let mut threads: Vec<_> = mission
+        .thread_history
+        .iter()
+        .filter_map(|tid| threads_by_id.get(tid).cloned())
+        .collect();
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.created_at));
+    threads
+}
+
+async fn load_mission_run_threads(
+    store: &Arc<dyn Store>,
+    mission: &ironclaw_engine::Mission,
+) -> Result<Vec<ironclaw_engine::Thread>, Error> {
+    let mut threads = Vec::new();
+    for tid in &mission.thread_history {
+        match store.load_thread(*tid).await {
+            Ok(Some(thread)) => threads.push(thread),
+            Ok(None) => {}
+            Err(e) => return Err(engine_err("load mission thread", e)),
+        }
+    }
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.created_at));
+    Ok(threads)
+}
+
+async fn load_visible_project_threads(
+    store: &Arc<dyn Store>,
+    project_id: ironclaw_engine::ProjectId,
+    user_id: &str,
+) -> Result<std::collections::HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>, Error> {
+    let mut threads = store
+        .list_threads(project_id, user_id)
+        .await
+        .map_err(|e| engine_err("list project threads", e))?;
+
+    if !ironclaw_engine::types::is_shared_owner(user_id) {
+        for owner_id in ironclaw_engine::types::shared_owner_candidates() {
+            let mut shared_threads = store
+                .list_threads(project_id, owner_id)
+                .await
+                .map_err(|e| engine_err("list shared project threads", e))?;
+            threads.append(&mut shared_threads);
+        }
+    }
+
+    let mut threads_by_id = std::collections::HashMap::with_capacity(threads.len());
+    for thread in threads {
+        threads_by_id.insert(thread.id, thread);
+    }
+    Ok(threads_by_id)
+}
+
+fn summarize_mission_runs(threads: &[ironclaw_engine::Thread]) -> EngineMissionRunSummary {
+    let mut completed_runs = 0;
+    let mut failed_runs = 0;
+    let mut in_progress_runs = 0;
+
+    for thread in threads {
+        match mission_run_state(thread) {
+            "Completed" => completed_runs += 1,
+            "Failed" => failed_runs += 1,
+            _ => in_progress_runs += 1,
+        }
+    }
+
+    EngineMissionRunSummary {
+        total_runs: threads.len() as u64,
+        completed_runs,
+        failed_runs,
+        in_progress_runs,
+        last_run_at: threads.first().map(|thread| thread.created_at.to_rfc3339()),
+        last_run_state: threads
+            .first()
+            .map(|thread| mission_run_state(thread).to_string()),
+    }
+}
+
+fn mission_to_info(
+    mission: &ironclaw_engine::Mission,
+    run_threads: &[ironclaw_engine::Thread],
+) -> EngineMissionInfo {
+    EngineMissionInfo {
+        id: mission.id,
+        name: mission.name.clone(),
+        goal: mission.goal.clone(),
+        status: format!("{:?}", mission.status),
+        cadence_type: cadence_type_label(&mission.cadence).to_string(),
+        cadence_description: cadence_description(&mission.cadence),
+        thread_count: run_threads.len(),
+        run_summary: summarize_mission_runs(run_threads),
+        current_focus: mission.current_focus.clone(),
+        created_at: mission.created_at.to_rfc3339(),
+        updated_at: mission.updated_at.to_rfc3339(),
     }
 }
 
@@ -5388,22 +5513,15 @@ pub async fn list_engine_missions(
         .list_missions_with_shared(pid, user_id)
         .await
         .map_err(|e| engine_err("list missions", e))?;
+    let threads_by_id = load_visible_project_threads(&state.store, pid, user_id).await?;
 
-    Ok(missions
-        .iter()
-        .map(|m| EngineMissionInfo {
-            id: m.id,
-            name: m.name.clone(),
-            goal: m.goal.clone(),
-            status: format!("{:?}", m.status),
-            cadence_type: cadence_type_label(&m.cadence).to_string(),
-            cadence_description: cadence_description(&m.cadence),
-            thread_count: m.thread_history.len(),
-            current_focus: m.current_focus.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            updated_at: m.updated_at.to_rfc3339(),
-        })
-        .collect())
+    let mut infos = Vec::with_capacity(missions.len());
+    for mission in &missions {
+        let run_threads = mission_run_threads_from_lookup(mission, &threads_by_id);
+        infos.push(mission_to_info(mission, &run_threads));
+    }
+
+    Ok(infos)
 }
 
 /// Get a single mission by ID.
@@ -5437,27 +5555,11 @@ pub async fn get_engine_mission(
 
     let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
 
-    // Load thread summaries for the spawned threads table
-    let mut threads = Vec::new();
-    for tid in &m.thread_history {
-        if let Ok(Some(thread)) = state.store.load_thread(*tid).await {
-            threads.push(thread_to_info(&thread));
-        }
-    }
+    let run_threads = load_mission_run_threads(&state.store, &m).await?;
+    let threads = run_threads.iter().map(thread_to_info).collect();
 
     Ok(Some(EngineMissionDetail {
-        info: EngineMissionInfo {
-            id: m.id,
-            name: m.name.clone(),
-            goal: m.goal.clone(),
-            status: format!("{:?}", m.status),
-            cadence_type: cadence_type_label(&m.cadence).to_string(),
-            cadence_description: cadence_description(&m.cadence),
-            thread_count: m.thread_history.len(),
-            current_focus: m.current_focus.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            updated_at: m.updated_at.to_rfc3339(),
-        },
+        info: mission_to_info(&m, &run_threads),
         cadence: cadence_json,
         approach_history: m.approach_history.clone(),
         notify_channels: m.notify_channels.clone(),
@@ -6137,6 +6239,7 @@ mod tests {
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
         threads: TokioRwLock<HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>>,
+        missions: TokioRwLock<HashMap<ironclaw_engine::MissionId, ironclaw_engine::Mission>>,
         docs: TokioRwLock<Vec<ironclaw_engine::MemoryDoc>>,
         projects: TokioRwLock<Vec<ironclaw_engine::Project>>,
     }
@@ -6146,6 +6249,7 @@ mod tests {
             Self {
                 conversations: TokioRwLock::new(Vec::new()),
                 threads: TokioRwLock::new(HashMap::new()),
+                missions: TokioRwLock::new(HashMap::new()),
                 docs: TokioRwLock::new(Vec::new()),
                 projects: TokioRwLock::new(Vec::new()),
             }
@@ -6399,29 +6503,69 @@ mod tests {
         }
         async fn save_mission(
             &self,
-            _: &ironclaw_engine::Mission,
+            mission: &ironclaw_engine::Mission,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            self.missions
+                .write()
+                .await
+                .insert(mission.id, mission.clone());
             Ok(())
         }
         async fn load_mission(
             &self,
-            _: ironclaw_engine::MissionId,
+            id: ironclaw_engine::MissionId,
         ) -> Result<Option<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self.missions.read().await.get(&id).cloned())
         }
         async fn list_missions(
             &self,
-            _: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .missions
+                .read()
+                .await
+                .values()
+                .filter(|mission| mission.project_id == project_id && mission.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn update_mission_status(
             &self,
-            _: ironclaw_engine::MissionId,
-            _: ironclaw_engine::MissionStatus,
+            id: ironclaw_engine::MissionId,
+            status: ironclaw_engine::MissionStatus,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            if let Some(mission) = self.missions.write().await.get_mut(&id) {
+                mission.status = status;
+            }
             Ok(())
+        }
+        async fn list_all_missions(
+            &self,
+            project_id: ironclaw_engine::ProjectId,
+        ) -> Result<Vec<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
+            Ok(self
+                .missions
+                .read()
+                .await
+                .values()
+                .filter(|mission| mission.project_id == project_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_all_threads(
+            &self,
+            project_id: ironclaw_engine::ProjectId,
+        ) -> Result<Vec<ironclaw_engine::Thread>, ironclaw_engine::EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|thread| thread.project_id == project_id)
+                .cloned()
+                .collect())
         }
     }
 
@@ -8578,6 +8722,185 @@ mod tests {
         let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
         assert!(result.is_some(), "should find thread via entry fallback");
         assert_eq!(result.unwrap().id, tid);
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_includes_run_summary_for_mission_threads() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+        let project_id = state.default_project_id;
+        let now = chrono::Utc::now();
+
+        let mut failed = ironclaw_engine::Thread::new(
+            "failed run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        failed.state = ironclaw_engine::ThreadState::Failed;
+        failed.created_at = now - chrono::Duration::hours(3);
+        failed.updated_at = failed.created_at;
+
+        let mut completed = ironclaw_engine::Thread::new(
+            "completed run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        completed.state = ironclaw_engine::ThreadState::Done;
+        completed.created_at = now - chrono::Duration::hours(2);
+        completed.updated_at = completed.created_at;
+
+        let mut running = ironclaw_engine::Thread::new(
+            "running run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        running.state = ironclaw_engine::ThreadState::Running;
+        running.created_at = now - chrono::Duration::hours(1);
+        running.updated_at = running.created_at;
+
+        store.save_thread(&failed).await.unwrap();
+        store.save_thread(&completed).await.unwrap();
+        store.save_thread(&running).await.unwrap();
+
+        let mut mission = ironclaw_engine::Mission::new(
+            project_id,
+            "alice",
+            "Daily digest",
+            "Collect the latest updates",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        mission.thread_history = vec![
+            failed.id,
+            ironclaw_engine::ThreadId::new(),
+            running.id,
+            completed.id,
+        ];
+        store.save_mission(&mission).await.unwrap();
+
+        *lock.write().await = Some(state);
+
+        let missions = list_engine_missions(None, "alice").await.unwrap();
+        assert_eq!(missions.len(), 1);
+
+        let mission = &missions[0];
+        assert_eq!(mission.thread_count, 3);
+        assert_eq!(
+            mission.run_summary,
+            EngineMissionRunSummary {
+                total_runs: 3,
+                completed_runs: 1,
+                failed_runs: 1,
+                in_progress_runs: 1,
+                last_run_at: Some(running.created_at.to_rfc3339()),
+                last_run_state: Some("In Progress".to_string()),
+            }
+        );
+
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn get_engine_mission_sorts_runs_newest_first_and_skips_missing_threads() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+        let project_id = state.default_project_id;
+        let now = chrono::Utc::now();
+
+        let mut oldest = ironclaw_engine::Thread::new(
+            "oldest run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        oldest.state = ironclaw_engine::ThreadState::Failed;
+        oldest.created_at = now - chrono::Duration::hours(4);
+        oldest.updated_at = oldest.created_at;
+
+        let mut middle = ironclaw_engine::Thread::new(
+            "middle run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        middle.state = ironclaw_engine::ThreadState::Completed;
+        middle.created_at = now - chrono::Duration::hours(2);
+        middle.updated_at = middle.created_at;
+
+        let mut newest = ironclaw_engine::Thread::new(
+            "newest run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        newest.state = ironclaw_engine::ThreadState::Waiting;
+        newest.created_at = now - chrono::Duration::minutes(30);
+        newest.updated_at = newest.created_at;
+
+        store.save_thread(&oldest).await.unwrap();
+        store.save_thread(&middle).await.unwrap();
+        store.save_thread(&newest).await.unwrap();
+
+        let mut mission = ironclaw_engine::Mission::new(
+            project_id,
+            "alice",
+            "Recurring monitor",
+            "Track regressions",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        mission.thread_history = vec![
+            middle.id,
+            ironclaw_engine::ThreadId::new(),
+            oldest.id,
+            newest.id,
+        ];
+        let mission_id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        *lock.write().await = Some(state);
+
+        let detail = get_engine_mission(&mission_id.to_string(), "alice")
+            .await
+            .unwrap()
+            .expect("mission detail should exist");
+
+        let ordered_ids: Vec<_> = detail
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                newest.id.to_string(),
+                middle.id.to_string(),
+                oldest.id.to_string(),
+            ]
+        );
+        assert_eq!(detail.info.thread_count, 3);
+        assert_eq!(detail.info.run_summary.total_runs, 3);
+        assert_eq!(
+            detail.info.run_summary.last_run_state.as_deref(),
+            Some("In Progress")
+        );
+
+        *lock.write().await = None;
     }
 
     #[test]
