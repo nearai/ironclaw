@@ -80,6 +80,10 @@ pub use router::reset_engine_state;
 #[doc(hidden)]
 pub use router::engine_retrospectives_for_test;
 
+#[cfg(feature = "libsql")]
+#[doc(hidden)]
+pub use router::override_engine_project_root_for_test;
+
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]
 pub(crate) use router::handle_mission_notification;
