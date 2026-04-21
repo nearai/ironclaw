@@ -246,6 +246,13 @@ async def multi_tenant_gateway_server(ironclaw_binary, mock_llm_server):
         "ONBOARD_COMPLETED": "true",
     }
 
+    # Forward cargo-llvm-cov env vars so coverage data is captured in CI.
+    cov_prefixes = ("CARGO_LLVM_COV", "LLVM_")
+    cov_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
+    for key, val in os.environ.items():
+        if key.startswith(cov_prefixes) or key in cov_extras:
+            env[key] = val
+
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary,
         "--no-onboard",
