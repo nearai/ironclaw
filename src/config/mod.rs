@@ -630,21 +630,46 @@ fn fallback_fired(configured: Option<&str>, active: &str) -> bool {
     normalize_backend(configured) != normalize_backend(active)
 }
 
-/// Normalize the handful of backend aliases recognised by `LlmConfig::resolve`.
-/// Must stay in sync with the alias branches there — this helper only needs
-/// to collapse aliases that could realistically appear in the DB's
-/// `llm_backend` setting.
+/// Normalize a backend id to the canonical form that `LlmConfig::resolve`
+/// lands on after alias resolution. Must produce the same canonical id the
+/// resolver uses — otherwise `fallback_fired` will mis-fire on every restart
+/// for any DB value that's a known alias (e.g. `claude` → `anthropic`,
+/// `bigmodel` → `zai`, `github-copilot` → `github_copilot`) and trigger a
+/// spurious DB rewrite.
+///
+/// Two sources of aliases:
+/// 1. Registry-defined aliases — delegated to `ProviderRegistry::find`, which
+///    is the same lookup `resolve_registry_provider` uses.
+/// 2. Hardcoded aliases for the four "virtual" backends that are not in the
+///    registry (nearai / bedrock / gemini_oauth / openai_codex). These must
+///    stay in sync with the matching branches in `LlmConfig::resolve`.
 fn normalize_backend(raw: &str) -> String {
     let lower = raw.to_lowercase();
+
+    // (1) Virtual backends (not in the registry) — hardcoded alias list
+    // mirroring LlmConfig::resolve.
     match lower.as_str() {
-        "near" | "near_ai" => "nearai".to_string(),
-        "aws" | "aws_bedrock" => "bedrock".to_string(),
-        "gemini-oauth" => "gemini_oauth".to_string(),
-        "openai-codex" | "codex" => "openai_codex".to_string(),
-        "open_ai" | "open-ai" => "openai".to_string(),
-        "openai-compatible" | "compatible" => "openai_compatible".to_string(),
-        _ => lower,
+        "nearai" | "near" | "near_ai" => return "nearai".to_string(),
+        "bedrock" | "aws" | "aws_bedrock" => return "bedrock".to_string(),
+        "gemini_oauth" | "gemini-oauth" => return "gemini_oauth".to_string(),
+        "openai_codex" | "openai-codex" | "codex" => return "openai_codex".to_string(),
+        _ => {}
     }
+
+    // (2) Registry providers — any alias declared in `providers.json` is
+    // resolved by `ProviderRegistry::find` to its canonical `id`. This is the
+    // SAME canonicalization `LlmConfig::resolve_registry_provider` does, so
+    // DB values like `claude` / `bigmodel` / `github-copilot` / `open_ai`
+    // won't look like a fallback.
+    if let Some(def) = crate::llm::ProviderRegistry::load().find(&lower) {
+        return def.id.clone();
+    }
+
+    // Unknown backend — resolve() treats it as openai_compatible at runtime,
+    // but here we conservatively return the input as-is. A truly unknown id
+    // won't match the canonical `active` either way; the comparison in
+    // `fallback_fired` just has to be consistent between both sides.
+    lower
 }
 
 pub(crate) fn load_bootstrap_settings(
@@ -1489,12 +1514,40 @@ mod tests {
         // `resolve` canonicalises backend aliases (near → nearai, open_ai →
         // openai) but that is not a fallback and must not trigger a DB
         // rewrite — doing so would churn the row on every startup.
+        //
+        // Virtual backends (not in the registry — alias set hardcoded in
+        // normalize_backend):
         assert!(!fallback_fired(Some("near"), "nearai"));
         assert!(!fallback_fired(Some("near_ai"), "nearai"));
-        assert!(!fallback_fired(Some("open_ai"), "openai"));
-        assert!(!fallback_fired(Some("codex"), "openai_codex"));
         assert!(!fallback_fired(Some("aws"), "bedrock"));
+        assert!(!fallback_fired(Some("aws_bedrock"), "bedrock"));
+        assert!(!fallback_fired(Some("codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("openai-codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("gemini-oauth"), "gemini_oauth"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_registry_aliases() {
+        // Regression: `providers.json` declares aliases for many registry
+        // providers (e.g. `claude` → `anthropic`, `bigmodel` → `zai`,
+        // `github-copilot` → `github_copilot`, `open_ai` → `openai`).
+        // `resolve_registry_provider` canonicalises these to the registry's
+        // `id` field, so a DB value of `claude` produces `cfg.backend ==
+        // "anthropic"`. normalize_backend must delegate to the registry so
+        // this is recognised as alias drift, not a fallback. Otherwise the
+        // DB gets rewritten on every startup for users who happen to have
+        // the alias form saved.
+        assert!(!fallback_fired(Some("claude"), "anthropic"));
+        assert!(!fallback_fired(Some("bigmodel"), "zai"));
+        assert!(!fallback_fired(Some("github-copilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("githubcopilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("open_ai"), "openai"));
+        assert!(!fallback_fired(
+            Some("openai-compatible"),
+            "openai_compatible"
+        ));
         assert!(!fallback_fired(Some("compatible"), "openai_compatible"));
+        assert!(!fallback_fired(Some("open_router"), "openrouter"));
     }
 
     #[test]

@@ -1609,9 +1609,13 @@ mod tests {
         // Empty base_url is accepted at save time so users can stage an
         // incomplete config without losing it. It is NOT enforced during
         // `LlmConfig::resolve_custom_provider` either (only a warning).
-        // The frontend activation guard and the startup fallback in
-        // `LlmConfig::resolve` are what actually prevent such a config
-        // from being used at runtime.
+        // What actually prevents such a config from being used at runtime:
+        //   1. Frontend activation guard (isProviderConfigured in
+        //      static/js/surfaces/config.js blocks the "Use" button).
+        //   2. Startup fallback in `LlmConfig::resolve_with_fallback`
+        //      (invoked from `Config::re_resolve_llm_with_secrets`) —
+        //      demotes unusable custom providers to NearAI rather than
+        //      crash-looping the instance (#2514).
         let input = serde_json::json!([{
             "id": "my-llm",
             "adapter": "open_ai_completions",
