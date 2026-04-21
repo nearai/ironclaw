@@ -5,8 +5,8 @@ use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{
-    db_first_bool, db_first_or_default, optional_env, parse_optional_env, validate_base_url,
-    validate_operator_base_url,
+    db_first_bool, db_first_option, db_first_optional_string, db_first_or_default, optional_env,
+    parse_optional_env, validate_base_url, validate_operator_base_url,
 };
 use crate::error::ConfigError;
 use crate::llm::config::*;
@@ -360,21 +360,15 @@ impl LlmConfig {
             None
         };
 
-        // Generic cheap model: env var > settings > None.
+        // Generic cheap model: settings > env var > None.
         // Falls back to NearAI-specific cheap_model in provider chain logic.
-        let cheap_model = optional_env("LLM_CHEAP_MODEL")?.or_else(|| settings.cheap_model.clone());
+        let cheap_model = db_first_optional_string(&settings.cheap_model, "LLM_CHEAP_MODEL")?;
 
-        // Generic smart routing cascade flag: env var > settings > true.
+        // Generic smart routing cascade flag: settings > env var > true.
         // Overrides NearAI-specific smart_routing_cascade.
-        let smart_routing_cascade = optional_env("SMART_ROUTING_CASCADE")?
-            .map(|raw| raw.parse::<bool>())
-            .transpose()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: "SMART_ROUTING_CASCADE".to_string(),
-                message: format!("must be true or false: {e}"),
-            })?
-            .or(settings.smart_routing_cascade)
-            .unwrap_or(true);
+        let smart_routing_cascade =
+            db_first_option(&settings.smart_routing_cascade, "SMART_ROUTING_CASCADE")?
+                .unwrap_or(true);
 
         // Decorator chain settings — top-level `LLM_*` vars with fallback to
         // existing backend-specific vars for backward compatibility.
@@ -849,7 +843,25 @@ mod tests {
     }
 
     #[test]
-    fn cheap_model_env_overrides_settings() {
+    fn cheap_model_uses_env_when_settings_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_CHEAP_MODEL", "env-cheap");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        assert_eq!(cfg.cheap_model.as_deref(), Some("env-cheap"));
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_CHEAP_MODEL");
+        }
+    }
+
+    #[test]
+    fn cheap_model_settings_override_env() {
         let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
@@ -863,7 +875,7 @@ mod tests {
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(cfg.cheap_model.as_deref(), Some("env-cheap"));
+        assert_eq!(cfg.cheap_model.as_deref(), Some("settings-cheap"));
 
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -895,7 +907,25 @@ mod tests {
     }
 
     #[test]
-    fn smart_routing_cascade_env_overrides_settings() {
+    fn smart_routing_cascade_uses_env_when_settings_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SMART_ROUTING_CASCADE", "false");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        assert!(!cfg.smart_routing_cascade);
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("SMART_ROUTING_CASCADE");
+        }
+    }
+
+    #[test]
+    fn smart_routing_cascade_settings_override_env() {
         let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
@@ -909,7 +939,7 @@ mod tests {
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
-        assert!(cfg.smart_routing_cascade);
+        assert!(!cfg.smart_routing_cascade);
 
         // SAFETY: Under ENV_MUTEX.
         unsafe {

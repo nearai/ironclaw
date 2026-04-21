@@ -68,7 +68,8 @@ pub async fn webhook_trigger_handler(
     // but tenant isolation requires scoping by user_id.
     // Use workspace_pool as the multi-tenant indicator — it's only set when
     // has_any_users() was true at startup (not just when a DB exists).
-    if state.workspace_pool.is_some() {
+    let multi_tenant = state.workspace_pool.is_some(); // dispatch-exempt: tenant-safety gate
+    if multi_tenant {
         return Err((
             StatusCode::GONE,
             "Unscoped webhooks disabled in multi-tenant mode. Use /api/webhooks/u/{user_id}/{path} instead.".to_string(),
