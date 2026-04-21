@@ -17,9 +17,6 @@ on:
         required: false
         type: string
         default: ""
-  # Staging build from the staging branch every hour
-  schedule:
-    - cron: '0 * * * *'
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
@@ -37,7 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'staging' || '' }}
           persist-credentials: false
 
       - name: Resolve source git commit
@@ -53,6 +49,16 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Detected version: ${VERSION}"
+
+      - name: Validate tag override
+        if: inputs.tag != ''
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${INPUT_TAG}" == "staging" ]]; then
+            echo "::error::The staging tag has been retired. Use a different tag or rely on release tags."
+            exit 1
+          fi
 
       - name: Determine tags
         id: tags
@@ -73,32 +79,20 @@ jobs:
             WORKER_TAGS="${WORKER_IMAGE_NAME}:${VERSION}"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
-          elif [[ "${EVENT_NAME}" == "schedule" ]]; then
-            # Daily staging: :staging + :sha-xxx
-            TAGS="${IMAGE_NAME}:staging"
-            TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
-            WORKER_TAGS="${WORKER_IMAGE_NAME}:staging"
-            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           else
             # Manual dispatch: :sha-xxx only
             TAGS="${IMAGE_NAME}:${SHA}"
             WORKER_TAGS="${WORKER_IMAGE_NAME}:${SHA}"
           fi
 
-          # Manual override adds an extra tag (e.g. "staging")
           if [[ -n "${INPUT_TAG}" ]]; then
             TAGS="${TAGS},${IMAGE_NAME}:${INPUT_TAG}"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${INPUT_TAG}"
           fi
+
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "worker_tags=${WORKER_TAGS}" >> "$GITHUB_OUTPUT"
-
-          # Staging builds get pre-bundled WASM extensions
-          if [[ "${EVENT_NAME}" == "schedule" || "${INPUT_TAG}" == "staging" ]]; then
-            echo "target=runtime-staging" >> "$GITHUB_OUTPUT"
-          else
-            echo "target=runtime" >> "$GITHUB_OUTPUT"
-          fi
+          echo "target=runtime" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -106,40 +100,10 @@ jobs:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
-      - name: Check if current staging commit is already built
-        id: check
-        if: steps.tags.outputs.target == 'runtime-staging'
-        env:
-          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
-        run: |
-          CURRENT_BUILT_SHA=""
-          WORKER_BUILT_SHA=""
-
-          if docker pull "${IMAGE_NAME}:staging" > /dev/null 2>&1; then
-            CURRENT_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${IMAGE_NAME}:staging" 2>/dev/null || echo "")
-          fi
-          if docker pull "${WORKER_IMAGE_NAME}:staging" > /dev/null 2>&1; then
-            WORKER_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${WORKER_IMAGE_NAME}:staging" 2>/dev/null || echo "")
-          fi
-
-          echo "Current built commit (ironclaw): ${CURRENT_BUILT_SHA:-<none>}"
-          echo "Current built commit (ironclaw-worker): ${WORKER_BUILT_SHA:-<none>}"
-          echo "Current source commit: ${SOURCE_SHA}"
-
-          if [[ -n "${CURRENT_BUILT_SHA}" && "${CURRENT_BUILT_SHA}" == "${SOURCE_SHA}" && -n "${WORKER_BUILT_SHA}" && "${WORKER_BUILT_SHA}" == "${SOURCE_SHA}" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Current commit already built for both images — skipping."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "At least one image is missing or out of date — proceeding."
-          fi
-
       - name: Set up Docker Buildx
-        if: steps.check.outputs.skip != 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and push (ironclaw)
-        if: steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -153,7 +117,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push (ironclaw-worker)
-        if: steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -168,7 +131,6 @@ jobs:
 
       - name: Create releases-manager app token
         id: app-token
-        if: steps.check.outputs.skip != 'true'
         continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
@@ -178,27 +140,21 @@ jobs:
           repositories: ironclaw-dind
 
       - name: Trigger ironclaw-dind Build & Push
-        if: steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'
+        if: >
+          steps.app-token.outcome == 'success' &&
+          github.event_name == 'workflow_call' &&
+          steps.version.outputs.version != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_TAG: ${{ inputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
-            gh api repos/nearai/ironclaw-dind/dispatches \
-              --method POST \
-              -f event_type="ironclaw_image_published" \
-              -f client_payload[version]="${VERSION}"
-          elif [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${INPUT_TAG}" == "staging" ]]; then
-            gh api repos/nearai/ironclaw-dind/dispatches \
-              --method POST \
-              -f event_type="ironclaw_image_published"
-          fi
+          gh api repos/nearai/ironclaw-dind/dispatches \
+            --method POST \
+            -f event_type="ironclaw_image_published" \
+            -f client_payload[version]="${VERSION}"
 
       - name: Summary
-        if: steps.check.outputs.skip != 'true'
         run: |
           {
             echo "## Docker Images"
@@ -214,15 +170,5 @@ jobs:
             echo '```'
             echo ""
             echo "- version: \`${{ steps.version.outputs.version }}\`"
-            echo "- sha: \`${{ steps.source_sha.outputs.sha }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Summary (skipped)
-        if: steps.check.outputs.skip == 'true'
-        run: |
-          {
-            echo "## Docker Images — skipped"
-            echo ""
-            echo "Current commit already built for \`${IMAGE_NAME}:staging\`."
             echo "- sha: \`${{ steps.source_sha.outputs.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
