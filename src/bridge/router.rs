@@ -7036,11 +7036,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -7258,11 +7260,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -7309,11 +7313,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -8070,11 +8076,13 @@ mod tests {
                         id: "call-1".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "pwd"}),
+                        rationale: None,
                     },
                     ironclaw_engine::ActionCall {
                         id: "call-2".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "ls"}),
+                        rationale: None,
                     },
                 ],
             ));
@@ -8195,6 +8203,7 @@ mod tests {
                     id: "call-install".to_string(),
                     action_name: "tool_install".to_string(),
                     parameters: serde_json::json!({"name": channel_name}),
+                    rationale: None,
                 }],
             ));
             thread.state = ironclaw_engine::ThreadState::Waiting;

@@ -450,6 +450,7 @@ mod tests {
         thread.add_message(ThreadMessage {
             role: crate::types::message::MessageRole::ActionResult,
             content: "result".into(),
+            assistant_content: None,
             provenance: crate::types::provenance::Provenance::ToolOutput {
                 action_name: "shell".into(),
             },

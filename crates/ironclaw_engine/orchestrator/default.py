@@ -662,7 +662,15 @@ def ensure_working_messages(state, context):
     return state["working_messages"]
 
 
-def append_message(messages, role, content, action_name=None, action_call_id=None, action_calls=None):
+def append_message(
+    messages,
+    role,
+    content,
+    action_name=None,
+    action_call_id=None,
+    action_calls=None,
+    assistant_content=None,
+):
     """Append a normalized message to the working transcript."""
     msg = {"role": role, "content": content}
     if action_name is not None:
@@ -671,6 +679,8 @@ def append_message(messages, role, content, action_name=None, action_call_id=Non
         msg["action_call_id"] = action_call_id
     if action_calls is not None:
         msg["action_calls"] = action_calls
+    if assistant_content is not None:
+        msg["assistant_content"] = assistant_content
     messages.append(msg)
 
 
@@ -895,7 +905,12 @@ def run_loop(context, goal, actions, state, config):
         elif resp_type == "code":
             state["_obligation_resolved"] = True  # code attempt satisfies obligation
             code = response.get("code", "")
-            append_message(working_messages, "Assistant", "```repl\n" + code + "\n```")
+            append_message(
+                working_messages,
+                "Assistant",
+                "```repl\n" + code + "\n```",
+                assistant_content=response.get("assistant_content"),
+            )
 
             # Execute code in nested Monty VM
             result = __execute_code_step__(code, state)
@@ -1034,6 +1049,7 @@ def run_loop(context, goal, actions, state, config):
                 "Assistant",
                 response.get("content", "") or "",
                 action_calls=executable_calls,
+                assistant_content=response.get("assistant_content"),
             )
 
             # Execute all tool calls in parallel via the batch host function.
