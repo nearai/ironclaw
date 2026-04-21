@@ -5563,7 +5563,10 @@ impl ExtensionManager {
         let client = Arc::new(client);
         self.mcp_clients.insert(user_id, name, client.clone()).await;
 
-        let tool_impls = match client.create_tools_with_store(self.mcp_client_store()).await {
+        let tool_impls = match client
+            .create_tools_with_store(self.mcp_client_store())
+            .await
+        {
             Ok(tools) => tools,
             Err(e) => {
                 self.mcp_clients.remove(user_id, name).await;
