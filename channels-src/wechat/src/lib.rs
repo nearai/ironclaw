@@ -59,6 +59,27 @@ struct FollowUpState<'a> {
     processed_message_ids_changed: &'a mut bool,
 }
 
+fn get_updates_error_message(response: &crate::types::GetUpdatesResponse) -> Option<String> {
+    let errmsg = response
+        .errmsg
+        .as_deref()
+        .unwrap_or("unknown WeChat polling error");
+
+    if let Some(ret) = response.ret {
+        if ret != 0 {
+            return Some(format!("ret={ret} errmsg={errmsg}"));
+        }
+    }
+
+    if let Some(errcode) = response.errcode {
+        if errcode != 0 {
+            return Some(format!("errcode={errcode} errmsg={errmsg}"));
+        }
+    }
+
+    None
+}
+
 impl Guest for WechatChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
         let config = serde_json::from_str::<WechatConfig>(&config_json)
@@ -136,17 +157,10 @@ impl Guest for WechatChannel {
                     return;
                 }
 
-                if !matches!(response.ret, Some(0)) {
-                    let errmsg = response
-                        .errmsg
-                        .as_deref()
-                        .unwrap_or("unknown WeChat polling error");
+                if let Some(error) = get_updates_error_message(&response) {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
-                        &format!(
-                            "WeChat getUpdates returned ret={} errmsg={errmsg}",
-                            response.ret.unwrap_or(-1)
-                        ),
+                        &format!("WeChat getUpdates returned {error}"),
                     );
                 }
 
@@ -448,17 +462,10 @@ fn collect_follow_up_bundles(config: &WechatConfig, state: FollowUpState<'_>) {
             break;
         }
 
-        if !matches!(response.ret, Some(0)) {
-            let errmsg = response
-                .errmsg
-                .as_deref()
-                .unwrap_or("unknown WeChat polling error");
+        if let Some(error) = get_updates_error_message(&response) {
             channel_host::log(
                 channel_host::LogLevel::Warn,
-                &format!(
-                    "WeChat getUpdates returned ret={} errmsg={errmsg} during follow-up merge window",
-                    response.ret.unwrap_or(-1)
-                ),
+                &format!("WeChat getUpdates returned {error} during follow-up merge window"),
             );
         }
 
@@ -875,14 +882,17 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        classify_status_update, extract_text, merge_text, process_incoming_bundle,
-        send_response_with_handlers, take_due_pending_bundles, PendingInboundBundle,
-        StoredInboundAttachment, WechatStatusAction, ATTACHMENT_DELIVERY_FAILED_FALLBACK,
+        classify_status_update, extract_text, get_updates_error_message, merge_text,
+        process_incoming_bundle, send_response_with_handlers, take_due_pending_bundles,
+        PendingInboundBundle, StoredInboundAttachment, WechatStatusAction,
+        ATTACHMENT_DELIVERY_FAILED_FALLBACK,
     };
     use crate::exports::near::agent::channel::{
         AgentResponse, Attachment, StatusType, StatusUpdate,
     };
-    use crate::types::{MessageItem, VoiceItem, WechatMessage, MESSAGE_ITEM_VOICE};
+    use crate::types::{
+        GetUpdatesResponse, MessageItem, VoiceItem, WechatMessage, MESSAGE_ITEM_VOICE,
+    };
 
     fn make_bundle(user_id: &str, text: &str, image_count: usize) -> PendingInboundBundle {
         PendingInboundBundle {
@@ -906,6 +916,41 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn make_updates_response(ret: Option<i32>, errcode: Option<i32>) -> GetUpdatesResponse {
+        GetUpdatesResponse {
+            ret,
+            errcode,
+            errmsg: None,
+            msgs: Vec::new(),
+            get_updates_buf: None,
+        }
+    }
+
+    #[test]
+    fn test_get_updates_error_message_allows_empty_poll_without_ret() {
+        let response = make_updates_response(None, None);
+        assert_eq!(get_updates_error_message(&response), None);
+    }
+
+    #[test]
+    fn test_get_updates_error_message_reports_nonzero_ret() {
+        let mut response = make_updates_response(Some(42), None);
+        response.errmsg = Some("bad cursor".to_string());
+        assert_eq!(
+            get_updates_error_message(&response),
+            Some("ret=42 errmsg=bad cursor".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_updates_error_message_reports_nonzero_errcode() {
+        let response = make_updates_response(None, Some(-14));
+        assert_eq!(
+            get_updates_error_message(&response),
+            Some("errcode=-14 errmsg=unknown WeChat polling error".to_string())
+        );
     }
 
     #[test]
