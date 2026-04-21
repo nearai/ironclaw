@@ -582,7 +582,7 @@ impl Reasoning {
             return Ok((Vec::new(), TokenUsage::default()));
         }
 
-        let skills_json = serde_json::to_string_pretty(available_skills).map_err(|e| {
+        let skills_json = serde_json::to_string(available_skills).map_err(|e| {
             LlmError::InvalidResponse {
                 provider: self.llm.model_name().to_string(),
                 reason: format!("failed to serialize skill catalog: {e}"),
