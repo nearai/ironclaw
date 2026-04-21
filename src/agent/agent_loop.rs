@@ -728,14 +728,15 @@ impl Agent {
                     description: skill.manifest.description.clone(),
                 })
                 .collect();
-            let reasoning = Reasoning::new(self.llm().clone());
+            let cheap_llm = self.cheap_llm().clone();
+            let reasoning = Reasoning::new(cheap_llm.clone());
             match reasoning
                 .select_skill_names_with_llm(&rewritten, &candidates, skills_cfg.max_active_skills)
                 .await
             {
                 Ok((selected_names, usage)) => {
                     // Record the LLM call against the cost guard and per-user budget.
-                    let model = self.deps.llm.model_name().to_string();
+                    let model = cheap_llm.model_name().to_string();
                     self.deps
                         .cost_guard
                         .record_llm_call_for_user(
@@ -745,9 +746,9 @@ impl Agent {
                             usage.output_tokens,
                             usage.cache_read_input_tokens,
                             usage.cache_creation_input_tokens,
-                            self.deps.llm.cache_read_discount(),
-                            self.deps.llm.cache_write_multiplier(),
-                            Some(self.deps.llm.cost_per_token()),
+                            cheap_llm.cache_read_discount(),
+                            cheap_llm.cache_write_multiplier(),
+                            Some(cheap_llm.cost_per_token()),
                         )
                         .await;
 
