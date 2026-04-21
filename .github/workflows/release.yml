@@ -479,6 +479,8 @@ jobs:
       packages: read
       actions: write
     uses: ./.github/workflows/docker.yml
+    with:
+      release: true
     secrets: inherit
 
   # Commit patched manifest SHA256 checksums back to main so the repo
