@@ -410,7 +410,7 @@ impl ToolRegistry {
     }
 
     /// Every registered tool name, regardless of engine-version filtering.
-    pub async fn all_registered_names(&self) -> Vec<String> {
+    pub(crate) async fn all_registered_names(&self) -> Vec<String> {
         self.tools.read().await.keys().cloned().collect()
     }
 
