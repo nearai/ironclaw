@@ -344,21 +344,35 @@ impl TuiWidget for ConversationWidget {
 
                         if text_lower.contains(&query_lower) {
                             let mut remaining = text.as_str();
+                            let query_char_count = query_lower.chars().count();
                             while !remaining.is_empty() {
                                 let lower_remaining = remaining.to_lowercase();
-                                if let Some(pos) = lower_remaining.find(&query_lower) {
-                                    if pos > 0 {
+                                if let Some(lower_pos) = lower_remaining.find(&query_lower) {
+                                    // Map byte position from lowercased string to original
+                                    // via character count (lowercasing can change byte lengths).
+                                    let chars_before = lower_remaining[..lower_pos].chars().count();
+                                    let orig_start = remaining
+                                        .char_indices()
+                                        .nth(chars_before)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(remaining.len());
+                                    let orig_end = remaining
+                                        .char_indices()
+                                        .nth(chars_before + query_char_count)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(remaining.len());
+
+                                    if orig_start > 0 {
                                         new_spans.push(Span::styled(
-                                            remaining[..pos].to_string(),
+                                            remaining[..orig_start].to_string(),
                                             span.style,
                                         ));
                                     }
-                                    let match_end = pos + query_lower.len();
                                     new_spans.push(Span::styled(
-                                        remaining[pos..match_end].to_string(),
+                                        remaining[orig_start..orig_end].to_string(),
                                         highlight_style,
                                     ));
-                                    remaining = &remaining[match_end..];
+                                    remaining = &remaining[orig_end..];
                                 } else {
                                     new_spans.push(Span::styled(remaining.to_string(), span.style));
                                     break;
