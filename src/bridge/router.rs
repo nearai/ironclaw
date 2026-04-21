@@ -9609,4 +9609,42 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn thread_to_info_carries_title_and_goal_separately() {
+        // Regression: mission-spawned threads put `mission.name` in
+        // `title` and the multi-paragraph meta-prompt in `goal`. The
+        // DTO must carry both through so UI callers can render the
+        // short label without reading the full goal.
+        let long_goal = "a".repeat(500);
+        let mut thread = ironclaw_engine::Thread::new(
+            &long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.title = Some("Daily summary".to_string());
+
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Daily summary"));
+        assert_eq!(info.goal.len(), 500);
+    }
+
+    #[test]
+    fn thread_to_info_passes_none_title_through() {
+        // Threads without an explicit title surface `None` on the DTO;
+        // the fallback derivation from `goal` happens at the read site,
+        // not inside `thread_to_info`.
+        let thread = ironclaw_engine::Thread::new(
+            "plain goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title, None);
+        assert_eq!(info.goal, "plain goal");
+    }
 }
