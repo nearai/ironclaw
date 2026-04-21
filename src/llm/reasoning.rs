@@ -441,6 +441,18 @@ pub struct RespondOutput {
     pub metadata: ResponseMetadata,
 }
 
+/// Minimal skill information passed to the LLM for active-skill selection.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillSelectionCandidate {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillSelectionResponse {
+    skills: Vec<String>,
+}
+
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
@@ -552,6 +564,78 @@ impl Reasoning {
     ) -> Self {
         self.conversation_context.insert(key.into(), value.into());
         self
+    }
+
+    /// Ask the LLM to choose relevant skills from the provided skill catalog.
+    ///
+    /// This is a best-effort fallback when explicit mentions and deterministic
+    /// keyword/pattern matching select no skills. The caller remains responsible
+    /// for loading skill prompts and applying trust/dependency policy before the
+    /// main assistant call.
+    pub async fn select_skill_names_with_llm(
+        &self,
+        user_request: &str,
+        available_skills: &[SkillSelectionCandidate],
+        max_skills: usize,
+    ) -> Result<(Vec<String>, TokenUsage), LlmError> {
+        if user_request.trim().is_empty() || available_skills.is_empty() || max_skills == 0 {
+            return Ok((Vec::new(), TokenUsage::default()));
+        }
+
+        let skills_json = serde_json::to_string_pretty(available_skills).map_err(|e| {
+            LlmError::InvalidResponse {
+                provider: self.llm.model_name().to_string(),
+                reason: format!("failed to serialize skill catalog: {e}"),
+            }
+        })?;
+        let messages = vec![
+            ChatMessage::system(format!(
+                "You select which installed skills should be loaded for a user's request. \
+                 Return only a strict JSON object with this exact shape: {{\"skills\":[\"skill-name\"]}}. \
+                 Choose at most {max_skills} skills. Choose only skill names from the provided catalog. \
+                 Return an empty array only when no provided skill is relevant."
+            )),
+            ChatMessage::user(format!(
+                "User request:\n{user_request}\n\nAvailable skills:\n{skills_json}"
+            )),
+        ];
+
+        let response = self
+            .llm
+            .complete(
+                CompletionRequest::new(messages)
+                    .with_temperature(0.0)
+                    .with_max_tokens(512),
+            )
+            .await?;
+
+        let usage = TokenUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+        };
+
+        let json = extract_json(&response.content).unwrap_or(response.content.trim());
+        let selection: SkillSelectionResponse =
+            serde_json::from_str(json).map_err(|e| LlmError::InvalidResponse {
+                provider: self.llm.model_name().to_string(),
+                reason: format!("failed to parse skill selection JSON: {e}"),
+            })?;
+
+        let allowed: std::collections::HashSet<&str> = available_skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let selected = selection
+            .skills
+            .into_iter()
+            .filter(|name| allowed.contains(name.as_str()) && seen.insert(name.clone()))
+            .take(max_skills)
+            .collect();
+
+        Ok((selected, usage))
     }
 
     /// Run a simple LLM completion with automatic response cleaning.

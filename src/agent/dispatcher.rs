@@ -147,9 +147,23 @@ impl Agent {
         };
 
         // Select active skills. Explicit /skill-name mentions are force-activated
-        // and replaced with the skill's description in the rewritten message.
+        // and replaced with the skill's description in the rewritten message;
+        // implicit selection uses deterministic keyword/pattern prefiltering.
+        // If deterministic selection finds nothing, an LLM selector may run
+        // as a best-effort fallback.
+        //
+        // On approval-resume, `message.content` is the approval payload or
+        // keyword, not the original user's request. Select against the latest
+        // user-role message in the conversation history so skills remain active
+        // throughout the resumed turn.
+        let skill_selection_input = initial_messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::llm::Role::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_else(|| message.content.clone());
         let (active_skills, rewritten_content, skill_feedback) = self
-            .select_active_skills(&message.content, &message.user_id)
+            .select_active_skills(&skill_selection_input, &message.user_id)
             .await;
 
         // Surface the selection decision to the channel so the web UI can
@@ -171,16 +185,16 @@ impl Agent {
                 .await;
         }
 
-        // Use the rewritten message (with /skill-name expanded) for the LLM
-        let user_content = if rewritten_content != message.content {
+        // Use the rewritten message (with /skill-name expanded) for the LLM.
+        let user_content = if rewritten_content != skill_selection_input {
             tracing::debug!(
-                original = %message.content,
+                original = %skill_selection_input,
                 rewritten = %rewritten_content,
                 "expanded /skill-name mentions in message"
             );
-            rewritten_content
+            Some(rewritten_content)
         } else {
-            message.content.clone()
+            None
         };
 
         // Build skill context block
@@ -288,7 +302,7 @@ impl Agent {
 
         // If /skill-name mentions were expanded, rewrite the last user message
         // in the conversation history so the LLM sees the natural-language version.
-        let messages_for_llm = if user_content != message.content {
+        let messages_for_llm = if let Some(user_content) = user_content {
             let mut msgs = initial_messages;
             if let Some(last_user) = msgs
                 .iter_mut()
@@ -1814,6 +1828,7 @@ mod tests {
 
     use async_trait::async_trait;
     use rust_decimal::Decimal;
+    use std::fs;
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
@@ -3361,6 +3376,28 @@ mod tests {
     /// Helper to build a test Agent with a custom LLM provider and
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
+        make_test_agent_with_llm_and_skills(llm, max_tool_iterations, None)
+    }
+
+    fn make_test_agent_with_llm_and_skills(
+        llm: Arc<dyn LlmProvider>,
+        max_tool_iterations: usize,
+        skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
+    ) -> Agent {
+        make_test_agent_with_llm_skills_config(
+            llm,
+            max_tool_iterations,
+            skill_registry,
+            SkillsConfig::default(),
+        )
+    }
+
+    fn make_test_agent_with_llm_skills_config(
+        llm: Arc<dyn LlmProvider>,
+        max_tool_iterations: usize,
+        skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
+        skills_config: SkillsConfig,
+    ) -> Agent {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
@@ -3374,9 +3411,9 @@ mod tests {
             tools: Arc::new(ToolRegistry::new()),
             workspace: None,
             extension_manager: None,
-            skill_registry: None,
+            skill_registry,
             skill_catalog: None,
-            skills_config: SkillsConfig::default(),
+            skills_config,
             hooks: Arc::new(HookRegistry::new()),
             auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
@@ -3422,6 +3459,102 @@ mod tests {
             Some(Arc::new(ContextManager::new(1))),
             None,
         )
+    }
+
+    async fn make_skill_registry(
+        skills: &[(&str, &str, &[&str], usize, &str)],
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (name, description, keywords, max_context_tokens, prompt) in skills {
+            let skill_dir = dir.path().join(name);
+            fs::create_dir_all(&skill_dir).expect("create skill dir");
+            let keywords_yaml = keywords
+                .iter()
+                .map(|keyword| format!("\"{keyword}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [{keywords_yaml}]\n  max_context_tokens: {max_context_tokens}\n---\n\n{prompt}\n"
+                ),
+            )
+            .expect("write skill");
+        }
+
+        let mut registry = ironclaw_skills::SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+        assert_eq!(loaded.len(), skills.len());
+        (dir, Arc::new(std::sync::RwLock::new(registry)))
+    }
+
+    #[tokio::test]
+    async fn test_select_active_skills_deterministic_hit_skips_llm_fallback() {
+        let (_dir, registry) = make_skill_registry(&[
+            (
+                "flight",
+                "Find and book flights",
+                &["flight", "booking"][..],
+                100,
+                "Flight instructions.",
+            ),
+            (
+                "weather",
+                "Check weather forecasts",
+                &["weather", "forecast"][..],
+                100,
+                "Weather instructions.",
+            ),
+        ])
+        .await;
+        let llm = Arc::new(crate::testing::StubLlm::new(r#"{"skills":["weather"]}"#));
+        let agent = make_test_agent_with_llm_and_skills(llm.clone(), 3, Some(registry));
+
+        let (active_skills, rewritten, feedback) = agent
+            .select_active_skills("book a flight", "test-user")
+            .await;
+
+        assert_eq!(rewritten, "book a flight");
+        assert!(feedback.is_empty());
+        let names: Vec<&str> = active_skills.iter().map(|skill| skill.name()).collect();
+        assert_eq!(names, vec!["flight"]);
+        assert_eq!(llm.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_select_active_skills_explicit_hit_skips_llm_fallback() {
+        let (_dir, registry) = make_skill_registry(&[
+            (
+                "flight",
+                "Find and book flights",
+                &["flight", "booking"][..],
+                100,
+                "Flight instructions.",
+            ),
+            (
+                "weather",
+                "Check weather forecasts",
+                &["weather", "forecast"][..],
+                100,
+                "Weather instructions.",
+            ),
+        ])
+        .await;
+        let llm = Arc::new(crate::testing::StubLlm::new(r#"{"skills":["weather"]}"#));
+        let agent = make_test_agent_with_llm_and_skills(llm.clone(), 3, Some(registry));
+
+        let (active_skills, rewritten, feedback) = agent
+            .select_active_skills("please use /flight", "test-user")
+            .await;
+
+        assert_eq!(rewritten, "please use Find and book flights");
+        assert_eq!(feedback, vec!["flight: force-activated via /mention"]);
+        let names: Vec<&str> = active_skills.iter().map(|skill| skill.name()).collect();
+        assert_eq!(names, vec!["flight"]);
+        assert_eq!(llm.calls(), 0);
     }
 
     /// Regression test for the infinite loop bug (PR #252) where `continue`

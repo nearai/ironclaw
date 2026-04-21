@@ -28,6 +28,7 @@ use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
+use crate::llm::{Reasoning, SkillSelectionCandidate};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
@@ -77,6 +78,23 @@ impl From<crate::bridge::BridgeOutcome> for HandleOutcome {
             crate::bridge::BridgeOutcome::Pending => HandleOutcome::Pending,
         }
     }
+}
+
+fn skill_context_token_cost(skill: &ironclaw_skills::LoadedSkill) -> usize {
+    let declared_tokens = skill.manifest.activation.max_context_tokens;
+    let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
+    let raw_cost = if approx_tokens > declared_tokens * 2 {
+        tracing::warn!(
+            "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
+            skill.name(),
+            declared_tokens,
+            approx_tokens,
+        );
+        approx_tokens
+    } else {
+        declared_tokens
+    };
+    raw_cost.max(1)
 }
 
 /// Static greeting persisted to DB and broadcast on first launch.
@@ -554,14 +572,18 @@ impl Agent {
         self.deps.skill_catalog.as_ref()
     }
 
-    /// Select active skills for a message using deterministic prefiltering.
+    /// Select active skills for a message using deterministic selection first.
     /// Select skills for a message. Returns (active skills, rewritten message).
     ///
     /// Skills are selected in two ways:
     /// 1. **Explicit**: `/skill-name` in the message force-activates that skill.
     ///    The `/skill-name` is replaced with the skill's description so the
     ///    sentence reads naturally for the LLM.
-    /// 2. **Implicit**: keyword/pattern scoring against the message content.
+    /// 2. **Implicit**: deterministic keyword/pattern scoring against the
+    ///    rewritten message.
+    ///
+    /// The LLM is used only as a fallback after explicit and deterministic
+    /// selection both return no skills.
     ///
     /// One-time setup skills (`*-setup` persona bundles) declare a
     /// `setup_marker` workspace path in their activation frontmatter. Before
@@ -634,7 +656,7 @@ impl Agent {
         let (explicit, rewritten) =
             ironclaw_skills::extract_skill_mentions(message_content, &available);
 
-        // Phase 2: Score-based selection on the rewritten message
+        // Phase 2: Score-based deterministic selection on the rewritten message.
         let skills_cfg = &self.deps.skills_config;
         let outcome = ironclaw_skills::prefilter_skills(
             &rewritten,
@@ -650,19 +672,130 @@ impl Agent {
         // a skill loaded even when it didn't score.
         let mut feedback: Vec<String> = explicit
             .iter()
-            .map(|s| format!("{}: force-activated via /mention", s.name()))
+            .map(|skill| format!("{}: force-activated via /mention", skill.name()))
             .collect();
         feedback.extend(outcome.notes);
 
-        // Merge: explicit mentions first, then scored (dedup by name)
+        // Merge: explicit mentions first, then deterministic results (dedup by name).
         let mut selected: Vec<ironclaw_skills::LoadedSkill> =
             explicit.into_iter().cloned().collect();
+        let explicit_count = selected.len();
         for skill in outcome.selected {
             if !selected
                 .iter()
-                .any(|s| s.manifest.name == skill.manifest.name)
+                .any(|selected_skill| selected_skill.manifest.name == skill.manifest.name)
             {
                 selected.push(skill.clone());
+            }
+        }
+
+        let deterministic_count = selected.len().saturating_sub(explicit_count);
+        if explicit_count > 0 || deterministic_count > 0 {
+            tracing::debug!(
+                explicit_count,
+                deterministic_count,
+                selected = ?selected.iter().map(|s| s.name()).collect::<Vec<_>>(),
+                "Skill selection satisfied by explicit/deterministic path"
+            );
+        }
+
+        if selected.is_empty() {
+            tracing::debug!(
+                "No explicit or deterministic skills selected; trying LLM skill fallback"
+            );
+            let fallback_candidates: Vec<&ironclaw_skills::LoadedSkill> = available
+                .iter()
+                .filter(|skill| {
+                    // Only offer skills with no positive activation criteria to the
+                    // LLM. Skills that have keywords/patterns/tags but didn't score
+                    // were correctly excluded by the deterministic prefilter; the LLM
+                    // shouldn't second-guess that decision.
+                    skill.manifest.activation.keywords.is_empty()
+                        && skill.manifest.activation.patterns.is_empty()
+                        && skill.manifest.activation.tags.is_empty()
+                        && skill
+                            .manifest
+                            .activation
+                            .setup_marker
+                            .as_ref()
+                            .is_none_or(|marker| !satisfied.contains(marker))
+                })
+                .collect();
+            let candidates: Vec<SkillSelectionCandidate> = fallback_candidates
+                .iter()
+                .map(|skill| SkillSelectionCandidate {
+                    name: skill.name().to_string(),
+                    description: skill.manifest.description.clone(),
+                })
+                .collect();
+            let reasoning = Reasoning::new(self.llm().clone());
+            match reasoning
+                .select_skill_names_with_llm(&rewritten, &candidates, skills_cfg.max_active_skills)
+                .await
+            {
+                Ok((selected_names, usage)) => {
+                    // Record the LLM call against the cost guard and per-user budget.
+                    let model = self.deps.llm.model_name().to_string();
+                    self.deps
+                        .cost_guard
+                        .record_llm_call_for_user(
+                            user_id,
+                            &model,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_read_input_tokens,
+                            usage.cache_creation_input_tokens,
+                            self.deps.llm.cache_read_discount(),
+                            self.deps.llm.cache_write_multiplier(),
+                            Some(self.deps.llm.cost_per_token()),
+                        )
+                        .await;
+
+                    let mut budget_remaining = skills_cfg.max_context_tokens;
+
+                    for name in selected_names {
+                        let Some(skill) = fallback_candidates
+                            .iter()
+                            .copied()
+                            .find(|skill| skill.name() == name)
+                        else {
+                            continue;
+                        };
+                        if selected.iter().any(|selected_skill| {
+                            selected_skill.manifest.name == skill.manifest.name
+                        }) {
+                            continue;
+                        }
+
+                        let token_cost = skill_context_token_cost(skill);
+                        if token_cost > budget_remaining {
+                            tracing::debug!(
+                                skill = %skill.name(),
+                                token_cost,
+                                budget_remaining,
+                                "Skipping LLM-selected skill due to context budget"
+                            );
+                            continue;
+                        }
+                        budget_remaining -= token_cost;
+                        selected.push(skill.clone());
+                    }
+
+                    if selected.is_empty() {
+                        tracing::debug!("LLM skill fallback returned no usable skills");
+                    } else {
+                        tracing::debug!(
+                            selected = ?selected.iter().map(|s| s.name()).collect::<Vec<_>>(),
+                            "LLM skill fallback selected skills"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "LLM skill fallback failed; continuing with no active skills"
+                    );
+                }
             }
         }
 
@@ -680,7 +813,6 @@ impl Agent {
 
         (selected, rewritten, feedback)
     }
-
     /// Send initial engine thread list and routines to the TUI channel so
     /// the sidebar is populated before the first user message.
     async fn hydrate_tui_sidebar(&self) {
