@@ -201,6 +201,32 @@ pub enum EngineVersion {
     V2,
 }
 
+/// Try `resolver(name)` first, then hyphen↔underscore aliases — matching
+/// `ToolRegistry::get`'s normalization. Used on every capability-registry
+/// read path so hyphenated LLM emissions resolve the same as underscored
+/// ones (and the register-time shadow check catches both forms).
+pub(crate) fn resolve_with_aliases<T>(
+    name: &str,
+    mut resolver: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    if let Some(hit) = resolver(name) {
+        return Some(hit);
+    }
+    let underscore = name.replace('-', "_");
+    if underscore != name
+        && let Some(hit) = resolver(&underscore)
+    {
+        return Some(hit);
+    }
+    let hyphen = name.replace('_', "-");
+    if hyphen != name
+        && let Some(hit) = resolver(&hyphen)
+    {
+        return Some(hit);
+    }
+    None
+}
+
 /// Error type for tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {

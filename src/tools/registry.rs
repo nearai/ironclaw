@@ -143,6 +143,10 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Engine v2 capability registry, wired at v2 bootstrap. `None` on v1
+    /// or before bootstrap. Discovery tools consult it so engine-native
+    /// action schemas (missions, etc.) are introspectable.
+    capability_registry: RwLock<Option<Arc<ironclaw_engine::CapabilityRegistry>>>,
 }
 
 impl ToolRegistry {
@@ -172,6 +176,7 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            capability_registry: RwLock::new(None),
         }
     }
 
@@ -215,6 +220,22 @@ impl ToolRegistry {
         self.engine_version
     }
 
+    /// Install the engine v2 capability registry. `pub(crate)` so the
+    /// `bridge::router::wire_capability_registry` helper is the only
+    /// real call site — keeps the adapter/registry dual-wiring invariant
+    /// enforceable. Tests inside the crate can still call it directly.
+    pub(crate) async fn set_capability_registry(
+        &self,
+        registry: Arc<ironclaw_engine::CapabilityRegistry>,
+    ) {
+        *self.capability_registry.write().await = Some(registry);
+    }
+
+    /// Snapshot of the installed capability registry, if any.
+    pub async fn capability_registry(&self) -> Option<Arc<ironclaw_engine::CapabilityRegistry>> {
+        self.capability_registry.read().await.clone()
+    }
+
     /// Get a reference to the shared credential registry.
     pub fn credential_registry(&self) -> Option<&Arc<SharedCredentialRegistry>> {
         self.credential_registry.as_ref()
@@ -238,8 +259,9 @@ impl ToolRegistry {
         self.role_lookup.as_ref()
     }
 
-    /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
-    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
+    /// Register a tool. Rejects dynamic tools that would shadow a built-in
+    /// `Tool` or an engine-v2 capability action, and names containing `.`
+    /// (conflicts with settings path parsing).
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
@@ -258,12 +280,27 @@ impl ToolRegistry {
             );
             return;
         }
+        // Match `ToolRegistry::get`'s hyphen↔underscore alias normalization
+        // so a tool named `mission-create` cannot slip past exact-match
+        // and then win lookups for `mission_create` via the alias.
+        if let Some(caps) = self.capability_registry.read().await.as_ref()
+            && crate::tools::tool::resolve_with_aliases(&name, |n| caps.find_action(n)).is_some()
+        {
+            tracing::warn!(
+                tool = %name,
+                "Rejected tool registration: would shadow an engine-v2 capability action"
+            );
+            return;
+        }
         self.tools.write().await.insert(name.clone(), tool);
         tracing::trace!("Registered tool: {}", name);
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
-    /// Also rejects tool names containing `.` which conflicts with settings path parsing.
+    /// Rejects names containing `.`. Skips the capability-shadowing check
+    /// because built-ins register before v2 wiring; the reverse collision
+    /// (built-in shadowing a capability) is caught by a debug-assert in
+    /// `bridge::router::wire_capability_registry`.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
@@ -1568,6 +1605,123 @@ mod tests {
 
         let echo = registry.get("echo").await.unwrap();
         assert_eq!(echo.engine_compatibility(), EngineCompatibility::Both);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_tool_shadowing_capability_action() {
+        // An external tool named after a capability action would split-brain
+        // discovery (shows the tool) and execution (handle_mission_call still
+        // intercepts). Registration must be rejected once capabilities wire.
+
+        struct ShadowingTool;
+        #[async_trait::async_trait]
+        impl Tool for ShadowingTool {
+            fn name(&self) -> &str {
+                "mission_create"
+            }
+            fn description(&self) -> &str {
+                "bogus"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+
+        // Pre-wiring: the name has no reserved meaning, registration succeeds.
+        registry.register(Arc::new(ShadowingTool)).await;
+        assert!(
+            registry.get("mission_create").await.is_some(),
+            "pre-wiring, mission_create has no reserved meaning and should register"
+        );
+        registry.unregister("mission_create").await;
+
+        // Post-wiring: the capability claims the name, registration is rejected.
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(ironclaw_engine::types::capability::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::types::capability::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        registry.register(Arc::new(ShadowingTool)).await;
+        assert!(
+            registry.get("mission_create").await.is_none(),
+            "registering a tool whose name matches a capability action must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rejects_hyphenated_alias_of_capability_action() {
+        // `ToolRegistry::get` normalizes hyphens↔underscores, so a tool
+        // named `mission-create` would otherwise slip past an exact-match
+        // capability check and then win lookups for `mission_create` via
+        // the alias — producing the split-brain the check exists to block.
+
+        struct HyphenShadow;
+        #[async_trait::async_trait]
+        impl Tool for HyphenShadow {
+            fn name(&self) -> &str {
+                "mission-create"
+            }
+            fn description(&self) -> &str {
+                "bogus"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(ironclaw_engine::types::capability::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::types::capability::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        registry.register(Arc::new(HyphenShadow)).await;
+        assert!(
+            registry.get("mission_create").await.is_none(),
+            "hyphenated shadow must not win mission_create via alias"
+        );
+        assert!(
+            registry.get("mission-create").await.is_none(),
+            "hyphenated shadow must be rejected under its own name too"
+        );
     }
 
     #[tokio::test]

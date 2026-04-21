@@ -14,7 +14,9 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str, resolve_with_aliases,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolInfoDetail {
@@ -139,35 +141,53 @@ impl Tool for ToolInfoTool {
             )
         })?;
 
-        let tool = registry.get(name).await.ok_or_else(|| {
-            ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
-        })?;
-
-        // Reject tools that are not available in the current engine version.
-        if !tool
-            .engine_compatibility()
-            .is_visible_in(registry.engine_version())
+        // Search the v1 tool map first, then fall through to v2 capability
+        // actions. On v1 the capability registry is `None`, so the fallback
+        // is a no-op. Assumes v1 tool and v2 capability names don't overlap.
+        let (action_name, description, schema, summary) = if let Some(tool) =
+            registry.get(name).await
         {
+            if !tool
+                .engine_compatibility()
+                .is_visible_in(registry.engine_version())
+            {
+                return Err(ToolError::InvalidParameters(format!(
+                    "Tool '{name}' is not available in the current engine version"
+                )));
+            }
+            let schema = tool.discovery_schema();
+            let summary = tool
+                .discovery_summary()
+                .unwrap_or_else(|| fallback_summary(&schema));
+            (
+                tool.name().to_string(),
+                tool.description().to_string(),
+                schema,
+                summary,
+            )
+        } else if let Some(cap_registry) = registry.capability_registry().await
+            && let Some(action) =
+                resolve_with_aliases(name, |n| cap_registry.find_action(n).map(|(_, a)| a.clone()))
+        {
+            let schema = action.parameters_schema.clone();
+            let summary = fallback_summary(&schema);
+            (action.name, action.description, schema, summary)
+        } else {
             return Err(ToolError::InvalidParameters(format!(
-                "Tool '{name}' is not available in the current engine version"
+                "No tool named '{name}' is registered"
             )));
-        }
+        };
 
-        let schema = tool.discovery_schema();
         let param_names = schema_param_names(&schema);
-
         let mut info = serde_json::json!({
-            "name": tool.name(),
-            "description": tool.description(),
+            "name": action_name,
+            "description": description,
             "parameters": param_names,
         });
 
         match detail {
             ToolInfoDetail::Names => {}
             ToolInfoDetail::Summary => {
-                let summary = tool
-                    .discovery_summary()
-                    .unwrap_or_else(|| fallback_summary(&schema));
                 info["summary"] = serde_json::to_value(summary).map_err(|err| {
                     ToolError::ExecutionFailed(format!(
                         "failed to serialize discovery summary: {err}"
@@ -186,6 +206,7 @@ impl Tool for ToolInfoTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::EngineVersion;
     use crate::tools::builtin::EchoTool;
     use std::sync::Arc;
 
@@ -345,6 +366,132 @@ mod tests {
         assert!(
             matches!(result, Err(ToolError::InvalidParameters(ref msg)) if msg.contains("not available")),
             "tool_info should reject V1Only tools in V2 registry"
+        );
+    }
+
+    // Engine v2 capability-registry fallback: capability actions live in
+    // `CapabilityRegistry`, not `ToolRegistry`. These tests lock in that
+    // `tool_info` consults both sources.
+
+    fn sample_capability() -> ironclaw_engine::types::capability::Capability {
+        ironclaw_engine::types::capability::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::types::capability::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "cadence": {"type": "string"}
+                    },
+                    "required": ["name", "goal", "cadence"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_surfaces_capability_action_on_v2_registry() {
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(sample_capability());
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "mission_create", "detail": "schema"}),
+                &ctx,
+            )
+            .await
+            .expect("mission_create should resolve via capability registry on v2");
+
+        let info = &result.result;
+        assert_eq!(info["name"], "mission_create");
+        assert_eq!(info["description"], "Create a new mission");
+        let params = info["parameters"].as_array().expect("parameters array");
+        let param_strs: Vec<&str> = params.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            param_strs.contains(&"name")
+                && param_strs.contains(&"goal")
+                && param_strs.contains(&"cadence"),
+            "expected name/goal/cadence in params: {param_strs:?}"
+        );
+        assert_eq!(info["schema"]["required"], serde_json::json!(["name", "goal", "cadence"]));
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_capability_action_summary_path() {
+        // The summary detail for capability actions goes through
+        // `fallback_summary(&schema)` — the only summary source for
+        // capabilities, since `ActionDef` has no `discovery_summary()`.
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(sample_capability());
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "mission_create", "detail": "summary"}),
+                &ctx,
+            )
+            .await
+            .expect("summary detail should resolve for capability action");
+
+        assert_eq!(
+            result.result["summary"]["always_required"],
+            serde_json::json!(["name", "goal", "cadence"]),
+            "fallback_summary should pull required fields from the schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_resolves_hyphenated_capability_alias() {
+        // LLMs and providers sometimes normalize underscores to hyphens.
+        // tool_info must resolve `mission-create` the same as `mission_create`
+        // — mirroring `ToolRegistry::get`'s alias logic.
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(sample_capability());
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "mission-create"}), &ctx)
+            .await
+            .expect("hyphenated form should resolve to underscored capability action");
+
+        assert_eq!(result.result["name"], "mission_create");
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_v2_without_capability_registry_still_rejects_missions() {
+        // Unwired v2 registry (bootstrap hasn't run yet) must reject
+        // cleanly — no panic, no misleading schema.
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"name": "mission_create"}), &ctx)
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters(ref msg)) if msg.contains("No tool named")),
+            "unwired v2 registry must reject cleanly, got: {result:?}"
         );
     }
 }

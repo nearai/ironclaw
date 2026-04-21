@@ -55,7 +55,7 @@ impl Tool for SystemToolsListTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let defs = self.registry.tool_definitions().await;
-        let tools: Vec<serde_json::Value> = defs
+        let mut tools: Vec<serde_json::Value> = defs
             .into_iter()
             .map(|td| {
                 json!({
@@ -64,6 +64,20 @@ impl Tool for SystemToolsListTool {
                 })
             })
             .collect();
+
+        // Merge v2 capability actions (not `Tool` impls, absent from
+        // `tool_definitions()`). No-op on v1. Assumes v1/v2 names don't overlap.
+        if let Some(cap_registry) = self.registry.capability_registry().await {
+            for cap in cap_registry.list() {
+                for action in &cap.actions {
+                    tools.push(json!({
+                        "name": action.name,
+                        "description": action.description,
+                    }));
+                }
+            }
+        }
+
         Ok(ToolOutput::success(
             json!({ "tools": tools, "count": tools.len() }),
             start.elapsed(),
@@ -125,5 +139,48 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         let tool = SystemToolsListTool::new(registry);
         assert_eq!(tool.name(), "system_tools_list");
+    }
+
+    fn sample_capability() -> ironclaw_engine::types::capability::Capability {
+        ironclaw_engine::types::capability::Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::types::capability::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn system_tools_list_includes_capability_actions() {
+        let registry = Arc::new(ToolRegistry::new());
+        let mut caps = ironclaw_engine::CapabilityRegistry::new();
+        caps.register(sample_capability());
+        registry.set_capability_registry(Arc::new(caps)).await;
+
+        let tool = SystemToolsListTool::new(Arc::clone(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("system_tools_list should succeed");
+
+        let names: Vec<&str> = result.result["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"mission_create"),
+            "system_tools_list must include capability actions when a capability \
+             registry is wired, got: {names:?}"
+        );
     }
 }

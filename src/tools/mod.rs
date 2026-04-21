@@ -40,3 +40,4 @@ pub use tool::{
     ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig, check_approval_in_context,
     redact_params, validate_tool_schema,
 };
+pub(crate) use tool::resolve_with_aliases;

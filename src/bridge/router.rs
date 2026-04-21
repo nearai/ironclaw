@@ -1466,6 +1466,39 @@ async fn submit_pending_auth_credential(
     Ok(PendingAuthCredentialSubmission::SkippedNoBackend)
 }
 
+/// Share the capability registry with both the effect adapter (for LLM
+/// system-prompt advertisement) and the v1 `ToolRegistry` (for discovery
+/// tools). Centralized so the dual-consumer invariant is testable.
+async fn wire_capability_registry(
+    effect_adapter: &EffectBridgeAdapter,
+    tools: &crate::tools::ToolRegistry,
+    capabilities: Arc<CapabilityRegistry>,
+) {
+    // Enforce the no-overlap invariant at startup: no tool currently in the
+    // registry may share a name with a capability action. `register()`'s
+    // capability-shadow check only fires once capabilities are wired; this
+    // catches the reverse — built-ins registered before wiring that collide.
+    #[cfg(debug_assertions)]
+    {
+        for tool_name in tools.list().await {
+            if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n))
+                .is_some()
+            {
+                panic!(
+                    "wire_capability_registry: tool '{tool_name}' collides with a \
+                     capability action. Capability names are reserved — rename the tool \
+                     or the capability."
+                );
+            }
+        }
+    }
+
+    effect_adapter
+        .set_capability_registry(Arc::clone(&capabilities))
+        .await;
+    tools.set_capability_registry(capabilities).await;
+}
+
 /// Get or initialize the engine state using the agent's dependencies.
 ///
 /// Called eagerly at startup (from `Agent::run()`) when `ENGINE_V2=true`,
@@ -1692,14 +1725,8 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     let store_dyn: Arc<dyn Store> = store.clone();
 
-    // Share the registry with the effect adapter so its `available_actions`
-    // can advertise engine-native capability actions (missions) to the LLM.
-    // Without this, mission tools have active leases but never appear in
-    // the tools list sent with each LLM call.
     let capabilities = Arc::new(capabilities);
-    effect_adapter
-        .set_capability_registry(Arc::clone(&capabilities))
-        .await;
+    wire_capability_registry(&effect_adapter, agent.tools(), Arc::clone(&capabilities)).await;
 
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
@@ -5930,6 +5957,84 @@ mod tests {
 
     static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+
+    // `wire_capability_registry` must reach both consumers (effect adapter
+    // for system-prompt advertisement, tool registry for discovery). A
+    // regression that drops either consumer fails the test below.
+
+    #[tokio::test]
+    async fn wire_capability_registry_reaches_both_consumers() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools =
+            Arc::new(ToolRegistry::new().with_engine_version(crate::tools::EngineVersion::V2));
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut caps = CapabilityRegistry::new();
+        caps.register(Capability {
+            name: "missions".into(),
+            description: "Mission lifecycle".into(),
+            actions: vec![ironclaw_engine::ActionDef {
+                name: "mission_create".into(),
+                description: "Create a new mission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+        let caps = Arc::new(caps);
+
+        // Sanity: before wiring, neither consumer has the registry.
+        assert!(
+            tools.capability_registry().await.is_none(),
+            "tools registry should start without a capability registry"
+        );
+
+        wire_capability_registry(&adapter, &tools, Arc::clone(&caps)).await;
+
+        // Consumer 1: `ToolRegistry` — checked directly.
+        assert!(
+            tools.capability_registry().await.is_some(),
+            "wire_capability_registry must set the capability registry on ToolRegistry \
+             so tool_info/system_tools_list can introspect capability actions"
+        );
+
+        // Consumer 2: `EffectBridgeAdapter` — checked through behavior
+        // (no direct getter). Grant a mission lease; `available_actions`
+        // must surface `mission_create`.
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "missions".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        use ironclaw_engine::EffectExecutor;
+        let actions = adapter
+            .available_actions(std::slice::from_ref(&lease))
+            .await
+            .expect("available_actions should succeed");
+        assert!(
+            actions.iter().any(|a| a.name == "mission_create"),
+            "wire_capability_registry must set the capability registry on EffectBridgeAdapter \
+             so available_actions advertises capability actions; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // `bridge_outcome_for_failed_thread` — caller-level coverage.

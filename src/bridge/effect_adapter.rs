@@ -113,10 +113,11 @@ impl EffectBridgeAdapter {
     }
 
     /// Install the engine capability registry so `available_actions()` can
-    /// surface actions from engine-native capabilities (missions, etc.) to
-    /// the LLM. Called once at bridge setup after `router.rs` has finished
-    /// registering all capabilities.
-    pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
+    /// surface engine-native capability actions to the LLM. `pub(crate)`
+    /// so the `bridge::router::wire_capability_registry` helper is the
+    /// only real call site — keeps the adapter/registry dual-wiring
+    /// invariant enforceable.
+    pub(crate) async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
         *self.capability_registry.write().await = Some(registry);
     }
 
@@ -2264,14 +2265,11 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
+/// V1 tools that cannot work on engine v2. `routine_*` is excluded because
+/// on v2 those names are intercepted by `handle_mission_call`'s routine
+/// alias path before this check fires. Defense-in-depth only — will be
+/// deleted alongside v1.
 fn is_v1_only_tool(name: &str) -> bool {
-    // routine_* tools are surfaced in v2 too, but are intercepted by
-    // `handle_mission_call`'s routine alias path *before* this check fires —
-    // they get translated into mission_* dispatches via the existing
-    // mission manager rather than the v1 routine engine. The original v1
-    // routine tools remain registered for the v1 engine, but in v2 the
-    // alias path means the LLM-facing routine_create/list/update/etc.
-    // calls always go through missions.
     matches!(
         name,
         "create_job"
@@ -2283,8 +2281,7 @@ fn is_v1_only_tool(name: &str) -> bool {
     )
 }
 
-/// Auth management tools from v1 that are now kernel-internal in v2.
-/// The LLM should not see or call these — auth is handled automatically.
+/// Auth-management tools from v1 that are kernel-internal in v2.
 fn is_v1_auth_tool(name: &str) -> bool {
     matches!(name, "tool_auth" | "tool-auth")
 }
