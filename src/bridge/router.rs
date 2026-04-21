@@ -19,6 +19,7 @@ use crate::bridge::auth_manager::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
+use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
@@ -117,10 +118,6 @@ fn bridge_outcome_for_failed_thread(
         BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
     }
 }
-
-/// The channel name used by the web gateway on [`IncomingMessage::channel`].
-/// Defined in `channels::web::GatewayChannel::name()`.
-const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
 

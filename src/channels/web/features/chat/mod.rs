@@ -1192,10 +1192,12 @@ fn reconcile_in_progress_with_turns(
 
     if in_progress_matches_turn(last_turn, &in_progress) {
         // Only treat the matching turn as "already done" if the model wrote
-        // a final response AND every recorded tool call completed
-        // successfully. Otherwise the turn is really still in-progress and
-        // the UI should keep the processing affordance visible so the user
-        // can see (and, in a follow-up, retry) the stuck step (#1993).
+        // a final response AND the trailing tool call is in a successful
+        // terminal state (see `turn_tool_calls_succeeded`). Earlier failed
+        // attempts are allowed as long as a later retry succeeded — that's
+        // a legitimate recovery. A trailing unfinished / errored tool call
+        // keeps the processing affordance visible so the user sees the
+        // stuck step instead of fabricated success (#1993).
         if last_turn.response.is_some() && turn_tool_calls_succeeded(last_turn) {
             None
         } else {

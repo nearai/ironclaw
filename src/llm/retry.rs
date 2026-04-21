@@ -82,27 +82,47 @@ pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
 
 /// Parse a `Retry-After` header value into a capped `Duration`.
 ///
-/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats (RFC 7231
-/// §7.1.1 / IMF-fixdate). The implementation uses `chrono::DateTime::parse_from_rfc2822`,
-/// which also accepts RFC 2822-style dates.
-/// Returns `DEFAULT_RETRY_AFTER` (60 s) if the header is missing or unparseable.
+/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats
+/// (RFC 7231 §7.1.1 / IMF-fixdate). The implementation uses
+/// `chrono::DateTime::parse_from_rfc2822`, which also accepts RFC 2822-style
+/// dates.
+///
+/// Returns `DEFAULT_RETRY_AFTER` (60 s) if the header is missing or
+/// unparseable. That "missing → 60 s" default is specifically for rate-limit
+/// / auth-retry paths where we always want a non-zero delay even if the
+/// upstream omits the header. Callers that need to distinguish
+/// "header absent" from "header present but unparseable" — so that missing
+/// headers can fall through to exponential backoff instead — must use
+/// [`parse_retry_after_value`] on the `&HeaderValue` extracted from the
+/// headers map directly.
 pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Duration {
     header
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            if let Ok(secs) = v.trim().parse::<u64>() {
-                return Some(cap_retry_after(Duration::from_secs(secs)));
-            }
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
-                let now = chrono::Utc::now();
-                let delta = dt.signed_duration_since(now);
-                return Some(cap_retry_after(Duration::from_secs(
-                    delta.num_seconds().max(0) as u64,
-                )));
-            }
-            None
-        })
+        .map(parse_retry_after_value)
         .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+}
+
+/// Parse a *known-present* `Retry-After` header into a capped `Duration`.
+///
+/// Use this from call sites that want to preserve the `Option` shape around
+/// header presence — e.g. 5xx retry paths where a missing header should
+/// fall through to [`retry_backoff_delay`] instead of the 60-second default
+/// that [`parse_retry_after`] returns for rate-limit semantics. Unparseable
+/// values still fall back to `DEFAULT_RETRY_AFTER` (60 s).
+pub(crate) fn parse_retry_after_value(header: &reqwest::header::HeaderValue) -> Duration {
+    let parsed = header.to_str().ok().and_then(|v| {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            return Some(cap_retry_after(Duration::from_secs(secs)));
+        }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
+            let now = chrono::Utc::now();
+            let delta = dt.signed_duration_since(now);
+            return Some(cap_retry_after(Duration::from_secs(
+                delta.num_seconds().max(0) as u64,
+            )));
+        }
+        None
+    });
+    parsed.unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
 }
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
@@ -538,6 +558,26 @@ mod tests {
     fn parse_retry_after_missing_header() {
         assert_eq!(
             parse_retry_after(None),
+            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
+        );
+    }
+
+    /// `parse_retry_after_value` takes a known-present `&HeaderValue`, so
+    /// callers that want to distinguish "absent" from "unparseable" (e.g.
+    /// `nearai_chat`'s 5xx branch, which falls through to exponential
+    /// backoff when the header is missing) can preserve the `Option` shape
+    /// around presence. Unparseable values still default to the 60 s floor.
+    #[test]
+    fn parse_retry_after_value_parses_delay_seconds() {
+        let val = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(parse_retry_after_value(&val), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_retry_after_value_unparseable_falls_back_to_default() {
+        let val = reqwest::header::HeaderValue::from_static("not-a-number");
+        assert_eq!(
+            parse_retry_after_value(&val),
             Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
         );
     }

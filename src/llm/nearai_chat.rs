@@ -261,14 +261,14 @@ impl NearAiChatProvider {
         // Extract Retry-After header before consuming the response body.
         // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
         // header was actually present on the response — `None` otherwise, so
-        // that 502/503/504 retries fall back to `retry_backoff_delay`'s
-        // exponential schedule instead of the 60s default that
-        // `parse_retry_after` applies to missing headers. Preserving the 60s
-        // floor for 429 (rate limit) still happens at the 429 call site below.
+        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
+        // schedule instead of the 60s default `parse_retry_after` applies to
+        // missing headers. The 60s floor for 429 (rate limit) is re-added
+        // explicitly at the 429 call site below via `.or(Some(...))`.
         let retry_after_header: Option<Duration> = response
             .headers()
             .get("retry-after")
-            .map(|h| crate::llm::retry::parse_retry_after(Some(h)));
+            .map(crate::llm::retry::parse_retry_after_value);
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
