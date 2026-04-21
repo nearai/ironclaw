@@ -58,6 +58,35 @@ if [[ -n "${IRONCLAW_DB_B64:-}" && ! -f "${DB_TARGET}" ]]; then
     echo "[entrypoint] Wrote ${db_size} bytes to ${DB_TARGET}"
 fi
 
+# Fallback bootstrap route for when the base64-in-env path blows past
+# the service plan's env-var size limit (Railway varies by plan, some
+# cap at 64 KB). Set IRONCLAW_DB_URL to a short-lived pre-signed URL
+# the runner can GET once; the file is written to the same target as
+# IRONCLAW_DB_B64 and the same `-f` guard applies — once the DB exists
+# on the volume, subsequent boots skip the fetch so in-flight refresh
+# token rotations aren't clobbered.
+#
+# Operator hygiene: use a URL that expires in an hour, from a service
+# you control (S3/R2 presigned URL, private gist asset, etc.). The
+# libsql file has encrypted secret values but plaintext schema — don't
+# park it on a public pastebin.
+if [[ -n "${IRONCLAW_DB_URL:-}" && ! -f "${DB_TARGET}" ]]; then
+    echo "[entrypoint] Bootstrapping ${DB_TARGET} from IRONCLAW_DB_URL"
+    mkdir -p "$(dirname "${DB_TARGET}")"
+    if ! curl --fail --silent --show-error --location \
+            --max-time 120 \
+            --output "${DB_TARGET}" \
+            "${IRONCLAW_DB_URL}"; then
+        echo "[entrypoint] ERROR: fetch of IRONCLAW_DB_URL failed" >&2
+        rm -f "${DB_TARGET}"
+        exit 1
+    fi
+    chmod 600 "${DB_TARGET}"
+    db_size="$(stat -c %s "${DB_TARGET}" 2>/dev/null \
+        || stat -f %z "${DB_TARGET}" 2>/dev/null || echo unknown)"
+    echo "[entrypoint] Fetched ${db_size} bytes to ${DB_TARGET}"
+fi
+
 # Recovery path. If the volume holds a stale `.runner` sentinel for a
 # registration that GitHub has since deleted (because the UI "Remove"
 # button was clicked, or GitHub auto-GC'd a runner that went offline
