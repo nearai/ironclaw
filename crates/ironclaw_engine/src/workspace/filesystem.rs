@@ -331,6 +331,7 @@ mod tests {
         assert!(matches!(err, MountError::InvalidPath { .. }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rejects_symlink_escapes() {
         // Set up: backend root is a tempdir; create a symlink inside that
@@ -340,20 +341,13 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"oops").unwrap();
         // best effort — symlink may not work on all platforms; skip if it fails
-        #[cfg(unix)]
-        {
-            let link = dir.path().join("escape");
-            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-            let err = backend
-                .read(Path::new("escape/secret"))
-                .await
-                .expect_err("symlink escape must be rejected");
-            assert!(matches!(err, MountError::InvalidPath { .. }));
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = dir; // unused on non-unix
-        }
+        let link = dir.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let err = backend
+            .read(Path::new("escape/secret"))
+            .await
+            .expect_err("symlink escape must be rejected");
+        assert!(matches!(err, MountError::InvalidPath { .. }));
     }
 
     #[tokio::test]

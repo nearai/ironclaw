@@ -474,18 +474,14 @@ impl AppBuilder {
             // workspace. Even outside authenticated multi-tenant mode, some
             // channels and test harnesses route non-owner users through
             // per-user tenant workspaces seeded on demand.
-            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+            //
+            // Whether the deployment is multi-tenant is configuration, not a
+            // property we should infer from the current DB contents. An admin
+            // may start in multi-tenant mode before creating any tenant users.
+            let is_multi_tenant = self.config.is_multi_tenant_deployment();
 
             // In multi-tenant mode, enable admin system prompt on the owner
             // workspace so the dispatcher reads SYSTEM.md from __admin__ scope.
-            //
-            // NOTE: `is_multi_tenant` is evaluated once at startup. If the
-            // server starts with no users (single-user mode) and users are
-            // added later, the owner workspace frozen in `Arc` will NOT have
-            // `admin_prompt_enabled`. A server restart is required after the
-            // first user is created to activate admin prompts on the owner
-            // workspace. Tenant workspaces created via `WorkspacePool` are
-            // unaffected — they always call `.with_admin_prompt()`.
             if is_multi_tenant {
                 ws = ws.with_admin_prompt();
             }

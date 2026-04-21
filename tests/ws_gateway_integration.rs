@@ -43,6 +43,7 @@ async fn start_test_server() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,

@@ -153,6 +153,15 @@ fn generate_test_master_key() -> secrecy::SecretString {
 }
 
 impl Config {
+    /// Returns whether this deployment is configured to run in multi-tenant mode.
+    ///
+    /// Keep this decision config-driven rather than inferring it from runtime
+    /// DB contents. A deployment may be explicitly multi-tenant before any
+    /// non-owner users have been created.
+    pub fn is_multi_tenant_deployment(&self) -> bool {
+        self.agent.multi_tenant
+    }
+
     /// Create a full Config for integration tests without reading env vars.
     ///
     /// Requires the `libsql` feature. Sets up:
@@ -286,45 +295,8 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Resolution layers (lowest -> highest priority):
-        //   defaults -> deployment profile -> TOML -> admin DB -> per-user DB
-        let mut settings = Settings::default();
-        profile::apply_profile(&mut settings)?;
-        Self::apply_toml_overlay(&mut settings, toml_path)?;
-
-        // Layer admin-scope defaults between TOML and per-user settings.
-        // This lets an admin set instance-wide defaults (e.g. temperature,
-        // model) that members inherit unless they override per-user.
-        // Skip if the user IS the admin scope to avoid a redundant merge.
-        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
-        if user_id != admin_scope
-            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
-            && !admin_map.is_empty()
-        {
-            // Defense-in-depth: even though the admin-scope map is written
-            // by an operator, never let admin-only LLM endpoint settings
-            // (private/loopback URLs) propagate down to non-operators.
-            if !is_operator {
-                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
-            }
-            let admin_settings = Settings::from_db_map(&admin_map);
-            settings.merge_from(&admin_settings);
-        }
-
-        // Overlay per-user DB settings on top (highest priority).
-        match store.get_all_settings(user_id).await {
-            Ok(mut map) => {
-                if !is_operator {
-                    crate::config::helpers::strip_admin_only_llm_keys(&mut map);
-                }
-                let db_settings = Settings::from_db_map(&map);
-                settings.merge_from(&db_settings);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
-            }
-        };
-
+        let settings =
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, false).await?;
         Self::build(&settings).await
     }
 
@@ -417,91 +389,185 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<(), ConfigError> {
-        let mut settings = if let Some(store) = store {
-            // Resolution layers: profile -> TOML -> admin DB -> per-user DB.
-            let mut s = Settings::default();
-            profile::apply_profile(&mut s)?;
-            Self::apply_toml_overlay(&mut s, toml_path)?;
-            let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
-            if user_id != admin_scope
-                && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
-                && !admin_map.is_empty()
-            {
-                if !is_operator {
-                    crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+        self.llm =
+            Self::resolve_llm_with_secrets(store, user_id, toml_path, secrets, is_operator).await?;
+        Ok(())
+    }
+
+    /// Build the settings overlay used for DB-backed config reads.
+    ///
+    /// Resolution order is profile -> TOML -> admin DB -> per-user DB.
+    /// This is shared between full config loads and LLM-only hot reloads so
+    /// they read the same owner/admin scopes without duplicating merge logic.
+    async fn load_db_backed_settings(
+        store: &(dyn crate::db::SettingsStore + Sync),
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<Settings, ConfigError> {
+        let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
+        Self::apply_toml_overlay(&mut settings, toml_path)?;
+
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope {
+            match store.get_all_settings(admin_scope).await {
+                Ok(mut admin_map) if !admin_map.is_empty() => {
+                    if !is_operator {
+                        crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+                    }
+                    let admin_settings = Settings::from_db_map(&admin_map);
+                    settings.merge_from(&admin_settings);
                 }
-                let admin_settings = Settings::from_db_map(&admin_map);
-                s.merge_from(&admin_settings);
+                Ok(_) => {}
+                Err(e) if strict_db_reads => {
+                    return Err(ConfigError::ParseError(format!(
+                        "Failed to load admin-scope settings from DB: {e}"
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load admin-scope settings from DB, using defaults: {e}"
+                    );
+                }
             }
-            if let Ok(mut map) = store.get_all_settings(user_id).await {
+        }
+
+        match store.get_all_settings(user_id).await {
+            Ok(mut map) => {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
                 }
                 let db_settings = Settings::from_db_map(&map);
-                s.merge_from(&db_settings);
+                settings.merge_from(&db_settings);
             }
-            s
+            Err(e) if strict_db_reads => {
+                return Err(ConfigError::ParseError(format!(
+                    "Failed to load settings from DB: {e}"
+                )));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
+            }
+        }
+
+        Ok(settings)
+    }
+
+    async fn resolve_llm_with_secrets_inner(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        let mut settings = if let Some(store) = store {
+            Self::load_db_backed_settings(store, user_id, toml_path, is_operator, strict_db_reads)
+                .await?
         } else {
             let mut s = Settings::default();
             profile::apply_profile(&mut s)?;
+            Self::apply_toml_overlay(&mut s, toml_path)?;
             s
         };
 
-        // Hydrate API keys from encrypted secrets store into the settings
-        // struct so that LlmConfig::resolve() sees them without any changes
-        // to its synchronous resolution logic.
         if let Some(secrets) = secrets {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
-        // Final resolve after secrets are hydrated — use the fallback-aware
-        // entry point so an unusable user backend downgrades to NearAI (#2514)
-        // instead of crash-looping the instance.
+        // Startup path (non-strict): fall back to NearAI if the user-configured
+        // backend is unusable. This prevents the #2514 crash-loop and keeps the
+        // instance runnable while the user fixes their provider configuration.
+        //
+        // Hot-reload path (strict): use pure `resolve` so a bad save fails the
+        // whole call and lets the caller roll back the triggering settings
+        // write. Silently falling back here would be worse UX — the user
+        // saved "openrouter", runtime would switch to NearAI, the UI would
+        // show NearAI, and the user would wonder where their selection went.
+        if strict_db_reads {
+            return LlmConfig::resolve(&settings);
+        }
+
         let configured_backend = settings.llm_backend.clone();
-        self.llm = LlmConfig::resolve_with_fallback(&settings)?;
+        let cfg = LlmConfig::resolve_with_fallback(&settings)?;
 
         // If fallback demoted the backend, persist the effective backend to
         // the DB so the UI, status endpoint, and any other consumers stay
         // consistent with what is actually running. Without this, the user
         // would see "Active: openrouter" in Settings while the runtime is
         // quietly using NearAI.
-        if let Some(store) = store {
-            let active_backend = self.llm.backend.clone();
-            if fallback_fired(configured_backend.as_deref(), &active_backend) {
+        if let Some(store) = store
+            && fallback_fired(configured_backend.as_deref(), &cfg.backend)
+        {
+            tracing::warn!(
+                configured = ?configured_backend,
+                active = %cfg.backend,
+                "Syncing llm_backend in DB to reflect post-fallback runtime state"
+            );
+            if let Err(e) = store
+                .set_setting(
+                    user_id,
+                    "llm_backend",
+                    &serde_json::Value::String(cfg.backend.clone()),
+                )
+                .await
+            {
                 tracing::warn!(
-                    configured = ?configured_backend,
-                    active = %active_backend,
-                    "Syncing llm_backend in DB to reflect post-fallback runtime state"
+                    error = %e,
+                    "Failed to persist post-fallback llm_backend to DB — UI may \
+                     display the previously-selected backend until next save"
                 );
-                if let Err(e) = store
-                    .set_setting(
-                        user_id,
-                        "llm_backend",
-                        &serde_json::Value::String(active_backend.clone()),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to persist post-fallback llm_backend to DB — UI may \
-                         display the previously-selected backend until next save"
-                    );
-                }
-                // The previously-selected model is almost certainly wrong for
-                // the NearAI fallback (e.g. an OpenRouter model name). Clear
-                // it so resolve_model() picks NearAI's default on next load.
-                if settings.selected_model.is_some()
-                    && let Err(e) = store.delete_setting(user_id, "selected_model").await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to clear selected_model after fallback"
-                    );
-                }
+            }
+            // The previously-selected model is almost certainly wrong for
+            // the NearAI fallback (e.g. an OpenRouter model name). Clear
+            // it so resolve_model() picks NearAI's default on next load.
+            if settings.selected_model.is_some()
+                && let Err(e) = store.delete_setting(user_id, "selected_model").await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to clear selected_model after fallback"
+                );
             }
         }
 
-        Ok(())
+        Ok(cfg)
+    }
+
+    /// Resolve only the LLM configuration from the current source stack.
+    ///
+    /// This is used by hot reload paths that need the exact owner/admin merge
+    /// semantics from startup without rebuilding unrelated config sections.
+    /// Non-strict mode: applies `resolve_with_fallback`, so an unusable user
+    /// backend downgrades to NearAI at startup instead of crash-looping
+    /// (#2514). Use [`resolve_llm_with_secrets_strict`] for hot-reload paths.
+    pub(crate) async fn resolve_llm_with_secrets(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, false)
+            .await
+    }
+
+    /// Resolve LLM configuration for hot reload paths that must fail closed on
+    /// DB read errors so the caller can roll back the triggering settings write.
+    /// Strict mode also disables the NearAI fallback: a broken save produces
+    /// `Err` rather than a silent demotion, which is the signal the caller
+    /// needs to trigger rollback and preserve the user's explicit selection.
+    pub(crate) async fn resolve_llm_with_secrets_strict(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+    ) -> Result<LlmConfig, ConfigError> {
+        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, true)
+            .await
     }
 
     /// Build config from settings (shared by from_env and from_db).
@@ -1020,12 +1086,16 @@ mod tests {
         rows: tokio::sync::RwLock<
             std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
         >,
+        fail_get_all_settings_for: tokio::sync::RwLock<std::collections::HashSet<String>>,
     }
 
     impl FakeSettingsStore {
         fn new() -> Self {
             Self {
                 rows: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+                fail_get_all_settings_for: tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
+                ),
             }
         }
 
@@ -1034,6 +1104,13 @@ mod tests {
             rows.entry(user_id.to_string())
                 .or_default()
                 .insert(key.to_string(), value);
+        }
+
+        async fn fail_get_all_settings_for(&self, user_id: &str) {
+            self.fail_get_all_settings_for
+                .write()
+                .await
+                .insert(user_id.to_string());
         }
     }
 
@@ -1094,6 +1171,16 @@ mod tests {
             user_id: &str,
         ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
         {
+            if self
+                .fail_get_all_settings_for
+                .read()
+                .await
+                .contains(user_id)
+            {
+                return Err(crate::error::DatabaseError::Query(format!(
+                    "injected get_all_settings failure for {user_id}"
+                )));
+            }
             let rows = self.rows.read().await;
             Ok(rows.get(user_id).cloned().unwrap_or_default())
         }
@@ -1140,6 +1227,63 @@ mod tests {
             .suffix(".toml")
             .tempfile()
             .expect("create temp toml")
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn re_resolve_llm_without_store_keeps_toml_overlay() {
+        let _env_guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let toml_path = dir.path().join("config.toml");
+        Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("toml-selected-model".to_string()),
+            ..Default::default()
+        }
+        .save_toml(&toml_path)
+        .expect("save config.toml");
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm(None, "operator-user", Some(&toml_path))
+            .await
+            .expect("resolve should succeed without a settings store");
+
+        assert_eq!(
+            cfg.llm.backend, "nearai",
+            "re-resolve without a DB store must keep the TOML-selected backend"
+        );
+        assert_eq!(
+            cfg.llm.nearai.model, "toml-selected-model",
+            "re-resolve without a DB store must keep the TOML-selected model"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_llm_with_secrets_strict_fails_on_user_db_read_error() {
+        let store = FakeSettingsStore::new();
+        store.fail_get_all_settings_for("owner-user").await;
+
+        let toml = empty_toml_path();
+        let err = Config::resolve_llm_with_secrets_strict(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "owner-user",
+            Some(toml.path()),
+            None,
+            true,
+        )
+        .await
+        .expect_err("strict resolve should fail closed on DB read error");
+
+        assert!(
+            err.to_string().contains("Failed to load settings from DB"),
+            "strict resolve should surface the DB read failure; got {err}"
+        );
     }
 
     #[tokio::test]
