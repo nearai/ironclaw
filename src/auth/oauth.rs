@@ -127,6 +127,32 @@ fn truncate_at_char_boundary(body: &str, max_bytes: usize) -> String {
     format!("{}...", &body[..end])
 }
 
+/// Read an OAuth error response body for inclusion in a log / error
+/// message, truncated to `max_bytes` at a UTF-8 char boundary.
+///
+/// Two hazards rolled into one helper so every `!status.is_success()`
+/// site in this module composes an error message the same way:
+///
+/// 1. **Leak risk.** OAuth error responses can echo request details,
+///    partial token material, or unbounded vendor-specific blobs.
+///    Surfacing the raw body into an error string leaks that into
+///    logs, SSE events, and panic output.
+/// 2. **Read failures.** `response.text().await` can fail on network
+///    resets, encoding issues, or header/body mismatches. We swallow
+///    those and fall back to an empty string — the HTTP status code
+///    is already in the caller's outer `format!`, so it's still
+///    actionable without the body. Raising the read failure instead
+///    would obscure the actual provider error with a secondary I/O
+///    error. This is the `// silent-ok` case per
+///    `.claude/rules/error-handling.md`.
+async fn consume_oauth_error_body(response: reqwest::Response, max_bytes: usize) -> String {
+    // silent-ok: upstream error body may be unreadable (network reset,
+    // bad encoding); the caller's format! already includes status,
+    // which is the actionable part.
+    let body = response.text().await.unwrap_or_default();
+    truncate_at_char_boundary(&body, max_bytes)
+}
+
 /// Response from the OAuth token exchange.
 pub struct OAuthTokenResponse {
     pub access_token: String,
@@ -359,12 +385,7 @@ pub async fn exchange_oauth_code_with_params(
 
     if !token_response.status().is_success() {
         let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        // Truncate the upstream body before bubbling it into our error
-        // string. OAuth error responses can echo partial token material,
-        // request details, or unbounded vendor messages — surfacing the
-        // raw body verbatim is both a leak risk and a log-bloat risk.
-        let truncated = truncate_at_char_boundary(&body, 500);
+        let truncated = consume_oauth_error_body(token_response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange failed: {} - {}",
             status, truncated
@@ -530,8 +551,7 @@ pub async fn validate_oauth_token(
         Ok(())
     } else {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        let truncated = truncate_at_char_boundary(&body, 200);
+        let truncated = consume_oauth_error_body(response, 200).await;
         Err(OAuthCallbackError::Io(format!(
             "Token validation failed: HTTP {} (expected {}): {}",
             status, validation.success_status, truncated
@@ -1119,10 +1139,10 @@ pub async fn exchange_via_proxy(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let truncated = consume_oauth_error_body(response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange proxy failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
@@ -1181,10 +1201,10 @@ pub async fn refresh_token_via_proxy(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let truncated = consume_oauth_error_body(response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token refresh proxy failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
