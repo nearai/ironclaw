@@ -432,6 +432,16 @@ async def _start_auth_matrix_repl(
             "SECRETS_MASTER_KEY": MASTER_KEY,
             "GATEWAY_ENABLED": "false",
             "CLI_ENABLED": "true",
+            # `CLI_MODE` defaults to `tui` (ratatui full-screen UI)
+            # which reads stdin keystroke-by-keystroke and renders into
+            # a framebuffer. The PTY-driven tests here send whole lines
+            # via `os.write(master_fd, b"prompt\n")` and match for
+            # specific text in the raw stream — under the default TUI
+            # mode those line-based sends don't dispatch the prompt to
+            # the agent and the test times out with nothing but
+            # cursor-position escapes captured. Pin the plain REPL so
+            # these PTY-based tests drive the expected CLI surface.
+            "CLI_MODE": "repl",
             "LLM_BACKEND": "openai_compatible",
             "LLM_BASE_URL": mock_llm_server,
             "LLM_MODEL": "mock-model",

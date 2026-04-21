@@ -318,24 +318,11 @@ function handleImageFiles(files) {
   });
 }
 
-document.getElementById('attach-btn').addEventListener('click', () => {
-  document.getElementById('image-file-input').click();
-});
-
-document.getElementById('image-file-input').addEventListener('change', (e) => {
-  const files = Array.from(e.target.files || []);
-  handleImageFiles(files);
-});
-
-document.getElementById('chat-input').addEventListener('paste', (e) => {
-  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
-      const file = items[i].getAsFile();
-      if (file) handleImageFiles([file]);
-    }
-  }
-});
+// The click/change/paste wiring for #attach-btn + #image-file-input lives in
+// the `wireAttachmentUI` IIFE below (next to the unified handleAttachmentFiles
+// flow). A duplicate set of listeners used to live here and fire first,
+// clearing `e.target.value` before the unified listener ran — which emptied
+// the FileList and silently dropped every uploaded attachment.
 
 const chatMessagesEl = document.getElementById('chat-messages');
 chatMessagesEl.addEventListener('copy', (e) => {
@@ -770,7 +757,13 @@ function handleAttachmentFiles(files) {
   const fileInput = document.getElementById('image-file-input');
   if (fileInput) {
     fileInput.addEventListener('change', (e) => {
-      handleAttachmentFiles(e.target.files);
+      // Snapshot the FileList into an array *before* clearing the input.
+      // Some drivers (e.g. Playwright's set_input_files) expose a live
+      // FileList that turns empty mid-listener-chain; reading it later
+      // silently loses every file. Array.from fixes this by creating a
+      // stable copy while the FileList is still populated.
+      const files = Array.from(e.target.files || []);
+      handleAttachmentFiles(files);
       e.target.value = '';
     });
   }

@@ -901,6 +901,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     for pattern, tool_name, args_fn in TOOL_CALL_PATTERNS:
         m = pattern.search(content)
         if m:
+            # Don't re-dispatch a tool that already ran this turn: the
+            # agentic loop calls the mock LLM again after each tool
+            # result, and the "last user content" (which is what we
+            # pattern-match against) hasn't changed. A real LLM would
+            # see the tool result and respond with text — we mirror that
+            # by falling through to the match_response text path when a
+            # matching call is already sitting in the tool_results
+            # buffer.
+            if any(tr["name"] == tool_name for tr in recent_tool_results):
+                return None
             return _normalize_tool_calls(tool_name, args_fn(m))
     return None
 
