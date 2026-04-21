@@ -511,15 +511,16 @@ pub enum AppEvent {
 
     /// CodeAct (Python / Monty) execution failed.
     ///
-    /// Bridged from engine `EventKind::CodeExecutionFailed`. `category`
-    /// is the snake_case `CodeExecutionFailure` display string
-    /// (`syntax_error`, `runtime_error`, `name_lookup`, `vm_panic`,
-    /// `resource_limit`, `tool_error`, `os_denied`) — the engine type is
-    /// not re-exported into `ironclaw_common`, so the wire form is a
-    /// string the frontend can match on.
+    /// Bridged from engine `EventKind::CodeExecutionFailed`. The engine's
+    /// `CodeExecutionFailure` enum isn't re-exported into this crate
+    /// (dependency direction: `ironclaw_engine` depends on
+    /// `ironclaw_common`, not vice versa), so the wire type is a
+    /// dedicated parallel enum with matching snake_case serialization —
+    /// per `.claude/rules/types.md` "Wire-stable enums", not a stringly
+    /// typed field.
     #[serde(rename = "code_execution_failed")]
     CodeExecutionFailed {
-        category: String,
+        category: CodeExecutionFailureCategory,
         error: String,
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -527,6 +528,31 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+}
+
+/// Wire-side mirror of `ironclaw_engine::CodeExecutionFailure`.
+///
+/// Must be kept in variant-for-variant lock with the engine enum.  Both
+/// types serialize to the same snake_case strings so that a single
+/// frontend matcher handles any direct-engine telemetry path that may
+/// later emerge alongside the bridge projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeExecutionFailureCategory {
+    /// Python parse error — LLM generated invalid syntax.
+    SyntaxError,
+    /// Python runtime error (NameError, TypeError, ValueError, etc.).
+    RuntimeError,
+    /// Name lookup failed — function/variable not in scope and not a known tool.
+    NameLookup,
+    /// Monty VM panicked (caught by `catch_unwind`).
+    VmPanic,
+    /// Resource limit hit (timeout, memory, allocation cap).
+    ResourceLimit,
+    /// A tool call inside code returned an error.
+    ToolError,
+    /// OS operation attempted (blocked by sandbox).
+    OsDenied,
 }
 
 impl AppEvent {
@@ -768,7 +794,7 @@ mod tests {
                 child_thread_id: String::new(),
             },
             AppEvent::CodeExecutionFailed {
-                category: String::new(),
+                category: CodeExecutionFailureCategory::SyntaxError,
                 error: String::new(),
                 duration_ms: 0,
                 code_hash: None,

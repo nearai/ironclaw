@@ -4484,6 +4484,31 @@ async fn forward_event_to_channel(
 ///
 /// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
 /// so the frontend creates the card then resolves it).
+/// Bridge engine-side `CodeExecutionFailure` to its wire mirror
+/// `CodeExecutionFailureCategory` in `ironclaw_common`.
+///
+/// Exhaustive on purpose: if the engine enum gains a variant, this must
+/// fail to compile so both enums stay in lockstep. Per
+/// `.claude/rules/types.md` "Wire-stable enums" — do not reach for
+/// `format!("{:?}", ...)` or `.to_string()` here; the serde rename rules
+/// on the two enums independently produce snake_case, and a `Debug`
+/// detour would silently drift.
+fn code_execution_category_to_wire(
+    category: &ironclaw_engine::CodeExecutionFailure,
+) -> ironclaw_common::CodeExecutionFailureCategory {
+    use ironclaw_common::CodeExecutionFailureCategory as Wire;
+    use ironclaw_engine::CodeExecutionFailure as Src;
+    match category {
+        Src::SyntaxError => Wire::SyntaxError,
+        Src::RuntimeError => Wire::RuntimeError,
+        Src::NameLookup => Wire::NameLookup,
+        Src::VmPanic => Wire::VmPanic,
+        Src::ResourceLimit => Wire::ResourceLimit,
+        Src::ToolError => Wire::ToolError,
+        Src::OsDenied => Wire::OsDenied,
+    }
+}
+
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
@@ -4593,7 +4618,7 @@ fn thread_event_to_app_events(
             duration_ms,
             ..
         } => vec![AppEvent::CodeExecutionFailed {
-            category: category.to_string(),
+            category: code_execution_category_to_wire(category),
             error: error.clone(),
             duration_ms: *duration_ms,
             code_hash: code_hash.clone(),
@@ -7065,7 +7090,10 @@ mod tests {
                 app_events[0]
             );
         };
-        assert_eq!(category, "runtime_error");
+        assert_eq!(
+            *category,
+            ironclaw_common::CodeExecutionFailureCategory::RuntimeError
+        );
         assert_eq!(error, "NameError: 'foo' is not defined");
         assert_eq!(*duration_ms, 42);
         assert_eq!(code_hash.as_deref(), Some("abc123"));
