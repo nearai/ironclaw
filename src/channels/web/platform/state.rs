@@ -342,8 +342,20 @@ pub struct GatewayState {
     pub sse: Arc<SseManager>,
     /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
-    /// Per-user workspace pool for multi-user mode.
+    /// Optional per-user workspace resolver/pool.
+    ///
+    /// This is independent of `multi_tenant_mode`: the runtime may provide a
+    /// per-user workspace pool even in single-user mode for plumbing or test
+    /// harnesses.
     pub workspace_pool: Option<Arc<WorkspacePool>>,
+    /// Whether the gateway started in multi-tenant mode.
+    ///
+    /// This is intentionally separate from `workspace_pool.is_some()`: the
+    /// runtime may still use a per-user workspace resolver in single-user mode,
+    /// but the unauthenticated bootstrap routes (`/`, `/style.css`) only need
+    /// to suppress workspace-driven frontend customizations when startup
+    /// actually determined that multiple tenants exist.
+    pub multi_tenant_mode: bool,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
