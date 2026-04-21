@@ -829,20 +829,12 @@ impl Channel for GatewayChannel {
                 suggestions,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ReasoningUpdate {
-                narrative,
-                decisions,
-            } => AppEvent::ReasoningUpdate {
-                narrative,
-                decisions: decisions
-                    .into_iter()
-                    .map(|d| crate::channels::web::types::ToolDecisionDto {
-                        tool_name: d.tool_name,
-                        rationale: d.rationale,
-                    })
-                    .collect(),
-                thread_id,
-            },
+            StatusUpdate::ReasoningUpdate { .. } => {
+                // Internal planning/rationale must not be exposed to browser
+                // clients. The web UI should only show user-facing responses
+                // plus coarse tool lifecycle/status updates.
+                return Ok(());
+            }
             StatusUpdate::TurnCost {
                 input_tokens,
                 output_tokens,
