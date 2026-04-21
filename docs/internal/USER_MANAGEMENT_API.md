@@ -584,7 +584,7 @@ The `input` field accepts a structured `context` object alongside the user messa
 
 ```json
 {
-  "model": "claude-sonnet-4-5-20250514",
+  "model": "default",
   "input": "Go ahead with the transfer",
   "previous_response_id": "resp_...",
   "x_context": {
@@ -628,7 +628,20 @@ Retrieve a historical response reconstructed from conversation messages in the d
 
 ## Error Format
 
-All error responses return a plain text body with the error message and the corresponding HTTP status code:
+Most endpoints (admin, profile, tokens, settings, memory, jobs, routines, skills, extensions) return a plain text body with the error message and the corresponding HTTP status code.
+
+The **Responses API** (`POST /api/v1/responses`, `GET /api/v1/responses/{id}`, and their legacy `/v1/...` aliases) returns an OpenAI-compatible JSON envelope instead:
+
+```json
+{
+  "error": {
+    "message": "human-readable description",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+An optional `code` string field may appear when the server can attach a machine-readable subtype; it is omitted when absent. Error types follow OpenAI's conventions (`invalid_request_error`, `rate_limit_exceeded`, `server_error`, etc.).
 
 | Code | Meaning |
 |------|---------|
@@ -636,6 +649,7 @@ All error responses return a plain text body with the error message and the corr
 | `401` | Missing or invalid bearer token |
 | `403` | Authenticated but insufficient role (member accessing admin endpoint) |
 | `404` | Resource not found |
+| `429` | Rate limit exceeded (Responses API) |
 | `503` | Database or secrets store not available |
 | `500` | Internal server error |
 
