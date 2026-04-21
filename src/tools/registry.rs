@@ -228,6 +228,8 @@ impl ToolRegistry {
         &self,
         registry: Arc<ironclaw_engine::CapabilityRegistry>,
     ) {
+        // safety: invariant check — capabilities are v2-native by construction;
+        // wiring one onto a v1 registry is a programmer error, not a runtime condition.
         assert_eq!(
             self.engine_version,
             EngineVersion::V2,
