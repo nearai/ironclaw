@@ -516,10 +516,14 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let secrets = get_secrets_store().await?;
     let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
 
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
-    } else if server.has_custom_auth_header() {
+    // An explicit Authorization header means the user owns the credential
+    // path (API key, personal access token, etc.). It must win over any
+    // stored OAuth tokens — otherwise adding `Authorization: Bearer …` to
+    // an already-authenticated server silently keeps using the OAuth token
+    // and the explicit header is never sent. This matches the `requires_auth()`
+    // contract (returns false when an Authorization header is present) and
+    // the factory's own ordering in `create_client_from_config`.
+    let client = if server.has_custom_auth_header() {
         let process_manager = Arc::new(McpProcessManager::new());
         create_client_from_config(
             server.clone(),
@@ -530,6 +534,9 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else if has_tokens {
+        // We have stored tokens, use authenticated client
+        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
     } else if server.requires_auth() {
         // OAuth configured but no tokens - need to authenticate
         println!();
@@ -585,18 +592,22 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             let err_str = e.to_string();
             // Check if server requires auth but we don't have valid tokens
             if crate::tools::mcp::is_auth_error_message(&err_str) {
-                if has_tokens {
-                    // We had tokens but they failed - need to re-authenticate
-                    println!(
-                        "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
-                    );
-                    println!("    ironclaw mcp auth {}", name);
-                } else if server.has_custom_auth_header() {
+                // Match the construction-side ordering: an explicit
+                // Authorization header wins over stored OAuth tokens, so
+                // the failure message must point at the configured header
+                // first.
+                if server.has_custom_auth_header() {
                     println!("  ✗ Authentication failed.");
                     println!();
                     println!(
                         "  Check the configured Authorization header or API key for this server."
                     );
+                } else if has_tokens {
+                    // We had tokens but they failed - need to re-authenticate
+                    println!(
+                        "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
+                    );
+                    println!("    ironclaw mcp auth {}", name);
                 } else {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");

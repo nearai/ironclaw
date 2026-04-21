@@ -813,12 +813,22 @@ pub async fn remove_mcp_server_db(
 ///
 /// This allows users to supply descriptive names like "My Twitter Server"
 /// which are stored as `my_twitter_server` (#2236).
+///
+/// Hyphens are folded to underscores so the canonical form agrees with
+/// [`ironclaw_common::ExtensionName::new`]. Without this, web/CLI surfaces
+/// that run a name through `normalize_server_name` would carry hyphens
+/// forward, but `ExtensionManager::install` (which calls
+/// `ExtensionName::new`) and [`create_client_from_config`] would fold them
+/// to underscores, producing divergent stored/runtime identities for the
+/// same user input. `McpServerName` still *accepts* hyphens (to keep
+/// pre-normalisation rows from disk loading cleanly); we just stop
+/// introducing new ones through the normaliser.
 pub fn normalize_server_name(name: &str) -> String {
     let lowered = name.to_lowercase();
     let normalized: String = lowered
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '_' {
                 c
             } else {
                 '_'
@@ -1100,7 +1110,7 @@ mod tests {
             env.clone(),
         );
 
-        assert_eq!(config.name, "my-server");
+        assert_eq!(config.name, "my_server");
         assert!(config.url.is_empty());
         assert!(config.enabled);
         assert!(config.oauth.is_none());
@@ -1127,7 +1137,7 @@ mod tests {
     fn test_unix_config_creation() {
         let config = McpServerConfig::new_unix("local-server", "/tmp/mcp.sock");
 
-        assert_eq!(config.name, "local-server");
+        assert_eq!(config.name, "local_server");
         assert!(config.url.is_empty());
         assert!(config.enabled);
 
@@ -1418,7 +1428,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.name, "test-server");
+        assert_eq!(parsed.name, "test_server");
         assert!(parsed.url.is_empty());
         assert_eq!(parsed.description.as_deref(), Some("A test server"));
 
@@ -1436,7 +1446,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.name, "unix-server");
+        assert_eq!(parsed.name, "unix_server");
         match &parsed.transport {
             Some(McpTransportConfig::Unix { socket_path }) => {
                 assert_eq!(socket_path, "/var/run/mcp.sock");
@@ -1451,7 +1461,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.name, "http-server");
+        assert_eq!(parsed.name, "http_server");
         assert!(parsed.transport.is_none());
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
     }
@@ -1488,8 +1498,29 @@ mod tests {
     #[test]
     fn test_normalize_server_name_basic() {
         assert_eq!(normalize_server_name("notion"), "notion");
-        assert_eq!(normalize_server_name("my-server"), "my-server");
+        // Hyphens fold to underscores so the stored identity matches
+        // `ExtensionName::new` (cross-surface canonicalisation).
+        assert_eq!(normalize_server_name("my-server"), "my_server");
         assert_eq!(normalize_server_name("my_server"), "my_server");
+    }
+
+    /// Regression: before this fix, `normalize_server_name` preserved
+    /// hyphens while `ExtensionName::new` (used by
+    /// `ExtensionManager::install`) folded them to underscores. A web
+    /// install of `my-server` was recorded as `my-server` by the MCP
+    /// config surface but stored as `my_server` by the extension
+    /// manager, causing follow-up lookups to miss.
+    #[test]
+    fn test_normalize_server_name_folds_hyphens_to_match_extension_name() {
+        use ironclaw_common::ExtensionName;
+
+        for raw in ["my-server", "notion-remote", "slack-relay"] {
+            assert_eq!(
+                normalize_server_name(raw),
+                ExtensionName::new(raw).unwrap().as_str(),
+                "normalize_server_name must agree with ExtensionName::new for {raw}"
+            );
+        }
     }
 
     #[test]
@@ -1524,7 +1555,7 @@ mod tests {
     #[test]
     fn test_constructor_normalizes_name() {
         let config = McpServerConfig::new("My-Server", "https://example.com");
-        assert_eq!(config.name, "my-server");
+        assert_eq!(config.name, "my_server");
 
         let config = McpServerConfig::new("UPPER CASE", "https://example.com");
         assert_eq!(config.name, "upper_case");
@@ -1546,7 +1577,8 @@ mod tests {
         };
         file.upsert(raw_config);
 
-        assert!(file.get("my-server").is_some());
+        assert!(file.get("my_server").is_some());
+        assert!(file.get("my-server").is_none());
         assert!(file.get("My-Server").is_none());
     }
 
@@ -1676,6 +1708,24 @@ mod tests {
         }
     }
 
+    /// Helper: build a config whose `name` is the exact raw input, bypassing
+    /// `McpServerConfig::new`'s normalization pass. Used by the security-
+    /// boundary tests below: `validate()` is the second line of defense
+    /// against dangerous names (e.g. names loaded from disk or reconstructed
+    /// outside the normal constructor), so it has to reject them on its own.
+    fn raw_config_with_name(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            url: "https://mcp.example.com".to_string(),
+            transport: None,
+            headers: HashMap::new(),
+            oauth: None,
+            enabled: true,
+            description: None,
+            cached_tools: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_server_name_shell_metacharacters_rejected() {
         let dangerous_names = [
@@ -1689,10 +1739,10 @@ mod tests {
             "name with spaces",
         ];
         for name in dangerous_names {
-            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            let config = raw_config_with_name(name);
             assert!(
                 config.validate().is_err(),
-                "Name '{}' should be rejected",
+                "Name '{}' should be rejected by validate()",
                 name
             );
         }
@@ -1701,10 +1751,10 @@ mod tests {
     #[test]
     fn test_server_name_path_separators_rejected() {
         for name in ["../etc/passwd", "server/name", "server\\name"] {
-            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            let config = raw_config_with_name(name);
             assert!(
                 config.validate().is_err(),
-                "Name '{}' should be rejected",
+                "Name '{}' should be rejected by validate()",
                 name
             );
         }
@@ -1712,7 +1762,7 @@ mod tests {
 
     #[test]
     fn test_server_name_null_byte_rejected() {
-        let config = McpServerConfig::new("server\0name", "https://mcp.example.com");
+        let config = raw_config_with_name("server\0name");
         assert!(config.validate().is_err());
     }
 
@@ -1720,11 +1770,37 @@ mod tests {
     fn test_server_name_dot_rejected() {
         // Dots are rejected because server names are used as tool name
         // prefixes and LLM providers require ^[a-zA-Z0-9_-]+$
-        let config = McpServerConfig::new("my.server", "https://mcp.example.com");
+        let config = raw_config_with_name("my.server");
         assert!(
             config.validate().is_err(),
-            "Dot in server name should be rejected"
+            "Dot in server name should be rejected by validate()"
         );
+    }
+
+    /// Complementary positive check: `McpServerConfig::new` must *also*
+    /// neutralize dangerous chars up front, so nothing nefarious survives
+    /// into `self.name` even if `validate()` is never called.
+    #[test]
+    fn test_constructor_sanitizes_dangerous_names() {
+        for raw in [
+            "server; rm -rf /",
+            "server$(whoami)",
+            "../etc/passwd",
+            "server\0name",
+            "my.server",
+            "name with spaces",
+        ] {
+            let config = McpServerConfig::new(raw, "https://mcp.example.com");
+            assert!(
+                config
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "normalized name '{}' from '{}' must contain no dangerous chars",
+                config.name,
+                raw
+            );
+        }
     }
 
     /// Regression for PR nearai/ironclaw#2681 review comment 3110617080.
