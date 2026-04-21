@@ -144,39 +144,39 @@ impl Tool for ToolInfoTool {
         // Search the v1 tool map first, then fall through to v2 capability
         // actions. On v1 the capability registry is `None`, so the fallback
         // is a no-op. Assumes v1 tool and v2 capability names don't overlap.
-        let (action_name, description, schema, summary) = if let Some(tool) =
-            registry.get(name).await
-        {
-            if !tool
-                .engine_compatibility()
-                .is_visible_in(registry.engine_version())
+        let (action_name, description, schema, summary) =
+            if let Some(tool) = registry.get(name).await {
+                if !tool
+                    .engine_compatibility()
+                    .is_visible_in(registry.engine_version())
+                {
+                    return Err(ToolError::InvalidParameters(format!(
+                        "Tool '{name}' is not available in the current engine version"
+                    )));
+                }
+                let schema = tool.discovery_schema();
+                let summary = tool
+                    .discovery_summary()
+                    .unwrap_or_else(|| fallback_summary(&schema));
+                (
+                    tool.name().to_string(),
+                    tool.description().to_string(),
+                    schema,
+                    summary,
+                )
+            } else if let Some(cap_registry) = registry.capability_registry().await
+                && let Some(action) = resolve_with_aliases(name, |n| {
+                    cap_registry.find_action(n).map(|(_, a)| a.clone())
+                })
             {
+                let schema = action.parameters_schema.clone();
+                let summary = fallback_summary(&schema);
+                (action.name, action.description, schema, summary)
+            } else {
                 return Err(ToolError::InvalidParameters(format!(
-                    "Tool '{name}' is not available in the current engine version"
+                    "No tool named '{name}' is registered"
                 )));
-            }
-            let schema = tool.discovery_schema();
-            let summary = tool
-                .discovery_summary()
-                .unwrap_or_else(|| fallback_summary(&schema));
-            (
-                tool.name().to_string(),
-                tool.description().to_string(),
-                schema,
-                summary,
-            )
-        } else if let Some(cap_registry) = registry.capability_registry().await
-            && let Some(action) =
-                resolve_with_aliases(name, |n| cap_registry.find_action(n).map(|(_, a)| a.clone()))
-        {
-            let schema = action.parameters_schema.clone();
-            let summary = fallback_summary(&schema);
-            (action.name, action.description, schema, summary)
-        } else {
-            return Err(ToolError::InvalidParameters(format!(
-                "No tool named '{name}' is registered"
-            )));
-        };
+            };
 
         let param_names = schema_param_names(&schema);
         let mut info = serde_json::json!({
@@ -427,7 +427,10 @@ mod tests {
                 && param_strs.contains(&"cadence"),
             "expected name/goal/cadence in params: {param_strs:?}"
         );
-        assert_eq!(info["schema"]["required"], serde_json::json!(["name", "goal", "cadence"]));
+        assert_eq!(
+            info["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
     }
 
     #[tokio::test]
