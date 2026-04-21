@@ -508,12 +508,13 @@ impl MissionManager {
         Ok(())
     }
 
-    /// Resume a paused mission.
+    /// Resume a paused or failed mission.
     ///
     /// Shared missions can only be managed by shared owners (system user).
-    /// Only `Paused` missions can be resumed — `Completed` and `Failed` are
-    /// terminal states and must not be resurrected by a stray resume call,
-    /// so anything else is rejected with a `Store` error.
+    /// `Paused` missions resume normally, and `Failed` missions may be
+    /// explicitly resumed after the caller fixes the underlying problem.
+    /// `Completed` remains terminal, so anything else is rejected with a
+    /// `Store` error.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
         let mut mission = self
             .store
@@ -533,10 +534,13 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        if mission.status != MissionStatus::Paused {
+        if !matches!(
+            mission.status,
+            MissionStatus::Paused | MissionStatus::Failed
+        ) {
             return Err(EngineError::Store {
                 reason: format!(
-                    "mission {id} is in state {:?}, only Paused missions can be resumed",
+                    "mission {id} is in state {:?}, only Paused or Failed missions can be resumed",
                     mission.status
                 ),
             });
@@ -3518,9 +3522,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_mission_rejects_terminal_states() {
-        // Regression: resume_mission must not resurrect Completed/Failed
-        // missions. Only Paused → Active is permitted.
+    async fn resume_mission_rejects_non_resumable_states() {
+        // Regression: resume_mission must not silently succeed for states
+        // that are not explicitly recoverable.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
@@ -3537,7 +3541,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Active → resume must fail (only Paused is resumable).
+        // Active → resume must fail (only Paused/Failed are resumable).
         let err = mgr
             .resume_mission(id, "alice")
             .await
@@ -3882,6 +3886,20 @@ mod tests {
             refire.is_none(),
             "failed missions must not keep spawning new threads until resumed"
         );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a failed cron mission should re-arm its schedule"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_some(),
+            "explicit resume should make failed missions fireable again"
+        );
     }
 
     #[tokio::test]
@@ -3928,6 +3946,14 @@ mod tests {
         assert!(
             refire.is_none(),
             "max-iterations missions must not keep spawning new threads until resumed"
+        );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a max-iterations cron mission should re-arm its schedule"
         );
     }
 

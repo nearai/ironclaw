@@ -50,7 +50,10 @@ pub enum MissionStatus {
     Paused,
     /// Mission has achieved its goal.
     Completed,
-    /// Mission has been abandoned or failed irrecoverably.
+    /// Mission stopped after a terminal thread failure.
+    ///
+    /// Automatic/manual firing is blocked until the owner explicitly resumes it
+    /// after fixing the underlying problem.
     Failed,
 }
 
