@@ -5,6 +5,64 @@ use std::fmt;
 use crate::types::capability::EffectType;
 use crate::types::thread::{ThreadId, ThreadState};
 
+/// Typed classification of an orchestrator-VM failure.
+///
+/// Replaces the previous `format!()`-built string reason so the user-facing
+/// message and the low-level detail stay separate. The low-level detail
+/// (Monty interpreter trace, Python traceback, underlying HTTP body) is
+/// preserved in [`OrchestratorFailure::debug_detail`] and surfaced via
+/// gateway debug mode rather than leaked into the user's reply.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum OrchestratorFailureKind {
+    #[error(
+        "{prefix}: time budget exhausted after {limit_secs}s (set IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS to raise the limit or simplify the task)"
+    )]
+    TimeLimit { prefix: String, limit_secs: u64 },
+
+    #[error("{prefix}: resource budget exhausted (memory or allocations)")]
+    ResourceLimit { prefix: String },
+
+    #[error("{prefix}: internal orchestrator failure (see debug logs for details)")]
+    Traceback { prefix: String },
+
+    #[error("{prefix}: Monty VM panicked during {phase}")]
+    VmPanic { prefix: String, phase: &'static str },
+
+    #[error("{prefix}: {message}")]
+    Other { prefix: String, message: String },
+}
+
+/// Structured orchestrator failure: user-safe classification plus preserved
+/// low-level detail.
+///
+/// The low-level detail (`debug_detail`) is NEVER surfaced in the Display
+/// impl — that path is user-visible. It's only readable via
+/// [`OrchestratorFailure::debug_detail`] so gateway debug mode can opt in
+/// to surface it.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{kind}")]
+pub struct OrchestratorFailure {
+    pub kind: OrchestratorFailureKind,
+    pub debug_detail: String,
+}
+
+impl OrchestratorFailure {
+    pub fn new(kind: OrchestratorFailureKind, debug_detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            debug_detail: debug_detail.into(),
+        }
+    }
+
+    pub fn user_message(&self) -> String {
+        self.kind.to_string()
+    }
+
+    pub fn debug_detail(&self) -> &str {
+        &self.debug_detail
+    }
+}
+
 /// Top-level engine error.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -25,6 +83,9 @@ pub enum EngineError {
 
     #[error("effect execution error: {reason}")]
     Effect { reason: String },
+
+    #[error("orchestrator failure: {0}")]
+    Orchestrator(OrchestratorFailure),
 
     #[error("invalid cadence: {reason}")]
     InvalidCadence { reason: String },
@@ -81,6 +142,21 @@ pub enum EngineError {
         resume_output: Option<Box<serde_json::Value>>,
         paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
     },
+}
+
+impl EngineError {
+    /// Low-level detail for gateway debug mode. Never surfaced to users.
+    ///
+    /// Today only [`EngineError::Orchestrator`] carries one, but the
+    /// accessor exists on the top-level error so callers don't have to
+    /// pattern-match against the full variant set just to pull a debug
+    /// string out. New variants can opt in by returning `Some(..)`.
+    pub fn debug_detail(&self) -> Option<&str> {
+        match self {
+            EngineError::Orchestrator(failure) => Some(failure.debug_detail()),
+            _ => None,
+        }
+    }
 }
 
 use crate::types::project::ProjectId;

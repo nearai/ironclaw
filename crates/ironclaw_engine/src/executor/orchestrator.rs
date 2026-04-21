@@ -38,7 +38,7 @@ use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::traits::store::Store;
-use crate::types::error::EngineError;
+use crate::types::error::{EngineError, OrchestratorFailure, OrchestratorFailureKind};
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
@@ -129,20 +129,27 @@ fn orchestrator_limits() -> ResourceLimits {
         .max_memory(128 * 1024 * 1024) // 128 MB
 }
 
-/// Detect Monty resource-limit errors and return a user-safe reason that
-/// does not leak the interpreter's internal trace.
+/// Classify a Monty orchestrator failure into a typed
+/// [`OrchestratorFailure`] that carries a user-safe classification plus
+/// the preserved low-level detail for gateway debug mode.
 ///
-/// The full `err_msg` (which frequently contains a Python traceback carrying
-/// internal file paths and upstream HTTP bodies) is always logged at debug
-/// so operators can correlate, but never returned in the user-visible reason
-/// — see `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
+/// The raw `err_msg` (often a Python traceback containing internal file
+/// paths and upstream HTTP bodies) is always stored on the returned
+/// struct's `debug_detail` field and emitted at `debug!`, never placed
+/// into the user-visible classification — see
+/// `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
 /// Edge" (#2546).
-fn orchestrator_failure_reason(prefix: &str, err_msg: &str) -> String {
+fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFailure {
     debug!(prefix, err_msg, "orchestrator VM failure");
 
     let lower = err_msg.to_ascii_lowercase();
-    let hit_time_limit =
-        lower.contains("timed out") || lower.contains("timeout") || lower.contains("duration");
+    // Narrow substring set — "duration" alone caught unrelated errors
+    // and drifted away from `executor/scripting.rs::classify_runtime_error`.
+    let hit_time_limit = lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("duration limit")
+        || lower.contains("max_duration")
+        || lower.contains("maximum duration");
     let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
     let hit_resource_limit = lower.contains("resource limit")
         || lower.contains("out of fuel")
@@ -150,20 +157,43 @@ fn orchestrator_failure_reason(prefix: &str, err_msg: &str) -> String {
     let has_python_traceback =
         lower.contains("traceback (most recent call last)") || lower.contains("traceback:");
 
-    if hit_time_limit {
-        let secs = orchestrator_max_duration().as_secs();
-        format!(
-            "{prefix}: time budget exhausted after {secs}s (set IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS to raise the limit or simplify the task)"
-        )
+    let kind = if hit_time_limit {
+        OrchestratorFailureKind::TimeLimit {
+            prefix: prefix.to_string(),
+            limit_secs: orchestrator_max_duration().as_secs(),
+        }
     } else if hit_memory_limit || hit_resource_limit {
-        format!("{prefix}: resource budget exhausted (memory or allocations)")
+        OrchestratorFailureKind::ResourceLimit {
+            prefix: prefix.to_string(),
+        }
     } else if has_python_traceback {
-        // Do not surface Python tracebacks to users; they routinely contain
-        // internal file paths, line numbers, and upstream HTTP response bodies.
-        format!("{prefix}: internal orchestrator failure (see debug logs for details)")
+        OrchestratorFailureKind::Traceback {
+            prefix: prefix.to_string(),
+        }
     } else {
-        format!("{prefix}: {err_msg}")
-    }
+        OrchestratorFailureKind::Other {
+            prefix: prefix.to_string(),
+            message: err_msg.to_string(),
+        }
+    };
+
+    OrchestratorFailure::new(kind, err_msg)
+}
+
+/// Wrap a Monty VM panic (parse / start / resume phase) as a typed
+/// orchestrator failure. The panic itself has no textual payload — the
+/// `panic_payload` we can stringify is always a `&str` or `String` from
+/// `catch_unwind` — so `debug_detail` carries the phase tag for
+/// correlation.
+fn orchestrator_vm_panic(prefix: &str, phase: &'static str) -> OrchestratorFailure {
+    debug!(prefix, phase, "orchestrator VM panic");
+    OrchestratorFailure::new(
+        OrchestratorFailureKind::VmPanic {
+            prefix: prefix.to_string(),
+            phase,
+        },
+        format!("Monty VM panicked during {phase}"),
+    )
 }
 
 /// Maximum consecutive failures before auto-rollback.
@@ -418,14 +448,19 @@ pub async fn execute_orchestrator(
     })) {
         Ok(Ok(runner)) => runner,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator parse error: {e}"),
-            });
+            // Route parse failures through the same typed sanitizer so
+            // a bad `default.py` deploy can't leak Monty internals to
+            // the channel edge.
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator parse error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator parsing".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator parse error",
+                "orchestrator parsing",
+            )));
         }
     };
 
@@ -440,14 +475,16 @@ pub async fn execute_orchestrator(
     let mut progress = match run_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: orchestrator_failure_reason("Orchestrator runtime error", &e.to_string()),
-            });
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator runtime error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator start".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator runtime error",
+                "orchestrator start",
+            )));
         }
     };
 
@@ -578,17 +615,16 @@ pub async fn execute_orchestrator(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: orchestrator_failure_reason(
-                                "Orchestrator error after resume",
-                                &e.to_string(),
-                            ),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            "Orchestrator error after resume",
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during orchestrator resume".into(),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            "Orchestrator error after resume",
+                            "orchestrator resume",
+                        )));
                     }
                 }
 
@@ -610,14 +646,16 @@ pub async fn execute_orchestrator(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator NameError '{name}': {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            &format!("Orchestrator NameError '{name}'"),
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Monty panic on NameLookup '{name}'"),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            &format!("Orchestrator NameError '{name}'"),
+                            "name lookup",
+                        )));
                     }
                 }
             }
@@ -2582,6 +2620,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string(),
+            debug_detail: None,
         },
         "gate_paused" => {
             let resume_kind_value = result
@@ -2674,32 +2713,71 @@ mod tests {
 
     #[test]
     fn failure_reason_maps_timeout_to_user_safe_message() {
-        let reason =
-            orchestrator_failure_reason("Orchestrator error after resume", "execution timed out");
+        let failure =
+            classify_orchestrator_failure("Orchestrator error after resume", "execution timed out");
         assert!(
-            reason.contains("time budget exhausted"),
-            "expected user-safe timeout reason, got: {reason}"
+            matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "expected TimeLimit variant, got: {:?}",
+            failure.kind
+        );
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("time budget exhausted"),
+            "expected user-safe timeout reason, got: {rendered}"
         );
         assert!(
-            reason.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
-            "reason must point operators at the override env var, got: {reason}"
+            rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+            "reason must point operators at the override env var, got: {rendered}"
         );
     }
 
     #[test]
     fn failure_reason_maps_memory_limit() {
-        let reason = orchestrator_failure_reason("Orchestrator runtime error", "memory limit hit");
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "memory limit hit");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::ResourceLimit { .. }
+        ));
         assert!(
-            reason.contains("resource budget exhausted"),
-            "memory-limit reason should not leak raw Monty text, got: {reason}"
+            failure.user_message().contains("resource budget exhausted"),
+            "memory-limit reason should not leak raw Monty text, got: {}",
+            failure.user_message()
         );
     }
 
     #[test]
     fn failure_reason_passes_through_unknown_errors() {
-        let reason =
-            orchestrator_failure_reason("Orchestrator runtime error", "NameError: foo undefined");
-        assert!(reason.contains("NameError"));
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "NameError: foo undefined");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Other { .. }
+        ));
+        assert!(failure.user_message().contains("NameError"));
+    }
+
+    /// Regression for Copilot review on PR #2753 — substring `"duration"`
+    /// alone mis-classified any error whose message happened to contain
+    /// that word as a timeout. The narrow predicate set now requires
+    /// the full phrase `"duration limit"` / `"max_duration"` /
+    /// `"maximum duration"` or an explicit timeout word.
+    #[test]
+    fn failure_reason_does_not_treat_bare_duration_as_timeout() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator runtime error",
+            "TypeError: duration must be a positive integer",
+        );
+        assert!(
+            !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "bare 'duration' in an unrelated error must not classify as TimeLimit, got: {:?}",
+            failure.kind
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+            "expected Other variant for unrelated duration-word error, got: {:?}",
+            failure.kind
+        );
     }
 
     #[test]
@@ -2709,10 +2787,15 @@ mod tests {
         // internal file paths ("orchestrator.py", line 907) and upstream
         // HTTP response bodies.
         let raw = "Traceback (most recent call last):\n  File \"orchestrator.py\", line 907, in run_loop\n  File \"orchestrator.py\", line 548, in __llm_complete__\nRuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
-        let reason = orchestrator_failure_reason("Orchestrator error after resume", raw);
+        let failure = classify_orchestrator_failure("Orchestrator error after resume", raw);
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Traceback { .. }
+        ));
+        let rendered = failure.user_message();
         assert!(
-            reason.contains("internal orchestrator failure"),
-            "should surface a generic internal-failure message, got: {reason}"
+            rendered.contains("internal orchestrator failure"),
+            "should surface a generic internal-failure message, got: {rendered}"
         );
         for forbidden in [
             "Traceback",
@@ -2723,10 +2806,17 @@ mod tests {
             "HTTP 502",
         ] {
             assert!(
-                !reason.contains(forbidden),
-                "user-visible reason must not leak `{forbidden}`, got: {reason}"
+                !rendered.contains(forbidden),
+                "user-visible reason must not leak `{forbidden}`, got: {rendered}"
             );
         }
+        // The debug detail MUST retain the raw traceback so gateway
+        // debug mode can surface it without re-reading logs.
+        assert!(
+            failure.debug_detail().contains("Traceback"),
+            "debug detail must preserve the raw Monty trace, got: {}",
+            failure.debug_detail()
+        );
     }
 
     #[test]
@@ -3279,7 +3369,7 @@ mod tests {
     fn parse_outcome_failed() {
         let result = serde_json::json!({"outcome": "failed", "error": "boom"});
         let outcome = parse_outcome(&result);
-        assert!(matches!(outcome, ThreadOutcome::Failed { error } if error == "boom"));
+        assert!(matches!(outcome, ThreadOutcome::Failed { error, .. } if error == "boom"));
     }
 
     #[test]

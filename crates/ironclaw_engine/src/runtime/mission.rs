@@ -2257,7 +2257,7 @@ async fn process_mission_outcome_and_notify(
             }
         }
         ThreadOutcome::Completed { response: None } => {}
-        ThreadOutcome::Failed { error } => {
+        ThreadOutcome::Failed { error, .. } => {
             mission.approach_history.push(format!("FAILED: {error}"));
             notify_response = Some(format!("Mission failed: {error}"));
             is_error = true;
@@ -5340,6 +5340,7 @@ mod tests {
             synthetic_thread_id,
             &ThreadOutcome::Failed {
                 error: "container exited 137".into(),
+                debug_detail: None,
             },
             mgr.notification_tx_for_test(),
             None,

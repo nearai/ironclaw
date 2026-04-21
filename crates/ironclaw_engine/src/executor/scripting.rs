@@ -1593,7 +1593,7 @@ async fn handle_rlm_query(
                 crate::runtime::messaging::ThreadOutcome::Completed { response } => {
                     response.unwrap_or_default()
                 }
-                crate::runtime::messaging::ThreadOutcome::Failed { error } => {
+                crate::runtime::messaging::ThreadOutcome::Failed { error, .. } => {
                     format!("rlm_query child failed: {error}")
                 }
                 crate::runtime::messaging::ThreadOutcome::MaxIterations => {

@@ -344,6 +344,7 @@ impl ExecutionLoop {
                     .await?;
                 Ok(ThreadOutcome::Failed {
                     error: format!("Orchestrator error: {e}"),
+                    debug_detail: e.debug_detail().map(|s| s.to_string()),
                 })
             }
         }

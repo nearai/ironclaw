@@ -1186,18 +1186,25 @@ fn completed_turn_is_newer_than_in_progress(
         .is_some_and(|last_turn_time| last_turn_time >= in_progress_started_at)
 }
 
-/// Whether the tool calls recorded on a turn collectively succeeded.
+/// Whether the turn's *current* tool step has reached a terminal state.
 ///
-/// A turn has "unfinished" tool calls if any recorded tool call errored
-/// (`has_error`) or never produced a result (`!has_result`). When a 502 or
-/// transport drop interrupts a turn mid-execution but a response text was
-/// already committed (e.g. "Done! I've sent..."), the naive
-/// "response.is_some() → completed" check mis-classifies that turn and the
-/// user sees fabricated success on reload. See #1993.
+/// Keyed off the most recent tool call, not the full turn history. An
+/// earlier failed tool call followed by a successful retry (and a final
+/// assistant response) is a legitimate recovery — the previous `all(...)`
+/// check would keep the turn pinned to `Processing` forever because the
+/// errored call still flipped `!has_error` to false. See serrrfirat's
+/// review on PR #2753.
+///
+/// A turn is considered "recovered" if the trailing tool call has a
+/// result and no error. A trailing unfinished (`!has_result && !has_error`)
+/// or errored (`has_error`) tool call keeps the turn visible as
+/// `Processing` so the user sees the stuck step instead of fabricated
+/// success — the original #1993 regression intent.
 fn turn_tool_calls_succeeded(turn: &TurnInfo) -> bool {
-    turn.tool_calls
-        .iter()
-        .all(|tc| tc.has_result && !tc.has_error)
+    match turn.tool_calls.last() {
+        Some(last) => last.has_result && !last.has_error,
+        None => true,
+    }
 }
 
 fn reconcile_in_progress_with_turns(
@@ -1429,6 +1436,71 @@ mod tests {
              does not show the fabricated success"
         );
         assert_eq!(turns[0].state, "Processing");
+    }
+
+    /// Regression for serrrfirat's review on PR #2753 — the original
+    /// `all(tool_calls succeeded)` rule was too strict: a turn that
+    /// recovered from an earlier tool-call error by retrying and then
+    /// produced a final response would stay pinned to `Processing`
+    /// forever. The fix keys off the *trailing* tool call instead.
+    #[test]
+    fn test_reconcile_allows_recovery_from_earlier_tool_error() {
+        use crate::channels::web::types::ToolCallInfo;
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "send 'hi' to telegram".to_string(),
+            response: Some("Sent 'hi' to your Telegram.".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            // Earlier errored call + successful retry = recovered.
+            tool_calls: vec![
+                ToolCallInfo {
+                    name: "telegram_send".to_string(),
+                    has_result: false,
+                    has_error: true,
+                    call_id: None,
+                    result_preview: None,
+                    result: None,
+                    error: Some("HTTP 502 on first attempt".to_string()),
+                    rationale: None,
+                },
+                ToolCallInfo {
+                    name: "telegram_send".to_string(),
+                    has_result: true,
+                    has_error: false,
+                    call_id: None,
+                    result_preview: Some("message_id=42".to_string()),
+                    result: Some("{\"message_id\":42}".to_string()),
+                    error: None,
+                    rationale: None,
+                },
+            ],
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let reconciled = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "send 'hi' to telegram".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(
+            reconciled.is_none(),
+            "a turn whose trailing tool call succeeded after an earlier \
+             error represents a recovery and must clear in-progress state"
+        );
+        assert_eq!(turns[0].state, "Completed");
     }
 
     #[test]

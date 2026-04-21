@@ -615,25 +615,34 @@ async fn check_skills() -> CheckResult {
 /// uses, then attempts to construct the backing store — the two things that
 /// jointly determine whether credential injection will actually work.
 async fn check_secrets(settings: &Settings) -> CheckResult {
-    // 1. Master-key resolution — mirrors the runtime probe order:
-    //    SECRETS_MASTER_KEY env, OS keychain, auto-generate to ~/.ironclaw/.env.
-    let resolved = match crate::config::SecretsConfig::resolve().await {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            return CheckResult::Fail(format!(
-                "master key resolution failed: {e}. Check SECRETS_MASTER_KEY, \
-                 OS keychain availability, or writability of ~/.ironclaw/.env"
-            ));
-        }
+    // 1. Master-key resolution — READ-ONLY. `SecretsConfig::resolve()`
+    //    auto-generates and persists a key to `~/.ironclaw/.env` when
+    //    none exists, which is the correct behavior for startup but
+    //    would make `ironclaw doctor` mutate user state every time it
+    //    ran on a fresh machine. Instead, probe only for an *existing*
+    //    key — env var or OS keychain — so the missing-key case reports
+    //    as Skip("not configured") without creating one.
+    //    References: Copilot/#2753 + serrrfirat review on PR #2753.
+    let resolved_key = crate::secrets::resolve_master_key().await;
+
+    let Some(master_key_hex) = resolved_key else {
+        return CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into());
     };
 
-    if resolved.master_key().is_none() {
-        // Honor the historical skip path so first-time-run and test harnesses
-        // still read as "not configured" rather than fail.
-        return CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into());
-    }
+    // Determine which source won. Mirrors `SecretsConfig::resolve`'s
+    // order: env first, keychain second, but without the auto-generate
+    // fallback.
+    let source = if std::env::var("SECRETS_MASTER_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        crate::settings::KeySource::Env
+    } else {
+        crate::settings::KeySource::Keychain
+    };
 
-    let source_label = match resolved.source {
+    let source_label = match source {
         crate::settings::KeySource::Keychain => "OS keychain",
         crate::settings::KeySource::Env => "env / ~/.ironclaw/.env",
         crate::settings::KeySource::None => "unset",
@@ -641,7 +650,7 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
 
     // 2. Surface a warning when settings disagree with the resolved runtime
     //    source — common when onboarding was skipped on a TEE.
-    let settings_note = match (settings.secrets_master_key_source, resolved.source) {
+    let settings_note = match (settings.secrets_master_key_source, source) {
         (s, r) if s == r => String::new(),
         (crate::settings::KeySource::None, _) => {
             " (settings say `None`; run `ironclaw onboard` to persist)".to_string()
@@ -662,22 +671,15 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
         }
     };
 
-    let crypto = match resolved
-        .master_key()
-        .cloned()
-        .map(crate::secrets::SecretsCrypto::new)
-    {
-        Some(Ok(c)) => std::sync::Arc::new(c),
-        Some(Err(e)) => {
-            return CheckResult::Fail(format!(
-                "master key resolved from {source_label} but crypto init failed: {e}"
-            ));
-        }
-        None => {
-            // Guarded above; defensive.
-            return CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into());
-        }
-    };
+    let crypto =
+        match crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(master_key_hex)) {
+            Ok(c) => std::sync::Arc::new(c),
+            Err(e) => {
+                return CheckResult::Fail(format!(
+                    "master key resolved from {source_label} but crypto init failed: {e}"
+                ));
+            }
+        };
 
     match crate::db::create_secrets_store(&config.database, crypto).await {
         Ok(_store) => CheckResult::Pass(format!(

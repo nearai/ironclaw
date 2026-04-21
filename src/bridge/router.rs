@@ -53,6 +53,19 @@ pub fn is_engine_v2_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the gateway should append engine-error debug detail to the
+/// user-visible reply.
+///
+/// Off by default. Operators flip `IRONCLAW_DEBUG_ERRORS=1` to surface
+/// the low-level detail (Monty trace, Python traceback, upstream HTTP
+/// body) preserved in `EngineError::Orchestrator` / `ThreadOutcome::Failed`.
+/// Raw detail still flows to `tracing::debug!` unconditionally.
+fn gateway_debug_errors_enabled() -> bool {
+    std::env::var("IRONCLAW_DEBUG_ERRORS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false)
+}
+
 /// Shorthand for building an `Error` from an engine-related failure.
 fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::from(crate::error::JobError::ContextError {
@@ -3943,7 +3956,26 @@ async fn await_thread_outcome(
         ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(BridgeOutcome::Respond(format!("Error: {error}"))),
+        ThreadOutcome::Failed {
+            error,
+            debug_detail,
+        } => {
+            // Low-level detail is never user-facing by default. Gateway
+            // debug mode (IRONCLAW_DEBUG_ERRORS=1) appends it to the
+            // reply so operators can triage without tailing logs;
+            // otherwise it's logged at debug and dropped from the
+            // response — see `.claude/rules/error-handling.md`.
+            if let Some(ref detail) = debug_detail {
+                tracing::debug!(error, detail, "engine thread failed");
+            }
+            let reply =
+                if let Some(detail) = debug_detail.filter(|_| gateway_debug_errors_enabled()) {
+                    format!("Error: {error}\n\n[debug] {detail}")
+                } else {
+                    format!("Error: {error}")
+                };
+            Ok(BridgeOutcome::Respond(reply))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,

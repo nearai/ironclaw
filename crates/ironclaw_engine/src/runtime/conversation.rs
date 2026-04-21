@@ -385,7 +385,7 @@ impl ConversationManager {
                 ));
                 conv.untrack_thread(thread_id);
             }
-            ThreadOutcome::Failed { error } => {
+            ThreadOutcome::Failed { error, .. } => {
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
                     format!("Thread failed: {error}"),
