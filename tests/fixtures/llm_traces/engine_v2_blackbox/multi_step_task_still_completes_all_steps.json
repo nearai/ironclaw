@@ -1,0 +1,52 @@
+{
+  "model_name": "v2-m0-blackbox-multi-step",
+  "expects": {
+    "response_contains": ["phase one complete", "phase two complete"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "phase one complete"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_multistep_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "phase one complete"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_multistep_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "phase two complete"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Done: phase one complete; phase two complete.",
+        "input_tokens": 190,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

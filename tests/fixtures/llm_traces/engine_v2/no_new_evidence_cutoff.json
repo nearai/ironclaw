@@ -1,0 +1,55 @@
+{
+  "model_name": "v2-m0-no-new-evidence-cutoff",
+  "expects": {
+    "response_contains": ["evidence reuse test"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "echo"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_no_evidence_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "evidence reuse test"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_no_evidence_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "evidence reuse test"
+            }
+          }
+        ],
+        "input_tokens": 130,
+        "output_tokens": 20
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "did not add meaningful new evidence"
+      },
+      "response": {
+        "type": "text",
+        "content": "I already had the needed result in context: evidence reuse test",
+        "input_tokens": 180,
+        "output_tokens": 24
+      }
+    }
+  ]
+}

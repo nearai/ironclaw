@@ -1,0 +1,85 @@
+{
+  "model_name": "v2-m0-blackbox-no-new-evidence",
+  "expects": {
+    "response_contains": ["holdout evidence"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "holdout evidence"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_evidence_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "holdout evidence"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "holdout evidence"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_evidence_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "holdout evidence"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "holdout evidence"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_evidence_echo_3",
+            "name": "echo",
+            "arguments": {
+              "message": "holdout evidence"
+            }
+          }
+        ],
+        "input_tokens": 180,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "did not add meaningful new evidence"
+      },
+      "response": {
+        "type": "text",
+        "content": "I already had the needed result in context: holdout evidence.",
+        "input_tokens": 175,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I already had the needed result in context: holdout evidence.",
+        "input_tokens": 210,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

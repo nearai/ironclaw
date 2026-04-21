@@ -1,0 +1,64 @@
+{
+  "model_name": "v2-m0-blackbox-simple-task",
+  "expects": {
+    "response_contains": ["simple blackbox success"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "simple blackbox success"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_simple_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "simple blackbox success"
+            }
+          }
+        ],
+        "input_tokens": 110,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "simple blackbox success"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_simple_time_1",
+            "name": "time",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 145,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "already have the tool results you need in context"
+      },
+      "response": {
+        "type": "text",
+        "content": "The echo tool returned: simple blackbox success.",
+        "input_tokens": 150,
+        "output_tokens": 16
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The echo tool returned: simple blackbox success.",
+        "input_tokens": 180,
+        "output_tokens": 16
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+---
+source: tests/e2e_engine_v2_milestone0.rs
+---
+scenario_id: local_execution_bias_no_new_evidence_cutoff
+response_count: 1
+has_final_response: true
+turn_count: 1
+llm_calls: 3
+tool_calls_total: 2
+tool_calls_failed: 0
+duplicate_tool_calls: 1
+max_failed_tool_streak: 0
+hit_iteration_limit: false
+safety_warning_count: 0
+saw_finalization_hint: false
+saw_no_new_evidence_hint: true
+saw_repeated_error_nudge: false
+saw_local_execution_bias_hint: true
+tool_sequence:
+  - echo
+  - echo
+engine_threads:
+  - final_state: Done
+    step_count: 3
+    action_failed_events: 0
+    code_execution_failed_events: 0
+    approval_requested_events: 0
+    issue_categories:
+      - mixed_mode

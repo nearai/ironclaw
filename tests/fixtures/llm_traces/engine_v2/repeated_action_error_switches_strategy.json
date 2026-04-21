@@ -1,0 +1,76 @@
+{
+  "model_name": "v2-m0-repeated-action-error-switches-strategy",
+  "expects": {
+    "response_contains": ["invalid JSON"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "parse"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_switch_error_json_1",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 24
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_switch_error_json_2",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "input": "not valid json {"
+            }
+          }
+        ],
+        "input_tokens": 140,
+        "output_tokens": 24
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "same action error just repeated"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_switch_error_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "The input is invalid JSON, so parsing cannot succeed without corrected input."
+            }
+          }
+        ],
+        "input_tokens": 190,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "already have the tool results you need in context"
+      },
+      "response": {
+        "type": "text",
+        "content": "The input is invalid JSON, so parsing cannot succeed until the JSON is corrected.",
+        "input_tokens": 220,
+        "output_tokens": 22
+      }
+    }
+  ]
+}

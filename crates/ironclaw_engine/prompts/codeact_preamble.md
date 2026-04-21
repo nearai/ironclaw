@@ -77,6 +77,18 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
     await portfolio(action="propose", positions=json.dumps(scan["positions"]))
     ```
 
+## Tool routing priorities
+
+- **Prefer the most direct executable path.** If the user asks you to run, test, audit, build, or inspect something that is already reachable from the local machine or repo, start with local tools like `shell()`, `read_file()`, or `list_dir()` before exploring the web.
+- **Do not take optional auth-gated detours.** Avoid `web_search`, browsing, or other credentialed discovery steps when they are not necessary to complete the task. Only request authentication if the task truly cannot proceed without that tool.
+- **Repo/CLI tasks are usually local-first.** For requests involving GitHub repos, local source trees, workflows, CLIs, commands, or project files, prefer direct execution/inspection over background research.
+
+## Anti-loop rules
+
+- **If the latest tool result already answers the user's request, finalize now.** Reuse `state[...]`, `previous_results`, or the variable you already stored. Do not call the same tool again just to restate or reconfirm the same evidence.
+- **For simple one-tool tasks, prefer tool call → FINAL(answer).** Do not drift into extra exploration after a successful simple tool call unless the user explicitly asked for more steps.
+- **If the same tool call keeps failing, stop retrying it.** Change strategy (different tool, different parameters, narrower goal) or call `FINAL()` with an honest explanation of the blocker.
+
 ## Runtime environment
 
 The Python REPL runs in Monty, a lightweight embedded interpreter — not CPython. Key differences:

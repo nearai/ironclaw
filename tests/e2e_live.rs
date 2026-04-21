@@ -53,7 +53,7 @@ mod live_tests {
         );
 
         // The agent should have used the shell tool to install/run zizmor.
-        // Tool events now carry args (e.g. `"shell(cmd)"`) via
+        // Tool events carry args (e.g. `"shell(cmd)"`) via
         // `format_action_display_name` in `src/bridge/router.rs`, so match both
         // the bare name and the argument-prefixed form.
         assert!(
@@ -99,13 +99,6 @@ mod live_tests {
     }
 
     /// Zizmor scan via engine v2.
-    ///
-    /// NOTE: Engine v2 does not yet honor `auto_approve_tools` from config —
-    /// it only checks the per-session "always" set. This means tool calls
-    /// that require approval (shell, file_write, etc.) will be paused.
-    /// The test currently validates that v2 at least attempts the task and
-    /// mentions zizmor in its response (even if it can't execute shell).
-    /// When v2 gains auto-approve support, update this to use `run_zizmor_scan`.
     #[tokio::test]
     #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
@@ -115,52 +108,7 @@ mod live_tests {
             .build()
             .await;
 
-        let user_input = "can we run https://github.com/zizmorcore/zizmor";
-        let rig = harness.rig();
-        rig.send_message(user_input).await;
-
-        let responses = rig.wait_for_responses(1, Duration::from_secs(300)).await;
-
-        assert!(!responses.is_empty(), "Expected at least one response");
-
-        let text: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
-        let tools = rig.tool_calls_started();
-
-        eprintln!("[ZizmorScanV2] Tools used: {tools:?}");
-        eprintln!(
-            "[ZizmorScanV2] Response preview: {}",
-            text.join("\n").chars().take(500).collect::<String>()
-        );
-
-        let joined = text.join("\n").to_lowercase();
-
-        // V2 without auto-approve hits an approval gate for shell/tool_install.
-        // The response may be the approval prompt itself rather than agent output.
-        // Verify the agent at least attempted a relevant action. Tool events
-        // carry args (e.g. `"shell(cmd)"`) via `format_action_display_name`, so
-        // accept either the bare name or the argument-prefixed form.
-        let attempted_relevant_tool = tools.iter().any(|t| {
-            t == "shell"
-                || t.starts_with("shell(")
-                || t == "tool_install"
-                || t.starts_with("tool_install(")
-                || t == "tool-install"
-                || t.starts_with("tool-install(")
-                || t.starts_with("tool_search")
-                || t.starts_with("skill_search")
-        });
-        assert!(
-            attempted_relevant_tool,
-            "Expected agent to attempt a relevant tool, got: {tools:?}"
-        );
-
-        // The response should mention zizmor or approval (approval gate).
-        assert!(
-            joined.contains("zizmor") || joined.contains("approval"),
-            "Response should mention zizmor or approval: {joined}"
-        );
-
-        harness.finish(user_input, &text).await;
+        run_zizmor_scan(harness).await;
     }
 
     /// End-to-end round-trip test for the post-flight auth gate.
@@ -410,10 +358,7 @@ mod live_tests {
 
         // The agent must NOT have run a tool_install / tool_activate
         // recovery loop — that's the bad behaviour the post-flight
-        // detector eliminates. Match both bare names and the
-        // argument-prefixed `"<name>(args)"` form emitted by
-        // `format_action_display_name`; an exact-match check would silently
-        // miss `"tool_install(foo)"` and turn this into a false negative.
+        // detector eliminates.
         let bad_recovery = phase_a_tools.iter().any(|t| {
             t == "tool_install"
                 || t.starts_with("tool_install(")
@@ -526,7 +471,6 @@ mod live_tests {
             "[DriveAuthGate][Phase B] Tools attempted ({}): {phase_b_tools:?}",
             phase_b_tools.len()
         );
-        // Match bare and argument-prefixed names; see the Phase A comment.
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
             t == "tool_install"
                 || t.starts_with("tool_install(")

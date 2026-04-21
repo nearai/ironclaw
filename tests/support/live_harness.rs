@@ -736,6 +736,13 @@ impl LiveTestHarnessBuilder {
         if let Some(interceptor) = http_interceptor {
             rig_builder = rig_builder.with_http_interceptor(interceptor);
         }
+        // Propagate engine_v2 to the TestRigBuilder as well, not just the
+        // resolved Config. With a config override, TestRigBuilder only honors
+        // the builder's explicit engine_v2 flag; otherwise live harnesses can
+        // print `engine_v2=true` while still building the v1 path internally.
+        if self.engine_v2.unwrap_or(false) {
+            rig_builder = rig_builder.with_engine_v2();
+        }
         if let Some(dir) = skills_dir_for_rig {
             rig_builder = rig_builder.with_skills_dir(dir);
         }

@@ -1,0 +1,39 @@
+{
+  "model_name": "v2-m0-local-execution-bias-repo-scan",
+  "expects": {
+    "response_contains": ["local scan ok"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "direct local execution path"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_local_bias_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "local scan ok"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 20
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "already have the tool results you need in context"
+      },
+      "response": {
+        "type": "text",
+        "content": "The local scan path succeeded: local scan ok.",
+        "input_tokens": 150,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

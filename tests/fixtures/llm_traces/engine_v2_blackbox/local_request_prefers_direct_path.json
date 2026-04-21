@@ -1,0 +1,83 @@
+{
+  "model_name": "v2-m0-blackbox-local-path",
+  "expects": {
+    "response_contains": ["local scan ok"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "local scan ok"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_local_time_1",
+            "name": "time",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 115,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "direct local execution path"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_local_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "local scan ok"
+            }
+          }
+        ],
+        "input_tokens": 110,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "already have the tool results you need in context"
+      },
+      "response": {
+        "type": "text",
+        "content": "The local scan path succeeded: local scan ok.",
+        "input_tokens": 145,
+        "output_tokens": 18
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "local scan ok"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb_local_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "local scan ok"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The local scan path succeeded: local scan ok.",
+        "input_tokens": 175,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

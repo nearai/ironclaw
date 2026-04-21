@@ -1,0 +1,39 @@
+{
+  "model_name": "v2-m0-simple-task-finalization-hint",
+  "expects": {
+    "response_contains": ["simple finalization success"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "echo"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_simple_finalize_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "simple finalization success"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 24
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "already have the tool results you need in context"
+      },
+      "response": {
+        "type": "text",
+        "content": "The echo tool returned: simple finalization success",
+        "input_tokens": 130,
+        "output_tokens": 18
+      }
+    }
+  ]
+}
