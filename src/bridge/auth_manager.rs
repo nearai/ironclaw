@@ -762,8 +762,19 @@ impl AuthManager {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             auto_activate_extension: false,
-        })
-        .ok()?;
+        });
+        let launch = match launch {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::error!(
+                    credential_name = %credential_name,
+                    user_id = %user_id,
+                    error = %error,
+                    "Skill OAuth launch rejected due to malformed descriptor; falling back to manual token entry"
+                );
+                return None;
+            }
+        };
         let pending_flow = launch.flow;
 
         if use_gateway {

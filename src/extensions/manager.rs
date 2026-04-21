@@ -4257,8 +4257,20 @@ impl ExtensionManager {
                 kind,
                 ExtensionKind::WasmChannel | ExtensionKind::WasmTool
             ),
-        })
-        .ok()?;
+        });
+        let launch = match launch {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::error!(
+                    extension_name = %extension_name,
+                    secret_name = %secret_name,
+                    user_id = %user_id,
+                    error = %error,
+                    "Secret-backed OAuth launch rejected due to malformed descriptor; falling back to manual token entry"
+                );
+                return None;
+            }
+        };
         let pending_flow = launch.flow;
 
         if self.should_use_gateway_mode() {
