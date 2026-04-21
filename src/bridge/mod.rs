@@ -11,6 +11,7 @@ mod router;
 pub mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
+mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;

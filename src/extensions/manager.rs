@@ -16,9 +16,10 @@ use crate::auth::{
 };
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
+    RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
-    owner_id_from_capabilities,
+    owner_id_from_capabilities, setup::inject_wasm_channel_secret_config_mappings,
 };
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
@@ -299,31 +300,6 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
 }
 
 use crate::pairing::approval::build_runtime_config_updates as build_wasm_channel_runtime_config_updates;
-
-async fn inject_wasm_channel_secret_config_updates(
-    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
-    owner_id: &str,
-    channel_name: &str,
-    config_updates: &mut HashMap<String, serde_json::Value>,
-) {
-    let secret_config_mappings: &[(&str, &str)] = match channel_name {
-        "feishu" => &[
-            ("app_id", "feishu_app_id"),
-            ("app_secret", "feishu_app_secret"),
-            ("verification_token", "feishu_verification_token"),
-        ],
-        _ => return,
-    };
-
-    for &(config_key, secret_name) in secret_config_mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
-            config_updates.insert(
-                config_key.to_string(),
-                serde_json::Value::String(decrypted.expose().to_string()),
-            );
-        }
-    }
-}
 
 // Auth instructions come from the capabilities file's `prompt` field (single
 // source of truth). Post-activation pairing instructions live in
@@ -960,7 +936,10 @@ impl ExtensionManager {
                 .await
             && !username.trim().is_empty()
         {
-            overrides.insert("bot_username".to_string(), serde_json::json!(username));
+            overrides.insert(
+                RUNTIME_CONFIG_KEY_BOT_USERNAME.to_string(),
+                serde_json::json!(username),
+            );
         }
 
         overrides
@@ -5885,6 +5864,11 @@ impl ExtensionManager {
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let secret_config_mappings = loaded
+            .capabilities_file
+            .as_ref()
+            .map(|f| f.validated_secret_config_mappings())
+            .unwrap_or_default();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -5907,10 +5891,11 @@ impl ExtensionManager {
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
-            inject_wasm_channel_secret_config_updates(
-                self.secrets.as_ref(),
-                &self.user_id,
+            inject_wasm_channel_secret_config_mappings(
                 &channel_name,
+                &self.user_id,
+                self.secrets.as_ref(),
+                &secret_config_mappings,
                 &mut config_updates,
             )
             .await;
@@ -6119,6 +6104,10 @@ impl ExtensionManager {
         let hmac_secret_name = capabilities_file
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
+        let secret_config_mappings = capabilities_file
+            .as_ref()
+            .map(|f| f.validated_secret_config_mappings())
+            .unwrap_or_default();
 
         let owner_actor_id = self
             .current_channel_owner_actor_id(name)
@@ -6130,10 +6119,11 @@ impl ExtensionManager {
             owner_actor_id.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
-        inject_wasm_channel_secret_config_updates(
-            self.secrets.as_ref(),
-            &self.user_id,
+        inject_wasm_channel_secret_config_mappings(
             name,
+            &self.user_id,
+            self.secrets.as_ref(),
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;
@@ -6150,7 +6140,7 @@ impl ExtensionManager {
                 .update_secret(name, secret.expose().to_string())
                 .await;
             config_updates.insert(
-                "webhook_secret".to_string(),
+                RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
                 serde_json::Value::String(secret.expose().to_string()),
             );
             should_rerun_on_start = true;
@@ -6353,14 +6343,14 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one.
-        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // Delete any stale nonce before storing the new one. Best-effort
+        // delete of the legacy caller-scoped entry first so upgrade residue
+        // does not linger in the secrets table. The primary delete uses
+        // self.user_id (the gateway owner) — NOT the caller's user_id —
         // because the OAuth callback handler looks up the nonce under
-        // state.owner_id which matches self.user_id.
-        let _ = self.secrets.delete(&self.user_id, &state_key).await;
-        // Also best-effort delete any legacy caller-scoped entry so older
-        // per-user nonces don't remain in the secrets table after upgrading.
+        // state.owner_id, which matches self.user_id.
         let _ = self.secrets.delete(user_id, &state_key).await;
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
             .create(
                 &self.user_id,
