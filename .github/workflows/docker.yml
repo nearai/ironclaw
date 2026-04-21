@@ -4,6 +4,11 @@ on:
   # Called by release.yml or other workflows
   workflow_call:
     inputs:
+      release:
+        description: "Set true when called from release.yml to publish version/latest tags"
+        required: false
+        type: boolean
+        default: false
       tag:
         description: "Image tag override (leave empty for auto-detect)"
         required: false
@@ -12,6 +17,11 @@ on:
   # On-demand builds
   workflow_dispatch:
     inputs:
+      release:
+        description: "Set true to force release-style tags (:version, :latest, :sha-xxx)"
+        required: false
+        type: boolean
+        default: false
       tag:
         description: "Image tag override (leave empty for auto-detect)"
         required: false
@@ -63,6 +73,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           EVENT_NAME: ${{ github.event_name }}
+          IS_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
           INPUT_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
@@ -74,7 +85,7 @@ jobs:
           SHA="sha-${SOURCE_SHA::7}"
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${EVENT_NAME}" == "workflow_call" ]]; then
+          if [[ "${IS_RELEASE_BUILD}" == "true" ]]; then
             # Release: :version + :latest + :sha-xxx
             TAGS="${IMAGE_NAME}:${VERSION}"
             TAGS="${TAGS},${IMAGE_NAME}:latest"
@@ -192,10 +203,11 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           EVENT_NAME: ${{ github.event_name }}
+          IS_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
           INPUT_TAG: ${{ inputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [[ "${EVENT_NAME}" == "workflow_call" && -n "${VERSION}" ]]; then
+          if [[ "${IS_RELEASE_BUILD}" == "true" && -n "${VERSION}" ]]; then
             gh api repos/nearai/ironclaw-dind/dispatches \
               --method POST \
               -f event_type="ironclaw_image_published" \

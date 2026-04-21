@@ -627,10 +627,18 @@ impl GatewayChannel {
     }
 }
 
+/// Canonical channel name for the web gateway.
+///
+/// Exported so cross-module call sites (e.g. `bridge::router`) can
+/// compare against this constant instead of duplicating the string
+/// literal — the `Channel::name()` impl below references this same
+/// constant, so the value is compile-time-pinned in both places.
+pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
-        "gateway"
+        GATEWAY_CHANNEL_NAME
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

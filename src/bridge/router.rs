@@ -19,6 +19,7 @@ use crate::bridge::auth_manager::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
+use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
@@ -68,17 +69,54 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
 /// in the server-side logs and returns a short, user-facing summary
 /// derived from the error's shape.
 ///
+/// `sse_will_deliver_to_user` signals that the caller already broadcast
+/// an `AppEvent::Error` on a per-user SSE stream that the originating
+/// channel renders to the user (today: the web gateway). In that case
+/// returning `Respond(sanitized)` would double-render the same failed
+/// turn — once as the SSE error card and again as a normal `response`
+/// frame emitted by `GatewayChannel::respond()`. When set we return
+/// `NoResponse`; otherwise we return `Respond(sanitized)` so channels
+/// without an SSE-as-primary-surface (telegram, relay, cli) still
+/// deliver the sanitized failure to the user.
+///
 /// Extracted into a named function so the sanitization flow (log + map to
 /// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
 /// by unit tests without spinning up the full engine.
-fn bridge_outcome_for_failed_thread(error: &str, user_id: &str, channel: &str) -> BridgeOutcome {
+fn bridge_outcome_for_failed_thread(
+    error: &str,
+    debug_detail: Option<&str>,
+    user_id: &str,
+    channel: &str,
+    sse_will_deliver_to_user: bool,
+) -> BridgeOutcome {
+    // `warn!` carries only the size of `debug_detail`, not its contents —
+    // a full Python traceback or upstream HTTP body can be multi-KB and
+    // would flood higher-severity logs with internal text that's already
+    // available at `debug!` level. Operators who need the full detail
+    // flip `RUST_LOG=ironclaw::bridge::router=debug`. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`, and
+    // `debug_detail` is deliberately NOT broadcast on the SSE `error`
+    // event — that payload reaches every authenticated consumer.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
         error = %error,
+        debug_detail_bytes = debug_detail.map(|d| d.len()),
         "engine v2: thread failed; showing user-friendly summary",
     );
-    BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    if let Some(detail) = debug_detail {
+        tracing::debug!(
+            user_id = %user_id,
+            channel = %channel,
+            detail,
+            "engine v2: thread failure debug detail",
+        );
+    }
+    if sse_will_deliver_to_user {
+        BridgeOutcome::NoResponse
+    } else {
+        BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    }
 }
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
@@ -3972,11 +4010,46 @@ async fn await_thread_outcome(
         ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(bridge_outcome_for_failed_thread(
-            &error,
-            &message.user_id,
-            &message.channel,
-        )),
+        ThreadOutcome::Failed {
+            error,
+            debug_detail,
+        } => {
+            // Emit the sanitized failure on SSE so the web gateway's
+            // chat surface (and the Debug Inspector) renders a structured
+            // error card with activity cleanup + input re-enable. The
+            // raw `debug_detail` is deliberately NOT broadcast — SSE
+            // error frames reach every authenticated consumer, so raw
+            // tracebacks and upstream HTTP bodies must stay server-side
+            // only (logged at `debug!` inside
+            // `bridge_outcome_for_failed_thread`).
+            //
+            // When the originating channel is the gateway itself, that
+            // SSE frame IS the user-visible surface — returning
+            // `Respond(sanitized)` on top of it would double-render the
+            // same failure. For non-gateway channels the SSE frame is
+            // only a secondary per-user stream, so we still return
+            // `Respond(sanitized)` so the primary channel (telegram,
+            // relay, …) delivers the sanitized failure.
+            let sanitized = crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+            let sse_will_deliver_to_user =
+                state.sse.is_some() && message.channel == GATEWAY_CHANNEL_NAME;
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: sanitized,
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            Ok(bridge_outcome_for_failed_thread(
+                &error,
+                debug_detail.as_deref(),
+                &message.user_id,
+                &message.channel,
+                sse_will_deliver_to_user,
+            ))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -4603,6 +4676,8 @@ fn thread_event_to_app_events(
 pub struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub thread_type: String,
     pub state: String,
     pub project_id: String,
@@ -4849,9 +4924,18 @@ fn describe_cron(expression: &str) -> Option<String> {
 }
 
 fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
+    // Fall back to a derived short label from `goal` for legacy threads
+    // persisted before the `title` field existed. Without this, frontend
+    // consumers of `EngineThreadInfo` (TUI, mission detail views) render
+    // a UUID prefix since the DTO lacks `turn_count`.
+    let title = t
+        .title
+        .clone()
+        .or_else(|| ironclaw_engine::Thread::derive_title_from_message(&t.goal));
     EngineThreadInfo {
         id: t.id.to_string(),
         goal: t.goal.clone(),
+        title,
         thread_type: format!("{:?}", t.thread_type),
         state: format!("{:?}", t.state),
         project_id: t.project_id.to_string(),
@@ -5985,7 +6069,9 @@ mod tests {
              File \"orchestrator.py\", line 907, in  \
              File \"orchestrator.py\", line 548, in run_loop \
              RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        // Non-gateway channel: SSE is not the primary surface, so the
+        // user-visible delivery comes through `Respond(sanitized)`.
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -6002,8 +6088,13 @@ mod tests {
 
     #[test]
     fn failed_thread_outcome_maps_unknown_error_to_generic_message() {
-        let outcome =
-            bridge_outcome_for_failed_thread("some unexpected internal failure", "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(
+            "some unexpected internal failure",
+            None,
+            "alice",
+            "telegram",
+            false,
+        );
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -6017,13 +6108,29 @@ mod tests {
     #[test]
     fn failed_thread_outcome_maps_context_too_large() {
         let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
         assert!(
             text.starts_with("The request was too large"),
             "unexpected text: {text}"
+        );
+    }
+
+    /// When the SSE stream is already rendering the failure to the
+    /// originating channel (gateway web UI), the helper must return
+    /// `NoResponse` so `channel.respond()` does not broadcast a second
+    /// SSE `response` frame for the same turn. Regression fence for the
+    /// double-render bug flagged on PR #2753 by serrrfirat.
+    #[test]
+    fn failed_thread_outcome_is_no_response_when_sse_will_deliver() {
+        let raw = "Orchestrator error: Llm { reason: \"HTTP 502 Bad Gateway\" }";
+        let outcome =
+            bridge_outcome_for_failed_thread(raw, Some("debug only"), "alice", "gateway", true);
+        assert!(
+            matches!(outcome, BridgeOutcome::NoResponse),
+            "expected NoResponse to avoid double-rendering an SSE-delivered failure, got {outcome:?}",
         );
     }
 
@@ -9640,5 +9747,61 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn thread_to_info_carries_title_and_goal_separately() {
+        // Regression: mission-spawned threads put `mission.name` in
+        // `title` and the multi-paragraph meta-prompt in `goal`. The
+        // DTO must carry both through so UI callers can render the
+        // short label without reading the full goal.
+        let long_goal = "a".repeat(500);
+        let mut thread = ironclaw_engine::Thread::new(
+            &long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.title = Some("Daily summary".to_string());
+
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Daily summary"));
+        assert_eq!(info.goal.len(), 500);
+    }
+
+    #[test]
+    fn thread_to_info_derives_title_from_goal_when_absent() {
+        // Regression: legacy engine threads persisted before the `title`
+        // field existed deserialize as `title = None`. The DTO must
+        // derive a short label from `goal` so frontend consumers don't
+        // fall through `threadTitle()` to rendering a UUID prefix.
+        let thread = ironclaw_engine::Thread::new(
+            "plain goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("plain goal"));
+        assert_eq!(info.goal, "plain goal");
+    }
+
+    #[test]
+    fn thread_to_info_derives_from_first_line_of_long_goal() {
+        // Multi-paragraph meta-prompt (mission pattern without explicit
+        // title set): derive from first non-empty line, truncated to
+        // the helper's char limit.
+        let long_goal = format!("Short first line\n\n{}\n", "x".repeat(500));
+        let thread = ironclaw_engine::Thread::new(
+            long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Short first line"));
     }
 }

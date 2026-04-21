@@ -135,7 +135,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Secrets",
-        check_secrets(&settings),
+        check_secrets(&settings).await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -602,23 +602,121 @@ async fn check_skills() -> CheckResult {
 
 // ── Secrets ─────────────────────────────────────────────────
 
-fn check_secrets(settings: &Settings) -> CheckResult {
-    match settings.secrets_master_key_source {
-        crate::settings::KeySource::Keychain => {
-            CheckResult::Pass("master key source: OS keychain".into())
+/// Diagnose the secrets subsystem end-to-end.
+///
+/// The stored `settings.secrets_master_key_source` is only one signal and
+/// does not capture the hosted-TEE failure mode (#1537): master key resolves
+/// to `Env`/`Keychain` source at runtime, but the backing store factory
+/// returns `None` because the DB handles needed by `LibSqlSecretsStore` /
+/// `PostgresSecretsStore` aren't available, so WASM tool credential
+/// injection silently falls back to unauthenticated requests.
+///
+/// This check does a **read-only** probe for an already-configured master
+/// key via `crate::secrets::resolve_master_key()` (env var → OS keychain;
+/// no filesystem writes, no auto-generate), then — when a key was found —
+/// exercises the same `secrets::create_secrets_store(crypto, &handles)`
+/// dispatch `AppBuilder::init_secrets` uses at startup. It deliberately
+/// avoids `SecretsConfig::resolve()` because that path auto-generates and
+/// persists a key to `~/.ironclaw/.env` when none exists, which would make
+/// `ironclaw doctor` mutate user state on a fresh machine.
+async fn check_secrets(settings: &Settings) -> CheckResult {
+    // 1. Master-key resolution — READ-ONLY. `SecretsConfig::resolve()`
+    //    auto-generates and persists a key to `~/.ironclaw/.env` when
+    //    none exists, which is the correct behavior for startup but
+    //    would make `ironclaw doctor` mutate user state every time it
+    //    ran on a fresh machine. Instead, probe only for an *existing*
+    //    key — env var or OS keychain — so the missing-key case reports
+    //    as Skip("not configured") without creating one.
+    //    References: Copilot/#2753 + serrrfirat review on PR #2753.
+    let resolved_key = crate::secrets::resolve_master_key().await;
+
+    let Some(master_key_hex) = resolved_key else {
+        return CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into());
+    };
+
+    // Determine which source won. Mirrors `SecretsConfig::resolve`'s
+    // order: env first, keychain second, but without the auto-generate
+    // fallback — so the only two reachable outcomes are `Env` or
+    // `Keychain`. `KeySource::None` is *not* reachable here because the
+    // `Some(master_key_hex) else Skip` guard above already returned.
+    let env_wins = std::env::var("SECRETS_MASTER_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
+    let (source, source_label) = if env_wins {
+        (crate::settings::KeySource::Env, "env / ~/.ironclaw/.env")
+    } else {
+        (crate::settings::KeySource::Keychain, "OS keychain")
+    };
+
+    // 2. Surface a warning when settings disagree with the resolved runtime
+    //    source — common when onboarding was skipped on a TEE.
+    let settings_note = match (settings.secrets_master_key_source, source) {
+        (s, r) if s == r => String::new(),
+        (crate::settings::KeySource::None, _) => {
+            " (settings say `None`; run `ironclaw onboard` to persist)".to_string()
         }
-        crate::settings::KeySource::Env => {
-            if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-                CheckResult::Pass("master key source: env var (set)".into())
-            } else {
-                CheckResult::Fail(
-                    "master key source: env var but SECRETS_MASTER_KEY not set".into(),
-                )
+        (s, r) => format!(" (settings say `{s:?}`, runtime resolved `{r:?}`)"),
+    };
+
+    // 3. Probe the backing store — this is the #1537 axis. A missing DB
+    //    handle here is the hosted-TEE symptom: master key present, but
+    //    the store factory has nothing to build against.
+    //
+    //    Use `connect_without_migrations` + `secrets::create_secrets_store`
+    //    rather than `db::create_secrets_store`. The former exercises the
+    //    exact runtime dispatch used by `AppBuilder::init_secrets`
+    //    (`DatabaseHandles` → `Option<Arc<dyn SecretsStore>>`), so the
+    //    missing-handle failure mode in #1537 is actually reachable from
+    //    the diagnostic. The latter would build a *fresh* backend and
+    //    run migrations — side-effectful, and not the same code path
+    //    that failed in production.
+    let config = match crate::config::Config::from_env().await {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckResult::Fail(format!(
+                "master key resolves from {source_label}{settings_note}, but config load \
+                 failed so the backing store cannot be probed: {e}"
+            ));
+        }
+    };
+
+    let crypto =
+        match crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(master_key_hex)) {
+            Ok(c) => std::sync::Arc::new(c),
+            Err(e) => {
+                return CheckResult::Fail(format!(
+                    "master key resolved from {source_label} but crypto init failed: {e}"
+                ));
             }
+        };
+
+    // `connect_without_migrations` opens a backend connection but does NOT
+    // run migrations — the minimum side effect required to probe whether
+    // the runtime dispatch would yield a store. Migrations only run at
+    // normal startup through `AppBuilder`.
+    let handles = match crate::db::connect_without_migrations(&config.database).await {
+        Ok((_db, handles)) => handles,
+        Err(e) => {
+            return CheckResult::Fail(format!(
+                "master key present ({source_label}){settings_note} but database unreachable: \
+                 {e}. Runtime will fall back to an ephemeral in-memory secrets store (see #1537); \
+                 credentials saved via `ironclaw tool auth` will not persist across restarts"
+            ));
         }
-        crate::settings::KeySource::None => {
-            CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into())
-        }
+    };
+
+    match crate::secrets::create_secrets_store(crypto, &handles) {
+        Some(_store) => CheckResult::Pass(format!(
+            "master key source: {source_label}; backing store reachable{settings_note}"
+        )),
+        None => CheckResult::Fail(format!(
+            "master key present ({source_label}){settings_note} but no backing store handle \
+             available for backend '{}'. This is the #1537 hosted-TEE symptom: runtime will \
+             fall back to an ephemeral in-memory store, and credentials saved via `ironclaw tool \
+             auth` will not persist across restarts",
+            config.database.backend
+        )),
     }
 }
 
@@ -822,21 +920,76 @@ mod tests {
         }
     }
 
-    #[test]
-    fn check_secrets_none_returns_skip() {
+    /// `check_secrets` runs a read-only probe (env → keychain) and then, if
+    /// a key is found, probes the backing store. The exact outcome depends
+    /// on the test-host environment — if `SECRETS_MASTER_KEY` is set in CI,
+    /// we'll Pass / Fail; on a dev machine with no keychain we'll Skip.
+    /// Either way the function must not panic.
+    #[tokio::test]
+    async fn check_secrets_does_not_panic() {
         let settings = Settings::default();
-        match check_secrets(&settings) {
-            CheckResult::Skip(msg) => {
-                assert!(
-                    msg.contains("not configured"),
-                    "expected 'not configured' in skip message, got: {msg}"
-                );
-            }
-            other => panic!(
-                "expected Skip for default settings, got: {}",
-                format_result(&other)
-            ),
+        let result = check_secrets(&settings).await;
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
+    }
+
+    /// When `SECRETS_MASTER_KEY` is set explicitly, the check must derive
+    /// the env-source label — so even if the backing-store probe fails
+    /// (e.g. no DB reachable in the unit-test environment), the rendered
+    /// message points at the correct master-key source. This is the axis
+    /// that masked the #1537 hosted-TEE regression: a settings snapshot
+    /// saying `None` used to hide an env-resolved runtime key from the
+    /// diagnostic.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test — other tests read the same env vars
+    async fn check_secrets_reports_env_source_when_env_key_is_set() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Under ENV_MUTEX.
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::lock_env();
+        let prev = std::env::var("SECRETS_MASTER_KEY").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            // 32-byte / 64-hex key — matches SecretsCrypto::new's length check.
+            std::env::set_var("SECRETS_MASTER_KEY", "a".repeat(64));
+        }
+        let _env_guard = EnvGuard("SECRETS_MASTER_KEY", prev);
+
+        // Settings still say `None`. The check must not Skip — the env
+        // resolution wins and the message must call out the disagreement.
+        let settings = Settings {
+            secrets_master_key_source: crate::settings::KeySource::None,
+            ..Default::default()
+        };
+
+        let result = check_secrets(&settings).await;
+        let rendered = match &result {
+            CheckResult::Pass(m) | CheckResult::Fail(m) => m.clone(),
+            CheckResult::Skip(m) => panic!(
+                "env-set master key must not Skip — it's an actively configured runtime source, got Skip: {m}",
+            ),
+        };
+        assert!(
+            rendered.contains("env"),
+            "message must surface the env-var source label, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("settings say `None`"),
+            "message must call out the settings-vs-runtime disagreement so the \
+             #1537 symptom (settings snapshot hides a working runtime key) is \
+             visible to operators, got: {rendered}"
+        );
     }
 
     #[test]
@@ -942,27 +1095,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn check_secrets_env_without_var_returns_fail() {
+    /// Earlier the `Env`-source branch returned Fail when
+    /// `SECRETS_MASTER_KEY` was unset. With the TEE-aware rewrite the check
+    /// resolves the actual master key (which may auto-generate and persist
+    /// to `~/.ironclaw/.env`, producing a runtime `Env` key that differs
+    /// from the settings snapshot). Just make sure settings drift no longer
+    /// panics the check.
+    #[tokio::test]
+    async fn check_secrets_env_source_does_not_panic() {
         let settings = Settings {
             secrets_master_key_source: crate::settings::KeySource::Env,
             ..Default::default()
         };
-        match check_secrets(&settings) {
-            CheckResult::Fail(msg) => {
-                assert!(
-                    msg.contains("SECRETS_MASTER_KEY not set"),
-                    "expected mention of missing env var, got: {msg}"
-                );
-            }
-            CheckResult::Pass(_) => {
-                // If SECRETS_MASTER_KEY happens to be set in the environment,
-                // Pass is correct — don't fail the test.
-            }
-            other => panic!(
-                "expected Fail or Pass for env key source, got: {}",
-                format_result(&other)
-            ),
+        let result = check_secrets(&settings).await;
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
     }
 
