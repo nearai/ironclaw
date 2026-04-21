@@ -144,7 +144,10 @@ impl Tool for ToolInfoTool {
         // Search the v1 tool map first, then fall through to v2 capability
         // actions. On v1 the capability registry is `None`, so the fallback
         // is a no-op. Assumes v1 tool and v2 capability names don't overlap.
-        let (action_name, description, schema, summary) =
+        // `tool_opt` carries the Tool forward so the `Summary` arm can ask
+        // it for a curated `discovery_summary()`; `None` means the source
+        // was a capability action and only `fallback_summary` applies.
+        let (action_name, description, schema, tool_opt) =
             if let Some(tool) = registry.get(name).await {
                 if !tool
                     .engine_compatibility()
@@ -155,14 +158,11 @@ impl Tool for ToolInfoTool {
                     )));
                 }
                 let schema = tool.discovery_schema();
-                let summary = tool
-                    .discovery_summary()
-                    .unwrap_or_else(|| fallback_summary(&schema));
                 (
                     tool.name().to_string(),
                     tool.description().to_string(),
                     schema,
-                    summary,
+                    Some(tool),
                 )
             } else if let Some(cap_registry) = registry.capability_registry().await
                 && let Some(action) = resolve_with_aliases(name, |n| {
@@ -170,8 +170,7 @@ impl Tool for ToolInfoTool {
                 })
             {
                 let schema = action.parameters_schema.clone();
-                let summary = fallback_summary(&schema);
-                (action.name, action.description, schema, summary)
+                (action.name, action.description, schema, None)
             } else {
                 return Err(ToolError::InvalidParameters(format!(
                     "No tool named '{name}' is registered"
@@ -188,6 +187,10 @@ impl Tool for ToolInfoTool {
         match detail {
             ToolInfoDetail::Names => {}
             ToolInfoDetail::Summary => {
+                let summary = tool_opt
+                    .as_ref()
+                    .and_then(|t| t.discovery_summary())
+                    .unwrap_or_else(|| fallback_summary(&schema));
                 info["summary"] = serde_json::to_value(summary).map_err(|err| {
                     ToolError::ExecutionFailed(format!(
                         "failed to serialize discovery summary: {err}"
