@@ -228,7 +228,8 @@ impl ToolRegistry {
         &self,
         registry: Arc<ironclaw_engine::CapabilityRegistry>,
     ) {
-        assert_eq!( // safety: invariant check — capabilities are v2-native by construction
+        assert_eq!(
+            // safety: invariant check — capabilities are v2-native by construction
             self.engine_version,
             EngineVersion::V2,
             "set_capability_registry called on engine {:?}; capabilities are v2-only",
