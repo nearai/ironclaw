@@ -47,7 +47,7 @@ fn reveal_text(text: &str, frame: u16, line_idx: u16) -> String {
     let stagger_offset = line_idx.saturating_mul(REVEAL_LINE_STAGGER);
     let effective = frame.saturating_sub(stagger_offset);
     let visible_chars = (effective as usize).saturating_mul(REVEAL_CHARS_PER_FRAME as usize);
-    if visible_chars >= text.len() {
+    if visible_chars >= text.chars().count() {
         text.to_string()
     } else {
         let mut result: String = text.chars().take(visible_chars).collect();
@@ -1101,7 +1101,8 @@ mod tests {
         tool.started_at = user_message.timestamp + chrono::Duration::milliseconds(1);
         tool.detail = Some("a/very/long/path/that/would/otherwise/span/across/the/terminal/and/bleed/into/other/ui".to_string());
 
-        let state = state_with_messages(vec![user_message], tool);
+        let mut state = state_with_messages(vec![user_message], tool);
+        state.tool_summary_expanded = true;
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
 

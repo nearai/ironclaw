@@ -904,12 +904,12 @@ async fn handle_event(
                 }
                 InputAction::ToolDetailScrollUp => {
                     if let Some(ref mut modal) = state.tool_detail_modal {
-                        modal.scroll = modal.scroll.saturating_add(5);
+                        modal.scroll = modal.scroll.saturating_sub(5);
                     }
                 }
                 InputAction::ToolDetailScrollDown => {
                     if let Some(ref mut modal) = state.tool_detail_modal {
-                        modal.scroll = modal.scroll.saturating_sub(5);
+                        modal.scroll = modal.scroll.saturating_add(5);
                     }
                 }
                 InputAction::DashboardPanelClose => {
@@ -917,12 +917,12 @@ async fn handle_event(
                 }
                 InputAction::DashboardPanelScrollUp => {
                     if let Some(ref mut modal) = state.expanded_dashboard_panel {
-                        modal.scroll = modal.scroll.saturating_add(3);
+                        modal.scroll = modal.scroll.saturating_sub(3);
                     }
                 }
                 InputAction::DashboardPanelScrollDown => {
                     if let Some(ref mut modal) = state.expanded_dashboard_panel {
-                        modal.scroll = modal.scroll.saturating_sub(3);
+                        modal.scroll = modal.scroll.saturating_add(3);
                     }
                 }
                 InputAction::IdentityFileClose => {
@@ -930,12 +930,12 @@ async fn handle_event(
                 }
                 InputAction::IdentityFileScrollUp => {
                     if let Some(ref mut modal) = state.identity_file_modal {
-                        modal.scroll = modal.scroll.saturating_add(3);
+                        modal.scroll = modal.scroll.saturating_sub(3);
                     }
                 }
                 InputAction::IdentityFileScrollDown => {
                     if let Some(ref mut modal) = state.identity_file_modal {
-                        modal.scroll = modal.scroll.saturating_sub(3);
+                        modal.scroll = modal.scroll.saturating_add(3);
                     }
                 }
                 InputAction::LogFilter(level) => {
@@ -1034,15 +1034,19 @@ async fn handle_event(
         TuiEvent::MouseScroll(delta) => {
             if let Some(ref mut modal) = state.identity_file_modal {
                 if delta < 0 {
-                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
+                    // Scroll up — show earlier content (decrease Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_sub(delta.unsigned_abs());
                 } else {
-                    modal.scroll = modal.scroll.saturating_sub(delta as u16);
+                    // Scroll down — show later content (increase Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_add(delta as u16);
                 }
             } else if let Some(ref mut modal) = state.expanded_dashboard_panel {
                 if delta < 0 {
-                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
+                    // Scroll up — show earlier content (decrease Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_sub(delta.unsigned_abs());
                 } else {
-                    modal.scroll = modal.scroll.saturating_sub(delta as u16);
+                    // Scroll down — show later content (increase Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_add(delta as u16);
                 }
             } else if let Some(ref mut modal) = state.tool_detail_modal {
                 if delta < 0 {
@@ -3069,14 +3073,7 @@ fn render_toasts(
         block.render(area, frame.buffer_mut());
 
         let msg_width = inner.width as usize;
-        let display_msg = if toast.message.len() > msg_width.saturating_sub(3) {
-            format!(
-                "{}...",
-                &toast.message[..msg_width.saturating_sub(6).min(toast.message.len())]
-            )
-        } else {
-            toast.message.clone()
-        };
+        let display_msg = crate::render::truncate(&toast.message, msg_width);
 
         let line = Line::from(vec![
             Span::styled(

@@ -754,6 +754,7 @@ impl Channel for GatewayChannel {
             | StatusUpdate::EngineThreadList { .. }
             | StatusUpdate::ConversationHistory { .. }
             | StatusUpdate::PlanUpdate { .. } => {
+                // PlanUpdate not yet supported in web UI — TUI and REPL only
                 return Ok(());
             }
         };

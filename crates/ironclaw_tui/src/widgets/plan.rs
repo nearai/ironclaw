@@ -96,11 +96,7 @@ fn render_progress_line(plan: &PlanState, usable_width: usize, theme: &Theme) ->
         .saturating_sub(bar.len())
         .saturating_sub(4); // spacing
 
-    let title = if plan.title.len() > title_max {
-        format!("{}...", &plan.title[..title_max.saturating_sub(3)])
-    } else {
-        plan.title.clone()
-    };
+    let title = crate::render::truncate(&plan.title, title_max);
 
     Line::from(vec![
         Span::styled("  ", theme.dim_style()),
@@ -153,11 +149,7 @@ fn render_step(
 fn render_step_result(result: &str, usable_width: usize, theme: &Theme) -> Line<'static> {
     let prefix = "        \u{2192} ";
     let max_len = usable_width.saturating_sub(prefix.len());
-    let display = if result.len() > max_len {
-        format!("{}...", &result[..max_len.saturating_sub(3)])
-    } else {
-        result.to_string()
-    };
+    let display = crate::render::truncate(result, max_len);
 
     Line::from(vec![
         Span::styled("        \u{2192} ".to_string(), theme.dim_style()),

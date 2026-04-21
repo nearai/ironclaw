@@ -1098,7 +1098,7 @@ impl Agent {
                 Ok(map) if !map.is_empty() => crate::settings::Settings::from_db_map(&map),
                 Ok(_) => crate::settings::Settings::default(),
                 Err(e) => {
-                    tracing::warn!("Failed to load DB settings: {}", e);
+                    tracing::debug!("Failed to load DB settings: {}", e);
                     crate::settings::Settings::default()
                 }
             }

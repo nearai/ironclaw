@@ -118,19 +118,27 @@ fn extract_preview_text(val: &serde_json::Value) -> String {
         }
         // Glob, Grep files_with_matches: {"files": [...]}
         if let Some(files) = obj.get("files").and_then(|v| v.as_array()) {
-            return files
+            let joined: String = files
                 .iter()
                 .filter_map(|f| f.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+            if !joined.is_empty() {
+                return joined;
+            }
+            // Fallback: array elements are objects, not strings
         }
         // Directory listing: {"entries": [...]}
         if let Some(entries) = obj.get("entries").and_then(|v| v.as_array()) {
-            return entries
+            let joined: String = entries
                 .iter()
                 .filter_map(|e| e.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+            if !joined.is_empty() {
+                return joined;
+            }
+            // Fallback: array elements are objects, not strings
         }
     }
     val.to_string()

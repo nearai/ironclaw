@@ -36,6 +36,9 @@ impl LogRingBuffer {
     }
 
     pub fn push(&mut self, entry: TuiLogEntry) {
+        if self.capacity == 0 {
+            return;
+        }
         if self.entries.len() >= self.capacity {
             self.entries.pop_front();
         }

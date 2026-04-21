@@ -161,11 +161,7 @@ impl TuiWidget for LogsWidget {
             // Truncate message to fit in available width
             let prefix_len = 1 + 2 + ts.len() + 1 + 1; // " ● HH:MM:SS.mmm "
             let msg_width = usable_width.saturating_sub(prefix_len + 1);
-            let message = if entry.message.len() > msg_width {
-                format!("{}...", &entry.message[..msg_width.saturating_sub(3)])
-            } else {
-                entry.message.clone()
-            };
+            let message = crate::render::truncate(&entry.message, msg_width);
 
             let line = Line::from(vec![
                 Span::styled(format!(" {indicator} "), level_style),

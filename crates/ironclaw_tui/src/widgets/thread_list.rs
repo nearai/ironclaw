@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(job_icon(JobStatus::Pending), "\u{25CB}");
         assert_eq!(job_icon(JobStatus::Running), "\u{25CF}");
         assert_eq!(job_icon(JobStatus::Completed), "\u{2713}");
-        assert_eq!(job_icon(JobStatus::Failed), "\u{2717}");
+        assert_eq!(job_icon(JobStatus::Failed), "\u{25CF}");
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(thread_icon(ThreadStatus::Active), "\u{25CF}");
         assert_eq!(thread_icon(ThreadStatus::Idle), "\u{25CB}");
         assert_eq!(thread_icon(ThreadStatus::Completed), "\u{2713}");
-        assert_eq!(thread_icon(ThreadStatus::Failed), "\u{2717}");
+        assert_eq!(thread_icon(ThreadStatus::Failed), "\u{25CF}");
     }
 
     #[test]
