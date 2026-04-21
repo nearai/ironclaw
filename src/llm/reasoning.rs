@@ -1670,7 +1670,7 @@ fn is_recoverable_tool_call_segment(
 /// - `<function_call>...</function_call>` (function_call variant)
 ///
 /// Only returns calls whose name matches an available tool.
-fn recover_tool_calls_from_content(
+pub(crate) fn recover_tool_calls_from_content(
     content: &str,
     available_tools: &[ToolDefinition],
 ) -> Vec<ToolCall> {
@@ -1810,7 +1810,7 @@ fn recover_tool_calls_from_content(
 /// 5. Strip pipe-delimited reasoning tags (code-aware)
 /// 6. Strip tool tags (string matching — no code-awareness needed)
 /// 7. Collapse triple+ newlines, trim
-fn clean_response(text: &str) -> String {
+pub(crate) fn clean_response(text: &str) -> String {
     // 1. Quick-check
     let mut result = if !QUICK_TAG_RE.is_match(text) {
         text.to_string()

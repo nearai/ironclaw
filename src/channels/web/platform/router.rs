@@ -421,7 +421,23 @@ pub async fn start_server(
             "/v1/models",
             get(crate::channels::web::openai_compat::models_handler),
         )
-        // OpenAI Responses API (routes through the full agent loop)
+        // OpenAI Responses API (routes through the full agent loop).
+        //
+        // Canonical path is `/api/v1/responses` so the Responses API shares
+        // the `/api/...` prefix used by the rest of IronClaw's HTTP surface.
+        // The legacy `/v1/responses` path is kept as an alias for backward
+        // compatibility with OpenAI SDK clients that were configured against
+        // it directly (see ironclaw#2201). Both paths dispatch to the same
+        // handlers — remove the legacy routes only after a deprecation
+        // window.
+        .route(
+            "/api/v1/responses",
+            post(crate::channels::web::responses_api::create_response_handler),
+        )
+        .route(
+            "/api/v1/responses/{id}",
+            get(crate::channels::web::responses_api::get_response_handler),
+        )
         .route(
             "/v1/responses",
             post(crate::channels::web::responses_api::create_response_handler),
