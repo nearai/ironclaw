@@ -236,8 +236,7 @@ mod attachment_tests {
             // (first-caller-wins LazyLock), which is `$HOME/.ironclaw` in a
             // fresh process and unrelated to the per-test tempdir here.
             assert!(
-                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone())
-                    .await,
+                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone()).await,
                 "engine state should be installed after build()"
             );
 
