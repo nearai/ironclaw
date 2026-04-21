@@ -37,6 +37,7 @@ use tracing::{debug, warn};
 use ironclaw_engine::{
     CapabilityLease, ConversationId, ConversationSurface, DocId, DocType, EngineError, LeaseId,
     MemoryDoc, Project, ProjectId, Step, Store, Thread, ThreadEvent, ThreadId, ThreadState,
+    ThreadSummary,
     types::mission::{Mission, MissionId, MissionStatus},
 };
 
@@ -1538,6 +1539,21 @@ impl Store for HybridStore {
             .values()
             .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
             .cloned()
+            .collect())
+    }
+
+    async fn list_thread_summaries(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<ThreadSummary>, EngineError> {
+        Ok(self
+            .threads
+            .read()
+            .await
+            .values()
+            .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
+            .map(ThreadSummary::from)
             .collect())
     }
 

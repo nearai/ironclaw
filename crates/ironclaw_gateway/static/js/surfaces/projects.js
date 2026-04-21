@@ -430,7 +430,7 @@ function renderMissionThreadProgress(threadId) {
 function missionThreadIds(mission) {
   if (!mission || !Array.isArray(mission.threads)) return [];
   return mission.threads
-    .map((thread) => [thread.id, thread.state, thread.updated_at, thread.created_at].join(':'))
+    .map((thread) => [thread.id, thread.state, thread.created_at].join(':'))
     .filter(Boolean)
     .sort();
 }
@@ -487,16 +487,16 @@ function renderMissionRunCountsText(summary) {
 
   const parts = [];
   if (normalized.completed_runs > 0) {
-    parts.push(normalized.completed_runs + ' ' + I18n.t('missions.runState.completed').toLowerCase());
+    parts.push(normalized.completed_runs + ' ' + I18n.t('missions.runState.completed'));
   }
   if (normalized.failed_runs > 0) {
-    parts.push(normalized.failed_runs + ' ' + I18n.t('missions.runState.failed').toLowerCase());
+    parts.push(normalized.failed_runs + ' ' + I18n.t('missions.runState.failed'));
   }
   if (normalized.in_progress_runs > 0) {
-    parts.push(normalized.in_progress_runs + ' ' + I18n.t('missions.runState.inProgress').toLowerCase());
+    parts.push(normalized.in_progress_runs + ' ' + I18n.t('missions.runState.inProgress'));
   }
   if (parts.length === 0) {
-    parts.push(normalized.total_runs + ' ' + I18n.t('missions.runs').toLowerCase());
+    parts.push(normalized.total_runs + ' ' + I18n.t('missions.runs'));
   }
   return parts.join(' · ');
 }

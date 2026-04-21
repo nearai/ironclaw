@@ -4961,8 +4961,8 @@ fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
     }
 }
 
-fn mission_run_state(thread: &ironclaw_engine::Thread) -> &'static str {
-    match thread.state {
+fn mission_run_state(state: ironclaw_engine::ThreadState) -> &'static str {
+    match state {
         ironclaw_engine::ThreadState::Done | ironclaw_engine::ThreadState::Completed => "Completed",
         ironclaw_engine::ThreadState::Failed => "Failed",
         ironclaw_engine::ThreadState::Created
@@ -4972,10 +4972,13 @@ fn mission_run_state(thread: &ironclaw_engine::Thread) -> &'static str {
     }
 }
 
-fn mission_run_threads_from_lookup(
+fn mission_run_summaries_from_lookup(
     mission: &ironclaw_engine::Mission,
-    threads_by_id: &std::collections::HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>,
-) -> Vec<ironclaw_engine::Thread> {
+    threads_by_id: &std::collections::HashMap<
+        ironclaw_engine::ThreadId,
+        ironclaw_engine::ThreadSummary,
+    >,
+) -> Vec<ironclaw_engine::ThreadSummary> {
     let mut threads: Vec<_> = mission
         .thread_history
         .iter()
@@ -5001,24 +5004,34 @@ async fn load_mission_run_threads(
     Ok(threads)
 }
 
-async fn load_visible_project_threads(
+fn visible_thread_owner_ids(user_id: &str) -> Vec<&str> {
+    if ironclaw_engine::types::is_shared_owner(user_id) {
+        ironclaw_engine::types::shared_owner_candidates()
+            .into_iter()
+            .collect()
+    } else {
+        let mut owner_ids = Vec::new();
+        owner_ids.push(user_id);
+        owner_ids.extend(ironclaw_engine::types::shared_owner_candidates());
+        owner_ids
+    }
+}
+
+async fn load_visible_project_thread_summaries(
     store: &Arc<dyn Store>,
     project_id: ironclaw_engine::ProjectId,
     user_id: &str,
-) -> Result<std::collections::HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>, Error> {
-    let mut threads = store
-        .list_threads(project_id, user_id)
-        .await
-        .map_err(|e| engine_err("list project threads", e))?;
-
-    if !ironclaw_engine::types::is_shared_owner(user_id) {
-        for owner_id in ironclaw_engine::types::shared_owner_candidates() {
-            let mut shared_threads = store
-                .list_threads(project_id, owner_id)
-                .await
-                .map_err(|e| engine_err("list shared project threads", e))?;
-            threads.append(&mut shared_threads);
-        }
+) -> Result<
+    std::collections::HashMap<ironclaw_engine::ThreadId, ironclaw_engine::ThreadSummary>,
+    Error,
+> {
+    let mut threads = Vec::new();
+    for owner_id in visible_thread_owner_ids(user_id) {
+        let mut owner_threads = store
+            .list_thread_summaries(project_id, owner_id)
+            .await
+            .map_err(|e| engine_err("list project thread summaries", e))?;
+        threads.append(&mut owner_threads);
     }
 
     let mut threads_by_id = std::collections::HashMap::with_capacity(threads.len());
@@ -5028,13 +5041,13 @@ async fn load_visible_project_threads(
     Ok(threads_by_id)
 }
 
-fn summarize_mission_runs(threads: &[ironclaw_engine::Thread]) -> EngineMissionRunSummary {
+fn summarize_mission_runs(threads: &[ironclaw_engine::ThreadSummary]) -> EngineMissionRunSummary {
     let mut completed_runs = 0;
     let mut failed_runs = 0;
     let mut in_progress_runs = 0;
 
     for thread in threads {
-        match mission_run_state(thread) {
+        match mission_run_state(thread.state) {
             "Completed" => completed_runs += 1,
             "Failed" => failed_runs += 1,
             _ => in_progress_runs += 1,
@@ -5049,13 +5062,13 @@ fn summarize_mission_runs(threads: &[ironclaw_engine::Thread]) -> EngineMissionR
         last_run_at: threads.first().map(|thread| thread.created_at.to_rfc3339()),
         last_run_state: threads
             .first()
-            .map(|thread| mission_run_state(thread).to_string()),
+            .map(|thread| mission_run_state(thread.state).to_string()),
     }
 }
 
 fn mission_to_info(
     mission: &ironclaw_engine::Mission,
-    run_threads: &[ironclaw_engine::Thread],
+    run_threads: &[ironclaw_engine::ThreadSummary],
 ) -> EngineMissionInfo {
     EngineMissionInfo {
         id: mission.id,
@@ -5513,11 +5526,11 @@ pub async fn list_engine_missions(
         .list_missions_with_shared(pid, user_id)
         .await
         .map_err(|e| engine_err("list missions", e))?;
-    let threads_by_id = load_visible_project_threads(&state.store, pid, user_id).await?;
+    let threads_by_id = load_visible_project_thread_summaries(&state.store, pid, user_id).await?;
 
     let mut infos = Vec::with_capacity(missions.len());
     for mission in &missions {
-        let run_threads = mission_run_threads_from_lookup(mission, &threads_by_id);
+        let run_threads = mission_run_summaries_from_lookup(mission, &threads_by_id);
         infos.push(mission_to_info(mission, &run_threads));
     }
 
@@ -5556,10 +5569,14 @@ pub async fn get_engine_mission(
     let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
 
     let run_threads = load_mission_run_threads(&state.store, &m).await?;
+    let run_summaries: Vec<_> = run_threads
+        .iter()
+        .map(ironclaw_engine::ThreadSummary::from)
+        .collect();
     let threads = run_threads.iter().map(thread_to_info).collect();
 
     Ok(Some(EngineMissionDetail {
-        info: mission_to_info(&m, &run_threads),
+        info: mission_to_info(&m, &run_summaries),
         cadence: cadence_json,
         approach_history: m.approach_history.clone(),
         notify_channels: m.notify_channels.clone(),
@@ -6329,10 +6346,17 @@ mod tests {
         }
         async fn list_threads(
             &self,
-            _project_id: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Thread>, ironclaw_engine::EngineError> {
-            Ok(self.threads.read().await.values().cloned().collect())
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn update_thread_state(
             &self,
@@ -8898,6 +8922,108 @@ mod tests {
         assert_eq!(
             detail.info.run_summary.last_run_state.as_deref(),
             Some("In Progress")
+        );
+
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_shared_owner_includes_legacy_shared_thread_runs() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+        let project_id = state.default_project_id;
+        let now = chrono::Utc::now();
+
+        let mut shared_thread = ironclaw_engine::Thread::new(
+            "shared run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            ironclaw_engine::types::SHARED_OWNER_ID,
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        shared_thread.state = ironclaw_engine::ThreadState::Done;
+        shared_thread.created_at = now - chrono::Duration::hours(2);
+        shared_thread.updated_at = shared_thread.created_at;
+
+        let mut legacy_thread = ironclaw_engine::Thread::new(
+            "legacy shared run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            ironclaw_engine::types::LEGACY_SHARED_OWNER_ID,
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        legacy_thread.state = ironclaw_engine::ThreadState::Failed;
+        legacy_thread.created_at = now - chrono::Duration::hours(1);
+        legacy_thread.updated_at = legacy_thread.created_at;
+
+        store.save_thread(&shared_thread).await.unwrap();
+        store.save_thread(&legacy_thread).await.unwrap();
+
+        let mut shared_mission = ironclaw_engine::Mission::new(
+            project_id,
+            ironclaw_engine::types::SHARED_OWNER_ID,
+            "Shared mission",
+            "Track shared work",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        shared_mission.thread_history = vec![shared_thread.id];
+        let shared_mission_id = shared_mission.id;
+        store.save_mission(&shared_mission).await.unwrap();
+
+        let mut legacy_mission = ironclaw_engine::Mission::new(
+            project_id,
+            ironclaw_engine::types::LEGACY_SHARED_OWNER_ID,
+            "Legacy shared mission",
+            "Track legacy work",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        legacy_mission.thread_history = vec![legacy_thread.id];
+        let legacy_mission_id = legacy_mission.id;
+        store.save_mission(&legacy_mission).await.unwrap();
+
+        *lock.write().await = Some(state);
+
+        let missions = list_engine_missions(None, ironclaw_engine::types::SHARED_OWNER_ID)
+            .await
+            .unwrap();
+        assert_eq!(missions.len(), 2);
+
+        let by_id: std::collections::HashMap<_, _> = missions
+            .into_iter()
+            .map(|mission| (mission.id, mission))
+            .collect();
+
+        assert_eq!(
+            by_id
+                .get(&shared_mission_id)
+                .expect("shared mission should be visible")
+                .run_summary,
+            EngineMissionRunSummary {
+                total_runs: 1,
+                completed_runs: 1,
+                failed_runs: 0,
+                in_progress_runs: 0,
+                last_run_at: Some(shared_thread.created_at.to_rfc3339()),
+                last_run_state: Some("Completed".to_string()),
+            }
+        );
+        assert_eq!(
+            by_id
+                .get(&legacy_mission_id)
+                .expect("legacy shared mission should be visible")
+                .run_summary,
+            EngineMissionRunSummary {
+                total_runs: 1,
+                completed_runs: 0,
+                failed_runs: 1,
+                in_progress_runs: 0,
+                last_run_at: Some(legacy_thread.created_at.to_rfc3339()),
+                last_run_state: Some("Failed".to_string()),
+            }
         );
 
         *lock.write().await = None;

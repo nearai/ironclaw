@@ -11,7 +11,7 @@ use crate::types::memory::{DocId, MemoryDoc};
 use crate::types::mission::{Mission, MissionId, MissionStatus};
 use crate::types::project::{Project, ProjectId};
 use crate::types::step::Step;
-use crate::types::thread::{Thread, ThreadId, ThreadState};
+use crate::types::thread::{Thread, ThreadId, ThreadState, ThreadSummary};
 use crate::types::{is_shared_owner, shared_owner_candidates};
 
 /// Persistence abstraction for the engine.
@@ -26,6 +26,18 @@ pub trait Store: Send + Sync {
         project_id: ProjectId,
         user_id: &str,
     ) -> Result<Vec<Thread>, EngineError>;
+    async fn list_thread_summaries(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Result<Vec<ThreadSummary>, EngineError> {
+        Ok(self
+            .list_threads(project_id, user_id)
+            .await?
+            .into_iter()
+            .map(ThreadSummary::from)
+            .collect())
+    }
     async fn update_thread_state(
         &self,
         id: ThreadId,

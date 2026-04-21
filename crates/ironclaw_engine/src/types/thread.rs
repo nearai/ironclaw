@@ -236,6 +236,33 @@ pub struct Thread {
     pub total_cost_usd: f64,
 }
 
+/// Lightweight metadata for list and summary views that do not need the full
+/// thread transcript or embedded events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub id: ThreadId,
+    pub state: ThreadState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Thread> for ThreadSummary {
+    fn from(thread: &Thread) -> Self {
+        Self {
+            id: thread.id,
+            state: thread.state,
+            created_at: thread.created_at,
+            updated_at: thread.updated_at,
+        }
+    }
+}
+
+impl From<Thread> for ThreadSummary {
+    fn from(thread: Thread) -> Self {
+        Self::from(&thread)
+    }
+}
+
 impl Thread {
     /// Create a new thread in the `Created` state.
     pub fn new(
