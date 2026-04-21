@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
@@ -147,6 +147,64 @@ impl EffectExecutor for HttpMockEffects {
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
         }])
+    }
+}
+
+/// Generic EffectExecutor for scripted CodeAct benchmark scenarios.
+/// Returns queued action results in order and records every canonical action call.
+struct SequenceMockEffects {
+    actions: Vec<ActionDef>,
+    results: RwLock<Vec<Result<ActionResult, EngineError>>>,
+    calls: RwLock<Vec<(String, serde_json::Value)>>,
+}
+
+impl SequenceMockEffects {
+    fn new(actions: Vec<ActionDef>, results: Vec<Result<ActionResult, EngineError>>) -> Arc<Self> {
+        Arc::new(Self {
+            actions,
+            results: RwLock::new(results),
+            calls: RwLock::new(Vec::new()),
+        })
+    }
+
+    async fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls.read().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectExecutor for SequenceMockEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        self.calls
+            .write()
+            .await
+            .push((action_name.to_string(), parameters.clone()));
+
+        let mut results = self.results.write().await;
+        if results.is_empty() {
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        } else {
+            results.remove(0)
+        }
+    }
+
+    async fn available_actions(
+        &self,
+        _leases: &[CapabilityLease],
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self.actions.clone())
     }
 }
 
@@ -644,4 +702,400 @@ async fn non_matching_goal_skips_skill_codeact() {
         .iter()
         .any(|m| m.content.contains("Active Skills"));
     assert!(!has_skill_content, "no skills for unrelated goal");
+}
+
+fn scripted_usage_for_code(code: &str) -> TokenUsage {
+    TokenUsage {
+        input_tokens: 80,
+        output_tokens: ((code.len() as u64) / 4).max(1),
+        ..TokenUsage::default()
+    }
+}
+
+fn benchmark_action(name: &str) -> ActionDef {
+    let effects = match name {
+        "read_file" | "list_dir" | "glob" => vec![EffectType::ReadLocal],
+        "http" => vec![EffectType::ReadExternal],
+        "shell" | "write_file" => vec![EffectType::WriteLocal],
+        _ => vec![EffectType::ReadLocal],
+    };
+    ActionDef {
+        name: name.into(),
+        description: format!("Benchmark action {name}"),
+        parameters_schema: serde_json::json!({"type": "object"}),
+        effects,
+        requires_approval: false,
+    }
+}
+
+#[derive(Debug)]
+struct CodeactBenchMetrics {
+    scenario_id: &'static str,
+    variant: &'static str,
+    wall_time_ms: u128,
+    total_tokens_used: u64,
+    step_count: usize,
+    action_count: usize,
+    action_names: Vec<String>,
+    final_response: String,
+    code_chars: usize,
+}
+
+async fn run_codeact_benchmark_scenario(
+    scenario_id: &'static str,
+    variant: &'static str,
+    goal: &str,
+    code: &str,
+    actions: Vec<ActionDef>,
+    results: Vec<Result<ActionResult, EngineError>>,
+) -> CodeactBenchMetrics {
+    let project_id = ProjectId::new();
+    let llm = ScriptedLlm::new(vec![LlmOutput {
+        response: LlmResponse::Code {
+            code: code.to_string(),
+            content: None,
+        },
+        usage: scripted_usage_for_code(code),
+    }]);
+
+    let effects = SequenceMockEffects::new(actions.clone(), results);
+    let store = TestStore::new();
+
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "Available tools".into(),
+        actions,
+        knowledge: vec![],
+        policies: vec![],
+    });
+
+    let mgr = ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(caps),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let start = Instant::now();
+    let tid = mgr
+        .spawn_thread(
+            goal,
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "bench-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+    let elapsed = start.elapsed();
+
+    let final_response = match outcome {
+        ThreadOutcome::Completed { response } => response.unwrap_or_default(),
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let calls = effects.recorded_calls().await;
+
+    CodeactBenchMetrics {
+        scenario_id,
+        variant,
+        wall_time_ms: elapsed.as_millis(),
+        total_tokens_used: thread.total_tokens_used,
+        step_count: thread.step_count,
+        action_count: calls.len(),
+        action_names: calls.into_iter().map(|(name, _)| name).collect(),
+        final_response,
+        code_chars: code.len(),
+    }
+}
+
+/// Shim-vs-raw benchmark inspired by the milestone0 replay/blackbox patterns
+/// in PR #2761, but aimed at the CodeAct path where the LLM emits Python code.
+#[tokio::test]
+#[ignore]
+async fn benchmark_codeact_raw_vs_shim_scenarios() {
+    let read_file_output = serde_json::json!({
+        "content": "     1│ {\"answer\": 42}",
+        "total_lines": 1,
+        "lines_shown": 1,
+        "truncated_by_default": false,
+        "path": "data.json"
+    });
+    let list_dir_output = serde_json::json!({
+        "path": "src",
+        "entries": ["bin/", "main.rs (1.0KB)"],
+        "count": 2,
+        "truncated": false
+    });
+    let glob_output = serde_json::json!({
+        "files": ["src/lib.rs", "src/main.rs"],
+        "count": 2,
+        "truncated": false,
+        "duration_ms": 1
+    });
+    let notes_read_output = serde_json::json!({
+        "content": "     1│ alpha",
+        "total_lines": 1,
+        "lines_shown": 1,
+        "truncated_by_default": false,
+        "path": "notes.txt"
+    });
+    let write_output = serde_json::json!({
+        "path": "notes.txt",
+        "bytes_written": 10,
+        "success": true
+    });
+
+    let raw_read_json = r#"
+import json
+raw = await read_file(path="data.json")
+parts = []
+for line in raw["content"].splitlines():
+    rest = line.split("│", 1)[1]
+    if rest.startswith(" "):
+        rest = rest[1:]
+    parts.append(rest)
+text = "\n".join(parts)
+data = json.loads(text)
+FINAL(str(data["answer"]))
+"#;
+    let shim_read_json = r#"
+data = await read_json("data.json")
+FINAL(str(data["answer"]))
+"#;
+
+    let raw_list_entries = r#"
+listing = await list_dir(path="src")
+entries = listing["entries"]
+FINAL(entries[0] + "|" + str(len(entries)))
+"#;
+    let shim_list_entries = r#"
+entries = await list_entries("src")
+FINAL(entries[0] + "|" + str(len(entries)))
+"#;
+
+    let raw_find_files = r#"
+result = await glob(pattern="*.rs", path="src")
+files = result["files"]
+FINAL(files[1] + "|" + str(len(files)))
+"#;
+    let shim_find_files = r#"
+files = await find_files("*.rs", "src")
+FINAL(files[1] + "|" + str(len(files)))
+"#;
+
+    let raw_append_text = r#"
+raw = await read_file(path="notes.txt", offset=1)
+parts = []
+for line in raw["content"].splitlines():
+    rest = line.split("│", 1)[1]
+    if rest.startswith(" "):
+        rest = rest[1:]
+    parts.append(rest)
+current = "\n".join(parts)
+result = await write_file(path="notes.txt", content=current + "\nbeta")
+FINAL(str(result["success"]) + "|" + str(result["bytes_written"]))
+"#;
+    let shim_append_text = r#"
+result = await append_text("notes.txt", "\nbeta")
+FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
+"#;
+
+    let raw_read_json_metrics = run_codeact_benchmark_scenario(
+        "read_json",
+        "raw",
+        "read json benchmark",
+        raw_read_json,
+        vec![benchmark_action("read_file")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "read_file".into(),
+            output: read_file_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+    let shim_read_json_metrics = run_codeact_benchmark_scenario(
+        "read_json",
+        "shim",
+        "read json benchmark",
+        shim_read_json,
+        vec![benchmark_action("read_file")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "read_file".into(),
+            output: read_file_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+
+    let raw_list_entries_metrics = run_codeact_benchmark_scenario(
+        "list_entries",
+        "raw",
+        "list entries benchmark",
+        raw_list_entries,
+        vec![benchmark_action("list_dir")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "list_dir".into(),
+            output: list_dir_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+    let shim_list_entries_metrics = run_codeact_benchmark_scenario(
+        "list_entries",
+        "shim",
+        "list entries benchmark",
+        shim_list_entries,
+        vec![benchmark_action("list_dir")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "list_dir".into(),
+            output: list_dir_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+
+    let raw_find_files_metrics = run_codeact_benchmark_scenario(
+        "find_files",
+        "raw",
+        "find files benchmark",
+        raw_find_files,
+        vec![benchmark_action("glob")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "glob".into(),
+            output: glob_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+    let shim_find_files_metrics = run_codeact_benchmark_scenario(
+        "find_files",
+        "shim",
+        "find files benchmark",
+        shim_find_files,
+        vec![benchmark_action("glob")],
+        vec![Ok(ActionResult {
+            call_id: String::new(),
+            action_name: "glob".into(),
+            output: glob_output.clone(),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })],
+    )
+    .await;
+
+    let raw_append_text_metrics = run_codeact_benchmark_scenario(
+        "append_text",
+        "raw",
+        "append text benchmark",
+        raw_append_text,
+        vec![
+            benchmark_action("read_file"),
+            benchmark_action("write_file"),
+        ],
+        vec![
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: notes_read_output.clone(),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            }),
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "write_file".into(),
+                output: write_output.clone(),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            }),
+        ],
+    )
+    .await;
+    let shim_append_text_metrics = run_codeact_benchmark_scenario(
+        "append_text",
+        "shim",
+        "append text benchmark",
+        shim_append_text,
+        vec![
+            benchmark_action("read_file"),
+            benchmark_action("write_file"),
+        ],
+        vec![
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: notes_read_output,
+                is_error: false,
+                duration: Duration::from_millis(1),
+            }),
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "write_file".into(),
+                output: write_output,
+                is_error: false,
+                duration: Duration::from_millis(1),
+            }),
+        ],
+    )
+    .await;
+
+    let pairs = vec![
+        (raw_read_json_metrics, shim_read_json_metrics),
+        (raw_list_entries_metrics, shim_list_entries_metrics),
+        (raw_find_files_metrics, shim_find_files_metrics),
+        (raw_append_text_metrics, shim_append_text_metrics),
+    ];
+
+    for (raw, shim) in pairs {
+        assert_eq!(
+            raw.final_response, shim.final_response,
+            "scenario {} should preserve final response",
+            raw.scenario_id
+        );
+        assert_eq!(
+            raw.action_names, shim.action_names,
+            "scenario {} should preserve canonical action sequence",
+            raw.scenario_id
+        );
+        assert!(
+            shim.total_tokens_used < raw.total_tokens_used,
+            "scenario {} should reduce scripted token proxy: raw={} shim={}",
+            raw.scenario_id,
+            raw.total_tokens_used,
+            shim.total_tokens_used
+        );
+        eprintln!(
+            "codeact_shim_bench scenario={} raw_variant={} shim_variant={} raw_ms={} shim_ms={} raw_tokens={} shim_tokens={} raw_actions={} shim_actions={} raw_steps={} shim_steps={} raw_chars={} shim_chars={}",
+            raw.scenario_id,
+            raw.variant,
+            shim.variant,
+            raw.wall_time_ms,
+            shim.wall_time_ms,
+            raw.total_tokens_used,
+            shim.total_tokens_used,
+            raw.action_count,
+            shim.action_count,
+            raw.step_count,
+            shim.step_count,
+            raw.code_chars,
+            shim.code_chars,
+        );
+    }
 }
