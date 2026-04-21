@@ -543,40 +543,90 @@ pub async fn load_mcp_servers() -> Result<McpServersFile, ConfigError> {
     load_mcp_servers_from(default_config_path()).await
 }
 
-/// In-place migrate a legacy server name whose length exceeds the
-/// [`MAX_MCP_SERVER_NAME_LEN`] cap introduced with the `McpServerName`
-/// newtype.
+/// In-place migrate a legacy server name to the current canonical form.
 ///
-/// Before the newtype landed, `validate()` only enforced non-empty +
-/// `[A-Za-z0-9_-]` — there was no length bound. Delegating to
-/// `McpServerName::new` added a 64-byte cap that would otherwise silently
-/// drop legacy persisted configs via the `retain(...)` guard in the load
-/// paths. Truncating here keeps the entry usable while still bringing it
-/// within the new invariant on the next save.
+/// Before the `McpServerName` newtype landed, `validate()` only enforced
+/// non-empty + `[A-Za-z0-9_-]` with no length bound. Two invariants
+/// tightened since:
+///
+/// 1. A 64-byte cap from `McpServerName::new` (truncated here at a char
+///    boundary rather than dropped by the `retain(...)` guard).
+/// 2. A canonical form from `normalize_server_name` that folds hyphens
+///    to underscores, lowercases ASCII, and collapses underscore runs.
+///    This matches `ExtensionName::new` so web/CLI surfaces and
+///    `ExtensionManager::install` all agree on a single stored identity.
+///
+/// Without (2), a legacy row persisted as `my-server` still loads as
+/// `my-server`, but CLI commands like `ironclaw mcp auth my-server`
+/// canonicalize the input to `my_server` and miss on exact lookup; and
+/// `upsert()` — which canonicalizes incoming configs — treats the
+/// canonical form as distinct from the legacy row and pushes a duplicate
+/// instead of updating.
 ///
 /// Truncation is char-boundary safe: the loaded string may contain
 /// arbitrary UTF-8 even though the allowlist ultimately rejects non-ASCII,
 /// because this runs *before* `validate()`.
 fn migrate_legacy_server_name(name: &mut String) {
-    if name.len() <= MAX_MCP_SERVER_NAME_LEN {
-        return;
+    if name.len() > MAX_MCP_SERVER_NAME_LEN {
+        let original_len = name.len();
+        let mut end = MAX_MCP_SERVER_NAME_LEN;
+        while end > 0 && !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let truncated = name[..end].to_string();
+        tracing::warn!(
+            original_name = %name,
+            truncated_name = %truncated,
+            original_len,
+            new_len = end,
+            max = MAX_MCP_SERVER_NAME_LEN,
+            "Truncating legacy MCP server name that exceeded the {MAX_MCP_SERVER_NAME_LEN}-byte cap \
+             introduced with McpServerName; re-save to persist the shorter form"
+        );
+        *name = truncated;
     }
-    let original_len = name.len();
-    let mut end = MAX_MCP_SERVER_NAME_LEN;
-    while end > 0 && !name.is_char_boundary(end) {
-        end -= 1;
+
+    // Canonicalize only legal-but-non-canonical legacy names (e.g.
+    // `my-server`, `MCP-1`). Names with invalid characters are left alone
+    // and get dropped by the `retain(...)` guard, matching prior behavior.
+    let is_legal_legacy = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if is_legal_legacy {
+        let canonical = normalize_server_name(name);
+        if canonical != *name && !canonical.is_empty() {
+            tracing::warn!(
+                original_name = %name,
+                canonical_name = %canonical,
+                "Canonicalizing legacy MCP server name to match normalize_server_name / \
+                 ExtensionName::new; re-save to persist the canonical form"
+            );
+            *name = canonical;
+        }
     }
-    let truncated = name[..end].to_string();
-    tracing::warn!(
-        original_name = %name,
-        truncated_name = %truncated,
-        original_len,
-        new_len = end,
-        max = MAX_MCP_SERVER_NAME_LEN,
-        "Truncating legacy MCP server name that exceeded the {MAX_MCP_SERVER_NAME_LEN}-byte cap \
-         introduced with McpServerName; re-save to persist the shorter form"
-    );
-    *name = truncated;
+}
+
+/// Drop rows whose name collides with an already-seen canonical name.
+///
+/// Can happen when load-time canonicalization in [`migrate_legacy_server_name`]
+/// rewrites a legacy row (e.g. `my-server`) to a form that matches an
+/// existing canonical row (`my_server`). We keep the first occurrence and
+/// warn on drops so the user can reconcile the duplicate manually.
+fn deduplicate_by_name(servers: &mut Vec<McpServerConfig>) {
+    let mut seen = std::collections::HashSet::new();
+    servers.retain(|server| {
+        if seen.insert(server.name.clone()) {
+            true
+        } else {
+            tracing::warn!(
+                server_name = %server.name,
+                "Dropping duplicate MCP server entry after load-time canonicalization; \
+                 keeping the first occurrence"
+            );
+            false
+        }
+    });
 }
 
 /// Load MCP server configurations from a specific path.
@@ -606,6 +656,7 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
             true
         }
     });
+    deduplicate_by_name(&mut config.servers);
 
     Ok(config)
 }
@@ -703,6 +754,7 @@ pub async fn load_mcp_servers_from_db(
                     true
                 }
             });
+            deduplicate_by_name(&mut config.servers);
             Ok(config)
         }
         Ok(None) => {
@@ -1033,10 +1085,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Invalid entries are skipped, valid ones are kept
+        // Invalid entries are skipped, valid ones are kept. Legacy
+        // hyphenated names are canonicalized to match
+        // `normalize_server_name` / `ExtensionName::new`.
         let result = load_mcp_servers_from(&path).await.unwrap();
         assert_eq!(result.servers.len(), 1);
-        assert_eq!(result.servers[0].name, "good-server");
+        assert_eq!(result.servers[0].name, "good_server");
     }
 
     #[test]
@@ -1921,10 +1975,112 @@ mod tests {
         });
         tokio::fs::write(&path, mixed.to_string()).await.unwrap();
 
-        // Invalid entry is skipped, valid one is kept
+        // Invalid entry is skipped, valid one is kept. Hyphen in the
+        // legacy name is canonicalized on load.
         let result = load_mcp_servers_from(&path).await.unwrap();
         assert_eq!(result.servers.len(), 1);
-        assert_eq!(result.servers[0].name, "good-server");
+        assert_eq!(result.servers[0].name, "good_server");
+    }
+
+    /// Regression for PR nearai/ironclaw#2699 review comments on
+    /// `src/cli/mcp.rs:293` and `src/tools/mcp/config.rs:410`.
+    ///
+    /// Before load-time canonicalization, a legacy row persisted as
+    /// `my-server` / `MCP-1` survived intact but CLI commands normalize
+    /// user input to `my_server` / `mcp_1`, so exact `get/remove/get_mut`
+    /// lookups missed. Canonicalizing on load keeps the two surfaces
+    /// aligned without requiring tolerant alias lookups everywhere.
+    #[tokio::test]
+    async fn test_load_canonicalizes_legacy_hyphenated_names() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "my-server", "url": "https://a.example.com", "enabled": true, "headers": {} },
+                { "name": "MCP-1",     "url": "https://b.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        let names: Vec<&str> = result.servers.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"my_server"),
+            "`my-server` must be canonicalized to `my_server` on load; got {names:?}"
+        );
+        assert!(
+            names.contains(&"mcp_1"),
+            "`MCP-1` must be canonicalized to `mcp_1` on load; got {names:?}"
+        );
+
+        // CLI-style lookup by canonical name must now hit.
+        assert!(result.get("my_server").is_some());
+        assert!(result.get("mcp_1").is_some());
+    }
+
+    /// Regression for PR nearai/ironclaw#2699 review comment on
+    /// `src/tools/mcp/config.rs:410`. `upsert()` canonicalizes the
+    /// incoming config, so without load-time canonicalization a legacy
+    /// `my-server` row and an incoming canonical `my_server` would not
+    /// match and `upsert` would append a duplicate instead of updating.
+    #[tokio::test]
+    async fn test_upsert_after_load_updates_legacy_row_in_place() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "my-server", "url": "https://old.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let mut servers = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(servers.servers.len(), 1);
+
+        // Caller hands in a config with the canonical form; must update,
+        // not duplicate.
+        servers.upsert(McpServerConfig::new("my_server", "https://new.example.com"));
+        assert_eq!(
+            servers.servers.len(),
+            1,
+            "legacy hyphenated row must be canonicalized on load so upsert treats the \
+             canonical form as the same row"
+        );
+        assert_eq!(servers.servers[0].name, "my_server");
+        assert_eq!(servers.servers[0].url, "https://new.example.com");
+    }
+
+    /// If a legacy `my-server` and a canonical `my_server` both exist on
+    /// disk, load-time canonicalization collapses them to the same name.
+    /// Keep the first occurrence and drop the duplicate rather than
+    /// returning two rows with identical names (which would break every
+    /// `get`/`get_mut`/`remove` downstream).
+    #[tokio::test]
+    async fn test_load_deduplicates_after_canonicalization() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "my-server", "url": "https://first.example.com", "enabled": true, "headers": {} },
+                { "name": "my_server", "url": "https://second.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(
+            result.servers.len(),
+            1,
+            "canonicalization collision must drop duplicates, not leave two rows with the same name"
+        );
+        assert_eq!(result.servers[0].name, "my_server");
+        assert_eq!(
+            result.servers[0].url, "https://first.example.com",
+            "first occurrence wins on collision"
+        );
     }
 
     #[tokio::test]
