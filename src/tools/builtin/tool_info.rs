@@ -169,8 +169,13 @@ impl Tool for ToolInfoTool {
                     cap_registry.find_action(n).map(|(_, a)| a.clone())
                 })
             {
-                let schema = action.parameters_schema.clone();
-                (action.name, action.description, schema, None)
+                let crate::tools::registry::ActionDef {
+                    name,
+                    description,
+                    parameters_schema,
+                    ..
+                } = action;
+                (name, description, parameters_schema, None)
             } else {
                 return Err(ToolError::InvalidParameters(format!(
                     "No tool named '{name}' is registered"
