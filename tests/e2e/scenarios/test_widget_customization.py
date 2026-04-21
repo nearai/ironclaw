@@ -198,6 +198,91 @@ async def clean_single_tenant_customizations(single_tenant_gateway_server):
     await _wipe_customizations(single_tenant_gateway_server)
 
 
+@pytest.fixture(scope="session")
+async def multi_tenant_gateway_server(ironclaw_binary, mock_llm_server):
+    """Dedicated gateway with AGENT_MULTI_TENANT=true for multi-tenant isolation tests."""
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-multi-tenant-home-")
+    home_dir = home_tmpdir.name
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-multi-tenant-db-")
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    reserved = []
+    for _ in range(2):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        reserved.append(sock)
+    gateway_port = reserved[0].getsockname()[1]
+    http_port = reserved[1].getsockname()[1]
+    for sock in reserved:
+        sock.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=info",
+        "RUST_BACKTRACE": "1",
+        "IRONCLAW_OWNER_ID": "e2e-widget-multi-tenant",
+        "AGENT_MULTI_TENANT": "true",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-widget-multi-tenant",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": os.path.join(db_tmpdir.name, "multi-tenant.db"),
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "true",
+        "ROUTINES_ENABLED": "true",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+
+    proc = await asyncio.create_subprocess_exec(
+        ironclaw_binary,
+        "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    try:
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        yield base_url
+    except TimeoutError:
+        stderr_text = ""
+        if proc.stderr:
+            try:
+                stderr_text = (await asyncio.wait_for(proc.stderr.read(8192), timeout=2)).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except asyncio.TimeoutError:
+                pass
+        pytest.fail(f"multi-tenant widget server failed to start:\n{stderr_text}")
+    finally:
+        await _stop_proc(proc)
+        home_tmpdir.cleanup()
+        db_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def clean_multi_tenant_customizations(multi_tenant_gateway_server):
+    await _wipe_customizations(multi_tenant_gateway_server)
+    yield
+    await _wipe_customizations(multi_tenant_gateway_server)
+
+
 async def _open_authed_page(browser, base_url: str):
     """Open a fresh authenticated page and wait for the auth screen to clear.
 
@@ -236,40 +321,46 @@ async def _drive_chat_customization(page, prompt: str) -> None:
 
 
 async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
-    page, browser, ironclaw_server, clean_customizations
+    browser, multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
     """Chat can write custom.css, but shared `/style.css` must stay base-only.
 
-    The gateway now runs with a per-user workspace pool in the main E2E
-    server. In that mode `/style.css` is intentionally unauthenticated and
-    must not read one tenant's `.system/gateway/custom.css`, or the CSS would
-    leak to every other user. This test exercises the chat-driven
-    customization write, then verifies the shared stylesheet stays clean on
-    reload.
+    The gateway runs with AGENT_MULTI_TENANT=true so `/style.css` is
+    intentionally unauthenticated and must not read one tenant's
+    `.system/gateway/custom.css`, or the CSS would leak to every other user.
+    This test exercises the chat-driven customization write, then verifies
+    the shared stylesheet stays clean on reload.
     """
-    # 1. Drive the customization through chat. The mock LLM matches the
-    #    `customize: move tab bar to left` trigger and emits a memory_write
-    #    tool call targeting `.system/gateway/custom.css`.
-    await _drive_chat_customization(page, "customize: move tab bar to left")
+    base_url = multi_tenant_gateway_server
 
-    # 2. Sanity check: the workspace file actually landed where the gateway
-    #    will look for it. Reading via the API both confirms the write and
-    #    bypasses any client-side caching of the chat tab.
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={"path": ".system/gateway/custom.css"},
-        )
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        # MemoryReadResponse uses a `content` field.
-        assert "tab bar to left side panel" in body.get("content", ""), body
+    # Open an authenticated page against the multi-tenant server.
+    context, page = await _open_authed_page(browser, base_url)
+    try:
+        # 1. Drive the customization through chat. The mock LLM matches the
+        #    `customize: move tab bar to left` trigger and emits a memory_write
+        #    tool call targeting `.system/gateway/custom.css`.
+        await _drive_chat_customization(page, "customize: move tab bar to left")
 
-    # 3. Re-open the gateway in a fresh browser context. In the shared E2E
+        # 2. Sanity check: the workspace file actually landed where the gateway
+        #    will look for it. Reading via the API both confirms the write and
+        #    bypasses any client-side caching of the chat tab.
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={"path": ".system/gateway/custom.css"},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            # MemoryReadResponse uses a `content` field.
+            assert "tab bar to left side panel" in body.get("content", ""), body
+    finally:
+        await context.close()
+
+    # 3. Re-open the gateway in a fresh browser context. In the multi-tenant
     #    gateway, `/style.css` is the unauthenticated bootstrap sheet and
     #    must not include per-user custom.css.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    context, pg = await _open_authed_page(browser, base_url)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
 
@@ -278,7 +369,7 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
         #     this assertion proves `/style.css` did not leak it.
         async with httpx.AsyncClient(timeout=10) as client:
             css_resp = await client.get(
-                f"{ironclaw_server}/style.css",
+                f"{base_url}/style.css",
                 headers=auth_headers(),
             )
             assert css_resp.status_code == 200
@@ -304,65 +395,72 @@ async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
 
 
 async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
-    page, browser, ironclaw_server, clean_customizations
+    browser, multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
     """Chat can install a widget definition without mutating the shared shell.
 
     The agent writes a widget manifest and an ``index.js`` implementation
-    into ``.system/gateway/widgets/skills-viewer/``. In the shared E2E
+    into ``.system/gateway/widgets/skills-viewer/``. In the multi-tenant
     gateway, the authenticated widgets API must surface that workspace state,
-    but the base multi-tenant shell must not auto-inline per-user widgets into
-    every browser load.
+    but the base shell must not auto-inline per-user widgets into every
+    browser load.
     """
-    # 1. One chat turn fans out into *two* parallel ``memory_write`` tool
-    #    calls (manifest + index.js). This intentionally exercises the
-    #    multi-tool-call path of the v2 engine — pinning the test to a
-    #    single call per turn would silently mask regressions in parallel
-    #    dispatch / accumulator handling.
-    await _drive_chat_customization(
-        page, "customize: install skills viewer widget"
-    )
+    base_url = multi_tenant_gateway_server
 
-    # 2. Confirm both files actually landed in the workspace.
-    async with httpx.AsyncClient(timeout=10) as client:
-        manifest_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={
-                "path": ".system/gateway/widgets/skills-viewer/manifest.json",
-            },
+    # Open an authenticated page against the multi-tenant server.
+    context, page = await _open_authed_page(browser, base_url)
+    try:
+        # 1. One chat turn fans out into *two* parallel ``memory_write`` tool
+        #    calls (manifest + index.js). This intentionally exercises the
+        #    multi-tool-call path of the v2 engine — pinning the test to a
+        #    single call per turn would silently mask regressions in parallel
+        #    dispatch / accumulator handling.
+        await _drive_chat_customization(
+            page, "customize: install skills viewer widget"
         )
-        assert manifest_resp.status_code == 200, manifest_resp.text
-        manifest_doc = manifest_resp.json()
-        manifest = json.loads(manifest_doc["content"])
-        assert manifest["id"] == "skills-viewer"
-        assert manifest["slot"] == "tab"
 
-        index_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={
-                "path": ".system/gateway/widgets/skills-viewer/index.js",
-            },
-        )
-        assert index_resp.status_code == 200, index_resp.text
-        assert "registerWidget" in index_resp.json()["content"]
+        # 2. Confirm both files actually landed in the workspace.
+        async with httpx.AsyncClient(timeout=10) as client:
+            manifest_resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={
+                    "path": ".system/gateway/widgets/skills-viewer/manifest.json",
+                },
+            )
+            assert manifest_resp.status_code == 200, manifest_resp.text
+            manifest_doc = manifest_resp.json()
+            manifest = json.loads(manifest_doc["content"])
+            assert manifest["id"] == "skills-viewer"
+            assert manifest["slot"] == "tab"
 
-        # 2a. The widgets API should now report the new widget. This is the
-        #     gateway's own discovery path — it walks the workspace dir and
-        #     parses each manifest.json — so it doubles as an integration
-        #     check on the FrontendBundle assembler.
-        widgets_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/widgets",
-            headers=auth_headers(),
-        )
-        assert widgets_resp.status_code == 200, widgets_resp.text
-        widget_ids = {w["id"] for w in widgets_resp.json()}
-        assert "skills-viewer" in widget_ids, widget_ids
+            index_resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={
+                    "path": ".system/gateway/widgets/skills-viewer/index.js",
+                },
+            )
+            assert index_resp.status_code == 200, index_resp.text
+            assert "registerWidget" in index_resp.json()["content"]
+
+            # 2a. The widgets API should now report the new widget. This is the
+            #     gateway's own discovery path — it walks the workspace dir and
+            #     parses each manifest.json — so it doubles as an integration
+            #     check on the FrontendBundle assembler.
+            widgets_resp = await client.get(
+                f"{base_url}/api/frontend/widgets",
+                headers=auth_headers(),
+            )
+            assert widgets_resp.status_code == 200, widgets_resp.text
+            widget_ids = {w["id"] for w in widgets_resp.json()}
+            assert "skills-viewer" in widget_ids, widget_ids
+    finally:
+        await context.close()
 
     # 3. Reload in a fresh context. The shared multi-tenant shell should not
     #    auto-inject per-user widgets into the base tab bar.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    context, pg = await _open_authed_page(browser, base_url)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
         widget_tab_btn = pg.locator('.tab-bar button[data-tab="skills-viewer"]')
@@ -476,15 +574,18 @@ async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell
 
 
 async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
-    ironclaw_server, clean_customizations
+    multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
     """Shared index should stay static even when per-user layout exists."""
+    base_url = multi_tenant_gateway_server
+
     # 1. Write a layout that would force customized HTML in single-tenant
-    #    mode. In the shared gateway this layout remains per-user state only.
+    #    mode. In the multi-tenant gateway this layout remains per-user
+    #    state only.
     layout = {"branding": {"title": "Acme AI"}}
     async with httpx.AsyncClient(timeout=10) as client:
         write = await client.post(
-            f"{ironclaw_server}/api/memory/write",
+            f"{base_url}/api/memory/write",
             headers=auth_headers(),
             json={
                 "path": ".system/gateway/layout.json",
@@ -500,7 +601,7 @@ async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
         # 2. Hit `/` directly. The bootstrap route stays on the static HTML/CSP
         #    path even though the authenticated layout API now has custom data.
         resp = await client.get(
-            f"{ironclaw_server}/?token={AUTH_TOKEN}",
+            f"{base_url}/?token={AUTH_TOKEN}",
             headers=auth_headers(),
         )
     assert resp.status_code == 200, resp.text
@@ -508,7 +609,7 @@ async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
     # 3. The authenticated layout API should expose the saved branding config.
     async with httpx.AsyncClient(timeout=10) as client:
         layout_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/layout",
+            f"{base_url}/api/frontend/layout",
             headers=auth_headers(),
         )
     assert layout_resp.status_code == 200, layout_resp.text
