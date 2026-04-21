@@ -33,10 +33,16 @@ For common file, HTTP, and shell tasks, prefer these Pythonic shims first:
 
 - `read_text(path)` → reads a file and returns plain text without line-number prefixes
 - `write_text(path, text)` → writes text to a file
+- `append_text(path, text)` → appends text to an existing file
+- `read_json(path)` → reads a JSON file and returns the parsed object
+- `write_json(path, value)` → writes a value as pretty JSON
+- `exists(path)` → returns `True` if a path exists in the parent directory listing
+- `list_entries(path=".", recursive=False, max_depth=3)` → returns just the directory entry strings
+- `find_files(pattern, path=".", max_results=None)` → returns just the matched file paths
 - `http_get(url, headers=None)` → performs a GET request and returns a dict with keys like `ok`, `status`, `body`, `text`, `json_body`
 - `run(command, timeout=None, workdir=None)` → runs a shell command and returns a dict with keys like `ok`, `exit_code`, `stdout`, `stderr`
 
-These are thin facades over the normal host tools (`read_file`, `write_file`, `http`, `shell`). They keep the same approval/policy behavior while giving you a smaller, more Pythonic interface.
+These are thin facades over the normal host tools (`read_file`, `write_file`, `list_dir`, `glob`, `http`, `shell`). They keep the same approval/policy behavior while giving you a smaller, more Pythonic interface.
 
 Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), non-GET HTTP methods, or tool-specific parameters.
 

@@ -60,10 +60,16 @@ These are injected by the IronClaw executor, not by Monty:
 
 ### Preferred host-backed shims
 
-Phase 1 adds a small ergonomic shim layer for common workflows:
+Phase 1 / 2 add a small ergonomic shim layer for common workflows:
 
 - `read_text(path)` → canonical `read_file`
 - `write_text(path, text)` → canonical `write_file`
+- `append_text(path, text)` → canonical `read_file` then `write_file`
+- `read_json(path)` → canonical `read_file` + host-side JSON parsing
+- `write_json(path, value)` → canonical `write_file` with pretty JSON serialization
+- `exists(path)` → canonical `list_dir` on the parent directory + host-side entry matching
+- `list_entries(path=".", recursive=False, max_depth=3)` → canonical `list_dir`
+- `find_files(pattern, path=".", max_results=None)` → canonical `glob`
 - `http_get(url, headers=None)` → canonical `http` with `method="GET"`
 - `run(command, timeout=None, workdir=None)` → canonical `shell`
 
