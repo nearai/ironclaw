@@ -128,6 +128,14 @@
                                 Source='$(var.CargoTargetBinDir)\ironclaw.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='binary1' Guid='*'>
+                            <File
+                                Id='exe1'
+                                Name='sandbox_daemon.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\sandbox_daemon.exe'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
                 </Directory>
             </Directory>
@@ -150,6 +158,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='binary1'/>
 
             <Feature
                 Id='Environment'
