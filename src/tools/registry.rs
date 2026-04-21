@@ -307,8 +307,9 @@ impl ToolRegistry {
     /// Register a tool (sync version for startup, marks as built-in).
     /// Rejects names containing `.`. Skips the capability-shadow check
     /// because built-ins register before v2 wiring; the reverse collision
-    /// is caught by `bridge::router::wire_capability_registry`, which
-    /// returns an error if any registered tool name matches a capability.
+    /// is enforced later by `bridge::router::wire_capability_registry`.
+    /// That wiring path currently fails fast (panic/assert) if any
+    /// registered tool name matches a capability action.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
