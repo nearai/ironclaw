@@ -623,9 +623,16 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
         except TimeoutError:
+            # Snapshot stderr before stop() drains/cancels the readers, then
+            # tear the subprocess and drain tasks down explicitly. Without
+            # this, a startup timeout leaks the child process (and its
+            # ports) because `await start()` runs before the fixture's
+            # try/finally guard.
+            stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
+            await stop()
             raise TimeoutError(
                 f"restartable_v2_server did not become ready at {base_url}/api/health.\n"
-                f"stderr tail:\n{bytes(stderr_tail).decode('utf-8', errors='replace')}"
+                f"stderr tail:\n{stderr_text}"
             )
 
     async def stop():
