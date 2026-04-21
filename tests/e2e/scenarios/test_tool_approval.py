@@ -195,6 +195,51 @@ async def test_approval_params_toggle(page):
     assert await params.is_hidden(), "Parameters should be hidden after second toggle"
 
 
+async def test_subagent_tool_args_keep_highlighting_after_html_escaping(page):
+    """Caller-level tool rendering should still highlight JSON after escaping."""
+    tool_args = json.dumps(
+        {
+            "command": 'echo "hi"',
+            "path": "<b>unsafe</b>",
+            "count": 2,
+        }
+    )
+
+    await page.evaluate(
+        """(toolArgs) => {
+            const card = window.__e2e.toolActivity.createSubAgentCard({
+                id: 'test-subagent-args',
+                title: 'Formatter',
+                status: 'done',
+                tools: [{
+                    name: 'shell',
+                    status: 'success',
+                    args: toolArgs,
+                    duration_ms: 12,
+                }],
+            });
+            document.getElementById('chat-messages').appendChild(card);
+        }""",
+        tool_args,
+    )
+
+    card = page.locator(f"{SEL['subagent_card']}[data-subagent-id='test-subagent-args']")
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator(SEL["subagent_header"]).click()
+
+    args = card.locator(f"{SEL['subagent_steps']} {SEL['toolline_args']}")
+    await args.wait_for(state="visible", timeout=5000)
+
+    assert await card.locator(SEL["toolline_arg_key"]).count() == 3
+    assert await card.locator(SEL["toolline_arg_string"]).count() == 2
+    assert await card.locator(SEL["toolline_arg_number"]).count() == 1
+
+    args_text = await args.text_content()
+    assert args_text == tool_args
+    assert "<b>unsafe</b>" in args_text
+    assert await args.locator("b").count() == 0
+
+
 async def test_waiting_for_approval_message_no_error_prefix(page):
     """Verify that input submitted while awaiting approval shows non-error status with tool context.
 

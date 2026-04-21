@@ -511,13 +511,52 @@ function humanizeToolName(rawName) {
     .trim();
 }
 
+const JSON_INLINE_TOKEN_RE = /"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g;
+
+function classifyJsonStringToken(source, tokenEnd) {
+  let cursor = tokenEnd;
+  while (cursor < source.length && /\s/.test(source[cursor])) {
+    cursor += 1;
+  }
+  return source[cursor] === ':' ? 'k' : 's';
+}
+
 function syntaxHighlightArgs(argsStr) {
   if (!argsStr) return '';
-  // Highlight keys, strings, and numbers in tool arguments
-  return argsStr
-    .replace(/"([^"]+)":/g, '<span class="k">"$1":</span>')
-    .replace(/:\s*"([^"]*)"/g, ': <span class="s">"$1"</span>')
-    .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="n">$1</span>');
+
+  const source = String(argsStr);
+  let html = '';
+  let lastIndex = 0;
+  let sawToken = false;
+  JSON_INLINE_TOKEN_RE.lastIndex = 0;
+
+  for (const match of source.matchAll(JSON_INLINE_TOKEN_RE)) {
+    const token = match[0];
+    const start = match.index;
+    if (typeof start !== 'number') continue;
+    sawToken = true;
+
+    html += escapeHtml(source.slice(lastIndex, start));
+
+    const end = start + token.length;
+    if (token.startsWith('"')) {
+      const klass = classifyJsonStringToken(source, end);
+      html += '<span class="' + klass + '">' + escapeHtml(token) + '</span>';
+    } else if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(token)) {
+      html += '<span class="n">' + escapeHtml(token) + '</span>';
+    } else {
+      html += escapeHtml(token);
+    }
+
+    lastIndex = end;
+  }
+
+  if (!sawToken) {
+    return escapeHtml(source);
+  }
+
+  html += escapeHtml(source.slice(lastIndex));
+  return html;
 }
 
 function createToolLines(tools) {
@@ -542,7 +581,7 @@ function createToolLines(tools) {
     const args = document.createElement('span');
     args.className = 'gw-toolline__args';
     if (tool.args) {
-      args.innerHTML = syntaxHighlightArgs(escapeHtml(tool.args));
+      args.innerHTML = syntaxHighlightArgs(tool.args);
     }
 
     const meta = document.createElement('span');
@@ -629,6 +668,14 @@ function createSubAgentCard(data) {
   card.appendChild(header);
   card.appendChild(body);
   return card;
+}
+
+if (typeof window !== 'undefined') {
+  // Narrow E2E hook so browser tests can exercise the real tool-line caller
+  // without copying its DOM assembly logic into the test harness.
+  window.__e2e = window.__e2e || {};
+  window.__e2e.toolActivity = window.__e2e.toolActivity || {};
+  window.__e2e.toolActivity.createSubAgentCard = createSubAgentCard;
 }
 
 function shouldShowChannelConnectedMessage(extensionName, success) {

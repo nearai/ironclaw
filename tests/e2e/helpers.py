@@ -179,6 +179,14 @@ SEL = {
     "activity_tool_body":       ".activity-tool-body",
     "activity_thinking":        ".activity-thinking",
     "activity_thinking_text":   ".activity-thinking-text",
+    # Sub-agent / inline tool lines
+    "subagent_card":            ".gw-subagent",
+    "subagent_header":          ".gw-subagent__header",
+    "subagent_steps":           ".gw-subagent__steps",
+    "toolline_args":            ".gw-toolline__args",
+    "toolline_arg_key":         ".gw-toolline__args .k",
+    "toolline_arg_string":      ".gw-toolline__args .s",
+    "toolline_arg_number":      ".gw-toolline__args .n",
     # Thread processing indicator
     "thread_processing":        ".thread-processing",
 }
