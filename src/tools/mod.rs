@@ -35,7 +35,6 @@ pub use builder::{
 pub(crate) use coercion::prepare_tool_params;
 pub use rate_limiter::RateLimiter;
 pub use registry::{ToolRegistry, is_protected_tool_name};
-#[cfg(debug_assertions)]
 pub(crate) use tool::resolve_with_aliases;
 pub use tool::{
     ApprovalContext, ApprovalRequirement, EngineCompatibility, EngineVersion, RiskLevel, Tool,
