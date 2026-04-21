@@ -278,24 +278,27 @@ impl Thread {
 
     /// Derive a short sidebar title from a free-form user message.
     ///
-    /// Takes the first non-empty line, trims trailing whitespace, and
-    /// truncates by character count (not bytes) so multibyte input
-    /// doesn't panic. Returns `None` if the message is all whitespace.
+    /// Takes the first non-empty line, trims leading and trailing
+    /// whitespace, and truncates by character count (not bytes) so
+    /// multibyte input doesn't panic. Returns `None` if the message is
+    /// all whitespace.
     pub fn derive_title_from_message(message: &str) -> Option<String> {
         const MAX_CHARS: usize = 60;
-        let first_line = message.lines().find(|l| !l.trim().is_empty())?;
-        let trimmed = first_line.trim();
-        if trimmed.is_empty() {
-            return None;
+        let trimmed = message.lines().find(|l| !l.trim().is_empty())?.trim();
+        // Streaming truncation avoids an O(n) `chars().count()` on long
+        // single-line input: take up to MAX_CHARS-1 chars, then peek the
+        // rest. If exactly one more char remains, append it (result is
+        // MAX_CHARS with no ellipsis); if more remain, append '…'.
+        let mut chars = trimmed.chars();
+        let mut out: String = chars.by_ref().take(MAX_CHARS - 1).collect();
+        if let Some(next) = chars.next() {
+            if chars.next().is_none() {
+                out.push(next);
+            } else {
+                out.push('…');
+            }
         }
-        let count = trimmed.chars().count();
-        if count <= MAX_CHARS {
-            Some(trimmed.to_string())
-        } else {
-            let mut out: String = trimmed.chars().take(MAX_CHARS - 1).collect();
-            out.push('…');
-            Some(out)
-        }
+        Some(out)
     }
 
     pub fn owner_id(&self) -> OwnerId<'_> {
@@ -586,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_title_trims_trailing_whitespace() {
+    fn derive_title_trims_whitespace() {
         assert_eq!(
             Thread::derive_title_from_message("  spaced out   "),
             Some("spaced out".to_string())
