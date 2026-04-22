@@ -157,7 +157,7 @@ function toggleShortcutsOverlay() {
       + '<h3>Keyboard Shortcuts</h3>'
       + '<div class="shortcut-row"><kbd>Ctrl/Cmd + 1-5</kbd> Switch tabs</div>'
       + '<div class="shortcut-row"><kbd>Ctrl/Cmd + N</kbd> New thread</div>'
-      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + K</kbd> Focus search/input</div>'
+      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + K</kbd> Command palette</div>'
       + '<div class="shortcut-row"><kbd>Ctrl/Cmd + /</kbd> Toggle this overlay</div>'
       + '<div class="shortcut-row"><kbd>Escape</kbd> Close modals</div>'
       + '<button class="shortcuts-close">Close</button>'
@@ -174,6 +174,9 @@ function toggleShortcutsOverlay() {
 }
 
 function closeModals() {
+  // Close command palette
+  if (_paletteOpen) closeCommandPalette();
+
   // Close shortcuts overlay
   const shortcutsOverlay = document.getElementById('shortcuts-overlay');
   if (shortcutsOverlay) shortcutsOverlay.style.display = 'none';

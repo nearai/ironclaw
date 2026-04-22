@@ -891,4 +891,11 @@ I18n.register('zh-CN', {
 
   // 技能（更多）
   'skills.viewOnClawHub': '在 ClawHub 上查看',
+
+  // 命令面板
+  'palette.placeholder': '搜索会话、命令、标签页...',
+  'palette.noResults': '未找到结果',
+  'palette.navigate': '导航',
+  'palette.open': '打开',
+  'palette.close': '关闭',
 });

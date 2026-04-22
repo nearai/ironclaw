@@ -346,6 +346,9 @@ function removeScrollSpinner() {
   if (spinner) spinner.remove();
 }
 
+// --- Cached thread data for command palette ---
+let _cachedThreads = [];
+
 // --- Threads ---
 
 function threadTitle(thread) {
@@ -421,6 +424,9 @@ function loadThreads() {
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
     const threads = data.threads || [];
+    _cachedThreads = threads.map(t => ({
+      id: t.id, title: threadTitle(t), channel: t.channel || 'gateway', updated_at: t.updated_at
+    }));
     for (const thread of threads) {
       rememberedThreads.push({
         threadId: thread.id,

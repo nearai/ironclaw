@@ -892,4 +892,11 @@ I18n.register('en', {
 
   // Skills (more)
   'skills.viewOnClawHub': 'View on ClawHub',
+
+  // Command Palette
+  'palette.placeholder': 'Search threads, commands, tabs...',
+  'palette.noResults': 'No results found',
+  'palette.navigate': 'Navigate',
+  'palette.open': 'Open',
+  'palette.close': 'Close',
 });

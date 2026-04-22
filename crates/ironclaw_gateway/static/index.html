@@ -592,6 +592,23 @@
     </div>
   </div>
 
+  <!-- Command Palette (Cmd+K) -->
+  <div id="command-palette-overlay" class="command-palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette" style="display:none">
+    <div class="command-palette">
+      <div class="command-palette-input-row">
+        <svg class="command-palette-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="palette-input" type="text" class="command-palette-input" placeholder="Search threads, commands, tabs..." data-i18n="palette.placeholder" data-i18n-attr="placeholder" autocomplete="off" aria-controls="palette-results" aria-autocomplete="list" />
+        <kbd class="command-palette-esc">ESC</kbd>
+      </div>
+      <div id="palette-results" class="command-palette-results" role="listbox"></div>
+      <div class="command-palette-footer">
+        <span><kbd>&uarr;&darr;</kbd> <span data-i18n="palette.navigate">Navigate</span></span>
+        <span><kbd>Enter</kbd> <span data-i18n="palette.open">Open</span></span>
+        <span><kbd>Esc</kbd> <span data-i18n="palette.close">Close</span></span>
+      </div>
+    </div>
+  </div>
+
   <div id="toasts"></div>
   <script src="/app.js"></script>
   <script src="/i18n-app.js"></script>
