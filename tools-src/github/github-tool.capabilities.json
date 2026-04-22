@@ -1,5 +1,5 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "wit_version": "0.3.0",
   "description": "Manage GitHub repositories, issues, pull requests, search, branches, file reads and writes, releases, and workflows.",
   "discovery_summary": {
@@ -16,7 +16,7 @@
     "notes": [
       "Use `tool_info(name: \"github\", detail: \"schema\")` for the full action schema before guessing fields.",
       "Supported families: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, and webhook normalization.",
-      "Not supported yet: forks, labels, milestones, projects, org/team admin, GraphQL, release asset uploads, and repository deletion."
+      "Not supported yet: labels, milestones, projects, org/team admin, GraphQL, release asset uploads, and repository deletion."
     ],
     "examples": [
       {
@@ -85,18 +85,32 @@
   "auth": {
     "secret_name": "github_token",
     "display_name": "GitHub",
-    "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+    "provider": "github",
+    "oauth": {
+      "authorization_url": "https://github.com/login/oauth/authorize",
+      "token_url": "https://github.com/login/oauth/access_token",
+      "client_id_env": "GITHUB_OAUTH_CLIENT_ID",
+      "client_secret_env": "GITHUB_OAUTH_CLIENT_SECRET",
+      "scopes": [
+        "repo",
+        "workflow",
+        "read:org"
+      ],
+      "use_pkce": false
+    },
+    "instructions": "Create a Personal Access Token at github.com/settings/tokens with scopes: repo, workflow, read:org. Then paste it here.",
     "setup_url": "https://github.com/settings/tokens",
     "token_hint": "Starts with 'ghp_' or 'github_pat_'",
-    "env_var": "GITHUB_TOKEN"
-  },
-  "setup": {
-    "required_secrets": [
-      {
-        "name": "github_token",
-        "prompt": "GitHub Personal Access Token (create one at github.com/settings/tokens with 'repo' scope)"
+    "env_var": "GITHUB_TOKEN",
+    "validation_endpoint": {
+      "url": "https://api.github.com/user",
+      "method": "GET",
+      "success_status": 200,
+      "headers": {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
       }
-    ]
+    }
   },
   "config": {
     "default_limit": 30,

@@ -6,8 +6,8 @@ mod timezone;
 mod util;
 
 pub use event::{
-    AppEvent, JobResultStatus, JobResultStatusParseError, OnboardingStateDto, PlanStepDto,
-    ToolDecisionDto,
+    AppEvent, CodeExecutionFailureCategory, JobResultStatus, JobResultStatusParseError,
+    OnboardingStateDto, PlanStepDto, ToolDecisionDto,
 };
 pub use identity::{
     CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, IdentityError,
