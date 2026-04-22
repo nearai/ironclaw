@@ -1907,16 +1907,24 @@ async fn resolve_mission_identity(
     let missions = mgr
         .list_missions(context.project_id, &context.user_id)
         .await?;
-    let mut matches = missions.iter().filter(|m| m.name == name);
-    let Some(mission) = matches.next() else {
+    // Prefer the caller's own mission over a same-named shared mission.
+    // v1 `get_routine_by_name` was scoped to the owner (UNIQUE(user_id,
+    // name)); widening the alias resolver to own+shared would turn a
+    // legacy `routine_delete(name=...)` into an ambiguity error whenever
+    // a shared mission happens to share the name.
+    let (owned, shared): (Vec<_>, Vec<_>) = missions
+        .iter()
+        .filter(|m| m.name == name)
+        .partition(|m| m.user_id == context.user_id);
+    let tier = if !owned.is_empty() { owned } else { shared };
+    let Some(mission) = tier.first() else {
         return Err(EngineError::Effect {
             reason: format!(
                 "no mission named {name:?}; call `mission_list()` to see available missions"
             ),
         });
     };
-
-    if matches.next().is_some() {
+    if tier.len() > 1 {
         return Err(EngineError::Effect {
             reason: format!(
                 "multiple missions are named {name:?}; use `id` instead or call `mission_list()` to disambiguate"
@@ -5710,6 +5718,122 @@ Use this skill to set up a Pika meeting.
                 delete.output
             );
         }
+    }
+
+    /// Regression: when a user-owned mission and a shared mission have the
+    /// same display name, `routine_*` name resolution must target the
+    /// owned one — not raise an "ambiguous" error. v1's routine store had
+    /// UNIQUE(user_id, name) so `routine_delete(name=...)` was
+    /// deterministic for the caller's own routines; the v2 alias
+    /// resolver must preserve that scoping by preferring owned over shared.
+    #[tokio::test]
+    async fn routine_alias_prefers_owned_over_shared_same_name() {
+        use ironclaw_engine::types::mission::MissionCadence;
+
+        let (adapter, _store, _dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rs1"));
+
+        // Owned mission (user = "test_user") via the public dispatch path.
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "Daily Check",
+                    "goal": "owned goal",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("owned create should succeed");
+        assert!(!create.is_error, "owned create failed: {}", create.output);
+        let owned_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("owned mission id")
+            .to_string();
+
+        // Shared mission under the same project, seeded through the manager
+        // so it lands with `user_id = "system"` (shared owner).
+        let mgr = adapter
+            .mission_manager()
+            .await
+            .expect("mission manager must be wired");
+        let shared_id = mgr
+            .create_mission(
+                ctx.project_id,
+                "system",
+                "Daily Check",
+                "shared goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .expect("shared create should succeed");
+        assert_ne!(
+            shared_id.to_string(),
+            owned_id,
+            "owned and shared must be distinct ids"
+        );
+
+        // routine_history(name=...) must resolve to the owned mission.
+        let history = adapter
+            .execute_action(
+                "routine_history",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_history should resolve by name, not error on ambiguity");
+        assert!(
+            !history.is_error,
+            "routine_history must not raise ambiguity across own/shared, got: {}",
+            history.output
+        );
+        assert_eq!(
+            history.output.get("id").and_then(|v| v.as_str()),
+            Some(owned_id.as_str()),
+            "routine_history must target the owned mission, got: {}",
+            history.output
+        );
+
+        // routine_delete(name=...) must complete the owned mission only.
+        let delete = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_delete should resolve by name, not error on ambiguity");
+        assert!(
+            !delete.is_error,
+            "routine_delete must not raise ambiguity across own/shared, got: {}",
+            delete.output
+        );
+        assert_eq!(
+            delete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "expected owned completion, got: {}",
+            delete.output
+        );
+
+        // Shared mission must still be active — never touched by the alias.
+        let shared_after = mgr
+            .get_mission(shared_id)
+            .await
+            .expect("load shared mission")
+            .expect("shared mission must still exist");
+        assert_eq!(
+            shared_after.status,
+            ironclaw_engine::types::mission::MissionStatus::Active,
+            "shared mission must not be affected by routine_delete on owned"
+        );
     }
 
     /// Regression: `mission_update` has a real `name` param (the new
