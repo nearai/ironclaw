@@ -250,6 +250,20 @@ pub enum EventKind {
     },
 
     // ── Code execution instrumentation ────────────────────────
+    /// Emitted when a code (REPL) execution attempt starts.
+    CodeExecutionStarted {
+        step_id: StepId,
+    },
+    /// Emitted when a code (REPL) execution attempt completes successfully.
+    CodeExecutionCompleted {
+        step_id: StepId,
+        /// Whether execution produced user-visible output (stdout, return value,
+        /// or non-empty tool/action output summarized back into context).
+        had_output: bool,
+        /// Duration of the code execution attempt in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+    },
     /// Emitted when a code (REPL) execution attempt fails. Enables aggregate
     /// analysis of code execution failure modes to determine whether the
     /// runtime (Monty), the LLM, or tool dispatch is the primary source of

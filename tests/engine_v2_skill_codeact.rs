@@ -415,7 +415,7 @@ FINAL(str(result))
     let llm = ScriptedLlm::new(vec![LlmOutput {
         response: LlmResponse::Code {
             code: python_code.to_string(),
-            content: None,
+            assistant_content: None,
         },
         usage: TokenUsage::default(),
     }]);
@@ -525,7 +525,7 @@ FINAL(str(result))
     let llm = ScriptedLlm::new(vec![LlmOutput {
         response: LlmResponse::Code {
             code: python_code.to_string(),
-            content: None,
+            assistant_content: None,
         },
         usage: TokenUsage::default(),
     }]);
