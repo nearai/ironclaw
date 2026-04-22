@@ -211,8 +211,7 @@ impl CapabilitiesFile {
         if let Some(http) = &self.http {
             for mapping in http.credentials.values() {
                 for pattern in &mapping.path_patterns {
-                    for err in
-                        ironclaw_skills::validate_path_pattern(&mapping.secret_name, pattern)
+                    for err in ironclaw_skills::validate_path_pattern(&mapping.secret_name, pattern)
                     {
                         tracing::warn!(tool = name, "capabilities validation: {}", err);
                     }

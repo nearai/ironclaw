@@ -229,7 +229,9 @@ impl StoreData {
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        use crate::secrets::{extract_url_path_for_matching, match_specificity, path_matches_prefix};
+        use crate::secrets::{
+            extract_url_path_for_matching, match_specificity, path_matches_prefix,
+        };
 
         let url_path = extract_url_path_for_matching(url);
 
@@ -2661,12 +2663,7 @@ mod tests {
             // yield the same WRITE winner under specificity sort
             vec![scoped(), global()],
         ] {
-            let store = StoreData::new(
-                1024 * 1024,
-                Capabilities::default(),
-                HashMap::new(),
-                creds,
-            );
+            let store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
             let mut headers = HashMap::new();
             let mut url = "https://api.example.com/api/v1/write/foo".to_string();
             store.inject_host_credentials("api.example.com", &mut headers, &mut url);

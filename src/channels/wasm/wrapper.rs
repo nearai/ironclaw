@@ -247,7 +247,9 @@ impl ChannelStoreData {
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        use crate::secrets::{extract_url_path_for_matching, match_specificity, path_matches_prefix};
+        use crate::secrets::{
+            extract_url_path_for_matching, match_specificity, path_matches_prefix,
+        };
 
         let url_path = extract_url_path_for_matching(url);
 

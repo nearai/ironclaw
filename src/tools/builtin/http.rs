@@ -1617,7 +1617,10 @@ mod tests {
         // separate accessors. This locks that behavior in so the auth
         // pre-flight and credential lookup agree on the effective path.
         let with_query = serde_json::json!({"url": "https://host/api/v1?page=1"});
-        assert_eq!(extract_path_from_params(&with_query), Some("/api/v1".into()));
+        assert_eq!(
+            extract_path_from_params(&with_query),
+            Some("/api/v1".into())
+        );
 
         let with_fragment = serde_json::json!({"url": "https://host/api/v1#frag"});
         assert_eq!(
