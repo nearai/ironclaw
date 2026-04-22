@@ -105,13 +105,24 @@ impl DefaultPolicyDecider {
         }
     }
 
-    /// Find the first credential mapping that matches both `host` and `path`.
-    /// Honors `path_patterns` so a mapping scoped to `/api/v1/write` does not
-    /// inject on `/api/v1/read` when the sandbox proxy forwards the request.
+    /// Find the most-specific credential mapping matching both `host` and
+    /// `path`. Uses the same precedence rule as `SharedCredentialRegistry::
+    /// find_for_url` and both WASM `inject_host_credentials`: longest
+    /// matching path prefix wins, tie-broken alphabetically on
+    /// `secret_name`. Without this sort, a host configured with both a
+    /// global and a narrower path-scoped credential would inject whichever
+    /// appeared first in the Vec, diverging from the HTTP-tool path.
     fn find_credential(&self, host: &str, path: &str) -> Option<&CredentialMapping> {
         self.credential_mappings
             .iter()
-            .find(|m| m.matches(host, path))
+            .filter(|m| m.matches(host, path))
+            .max_by(|a, b| {
+                let spec_a = crate::secrets::match_specificity(&a.path_patterns, path);
+                let spec_b = crate::secrets::match_specificity(&b.path_patterns, path);
+                spec_a
+                    .cmp(&spec_b)
+                    .then_with(|| a.secret_name.cmp(&b.secret_name))
+            })
     }
 }
 
@@ -273,6 +284,72 @@ mod tests {
             matches!(read_decision, NetworkDecision::Allow),
             "read path must NOT inject when credential is path-scoped to write; got {read_decision:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_proxy_most_specific_credential_wins() {
+        // Regression for Firat round-5 (#3126256060): sandbox `find_credential`
+        // used `.find(...)` (first match) instead of specificity-sorted max,
+        // diverging from the HTTP tool and WASM wrappers. A host with both a
+        // global and a narrower path-scoped credential would inject whichever
+        // appeared first in the Vec. This test asserts order-independence:
+        // the more-specific `/api/v1/write` credential wins regardless of
+        // insertion order.
+        let allowlist = DomainAllowlist::new(&["api.example.com".to_string()]);
+
+        for (desc, mappings) in [
+            (
+                "global first",
+                vec![
+                    CredentialMapping {
+                        secret_name: "GLOBAL_TOKEN".into(),
+                        location: CredentialLocation::AuthorizationBearer,
+                        host_patterns: vec!["api.example.com".into()],
+                        path_patterns: Vec::new(),
+                        optional: false,
+                    },
+                    CredentialMapping {
+                        secret_name: "WRITE_TOKEN".into(),
+                        location: CredentialLocation::AuthorizationBearer,
+                        host_patterns: vec!["api.example.com".into()],
+                        path_patterns: vec!["/api/v1/write".into()],
+                        optional: false,
+                    },
+                ],
+            ),
+            (
+                "specific first",
+                vec![
+                    CredentialMapping {
+                        secret_name: "WRITE_TOKEN".into(),
+                        location: CredentialLocation::AuthorizationBearer,
+                        host_patterns: vec!["api.example.com".into()],
+                        path_patterns: vec!["/api/v1/write".into()],
+                        optional: false,
+                    },
+                    CredentialMapping {
+                        secret_name: "GLOBAL_TOKEN".into(),
+                        location: CredentialLocation::AuthorizationBearer,
+                        host_patterns: vec!["api.example.com".into()],
+                        path_patterns: Vec::new(),
+                        optional: false,
+                    },
+                ],
+            ),
+        ] {
+            let decider = DefaultPolicyDecider::new(allowlist.clone(), mappings);
+            let req =
+                NetworkRequest::from_url("POST", "https://api.example.com/api/v1/write").unwrap();
+            match decider.decide(&req).await {
+                NetworkDecision::AllowWithCredentials { secret_name, .. } => {
+                    assert_eq!(
+                        secret_name, "WRITE_TOKEN",
+                        "[{desc}] write path must select the most-specific token"
+                    );
+                }
+                other => panic!("[{desc}] expected AllowWithCredentials, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

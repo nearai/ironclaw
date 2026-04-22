@@ -355,17 +355,33 @@ pub(crate) fn extract_url_path_for_matching(url: &str) -> String {
 }
 
 /// Returns true if any segment of `path` decodes (per RFC 3986 percent-
-/// decoding of octets) to the traversal segments `.` or `..`. Segments with
-/// embedded encoded dots that are part of a legitimate literal (e.g.
-/// `foo%2ebar`, `v1%2e2`) are allowed because the decoded form is not a
-/// pure dot-segment.
+/// decoding of octets) to the traversal segments `.` or `..`, or embeds
+/// a decoded `/` that a downstream server might use to re-split the path.
+///
+/// Legitimate segments with embedded encoded dots (`foo%2ebar`, `v1%2e2`)
+/// are allowed because they decode to a normal literal. Encoded slashes
+/// (`%2f`), however, are rejected whenever they appear in a segment that
+/// we haven't already deemed a dot-segment — some servers (Tomcat with
+/// `allowEncodedSlash=true`, older IIS, a handful of reverse proxies)
+/// will normalize `%2f` back to `/` and then re-apply path routing,
+/// effectively letting `/api/v1/%2e%2e%2fadmin` escape a `/api/v1` scope.
 fn path_has_dot_segment(path: &str) -> bool {
-    path.split('/').any(is_dot_segment)
+    path.split('/').any(is_traversal_segment)
 }
 
-fn is_dot_segment(segment: &str) -> bool {
+fn is_traversal_segment(segment: &str) -> bool {
     let decoded = percent_decode_bytes(segment.as_bytes());
-    matches!(decoded.as_slice(), b"." | b"..")
+    if matches!(decoded.as_slice(), b"." | b"..") {
+        return true;
+    }
+    // Embedded decoded `/` would be interpreted as a path separator by any
+    // server that re-splits after decoding. Treat the whole segment as
+    // traversal: if we cannot be sure the final routed path stays inside
+    // the declared scope, refuse to match.
+    if decoded.contains(&b'/') {
+        return true;
+    }
+    false
 }
 
 fn percent_decode_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -708,6 +724,25 @@ mod tests {
         // Mixed literal + encoded: `.%2e` decodes to `..`
         assert!(!path_matches_prefix("/api/v1/.%2e/admin", "/api/v1"));
         assert!(!path_matches_prefix("/api/v1/%2e./admin", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_percent_encoded_slash_smuggling() {
+        // Regression for Firat round-5 (#3126256056): `%2f` (encoded slash)
+        // inside a segment can be decoded back to `/` by some servers,
+        // turning e.g. `/api/v1/%2e%2e%2fadmin` into `/api/v1/../admin` at
+        // routing time — escaping the `/api/v1` scope. Since we can't know
+        // the downstream decoder's policy, refuse to match whenever a
+        // decoded segment contains a `/`.
+        use super::path_matches_prefix;
+        // The canonical attack: %2e%2e%2fadmin → ../admin
+        assert!(!path_matches_prefix("/api/v1/%2e%2e%2fadmin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2E%2E%2Fadmin", "/api/v1"));
+        // Embedded-slash variant inside a single segment — still rejected
+        // because the decoded form would split.
+        assert!(!path_matches_prefix("/api/v1/foo%2fbar", "/api/v1"));
+        // Uppercase form.
+        assert!(!path_matches_prefix("/api/v1/foo%2Fbar", "/api/v1"));
     }
 
     #[test]
