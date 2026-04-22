@@ -108,6 +108,10 @@ pub struct HybridStore {
     /// Tracks current workspace path for each doc so renames can delete the old file.
     doc_paths: RwLock<HashMap<DocId, String>>,
     workspace: Option<Arc<Workspace>>,
+    /// Database handle used for budget persistence. Optional because
+    /// tests that don't touch the budget system (the majority) construct
+    /// HybridStore without a DB.
+    database: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl HybridStore {
@@ -123,7 +127,22 @@ impl HybridStore {
             docs: RwLock::new(HashMap::new()),
             doc_paths: RwLock::new(HashMap::new()),
             workspace,
+            database: None,
         }
+    }
+
+    /// Attach a Database handle so budget operations (issue #2843) reach
+    /// the `BudgetStore` sub-trait on the backend. Without this, engine
+    /// Store budget methods return a "no database" error on use.
+    ///
+    /// Currently dead-code: the wiring in `init_engine` that passes the
+    /// database through to HybridStore has not landed yet. When it
+    /// does, remove this allow. Keeping the field + constructor in
+    /// place now prevents a later API break.
+    #[allow(dead_code)]
+    pub fn with_database(mut self, database: Arc<dyn crate::db::Database>) -> Self {
+        self.database = Some(database);
+        self
     }
 
     /// Load persisted engine state from the workspace on startup.
@@ -1953,6 +1972,213 @@ impl Store for HybridStore {
                 .await;
         }
         Ok(())
+    }
+
+    // ── Budget delegation (issue #2843) ─────────────────────────
+    //
+    // All budget state lives in the DB; no workspace-file mirror. A
+    // HybridStore without a `database` handle returns the default
+    // `unimplemented_budget_op` error so callers fail loudly rather
+    // than silently succeeding with in-memory-only budget state.
+
+    async fn save_budget(
+        &self,
+        budget: &ironclaw_engine::types::budget::Budget,
+    ) -> Result<(), ironclaw_engine::types::budget::BudgetError> {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        db.save_budget(budget).await.map_err(budget_db_err)
+    }
+
+    async fn load_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<
+        Option<ironclaw_engine::types::budget::Budget>,
+        ironclaw_engine::types::budget::BudgetError,
+    > {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        db.load_budget(id).await.map_err(budget_db_err)
+    }
+
+    async fn list_active_budgets_for_scope(
+        &self,
+        scope: &ironclaw_engine::types::budget::BudgetScope,
+    ) -> Result<
+        Vec<ironclaw_engine::types::budget::Budget>,
+        ironclaw_engine::types::budget::BudgetError,
+    > {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        db.list_active_budgets_for_scope(scope.kind_str(), &scope.scope_id())
+            .await
+            .map_err(budget_db_err)
+    }
+
+    async fn deactivate_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<(), ironclaw_engine::types::budget::BudgetError> {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        db.deactivate_budget(id).await.map_err(budget_db_err)
+    }
+
+    async fn get_or_create_ledger_for_period(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        ironclaw_engine::types::budget::BudgetLedger,
+        ironclaw_engine::types::budget::BudgetError,
+    > {
+        // The host-side trait takes explicit period bounds; the engine
+        // Store trait does not. We compute bounds here from the
+        // budget's period kind — for that we need the budget row first.
+        //
+        // NOTE: looking up the budget and then the ledger is two round
+        // trips. The performance-sensitive path (reserve) will use
+        // reserve_atomic directly, which computes bounds in the same
+        // way. A future optimisation could cache budget.period in the
+        // enforcer.
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        let budget = db
+            .load_budget(budget_id)
+            .await
+            .map_err(budget_db_err)?
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+        let (period_start, period_end) =
+            crate::bridge::budget_periods::period_bounds(&budget.period, now);
+        db.get_or_create_ledger_for_period(budget_id, period_start, period_end, now)
+            .await
+            .map_err(budget_db_err)
+    }
+
+    async fn reserve_atomic(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        requested_usd: rust_decimal::Decimal,
+        requested_tokens: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        Option<ironclaw_engine::traits::store::AtomicReserveOutcome>,
+        ironclaw_engine::types::budget::BudgetError,
+    > {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        let budget = db
+            .load_budget(budget_id)
+            .await
+            .map_err(budget_db_err)?
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+        let (period_start, period_end) =
+            crate::bridge::budget_periods::period_bounds(&budget.period, now);
+        let outcome = db
+            .reserve_atomic(
+                budget_id,
+                period_start,
+                period_end,
+                requested_usd,
+                requested_tokens,
+                budget.limit.usd,
+                now,
+            )
+            .await
+            .map_err(budget_db_err)?;
+        Ok(outcome.map(|(reservation_id, ledger)| {
+            ironclaw_engine::traits::store::AtomicReserveOutcome {
+                reservation_id,
+                budget_id,
+                reserved_usd: requested_usd,
+                reserved_tokens: requested_tokens,
+                ledger,
+            }
+        }))
+    }
+
+    async fn reconcile_reservation(
+        &self,
+        reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        original_reserved_usd: rust_decimal::Decimal,
+        actual_usd: rust_decimal::Decimal,
+        actual_tokens: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ironclaw_engine::types::budget::BudgetError> {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        let budget = db
+            .load_budget(budget_id)
+            .await
+            .map_err(budget_db_err)?
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+        let (period_start, _end) =
+            crate::bridge::budget_periods::period_bounds(&budget.period, now);
+        db.reconcile_reservation(
+            reservation_id,
+            budget_id,
+            period_start,
+            original_reserved_usd,
+            actual_usd,
+            actual_tokens,
+            now,
+        )
+        .await
+        .map_err(budget_db_err)
+    }
+
+    async fn release_reservation(
+        &self,
+        reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        original_reserved_usd: rust_decimal::Decimal,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ironclaw_engine::types::budget::BudgetError> {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        let budget = db
+            .load_budget(budget_id)
+            .await
+            .map_err(budget_db_err)?
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+        let (period_start, _end) =
+            crate::bridge::budget_periods::period_bounds(&budget.period, now);
+        db.release_reservation(
+            reservation_id,
+            budget_id,
+            period_start,
+            original_reserved_usd,
+            now,
+        )
+        .await
+        .map_err(budget_db_err)
+    }
+
+    async fn record_budget_event(
+        &self,
+        event: &ironclaw_engine::traits::store::BudgetEventRecord,
+    ) -> Result<(), ironclaw_engine::types::budget::BudgetError> {
+        let db = self.database.as_ref().ok_or_else(no_database)?;
+        db.record_budget_event(
+            uuid::Uuid::new_v4(),
+            event.budget_id,
+            event.thread_id,
+            event.event_kind.as_str(),
+            event.amount_usd,
+            event.tokens,
+            event.reason.as_deref(),
+            &event.actor_user_id,
+            event.created_at,
+        )
+        .await
+        .map_err(budget_db_err)
+    }
+}
+
+fn no_database() -> ironclaw_engine::types::budget::BudgetError {
+    ironclaw_engine::types::budget::BudgetError::Store {
+        reason: "HybridStore has no Database handle — call `.with_database(..)` at construction"
+            .into(),
+    }
+}
+
+fn budget_db_err(e: crate::error::DatabaseError) -> ironclaw_engine::types::budget::BudgetError {
+    ironclaw_engine::types::budget::BudgetError::Store {
+        reason: e.to_string(),
     }
 }
 

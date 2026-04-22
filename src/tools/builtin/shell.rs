@@ -61,8 +61,32 @@ use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
-/// Maximum output size before truncation (64KB).
-const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+/// Default maximum output size before truncation (30KB). Override via
+/// `BASH_MAX_OUTPUT_LENGTH`, clamped at `BASH_OUTPUT_HARD_CAP` (150KB)
+/// — per issue #2843's "per-tool output caps" bullet and the
+/// reference-research finding that unbounded `cargo build 2>&1`-style
+/// output is a recurring context-blowup path.
+///
+/// The historical value was 64KB; raising the default beyond that
+/// would regress token use for short commands, while lowering the cap
+/// would break tools that intentionally fetch longer logs. 30KB
+/// matches the reference implementation's default and is enforced per
+/// call, not per session.
+const DEFAULT_MAX_OUTPUT_SIZE: usize = 30 * 1024;
+const BASH_OUTPUT_HARD_CAP: usize = 150 * 1024;
+
+/// Resolve the active max-output-length by reading `BASH_MAX_OUTPUT_LENGTH`
+/// at each call. The env-var check is cheap and makes the limit
+/// testable without a global reset.
+fn max_output_size() -> usize {
+    match std::env::var("BASH_MAX_OUTPUT_LENGTH") {
+        Ok(s) => match s.trim().parse::<usize>() {
+            Ok(n) => n.clamp(1024, BASH_OUTPUT_HARD_CAP),
+            Err(_) => DEFAULT_MAX_OUTPUT_SIZE,
+        },
+        Err(_) => DEFAULT_MAX_OUTPUT_SIZE,
+    }
+}
 
 /// Default command timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -911,15 +935,12 @@ impl ShellTool {
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
+        let cap = max_output_size();
         let result = tokio::time::timeout(timeout, async {
             let stdout_fut = async {
                 if let Some(mut out) = stdout_handle {
                     let mut buf = Vec::new();
-                    (&mut out)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await
-                        .ok();
+                    (&mut out).take(cap as u64).read_to_end(&mut buf).await.ok();
                     // Drain any remaining output so the child does not block
                     tokio::io::copy(&mut out, &mut tokio::io::sink()).await.ok();
                     String::from_utf8_lossy(&buf).to_string()
@@ -931,11 +952,7 @@ impl ShellTool {
             let stderr_fut = async {
                 if let Some(mut err) = stderr_handle {
                     let mut buf = Vec::new();
-                    (&mut err)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await
-                        .ok();
+                    (&mut err).take(cap as u64).read_to_end(&mut buf).await.ok();
                     tokio::io::copy(&mut err, &mut tokio::io::sink()).await.ok();
                     String::from_utf8_lossy(&buf).to_string()
                 } else {
@@ -1167,18 +1184,23 @@ impl Tool for ShellTool {
     }
 }
 
-/// Truncate output to fit within limits (UTF-8 safe).
+/// Truncate output to fit within limits (UTF-8 safe). The active cap
+/// is read from `BASH_MAX_OUTPUT_LENGTH` at each call, clamped to
+/// `BASH_OUTPUT_HARD_CAP` (150KB). The truncated chunk is replaced
+/// with a head/tail preservation + byte-count marker.
 fn truncate_output(s: &str) -> String {
-    if s.len() <= MAX_OUTPUT_SIZE {
+    let max = max_output_size();
+    if s.len() <= max {
         s.to_string()
     } else {
-        let half = MAX_OUTPUT_SIZE / 2;
+        let half = max / 2;
         let head_end = crate::util::floor_char_boundary(s, half);
         let tail_start = crate::util::floor_char_boundary(s, s.len() - half);
         format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
+            "{}\n\n... [truncated {} bytes; raise BASH_MAX_OUTPUT_LENGTH up to {} to see more] ...\n\n{}",
             &s[..head_end],
-            s.len() - MAX_OUTPUT_SIZE,
+            s.len() - max,
+            BASH_OUTPUT_HARD_CAP,
             &s[tail_start..]
         )
     }
@@ -1757,8 +1779,38 @@ mod tests {
             .unwrap();
 
         let output = result.result.get("output").unwrap().as_str().unwrap();
-        assert_eq!(output.len(), MAX_OUTPUT_SIZE);
+        // The `.take(cap)` in the reader caps the buffer at
+        // `max_output_size()` before `truncate_output` sees it, so the
+        // result length equals the active cap (no extra marker bytes).
+        assert_eq!(output.len(), max_output_size());
         assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn bash_max_output_length_env_var_is_respected() {
+        // SAFETY: tests run single-threaded per module file by default,
+        // but set_var is a process-wide mutation. If this test ever
+        // flakes under parallel execution, hoist this into a
+        // #[serial_test::serial] block.
+        unsafe {
+            std::env::set_var("BASH_MAX_OUTPUT_LENGTH", "2048");
+        }
+        assert_eq!(max_output_size(), 2048);
+
+        unsafe {
+            std::env::set_var("BASH_MAX_OUTPUT_LENGTH", "999999999");
+        }
+        assert_eq!(max_output_size(), BASH_OUTPUT_HARD_CAP);
+
+        unsafe {
+            std::env::set_var("BASH_MAX_OUTPUT_LENGTH", "not-a-number");
+        }
+        assert_eq!(max_output_size(), DEFAULT_MAX_OUTPUT_SIZE);
+
+        unsafe {
+            std::env::remove_var("BASH_MAX_OUTPUT_LENGTH");
+        }
+        assert_eq!(max_output_size(), DEFAULT_MAX_OUTPUT_SIZE);
     }
 
     #[tokio::test]

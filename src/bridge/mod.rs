@@ -5,6 +5,7 @@
 //! existing behavior is unchanged when the flag is off.
 
 pub mod auth_manager;
+pub(crate) mod budget_periods;
 mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
