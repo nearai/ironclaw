@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -617,6 +617,43 @@ impl HybridStore {
             }
         }
         files
+    }
+
+    async fn persisted_thread_summaries(
+        &self,
+        ws: &Workspace,
+        project_id: ProjectId,
+        user_id: &str,
+    ) -> Vec<ThreadSummary> {
+        #[derive(Deserialize)]
+        struct PersistedThreadSummary {
+            id: ThreadId,
+            state: ThreadState,
+            project_id: ProjectId,
+            user_id: String,
+            created_at: chrono::DateTime<chrono::Utc>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let mut summaries = Vec::new();
+        for entry in self.file_entries(ws, THREADS_PREFIX, &[".json"]).await {
+            match ws.read(&entry.path).await {
+                Ok(doc) => match serde_json::from_str::<PersistedThreadSummary>(&doc.content) {
+                    Ok(thread) if thread.project_id == project_id && thread.user_id == user_id => {
+                        summaries.push(ThreadSummary {
+                            id: thread.id,
+                            state: thread.state,
+                            created_at: thread.created_at,
+                            updated_at: thread.updated_at,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(e) => debug!(path = %entry.path, "failed to parse thread summary: {e}"),
+                },
+                Err(e) => debug!(path = %entry.path, "failed to read thread summary: {e}"),
+            }
+        }
+        summaries
     }
 
     async fn persist_json<T: serde::Serialize>(&self, path: String, value: &T) {
@@ -1547,14 +1584,25 @@ impl Store for HybridStore {
         project_id: ProjectId,
         user_id: &str,
     ) -> Result<Vec<ThreadSummary>, EngineError> {
-        Ok(self
+        let mut summaries: HashMap<ThreadId, ThreadSummary> = self
             .threads
             .read()
             .await
             .values()
             .filter(|thread| thread.project_id == project_id && thread.user_id == user_id)
-            .map(ThreadSummary::from)
-            .collect())
+            .map(|thread| (thread.id, ThreadSummary::from(thread)))
+            .collect();
+
+        if let Some(ws) = self.workspace.as_ref() {
+            for summary in self
+                .persisted_thread_summaries(ws, project_id, user_id)
+                .await
+            {
+                summaries.entry(summary.id).or_insert(summary);
+            }
+        }
+
+        Ok(summaries.into_values().collect())
     }
 
     async fn update_thread_state(

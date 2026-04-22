@@ -4991,11 +4991,16 @@ fn mission_run_summaries_from_lookup(
 async fn load_mission_run_threads(
     store: &Arc<dyn Store>,
     mission: &ironclaw_engine::Mission,
+    user_id: &str,
 ) -> Result<Vec<ironclaw_engine::Thread>, Error> {
     let mut threads = Vec::new();
     for tid in &mission.thread_history {
         match store.load_thread(*tid).await {
-            Ok(Some(thread)) => threads.push(thread),
+            Ok(Some(thread)) => {
+                if thread_owner_visible_to_user(&thread.user_id, user_id) {
+                    threads.push(thread);
+                }
+            }
             Ok(None) => {}
             Err(e) => return Err(engine_err("load mission thread", e)),
         }
@@ -5015,6 +5020,12 @@ fn visible_thread_owner_ids(user_id: &str) -> Vec<&str> {
         owner_ids.extend(ironclaw_engine::types::shared_owner_candidates());
         owner_ids
     }
+}
+
+fn thread_owner_visible_to_user(thread_owner_id: &str, user_id: &str) -> bool {
+    visible_thread_owner_ids(user_id)
+        .into_iter()
+        .any(|owner_id| owner_id == thread_owner_id)
 }
 
 async fn load_visible_project_thread_summaries(
@@ -5568,7 +5579,7 @@ pub async fn get_engine_mission(
 
     let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
 
-    let run_threads = load_mission_run_threads(&state.store, &m).await?;
+    let run_threads = load_mission_run_threads(&state.store, &m, user_id).await?;
     let run_summaries: Vec<_> = run_threads
         .iter()
         .map(ironclaw_engine::ThreadSummary::from)
@@ -7650,8 +7661,8 @@ mod tests {
 
     // ── /expected command tests ─────────────────────────────────
 
-    /// Build a minimal EngineState backed by a TestStore for /expected tests.
-    fn make_expected_test_state(store: Arc<TestStore>) -> EngineState {
+    /// Build a minimal EngineState backed by the provided Store.
+    fn make_test_engine_state(store_dyn: Arc<dyn Store>) -> EngineState {
         use ironclaw_engine::{
             CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
         };
@@ -7696,7 +7707,6 @@ mod tests {
             }
         }
 
-        let store_dyn: Arc<dyn Store> = store;
         let effect_adapter = Arc::new(EffectBridgeAdapter::new(
             Arc::new(crate::tools::ToolRegistry::new()),
             Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -7733,6 +7743,11 @@ mod tests {
             extension_manager: None,
             project_root: resolve_project_root(),
         }
+    }
+
+    /// Build a minimal EngineState backed by a TestStore for /expected tests.
+    fn make_expected_test_state(store: Arc<TestStore>) -> EngineState {
+        make_test_engine_state(store)
     }
 
     async fn make_test_agent_with_status_channel(
@@ -9023,6 +9038,174 @@ mod tests {
                 in_progress_runs: 0,
                 last_run_at: Some(legacy_thread.created_at.to_rfc3339()),
                 last_run_state: Some("Failed".to_string()),
+            }
+        );
+
+        *lock.write().await = None;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn list_engine_missions_counts_evicted_terminal_runs_from_hybrid_store() {
+        use crate::bridge::store_adapter::HybridStore;
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::Workspace;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create libsql backend");
+        backend.run_migrations().await.expect("run migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("alice", db));
+
+        let store = Arc::new(HybridStore::new(Some(Arc::clone(&workspace))));
+        let state = make_test_engine_state(store.clone());
+        let project_id = state.default_project_id;
+        let now = chrono::Utc::now();
+
+        let mut completed = ironclaw_engine::Thread::new(
+            "persisted completed run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        completed.state = ironclaw_engine::ThreadState::Done;
+        completed.created_at = now - chrono::Duration::hours(2);
+        completed.updated_at = completed.created_at;
+        completed.completed_at = Some(completed.created_at);
+        store.save_thread(&completed).await.unwrap();
+
+        let mut mission = ironclaw_engine::Mission::new(
+            project_id,
+            "alice",
+            "Cleanup-safe mission",
+            "Keep historical run counts",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        mission.thread_history = vec![completed.id];
+        store.save_mission(&mission).await.unwrap();
+
+        let cleaned = store
+            .cleanup_terminal_state(chrono::Duration::minutes(5))
+            .await;
+        assert!(
+            cleaned >= 1,
+            "expected cleanup to evict at least one terminal thread"
+        );
+
+        *lock.write().await = Some(state);
+
+        let missions = list_engine_missions(None, "alice").await.unwrap();
+        assert_eq!(missions.len(), 1);
+        assert_eq!(missions[0].thread_count, 1);
+        assert_eq!(
+            missions[0].run_summary,
+            EngineMissionRunSummary {
+                total_runs: 1,
+                completed_runs: 1,
+                failed_runs: 0,
+                in_progress_runs: 0,
+                last_run_at: Some(completed.created_at.to_rfc3339()),
+                last_run_state: Some("Completed".to_string()),
+            }
+        );
+
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn get_engine_mission_hides_other_users_runs_for_shared_missions() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+        let project_id = state.default_project_id;
+        let now = chrono::Utc::now();
+
+        let mut alice_run = ironclaw_engine::Thread::new(
+            "alice run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        alice_run.state = ironclaw_engine::ThreadState::Done;
+        alice_run.created_at = now - chrono::Duration::hours(3);
+        alice_run.updated_at = alice_run.created_at;
+
+        let mut shared_run = ironclaw_engine::Thread::new(
+            "shared run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            ironclaw_engine::types::SHARED_OWNER_ID,
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        shared_run.state = ironclaw_engine::ThreadState::Failed;
+        shared_run.created_at = now - chrono::Duration::hours(2);
+        shared_run.updated_at = shared_run.created_at;
+
+        let mut bob_run = ironclaw_engine::Thread::new(
+            "bob run",
+            ironclaw_engine::ThreadType::Mission,
+            project_id,
+            "bob",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        bob_run.state = ironclaw_engine::ThreadState::Waiting;
+        bob_run.created_at = now - chrono::Duration::hours(1);
+        bob_run.updated_at = bob_run.created_at;
+
+        store.save_thread(&alice_run).await.unwrap();
+        store.save_thread(&shared_run).await.unwrap();
+        store.save_thread(&bob_run).await.unwrap();
+
+        let mut mission = ironclaw_engine::Mission::new(
+            project_id,
+            ironclaw_engine::types::SHARED_OWNER_ID,
+            "Shared trigger mission",
+            "Respond to shared events",
+            ironclaw_engine::MissionCadence::Manual,
+        );
+        mission.thread_history = vec![alice_run.id, shared_run.id, bob_run.id];
+        let mission_id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        *lock.write().await = Some(state);
+
+        let detail = get_engine_mission(&mission_id.to_string(), "bob")
+            .await
+            .unwrap()
+            .expect("shared mission detail should exist");
+
+        let ordered_ids: Vec<_> = detail
+            .threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect();
+        assert_eq!(
+            ordered_ids,
+            vec![bob_run.id.to_string(), shared_run.id.to_string()]
+        );
+        assert_eq!(detail.info.thread_count, 2);
+        assert_eq!(
+            detail.info.run_summary,
+            EngineMissionRunSummary {
+                total_runs: 2,
+                completed_runs: 0,
+                failed_runs: 1,
+                in_progress_runs: 1,
+                last_run_at: Some(bob_run.created_at.to_rfc3339()),
+                last_run_state: Some("In Progress".to_string()),
             }
         );
 
