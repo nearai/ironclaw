@@ -348,8 +348,7 @@ impl EffectBridgeAdapter {
         params: &serde_json::Value,
         context: &ThreadExecutionContext,
     ) -> Option<Result<ActionResult, EngineError>> {
-        let mgr = self.mission_manager.read().await;
-        let mgr = mgr.as_ref()?;
+        let mgr = self.mission_manager.read().await.as_ref().cloned()?;
 
         // Translate routine_* aliases to mission_* before dispatching. The
         // routine schema is richer (kind/schedule/pattern/source/event_type/
@@ -1901,17 +1900,25 @@ async fn resolve_mission_identity(
     let missions = mgr
         .list_missions(context.project_id, &context.user_id)
         .await?;
-    match missions.iter().find(|m| m.name == name) {
-        Some(m) => {
-            obj.insert("id".into(), serde_json::Value::String(m.id.to_string()));
-            Ok(())
-        }
-        None => Err(EngineError::Effect {
+    let mut matches = missions.iter().filter(|m| m.name == name);
+    let Some(mission) = matches.next() else {
+        return Err(EngineError::Effect {
             reason: format!(
                 "no mission named {name:?}; call `mission_list()` to see available missions"
             ),
-        }),
+        });
+    };
+
+    if matches.next().is_some() {
+        return Err(EngineError::Effect {
+            reason: format!(
+                "multiple missions are named {name:?}; use `id` instead or call `mission_list()` to disambiguate"
+            ),
+        });
     }
+
+    obj.insert("id".into(), serde_json::Value::String(mission.id.to_string()));
+    Ok(())
 }
 
 /// Translate a `routine_*` action call into mission_* parameters. Returns
