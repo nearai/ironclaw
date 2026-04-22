@@ -4436,6 +4436,11 @@ mod tests {
         provider_extension: String,
     }
 
+    struct ProviderFixture {
+        adapter: EffectBridgeAdapter,
+        _dir: tempfile::TempDir,
+    }
+
     #[async_trait]
     impl crate::tools::Tool for ProviderActionTool {
         fn name(&self) -> &str {
@@ -4470,7 +4475,7 @@ mod tests {
         provider_name: &str,
         action_name: &str,
         capabilities: serde_json::Value,
-    ) -> EffectBridgeAdapter {
+    ) -> ProviderFixture {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4478,7 +4483,6 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let dir_path = dir.path().to_path_buf();
-        std::mem::forget(dir);
         std::fs::create_dir_all(dir_path.join("tools")).expect("tools dir");
         std::fs::write(
             dir_path.join("tools").join(format!("{provider_name}.wasm")),
@@ -4539,12 +4543,12 @@ mod tests {
             )))
             .await;
 
-        adapter
+        ProviderFixture { adapter, _dir: dir }
     }
 
     #[tokio::test]
     async fn available_actions_omit_installed_needs_auth_provider_action() {
-        let adapter = make_adapter_with_installed_provider_fixture(
+        let fixture = make_adapter_with_installed_provider_fixture(
             "gmail",
             "gmail_send",
             serde_json::json!({
@@ -4568,7 +4572,8 @@ mod tests {
         )
         .await;
 
-        let actions = adapter
+        let actions = fixture
+            .adapter
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
@@ -4577,7 +4582,7 @@ mod tests {
 
     #[tokio::test]
     async fn available_actions_omit_installed_needs_setup_provider_action() {
-        let adapter = make_adapter_with_installed_provider_fixture(
+        let fixture = make_adapter_with_installed_provider_fixture(
             "notion",
             "notion_search",
             serde_json::json!({
@@ -4593,7 +4598,8 @@ mod tests {
         )
         .await;
 
-        let actions = adapter
+        let actions = fixture
+            .adapter
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
@@ -4602,7 +4608,7 @@ mod tests {
 
     #[tokio::test]
     async fn available_actions_omit_installed_inactive_provider_action() {
-        let adapter = make_adapter_with_installed_provider_fixture(
+        let fixture = make_adapter_with_installed_provider_fixture(
             "github",
             "github_search",
             serde_json::json!({
@@ -4611,7 +4617,8 @@ mod tests {
         )
         .await;
 
-        let actions = adapter
+        let actions = fixture
+            .adapter
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
