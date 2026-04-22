@@ -285,6 +285,36 @@ Acceptance criteria:
 
 - result types improve ergonomics without introducing brittle Monty behavior
 
+### Implemented object pass (2026-04-22)
+
+Implemented an **experimental gated object layer** instead of replacing the existing dict contract globally.
+
+Controls:
+
+- env/config: `CODEACT_HOST_RESULT_OBJECTS=true|false`
+- per-thread: `ThreadConfig.codeact_host_result_objects`
+- harnesses: `with_codeact_host_result_objects(...)`
+
+Behavior when enabled:
+
+- `http_get(...)` / `http_request(...)` return `HttpResponse`
+  - attrs: `ok`, `status`, `headers`, `body`, `text`, `json_body`, `duration_ms`
+  - method: `json()`
+- `run(...)` returns `CompletedProcess`
+  - attrs: `ok`, `exit_code`, `stdout`, `stderr`, `sandboxed`, `duration_ms`
+  - method: `check_returncode()`
+
+Why gated/off-by-default:
+
+- avoids breaking existing dict-based replay fixtures and shim benchmarks
+- lets us evaluate real ergonomics before committing to a global return-shape change
+- preserves the already-proven Phase 1/2 contract as the stable baseline
+
+Current explicit deferral:
+
+- `Path` was **not** added in this pass
+- direct ungated replacement of dicts was **not** done
+
 ## Phase 4 — scenario evaluation and A/B metrics
 
 Use the existing repo infrastructure rather than inventing a new benchmark harness.

@@ -558,71 +558,75 @@ pub async fn execute_code_with_skills(
                 // it to None. LLMs frequently emit `await FINAL(...)` by
                 // analogy with tool calls, so supporting both avoids a whole
                 // class of "NoneType can't be awaited" failures.
-                let sync_result = match action_name.as_str() {
-                    "FINAL" => {
-                        let answer = call.args.first().map(monty_to_string).unwrap_or_default();
-                        final_answer = Some(answer);
-                        pending_futures.insert(monty_call_id, PendingFuture::ready_none());
-                        None
+                let sync_result = if call.method_call {
+                    handle_host_result_object_method_call(&action_name, &call.args)
+                } else {
+                    match action_name.as_str() {
+                        "FINAL" => {
+                            let answer = call.args.first().map(monty_to_string).unwrap_or_default();
+                            final_answer = Some(answer);
+                            pending_futures.insert(monty_call_id, PendingFuture::ready_none());
+                            None
+                        }
+                        "FINAL_VAR" => {
+                            let var_name = call
+                                .args
+                                .first()
+                                .map(monty_to_string)
+                                .unwrap_or_else(|| "result".into());
+                            final_answer = Some(format!("[FINAL_VAR: {var_name}]"));
+                            pending_futures.insert(monty_call_id, PendingFuture::ready_none());
+                            None
+                        }
+                        // LLM calls are async — spawn tokio task, resume_pending.
+                        // This allows asyncio.gather(llm_query(...), tool(...))
+                        // to run the LLM call and tool call concurrently.
+                        "llm_query" => {
+                            let args = call.args.clone();
+                            let kwargs = call.kwargs.clone();
+                            let llm = llm.clone();
+                            let handle = tokio::spawn(async move {
+                                handle_llm_query_standalone(&args, &kwargs, &llm).await
+                            });
+                            pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
+                            None // handled as async below
+                        }
+                        "llm_query_batched" => {
+                            let args = call.args.clone();
+                            let kwargs = call.kwargs.clone();
+                            let llm = llm.clone();
+                            let handle = tokio::spawn(async move {
+                                handle_llm_query_batched_standalone(&args, &kwargs, &llm).await
+                            });
+                            pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
+                            None
+                        }
+                        // rlm_query stays synchronous — it spawns a child Monty VM
+                        // which isn't Send, so it can't run in tokio::spawn.
+                        "rlm_query" => Some(
+                            handle_rlm_query(
+                                &call.args,
+                                &call.kwargs,
+                                thread,
+                                llm,
+                                effects,
+                                leases,
+                                policy,
+                                &mut recursive_tokens,
+                            )
+                            .await,
+                        ),
+                        "globals" | "locals" => {
+                            let entries: Vec<(MontyObject, MontyObject)> = known_actions
+                                .iter()
+                                .map(|name| {
+                                    (MontyObject::String(name.clone()), MontyObject::Bool(true))
+                                })
+                                .collect();
+                            Some(ExtFunctionResult::Return(MontyObject::Dict(entries.into())))
+                        }
+                        _ => None, // tool call — handled async below
                     }
-                    "FINAL_VAR" => {
-                        let var_name = call
-                            .args
-                            .first()
-                            .map(monty_to_string)
-                            .unwrap_or_else(|| "result".into());
-                        final_answer = Some(format!("[FINAL_VAR: {var_name}]"));
-                        pending_futures.insert(monty_call_id, PendingFuture::ready_none());
-                        None
-                    }
-                    // LLM calls are async — spawn tokio task, resume_pending.
-                    // This allows asyncio.gather(llm_query(...), tool(...))
-                    // to run the LLM call and tool call concurrently.
-                    "llm_query" => {
-                        let args = call.args.clone();
-                        let kwargs = call.kwargs.clone();
-                        let llm = llm.clone();
-                        let handle = tokio::spawn(async move {
-                            handle_llm_query_standalone(&args, &kwargs, &llm).await
-                        });
-                        pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
-                        None // handled as async below
-                    }
-                    "llm_query_batched" => {
-                        let args = call.args.clone();
-                        let kwargs = call.kwargs.clone();
-                        let llm = llm.clone();
-                        let handle = tokio::spawn(async move {
-                            handle_llm_query_batched_standalone(&args, &kwargs, &llm).await
-                        });
-                        pending_futures.insert(monty_call_id, PendingFuture::Llm { handle });
-                        None
-                    }
-                    // rlm_query stays synchronous — it spawns a child Monty VM
-                    // which isn't Send, so it can't run in tokio::spawn.
-                    "rlm_query" => Some(
-                        handle_rlm_query(
-                            &call.args,
-                            &call.kwargs,
-                            thread,
-                            llm,
-                            effects,
-                            leases,
-                            policy,
-                            &mut recursive_tokens,
-                        )
-                        .await,
-                    ),
-                    "globals" | "locals" => {
-                        let entries: Vec<(MontyObject, MontyObject)> = known_actions
-                            .iter()
-                            .map(|name| {
-                                (MontyObject::String(name.clone()), MontyObject::Bool(true))
-                            })
-                            .collect();
-                        Some(ExtFunctionResult::Return(MontyObject::Dict(entries.into())))
-                    }
-                    _ => None, // tool call — handled async below
                 };
 
                 if let Some(ext_result) = sync_result {
@@ -990,6 +994,7 @@ pub async fn execute_code_with_skills(
                                     parameters,
                                     params_summary,
                                     result_adapter,
+                                    thread.config.codeact_host_result_objects,
                                     leases,
                                     context,
                                     &mut action_results,
@@ -1491,6 +1496,9 @@ fn required_string_param_with_aliases(
     )))
 }
 
+const HTTP_RESPONSE_TYPE_ID: u64 = 0x4854_5450_5245_5350;
+const COMPLETED_PROCESS_TYPE_ID: u64 = 0x5052_4f43_4553_5301;
+
 fn adapt_tool_output(
     adapter: ToolResultAdapter,
     output: &serde_json::Value,
@@ -1521,6 +1529,30 @@ fn adapt_tool_output(
             .cloned()
             .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))),
     }
+}
+
+fn adapt_tool_output_to_monty(
+    adapter: ToolResultAdapter,
+    output: &serde_json::Value,
+    rich_result_objects: bool,
+    duration_ms: Option<u64>,
+) -> Result<MontyObject, String> {
+    if rich_result_objects {
+        match adapter {
+            ToolResultAdapter::HttpResponse => {
+                return Ok(build_http_response_object(output, duration_ms.unwrap_or(0)));
+            }
+            ToolResultAdapter::Run => {
+                return Ok(build_completed_process_object(
+                    output,
+                    duration_ms.unwrap_or(0),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    adapt_tool_output(adapter, output).map(|adapted| json_to_monty(&adapted))
 }
 
 fn adapt_list_entries_output(output: &serde_json::Value) -> serde_json::Value {
@@ -1604,6 +1636,216 @@ fn adapt_http_response_output(output: &serde_json::Value) -> serde_json::Value {
         "text": text,
         "json_body": json_body,
     })
+}
+
+fn build_http_response_object(output: &serde_json::Value, duration_ms: u64) -> MontyObject {
+    let adapted = adapt_http_response_output(output);
+    build_host_dataclass(
+        "HttpResponse",
+        HTTP_RESPONSE_TYPE_ID,
+        vec![
+            "ok",
+            "status",
+            "headers",
+            "body",
+            "text",
+            "json_body",
+            "duration_ms",
+        ],
+        vec![
+            (
+                "ok",
+                json_to_monty(adapted.get("ok").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "status",
+                json_to_monty(adapted.get("status").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "headers",
+                json_to_monty(adapted.get("headers").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "body",
+                json_to_monty(adapted.get("body").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "text",
+                json_to_monty(adapted.get("text").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "json_body",
+                json_to_monty(adapted.get("json_body").unwrap_or(&serde_json::Value::Null)),
+            ),
+            ("duration_ms", MontyObject::Int(duration_ms as i64)),
+        ],
+    )
+}
+
+fn build_completed_process_object(output: &serde_json::Value, duration_ms: u64) -> MontyObject {
+    build_host_dataclass(
+        "CompletedProcess",
+        COMPLETED_PROCESS_TYPE_ID,
+        vec![
+            "ok",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "sandboxed",
+            "duration_ms",
+        ],
+        vec![
+            (
+                "ok",
+                json_to_monty(
+                    output
+                        .get("success")
+                        .unwrap_or(&serde_json::Value::Bool(false)),
+                ),
+            ),
+            (
+                "exit_code",
+                json_to_monty(output.get("exit_code").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "stdout",
+                json_to_monty(output.get("output").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "stderr",
+                json_to_monty(output.get("stderr").unwrap_or(&serde_json::Value::Null)),
+            ),
+            (
+                "sandboxed",
+                json_to_monty(output.get("sandboxed").unwrap_or(&serde_json::Value::Null)),
+            ),
+            ("duration_ms", MontyObject::Int(duration_ms as i64)),
+        ],
+    )
+}
+
+fn build_host_dataclass(
+    name: &str,
+    type_id: u64,
+    field_names: Vec<&str>,
+    attrs: Vec<(&str, MontyObject)>,
+) -> MontyObject {
+    let pairs: Vec<(MontyObject, MontyObject)> = attrs
+        .into_iter()
+        .map(|(key, value)| (MontyObject::String(key.to_string()), value))
+        .collect();
+
+    MontyObject::Dataclass {
+        name: name.to_string(),
+        type_id,
+        field_names: field_names
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect(),
+        attrs: pairs.into(),
+        frozen: true,
+    }
+}
+
+fn dataclass_attr<'a>(attrs: &'a monty::DictPairs, key: &str) -> Option<&'a MontyObject> {
+    attrs.into_iter().find_map(|(name, value)| match name {
+        MontyObject::String(s) if s == key => Some(value),
+        _ => None,
+    })
+}
+
+fn handle_host_result_object_method_call(
+    function_name: &str,
+    args: &[MontyObject],
+) -> Option<ExtFunctionResult> {
+    let self_obj = args.first()?;
+    match self_obj {
+        MontyObject::Dataclass { name, attrs, .. } if name == "HttpResponse" => {
+            Some(handle_http_response_method(function_name, args, attrs))
+        }
+        MontyObject::Dataclass { name, attrs, .. } if name == "CompletedProcess" => {
+            Some(handle_completed_process_method(function_name, args, attrs))
+        }
+        _ => Some(ExtFunctionResult::Error(MontyException::new(
+            ExcType::RuntimeError,
+            Some(format!(
+                "unsupported host result object method '{}()'",
+                function_name
+            )),
+        ))),
+    }
+}
+
+fn handle_http_response_method(
+    function_name: &str,
+    args: &[MontyObject],
+    attrs: &monty::DictPairs,
+) -> ExtFunctionResult {
+    match function_name {
+        "json" => {
+            if args.len() != 1 {
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::TypeError,
+                    Some("HttpResponse.json() takes no arguments".into()),
+                ));
+            }
+            let json_body = dataclass_attr(attrs, "json_body")
+                .cloned()
+                .unwrap_or(MontyObject::None);
+            if matches!(json_body, MontyObject::None) {
+                ExtFunctionResult::Error(MontyException::new(
+                    ExcType::ValueError,
+                    Some("HttpResponse.json() called on a non-JSON response".into()),
+                ))
+            } else {
+                ExtFunctionResult::Return(json_body)
+            }
+        }
+        _ => ExtFunctionResult::Error(MontyException::new(
+            ExcType::RuntimeError,
+            Some(format!(
+                "HttpResponse has no host method '{}()'",
+                function_name
+            )),
+        )),
+    }
+}
+
+fn handle_completed_process_method(
+    function_name: &str,
+    args: &[MontyObject],
+    attrs: &monty::DictPairs,
+) -> ExtFunctionResult {
+    match function_name {
+        "check_returncode" => {
+            if args.len() != 1 {
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::TypeError,
+                    Some("CompletedProcess.check_returncode() takes no arguments".into()),
+                ));
+            }
+            let ok = matches!(dataclass_attr(attrs, "ok"), Some(MontyObject::Bool(true)));
+            let exit_code = match dataclass_attr(attrs, "exit_code") {
+                Some(MontyObject::Int(code)) => *code,
+                _ => -1,
+            };
+            if ok || exit_code == 0 {
+                ExtFunctionResult::Return(MontyObject::None)
+            } else {
+                ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("CompletedProcess exited with status {}", exit_code)),
+                ))
+            }
+        }
+        _ => ExtFunctionResult::Error(MontyException::new(
+            ExcType::RuntimeError,
+            Some(format!(
+                "CompletedProcess has no host method '{}()'",
+                function_name
+            )),
+        )),
+    }
 }
 
 // ── Pending future tracking ─────────────────────────────────
@@ -2360,6 +2602,7 @@ async fn handle_rlm_query(
         depth: current_depth + 1,
         max_depth,
         codeact_host_shims: parent_thread.config.codeact_host_shims,
+        codeact_host_result_objects: parent_thread.config.codeact_host_result_objects,
         ..crate::types::thread::ThreadConfig::default()
     };
 
@@ -2495,6 +2738,7 @@ async fn resolve_tool_future(
     parameters: serde_json::Value,
     params_summary: Option<String>,
     result_adapter: ToolResultAdapter,
+    rich_result_objects: bool,
     leases: &LeaseManager,
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
@@ -2538,8 +2782,13 @@ async fn resolve_tool_future(
                 });
             }
             action_results.push(result.clone());
-            match adapt_tool_output(result_adapter, &result.output) {
-                Ok(adapted) => ExtFunctionResult::Return(json_to_monty(&adapted)),
+            match adapt_tool_output_to_monty(
+                result_adapter,
+                &result.output,
+                rich_result_objects,
+                Some(result.duration.as_millis() as u64),
+            ) {
+                Ok(adapted) => ExtFunctionResult::Return(adapted),
                 Err(message) => ExtFunctionResult::Error(MontyException::new(
                     ExcType::ValueError,
                     Some(message),
@@ -2720,6 +2969,20 @@ pub(crate) fn monty_to_json(obj: &MontyObject) -> serde_json::Value {
         }
         MontyObject::Bytes(b) => {
             serde_json::Value::String(b.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
+        MontyObject::Path(path) => serde_json::Value::String(path.clone()),
+        MontyObject::Dataclass { attrs, .. } => {
+            let map: serde_json::Map<String, serde_json::Value> = attrs
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        MontyObject::String(s) => s.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (key, monty_to_json(v))
+                })
+                .collect();
+            serde_json::Value::Object(map)
         }
         other => serde_json::Value::String(format!("{other:?}")),
     }
@@ -3180,6 +3443,100 @@ FINAL(str("read_text" in globals()) + "|" + str("read_file" in globals()))
             effects.recorded_calls().is_empty(),
             "no tool calls expected"
         );
+    }
+
+    #[tokio::test]
+    async fn rich_http_response_object_supports_attribute_access_and_json_method() {
+        let mut thread = make_test_thread();
+        thread.config.codeact_host_result_objects = true;
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("http")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "http".into(),
+                output: serde_json::json!({
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"answer": 42}
+                }),
+                is_error: false,
+                duration: Duration::from_millis(3),
+            })],
+        ));
+
+        let code = r#"
+resp = await http_get("https://example.com/api")
+payload = resp.json()
+FINAL(str(resp.ok) + "|" + str(resp.status) + "|" + str(payload["answer"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|200|42"));
+    }
+
+    #[tokio::test]
+    async fn rich_completed_process_object_supports_stdout_and_check_returncode() {
+        let mut thread = make_test_thread();
+        thread.config.codeact_host_result_objects = true;
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("shell")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "shell".into(),
+                output: serde_json::json!({
+                    "success": true,
+                    "exit_code": 0,
+                    "output": "hi\n",
+                    "stderr": "",
+                    "sandboxed": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(4),
+            })],
+        ));
+
+        let code = r#"
+proc = await run("echo hi")
+proc.check_returncode()
+FINAL(str(proc.ok) + "|" + proc.stdout.strip() + "|" + str(proc.duration_ms >= 1))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|hi|True"));
+    }
+
+    #[tokio::test]
+    async fn rich_completed_process_check_returncode_raises_runtime_error() {
+        let mut thread = make_test_thread();
+        thread.config.codeact_host_result_objects = true;
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("shell")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "shell".into(),
+                output: serde_json::json!({
+                    "success": false,
+                    "exit_code": 7,
+                    "output": "",
+                    "stderr": "boom",
+                    "sandboxed": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(4),
+            })],
+        ));
+
+        let code = r#"
+proc = await run("false")
+proc.check_returncode()
+FINAL("should-not-run")
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.final_answer.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.failure, Some(CodeExecutionFailure::RuntimeError));
     }
 
     #[tokio::test]
