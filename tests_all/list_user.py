@@ -1,4 +1,0 @@
-import os, requests                                                                                                                                                                                                                                                                             
-r = requests.get(f"{os.environ['BASE_URL']}/api/admin/users", headers={"Authorization": f"Bearer {os.environ['ADMIN_TOKEN']}"})                                                                                                                                                                 
-for u in r.json()["users"]:                                                                                                                                                                                                                                                                     
-    print(f"{u['id']:<40} {u['display_name']:<25} {u['status']}")
