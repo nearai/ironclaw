@@ -183,7 +183,13 @@ impl SharedCredentialRegistry {
         self.find_for_url(host, "/")
     }
 
-    /// Get all credential mappings matching a host and path.
+    /// Get all credential mappings matching a host and path, ordered by
+    /// **ascending path specificity** (longest matching prefix last). Callers
+    /// iterate and merge headers/query params under last-write-wins, so the
+    /// most-specific mapping overrides any conflicts from less-specific
+    /// mappings. Ties (same specificity) break alphabetically on
+    /// `secret_name` for deterministic ordering regardless of registration
+    /// order.
     pub fn find_for_url(&self, host: &str, path: &str) -> Vec<CredentialMapping> {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
@@ -194,11 +200,19 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard
+        let mut matched: Vec<CredentialMapping> = guard
             .iter()
             .filter(|mapping| mapping.matches(host, path))
             .cloned()
-            .collect()
+            .collect();
+        matched.sort_by(|a, b| {
+            let spec_a = crate::secrets::match_specificity(&a.path_patterns, path);
+            let spec_b = crate::secrets::match_specificity(&b.path_patterns, path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+        matched
     }
 
     pub fn oauth_refresh_for_secret(&self, secret_name: &str) -> Option<OAuthRefreshConfig> {
@@ -274,12 +288,25 @@ impl CredentialInjector {
             .collect()
     }
 
-    /// Find credentials that should be injected for a given host + path.
+    /// Find credentials that should be injected for a given host + path,
+    /// ordered by ascending path specificity (so more-specific mappings win
+    /// a last-write-wins merge on conflicting headers). `self.mappings` is a
+    /// `HashMap` whose iteration order is nondeterministic, so the sort is
+    /// also what makes the returned order stable across runs.
     pub fn find_credentials_for_url(&self, host: &str, path: &str) -> Vec<&CredentialMapping> {
-        self.mappings
+        let mut matched: Vec<&CredentialMapping> = self
+            .mappings
             .values()
             .filter(|mapping| mapping.matches(host, path))
-            .collect()
+            .collect();
+        matched.sort_by(|a, b| {
+            let spec_a = crate::secrets::match_specificity(&a.path_patterns, path);
+            let spec_b = crate::secrets::match_specificity(&b.path_patterns, path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+        matched
     }
 
     /// Host-only inject. See `inject_for_url`.

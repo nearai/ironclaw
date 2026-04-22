@@ -292,20 +292,16 @@ impl CredentialMapping {
 }
 
 /// Match `path` against a literal prefix with segment-boundary enforcement.
-/// After the prefix, the path must end or continue with `/` or `?`. A `..`
-/// that appears as a complete path segment is rejected; `..` inside a
-/// segment (e.g. `/api/..config`) is a legitimate literal path character.
+/// After the prefix, the path must end or continue with `/` or `?`.
 ///
-/// Percent-encoded dot sequences (`%2e`, `%2E`) are rejected outright:
-/// `url::Url::parse` preserves percent-encoding, but downstream servers
-/// (IIS, Tomcat, some reverse proxies) may decode `%2e%2e` to `..` before
-/// routing. Refusing to match when any `%2e` appears keeps the predicate
-/// aligned with the effective path the server will see.
+/// A segment that decodes to `.` or `..` is rejected (traversal). This
+/// covers both literal `..` and percent-encoded variants like `%2e%2e`,
+/// `%2e`, `%2E.`, etc. — every form that a server might normalize to a
+/// dot-segment before routing. Legitimate segments with embedded encoded
+/// dots (e.g. `foo%2ebar` → `foo.bar`, `v1%2e2` → `v1.2`) are allowed
+/// because the decoded segment is neither `.` nor `..`.
 pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    if path.split('/').any(|seg| seg == "..") {
-        return false;
-    }
-    if contains_percent_encoded_dot(path) {
+    if path_has_dot_segment(path) {
         return false;
     }
     let path = path.strip_suffix('/').unwrap_or(path);
@@ -318,6 +314,23 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
         return next_char == b'/' || next_char == b'?';
     }
     false
+}
+
+/// Compute the specificity of `mapping` relative to `req_path` for precedence
+/// ordering when multiple credential mappings match the same request. Longer
+/// matching path prefix = more specific. Returns 0 for mappings with no
+/// `path_patterns` (global scope).
+///
+/// Callers sort ascending by specificity so the most-specific mapping is
+/// applied LAST — that makes it overwrite any conflicting headers from
+/// less-specific mappings under a last-write-wins merge.
+pub(crate) fn match_specificity(path_patterns: &[String], req_path: &str) -> usize {
+    path_patterns
+        .iter()
+        .filter(|p| path_matches_prefix(req_path, p))
+        .map(|p| p.len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Extract the path component of a URL for credential path-pattern matching.
@@ -341,19 +354,45 @@ pub(crate) fn extract_url_path_for_matching(url: &str) -> String {
     }
 }
 
-fn contains_percent_encoded_dot(path: &str) -> bool {
-    let bytes = path.as_bytes();
+/// Returns true if any segment of `path` decodes (per RFC 3986 percent-
+/// decoding of octets) to the traversal segments `.` or `..`. Segments with
+/// embedded encoded dots that are part of a legitimate literal (e.g.
+/// `foo%2ebar`, `v1%2e2`) are allowed because the decoded form is not a
+/// pure dot-segment.
+fn path_has_dot_segment(path: &str) -> bool {
+    path.split('/').any(is_dot_segment)
+}
+
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_decode_bytes(segment.as_bytes());
+    matches!(decoded.as_slice(), b"." | b"..")
+}
+
+fn percent_decode_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i + 2 < bytes.len() {
+    while i < bytes.len() {
         if bytes[i] == b'%'
-            && (bytes[i + 1] == b'2')
-            && (bytes[i + 2] == b'e' || bytes[i + 2] == b'E')
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
         {
-            return true;
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
+        out.push(bytes[i]);
         i += 1;
     }
-    false
+    out
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Check if a hostname matches a pattern (supports `*.` wildcard and port stripping).
@@ -657,18 +696,58 @@ mod tests {
     }
 
     #[test]
-    fn path_matches_prefix_rejects_percent_encoded_dot() {
+    fn path_matches_prefix_rejects_percent_encoded_dot_segments() {
         use super::path_matches_prefix;
         // Lowercase %2e%2e — classic IIS/Tomcat path-traversal smuggling
         assert!(!path_matches_prefix("/api/v1/%2e%2e/admin", "/api/v1"));
         // Mixed case — some decoders are case-insensitive
         assert!(!path_matches_prefix("/api/v1/%2E%2E/admin", "/api/v1"));
         assert!(!path_matches_prefix("/api/v1/%2e%2E/admin", "/api/v1"));
-        // Single %2e as a segment-dot variant
+        // Single %2e as a single-dot segment variant
         assert!(!path_matches_prefix("/api/v1/%2e/admin", "/api/v1"));
-        // Embedded in a segment — still rejected; the presence of %2e is a
-        // strong signal the caller is trying to bypass normalization.
-        assert!(!path_matches_prefix("/api/v1/foo%2ebar", "/api/v1"));
+        // Mixed literal + encoded: `.%2e` decodes to `..`
+        assert!(!path_matches_prefix("/api/v1/.%2e/admin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2e./admin", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_allows_legit_embedded_encoded_dot() {
+        use super::path_matches_prefix;
+        // Regression for over-rejection (Firat round-4): encoded dots inside
+        // an otherwise legitimate segment decode to a normal literal dot
+        // character, not a dot-segment. These paths must be allowed.
+        assert!(path_matches_prefix("/files/foo%2ebar", "/files"));
+        assert!(path_matches_prefix("/releases/v1%2e2", "/releases"));
+        assert!(path_matches_prefix("/api/v1/some.file", "/api/v1"));
+        // Prefix equal to segment boundary still works.
+        assert!(path_matches_prefix("/files/foo%2ebar.txt", "/files"));
+    }
+
+    #[test]
+    fn match_specificity_ranks_longer_prefixes_higher() {
+        use super::{CredentialMapping, match_specificity};
+        use crate::secrets::CredentialLocation;
+        let mapping = CredentialMapping {
+            secret_name: "tok".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: vec!["/api".into(), "/api/v1/write".into()],
+            optional: false,
+        };
+        // When multiple patterns match, specificity = longest matching prefix.
+        assert_eq!(
+            match_specificity(&mapping.path_patterns, "/api/v1/write/x"),
+            "/api/v1/write".len()
+        );
+        // Only the shorter pattern matches.
+        assert_eq!(
+            match_specificity(&mapping.path_patterns, "/api/other"),
+            "/api".len()
+        );
+        // No match at all.
+        assert_eq!(match_specificity(&mapping.path_patterns, "/zzz"), 0);
+        // Empty patterns (global) = 0.
+        assert_eq!(match_specificity(&[], "/anything"), 0);
     }
 
     #[test]

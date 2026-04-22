@@ -611,8 +611,14 @@ impl Tool for HttpTool {
             NotConfigured,
             RefreshFailed,
         }
+        // Conjunctive credential tracking: if a request matches multiple
+        // required mappings (e.g. Bearer token + org header), ALL must
+        // resolve for the request to be fully authenticated. If any is
+        // missing we retain it in `missing_credential` — clearing it on a
+        // successful peer injection would silently drop the auth gate and
+        // surface a raw 401 with no remediation path. `optional` mappings
+        // are permitted to be missing without raising the gate.
         let mut missing_credential: Option<(String, MissingReason)> = None;
-        let mut injected_any_credential = false;
         if let (Some(registry), Some(store)) = (
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
@@ -640,8 +646,6 @@ impl Tool for HttpTool {
                 .await
                 {
                     Ok(secret) => {
-                        injected_any_credential = true;
-                        missing_credential = None;
                         tracing::debug!(
                             user_id = %ctx.user_id,
                             secret_name = %mapping.secret_name,
@@ -659,12 +663,20 @@ impl Tool for HttpTool {
                             request = request.query(&[(name.as_str(), value.as_str())]);
                         }
                     }
-                    Err(error) if error.requires_authentication() && !injected_any_credential => {
+                    Err(error) if error.requires_authentication() => {
+                        if mapping.optional {
+                            tracing::debug!(
+                                secret = %mapping.secret_name,
+                                host = %cred_host,
+                                "Optional credential unavailable — proceeding without"
+                            );
+                            continue;
+                        }
                         tracing::debug!(
                             secret = %mapping.secret_name,
                             host = %cred_host,
                             error = ?error,
-                            "Credential unavailable — proceeding without auth"
+                            "Required credential unavailable — will surface auth gate on 401/403"
                         );
                         let reason = match error {
                             crate::auth::CredentialResolutionError::RefreshFailed => {
@@ -672,7 +684,12 @@ impl Tool for HttpTool {
                             }
                             _ => MissingReason::NotConfigured,
                         };
-                        missing_credential = Some((mapping.secret_name.clone(), reason));
+                        // Keep the FIRST missing required credential for the
+                        // remediation UX — the auth gate surfaces one issue at
+                        // a time.
+                        if missing_credential.is_none() {
+                            missing_credential = Some((mapping.secret_name.clone(), reason));
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(

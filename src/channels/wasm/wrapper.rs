@@ -86,6 +86,10 @@ wasmtime::component::bindgen!({
 /// WASM channels never see the raw secret values.
 #[derive(Clone)]
 struct ResolvedHostCredential {
+    /// Name of the source secret. Non-sensitive metadata used only for
+    /// deterministic tie-breaks when two matching credentials share the
+    /// same path specificity; never rendered to logs or tool output.
+    secret_name: String,
     /// Host patterns this credential applies to (e.g., "api.slack.com").
     host_patterns: Vec<String>,
     /// Literal path prefixes scoping this credential to specific endpoints.
@@ -230,38 +234,48 @@ impl ChannelStoreData {
 
     /// Inject pre-resolved host credentials into the request.
     ///
-    /// Matches the URL host against each resolved credential's host_patterns.
-    /// Matching credentials have their headers merged and query params appended.
+    /// Matches the URL host against each resolved credential's host_patterns
+    /// and, when declared, path_patterns. Matching credentials are sorted by
+    /// ascending path specificity (longest matching prefix last), ties
+    /// broken alphabetically on `secret_name` for determinism. Last-write-
+    /// wins header merging then gives the most-specific mapping any
+    /// conflicting header key.
     fn inject_host_credentials(
         &self,
         url_host: &str,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        for cred in &self.host_credentials {
-            let matches = cred
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(url_host, pattern));
+        use crate::secrets::{extract_url_path_for_matching, match_specificity, path_matches_prefix};
 
-            if !matches {
-                continue;
-            }
+        let url_path = extract_url_path_for_matching(url);
 
-            // Honor path scoping when declared.
-            if !cred.path_patterns.is_empty() {
-                use crate::secrets::{extract_url_path_for_matching, path_matches_prefix};
-                let url_path = extract_url_path_for_matching(url);
-                let path_match = cred
-                    .path_patterns
+        let mut matches_for_request: Vec<&ResolvedHostCredential> = self
+            .host_credentials
+            .iter()
+            .filter(|cred| {
+                cred.host_patterns
                     .iter()
-                    .any(|prefix| path_matches_prefix(&url_path, prefix));
-                if !path_match {
-                    continue;
-                }
-            }
+                    .any(|pattern| host_matches_pattern(url_host, pattern))
+                    && (cred.path_patterns.is_empty()
+                        || cred
+                            .path_patterns
+                            .iter()
+                            .any(|prefix| path_matches_prefix(&url_path, prefix)))
+            })
+            .collect();
 
-            // Merge injected headers (host credentials take precedence)
+        matches_for_request.sort_by(|a, b| {
+            let spec_a = match_specificity(&a.path_patterns, &url_path);
+            let spec_b = match_specificity(&b.path_patterns, &url_path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+
+        for cred in matches_for_request {
+            // Merge injected headers (most-specific match iterates last so
+            // it wins any conflict under insert-and-overwrite).
             for (key, value) in &cred.headers {
                 headers.insert(key.clone(), value.clone());
             }
@@ -4295,6 +4309,7 @@ async fn resolve_channel_host_credentials(
         }
 
         resolved.push(ResolvedHostCredential {
+            secret_name: mapping.secret_name.clone(),
             host_patterns: mapping.host_patterns.clone(),
             path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
@@ -5907,6 +5922,7 @@ mod tests {
         );
 
         let host_creds = vec![ResolvedHostCredential {
+            secret_name: "host_secret".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec![],
             headers: std::collections::HashMap::new(),
@@ -5966,6 +5982,7 @@ mod tests {
         use std::collections::HashMap;
 
         let host_creds = vec![ResolvedHostCredential {
+            secret_name: "scoped_token".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec!["/api/v1".to_string()],
             headers: {
@@ -6017,6 +6034,7 @@ mod tests {
         use std::collections::HashMap;
 
         let host_creds = vec![ResolvedHostCredential {
+            secret_name: "api_key".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec![], // empty → all paths
             headers: {

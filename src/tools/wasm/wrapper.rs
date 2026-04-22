@@ -93,6 +93,10 @@ impl OAuthRefreshConfig {
 /// panic message, or a `dbg!()` cannot leak credentials. Do NOT add
 /// `#[derive(Debug)]` here without revisiting the redaction.
 struct ResolvedHostCredential {
+    /// Name of the source secret. Non-sensitive metadata used only for
+    /// deterministic tie-breaks when two matching credentials share the
+    /// same path specificity; never rendered to logs or tool output.
+    secret_name: String,
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
     /// Path prefixes this credential is scoped to. Empty means all paths.
@@ -213,38 +217,48 @@ impl StoreData {
 
     /// Inject pre-resolved host credentials into the request.
     ///
-    /// Matches the URL host against each resolved credential's host_patterns.
-    /// Matching credentials have their headers merged and query params appended.
+    /// Matches the URL host against each resolved credential's host_patterns
+    /// and — when declared — path_patterns. Matching credentials are ordered
+    /// by ascending path specificity (longest matching prefix last), with
+    /// ties broken alphabetically on `secret_name`. Last-write-wins header
+    /// merging then means the most-specific mapping wins any conflict,
+    /// deterministically.
     fn inject_host_credentials(
         &self,
         url_host: &str,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
-        for cred in &self.host_credentials {
-            let matches = cred
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(url_host, pattern));
+        use crate::secrets::{extract_url_path_for_matching, match_specificity, path_matches_prefix};
 
-            if !matches {
-                continue;
-            }
+        let url_path = extract_url_path_for_matching(url);
 
-            // Check path patterns if any are specified
-            if !cred.path_patterns.is_empty() {
-                use crate::secrets::{extract_url_path_for_matching, path_matches_prefix};
-                let url_path = extract_url_path_for_matching(url);
-                let path_match = cred
-                    .path_patterns
+        let mut matches_for_request: Vec<&ResolvedHostCredential> = self
+            .host_credentials
+            .iter()
+            .filter(|cred| {
+                cred.host_patterns
                     .iter()
-                    .any(|prefix| path_matches_prefix(&url_path, prefix));
-                if !path_match {
-                    continue;
-                }
-            }
+                    .any(|pattern| host_matches_pattern(url_host, pattern))
+                    && (cred.path_patterns.is_empty()
+                        || cred
+                            .path_patterns
+                            .iter()
+                            .any(|prefix| path_matches_prefix(&url_path, prefix)))
+            })
+            .collect();
 
-            // Merge injected headers (host credentials take precedence)
+        matches_for_request.sort_by(|a, b| {
+            let spec_a = match_specificity(&a.path_patterns, &url_path);
+            let spec_b = match_specificity(&b.path_patterns, &url_path);
+            spec_a
+                .cmp(&spec_b)
+                .then_with(|| a.secret_name.cmp(&b.secret_name))
+        });
+
+        for cred in matches_for_request {
+            // Merge injected headers (host credentials take precedence; the
+            // most-specific match iterates last, so it wins any conflict).
             for (key, value) in &cred.headers {
                 headers.insert(key.clone(), value.clone());
             }
@@ -1522,6 +1536,7 @@ async fn resolve_host_credentials(
         }
 
         resolved.push(ResolvedHostCredential {
+            secret_name: mapping.secret_name.clone(),
             host_patterns: mapping.host_patterns.clone(),
             path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
@@ -2429,6 +2444,7 @@ mod tests {
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "google_token".to_string(),
             host_patterns: vec!["www.googleapis.com".to_string()],
             path_patterns: vec![],
             headers: {
@@ -2472,6 +2488,7 @@ mod tests {
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "scoped_token".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec!["/api/v1".to_string()],
             headers: {
@@ -2522,6 +2539,7 @@ mod tests {
 
         let host_credentials = vec![
             ResolvedHostCredential {
+                secret_name: "v1_token".to_string(),
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: vec!["/api/v1".to_string()],
                 headers: {
@@ -2533,6 +2551,7 @@ mod tests {
                 secret_value: "v1-token".to_string(),
             },
             ResolvedHostCredential {
+                secret_name: "v2_token".to_string(),
                 host_patterns: vec!["api.example.com".to_string()],
                 path_patterns: vec!["/api/v2".to_string()],
                 headers: {
@@ -2578,11 +2597,75 @@ mod tests {
     }
 
     #[test]
+    fn test_inject_host_credentials_most_specific_path_wins() {
+        // Regression for Firat round-4 (#3125963270): overlapping mappings
+        // had no deterministic precedence and the HashMap-backed WASM
+        // credential source could pick the wrong winner. With ordered
+        // specificity, the longest matching path prefix must always win any
+        // conflicting header, regardless of insertion order.
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        fn global() -> ResolvedHostCredential {
+            ResolvedHostCredential {
+                secret_name: "global_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec![],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer GLOBAL".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "GLOBAL".to_string(),
+            }
+        }
+        fn scoped() -> ResolvedHostCredential {
+            ResolvedHostCredential {
+                secret_name: "write_token".to_string(),
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer WRITE".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "WRITE".to_string(),
+            }
+        }
+
+        for creds in [
+            // "wrong" order: global first, specific second
+            vec![global(), scoped()],
+            // reverse order: specific first, global second — must still
+            // yield the same WRITE winner under specificity sort
+            vec![scoped(), global()],
+        ] {
+            let store = StoreData::new(
+                1024 * 1024,
+                Capabilities::default(),
+                HashMap::new(),
+                creds,
+            );
+            let mut headers = HashMap::new();
+            let mut url = "https://api.example.com/api/v1/write/foo".to_string();
+            store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+            assert_eq!(
+                headers.get("Authorization"),
+                Some(&"Bearer WRITE".to_string()),
+                "most-specific path_patterns (/api/v1/write) must win over global credential"
+            );
+        }
+    }
+
+    #[test]
     fn test_inject_host_credentials_query_params() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "api_key".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec![],
             headers: HashMap::new(),
@@ -2614,6 +2697,7 @@ mod tests {
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
+            secret_name: "super_secret".to_string(),
             host_patterns: vec!["api.example.com".to_string()],
             path_patterns: vec![],
             headers: HashMap::new(),
@@ -3988,6 +4072,7 @@ mod tests {
             "another-secret-value-also-do-not-leak".to_string(),
         );
         let cred = super::ResolvedHostCredential {
+            secret_name: "googleapis_secret".to_string(),
             host_patterns: vec!["www.googleapis.com".to_string()],
             path_patterns: vec![],
             headers,

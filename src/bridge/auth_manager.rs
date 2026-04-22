@@ -184,8 +184,16 @@ impl AuthManager {
             return AuthCheckResult::NoAuthRequired;
         }
 
+        // Conjunctive evaluation: every *required* matched mapping must
+        // resolve. Endpoints that legitimately need two credentials (e.g. a
+        // Bearer token plus an organization/account header) would otherwise
+        // silently 401 at the wire if only one is configured. `optional`
+        // mappings are allowed to be missing — that's their whole purpose.
         let mut missing = Vec::new();
         for mapping in &matched {
+            if mapping.optional {
+                continue;
+            }
             let oauth_refresh = credential_registry.oauth_refresh_for_secret(&mapping.secret_name);
             let role_lookup = self
                 .tools
@@ -201,13 +209,7 @@ impl AuthManager {
             )
             .await
             {
-                Ok(_) => {
-                    // At least one credential is configured — tool can proceed.
-                    // (Multiple mappings for the same host is normal, e.g.,
-                    // Bearer token + org header. If any is present, we allow
-                    // execution and let the HTTP tool handle partial injection.)
-                    return AuthCheckResult::Ready;
-                }
+                Ok(_) => { /* required credential resolved — keep checking the others */ }
                 Err(error) if error.requires_authentication() => {
                     missing.push(
                         self.describe_missing_credential(&mapping.secret_name, user_id)
@@ -720,6 +722,7 @@ impl AuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::CreateSecretParams;
     use crate::testing::credentials::test_secrets_store;
     use crate::tools::ToolRegistry;
     use std::path::Path;
@@ -871,6 +874,77 @@ Test skill
             None => unsafe { std::env::remove_var(key) },
         }
         TestEnvVarGuard { key, original }
+    }
+
+    #[tokio::test]
+    async fn check_http_conjunctive_auth_any_missing_required_raises_gate() {
+        // Regression for Firat round-4 (#3125963977): previously, the first
+        // resolved credential short-circuited with `Ready`, so an endpoint
+        // that requires bearer + org-header would silently 401 at the wire
+        // if only one of the two was configured. Now every required
+        // (non-optional) mapping must resolve; missing ones surface the
+        // auth gate.
+        use crate::secrets::CredentialMapping;
+
+        let store_concrete = test_secrets_store();
+        // Configure ONLY bearer; org_header is missing.
+        store_concrete
+            .create(
+                "user1",
+                CreateSecretParams::new("bearer_tok", "bearer-value"),
+            )
+            .await
+            .expect("store bearer");
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(store_concrete);
+
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("bearer_tok", "api.example.com"),
+            CredentialMapping::header("org_header", "X-Org-ID", "api.example.com"),
+        ]);
+
+        let mgr = make_auth_manager(store);
+        let params = serde_json::json!({"url": "https://api.example.com/api/v1/users"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+
+        match result {
+            AuthCheckResult::MissingCredentials(missing) => {
+                assert!(
+                    missing.iter().any(|m| m.credential_name == "org_header"),
+                    "missing org_header should be surfaced even though bearer_tok is configured; got: {missing:?}"
+                );
+            }
+            other => panic!("expected MissingCredentials(org_header), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_http_conjunctive_auth_all_required_resolved_is_ready() {
+        use crate::secrets::CredentialMapping;
+
+        let store_concrete = test_secrets_store();
+        for (name, value) in [("bearer_tok", "bearer-value"), ("org_header", "acme")] {
+            store_concrete
+                .create("user1", CreateSecretParams::new(name, value))
+                .await
+                .expect("store");
+        }
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(store_concrete);
+
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("bearer_tok", "api.example.com"),
+            CredentialMapping::header("org_header", "X-Org-ID", "api.example.com"),
+        ]);
+
+        let mgr = make_auth_manager(store);
+        let params = serde_json::json!({"url": "https://api.example.com/api/v1/users"});
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+        assert!(matches!(result, AuthCheckResult::Ready), "got {result:?}");
     }
 
     #[tokio::test]
