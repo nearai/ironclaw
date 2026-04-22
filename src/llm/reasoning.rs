@@ -268,7 +268,9 @@ pub struct ReasoningContext {
     pub last_tool_batch_all_failed: bool,
     /// When set, each text token/chunk from streaming LLM calls is sent to this
     /// channel so callers can forward it to the client in real time.
-    pub chunk_sender: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ///
+    /// Bounded to apply backpressure; chunks that cannot be queued are dropped.
+    pub chunk_sender: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl ReasoningContext {
@@ -335,7 +337,7 @@ impl ReasoningContext {
     /// Set a chunk sender for real-time token streaming to the client.
     pub fn with_chunk_sender(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<String>,
+        sender: tokio::sync::mpsc::Sender<String>,
     ) -> Self {
         self.chunk_sender = Some(sender);
         self
@@ -821,7 +823,11 @@ Respond in JSON format:
             let response = if let Some(ref sender) = context.chunk_sender {
                 let sender = sender.clone();
                 let mut on_chunk = move |chunk: String| {
-                    let _ = sender.send(chunk);
+                    // Non-blocking send: drop on full/closed channel so the
+                    // sync callback never blocks the streaming task.
+                    if let Err(e) = sender.try_send(chunk) {
+                        tracing::trace!(error = %e, "stream chunk dropped (channel full/closed)");
+                    }
                 };
                 self.llm.complete_with_tools_stream(request, &mut on_chunk).await?
             } else {
@@ -945,7 +951,9 @@ Respond in JSON format:
             let response = if let Some(ref sender) = context.chunk_sender {
                 let sender = sender.clone();
                 let mut on_chunk = move |chunk: String| {
-                    let _ = sender.send(chunk);
+                    if let Err(e) = sender.try_send(chunk) {
+                        tracing::trace!(error = %e, "stream chunk dropped (channel full/closed)");
+                    }
                 };
                 self.llm.complete_stream(request, &mut on_chunk).await?
             } else {

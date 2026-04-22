@@ -627,9 +627,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let llm_call_start = std::time::Instant::now();
 
         // Wire up real-time token streaming to the channel layer.
+        // Bounded channel bounds memory usage when the consumer (channel
+        // layer) is slower than the LLM; producer drops chunks on overflow
+        // via `try_send`.
         {
             let (chunk_tx, mut chunk_rx) =
-                tokio::sync::mpsc::unbounded_channel::<String>();
+                tokio::sync::mpsc::channel::<String>(256);
             let channels = Arc::clone(&self.agent.channels);
             let channel_name = self.message.channel.clone();
             let metadata = self.message.metadata.clone();

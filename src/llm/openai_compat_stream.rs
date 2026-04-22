@@ -20,8 +20,8 @@ use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    sanitize_tool_messages, ChatMessage, CompletionRequest, CompletionResponse, FinishReason,
+    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 /// Wraps any [`LlmProvider`] backed by an OpenAI-compatible endpoint and adds
@@ -51,13 +51,15 @@ impl OpenAiCompatStreamingProvider {
         model_name: String,
         extra_headers: Vec<(String, String)>,
         unsupported_params: HashSet<String>,
-    ) -> Self {
-        // Use only a connect-timeout so that long streams are not cut off.
+    ) -> Result<Self, reqwest::Error> {
+        // `connect_timeout` bounds the TCP handshake; `timeout` bounds the
+        // total duration of a single streaming request (including reading
+        // the full SSE stream) so a hung upstream cannot leak tasks forever.
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
-            .build()
-            .expect("failed to build reqwest::Client for openai_compat streaming");
-        Self {
+            .timeout(Duration::from_secs(600))
+            .build()?;
+        Ok(Self {
             inner,
             client,
             base_url,
@@ -65,7 +67,7 @@ impl OpenAiCompatStreamingProvider {
             model_name,
             extra_headers,
             unsupported_params,
-        }
+        })
     }
 
     fn completions_url(&self) -> String {
@@ -232,8 +234,21 @@ impl OpenAiCompatStreamingProvider {
             .into_values()
             .filter(|p| !p.name.is_empty())
             .map(|p| {
-                let arguments = serde_json::from_str::<serde_json::Value>(&p.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+                // Prefer parsed JSON; on parse failure preserve the raw string
+                // (wrapped as JSON string) so the downstream tool executor can
+                // surface the actual malformed payload instead of a silent {}.
+                let arguments = match serde_json::from_str::<serde_json::Value>(&p.arguments) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %p.name,
+                            error = %e,
+                            raw = %p.arguments,
+                            "Failed to parse streamed tool_call arguments as JSON; preserving raw text",
+                        );
+                        serde_json::Value::String(p.arguments.clone())
+                    }
+                };
                 ToolCall {
                     id: p.id,
                     name: p.name,
@@ -389,6 +404,11 @@ impl LlmProvider for OpenAiCompatStreamingProvider {
         let model = req
             .take_model_override()
             .unwrap_or_else(|| self.model_name.clone());
+        // Match RigAdapter behavior: rewrite orphaned tool_result messages as
+        // user messages so OpenAI-compatible endpoints do not reject the
+        // request with 400 "messages with role 'tool' must be a response to
+        // a preceeding message with 'tool_calls'".
+        sanitize_tool_messages(&mut req.messages);
         let messages = messages_to_json(&req.messages);
 
         let mut body = serde_json::json!({
@@ -435,6 +455,7 @@ impl LlmProvider for OpenAiCompatStreamingProvider {
         let model = req
             .take_model_override()
             .unwrap_or_else(|| self.model_name.clone());
+        sanitize_tool_messages(&mut req.messages);
         let messages = messages_to_json(&req.messages);
         let tools = tools_to_json(&req.tools);
 
