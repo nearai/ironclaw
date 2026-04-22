@@ -427,6 +427,81 @@ This branch is a success if it produces all of the following:
 - tests proving shim calls still route through canonical actions
 - a clear next step for Phase 2 and A/B evaluation
 
+## Updated next-shim shortlist (2026-04-22 benchmark pass)
+
+The live/replay A/B suite now shows a clear split:
+
+- **Huge wins** happen on multi-file, path-sensitive, read/transform/write workflows (`package_json_edit`, `monorepo_package_migration`, `js_codemod_use_strict`, `yaml_workflow_update`, `cargo_toml_rust_version_sync`).
+- **Small or neutral wins** happen on already-clean single- or dual-file flows (`read_json`, `tsconfig_*`, `append_text`, `find_files`, `mixed_config_sync`).
+
+That means the next shims should target the *remaining multi-step friction*, not add more one-call sugar.
+
+### Priority 1 — path-safe file discovery
+
+Candidate shapes:
+
+- `find_paths(pattern, path=".")`
+- or `find_files(..., absolute=True)`
+
+Why first:
+
+- the biggest remaining failures in the high-friction scenarios were path-joining mistakes after discovery (`read_file(ci.yml)`, `read_file(sub/d.js)`, etc.)
+- this is the same category of ergonomics bug that `list_entries()` normalization already proved valuable
+
+### Priority 2 — literal text patch helper
+
+Candidate shapes:
+
+- `replace_in_file(path, old, new, count=None)`
+- `insert_after(path, anchor, text)`
+
+Why second:
+
+- the large wins in YAML / JS / Cargo.toml scenarios still required the model to hand-roll read/replace/write loops
+- a small literal patch helper should reduce both code volume and accidental whitespace drift without introducing a broad new capability class
+
+### Priority 3 — TOML-aware structured helpers
+
+Candidate shapes:
+
+- `read_toml(path)`
+- `write_toml(path, value)`
+
+Why third:
+
+- `cargo_toml_rust_version_sync` showed strong shim value even with only text helpers
+- that is a strong sign TOML is a real remaining pain point, especially in this Rust repo
+
+### Priority 4 — YAML-aware structured helpers
+
+Candidate shapes:
+
+- `read_yaml(path)`
+- `write_yaml(path, value)`
+
+Why fourth:
+
+- `yaml_workflow_update` still improved substantially with current text shims, but the model had to do brittle plain-text edits
+- structured YAML helpers likely help workflow, compose, and CI config tasks, but comment/order preservation needs careful design
+
+### Priority 5 — targeted batch-edit helper
+
+Candidate shapes:
+
+- `replace_in_files(pattern, old, new, path=".")`
+- `edit_many(paths, op=...)`
+
+Why fifth:
+
+- current wins increasingly come from reducing repeated multi-file orchestration, not single-file convenience
+- only pursue this after smaller path/text helpers prove stable, since batch helpers increase surface area quickly
+
+### Explicitly de-prioritized for now
+
+- more one-shot wrappers equivalent to current `append_text` / `find_files` / `read_json` gains
+- broad fake-stdlib additions (`pathlib`, `os.path`, large file object emulation)
+- JSON-specific patch helpers until they show bigger wins than the current JSON shims already deliver
+
 ## Notes for implementation
 
 - Do not turn this into a fake `pathlib` clone immediately.
