@@ -221,6 +221,11 @@ def _build_gateway_env(
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": db_path,
         "SANDBOX_ENABLED": "false",
+        # Engine v2 backs the `/api/engine/projects` routes (project_create
+        # and friends dispatch through `ENGINE_STATE`). Without this, every
+        # project-admin call 500s with "engine not initialized" and the
+        # coding-project scenarios fail before they start.
+        "ENGINE_V2": "true",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "true",
         "HEARTBEAT_ENABLED": "false",
@@ -487,6 +492,11 @@ async def ironclaw_server(
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "e2e.db"),
         "SANDBOX_ENABLED": "false",
+        # Engine v2 backs the `/api/engine/projects` routes (project_create
+        # and friends dispatch through `ENGINE_STATE`). Without this every
+        # project-admin call 500s with "engine not initialized" and the
+        # coding-project scenarios fail before they start.
+        "ENGINE_V2": "true",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "true",
         "HEARTBEAT_ENABLED": "false",

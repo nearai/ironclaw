@@ -234,6 +234,158 @@ async def test_shell_mode_rejects_when_no_project(page, ironclaw_server):
         )
 
 
+async def test_dev_project_pills_render(page, ironclaw_server):
+    """Chrome renders repo / branch / #issue / PR#n pills from thread.metadata.dev.
+
+    This exercises the fix-issue skill's user-visible surface without
+    spinning up a real agent or mutating GitHub — the test drives the
+    UI layer directly with a mocked `project` payload matching the
+    shape the backend emits after the skill has written `dev.*` keys
+    via `thread_metadata_set`.
+
+    The four pills — repo, branch, #issue, PR#n — are the primary
+    signal a user has that a coding-agent conversation is progressing
+    through the workflow. Regressing any of them would leave the
+    conversation chrome stuck on the folder and the user unable to
+    tell whether the agent has branched / filed the PR / which issue
+    it's working on.
+    """
+    with tempfile.TemporaryDirectory(prefix="ironclaw-e2e-pills-") as tmp:
+        project_path = Path(tmp) / "pills-project"
+        await _create_active_project(ironclaw_server, project_path)
+
+        # Reload so ProjectUI mounts and exposes its window surface.
+        await page.reload(wait_until="domcontentloaded")
+        await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=10000)
+        await page.locator("#project-chrome").wait_for(state="visible", timeout=10000)
+
+        # Drive `refreshChromeFromThread` with the full `ThreadProjectContext`
+        # shape the backend emits for a project the agent has worked on —
+        # github_repo set, branch written by coding-repo, issue written by
+        # fix-issue's step 1, PR written by fix-issue's step 7. The shape
+        # mirrors `src/channels/web/types.rs::ThreadProjectContext` exactly.
+        await page.evaluate(
+            """(projectPath) => {
+                window.ProjectUI.refreshChromeFromThread({
+                    id: "11111111-2222-3333-4444-555555555555",
+                    name: "pills-project",
+                    workspace_path: projectPath,
+                    github_repo: "nearai/ironclaw-e2e-test",
+                    default_branch: "staging",
+                    branch: "ip/fix-42-widget-pills",
+                    dirty: false,
+                    pr: {
+                        number: 17,
+                        title: "Fix widget pill rendering (#42)",
+                        url: "https://github.com/nearai/ironclaw-e2e-test/pull/17",
+                        state: "open"
+                    },
+                    issue: {
+                        number: 42,
+                        title: "Widget pills don't update on thread_metadata_set",
+                        url: "https://github.com/nearai/ironclaw-e2e-test/issues/42"
+                    },
+                    is_override: false
+                });
+            }""",
+            str(project_path),
+        )
+
+        # ── repo pill ───────────────────────────────────────────
+        repo = page.locator("#project-chrome-repo")
+        await repo.wait_for(state="visible", timeout=5000)
+        repo_text = await repo.inner_text()
+        assert repo_text == "nearai/ironclaw-e2e-test", (
+            f"repo pill text wrong: {repo_text!r}"
+        )
+        repo_href = await repo.get_attribute("href")
+        assert repo_href == "https://github.com/nearai/ironclaw-e2e-test", (
+            f"repo pill href wrong: {repo_href!r}"
+        )
+
+        # ── branch pill ─────────────────────────────────────────
+        branch = page.locator("#project-chrome-branch")
+        await branch.wait_for(state="visible", timeout=5000)
+        branch_text = await branch.inner_text()
+        assert branch_text == "ip/fix-42-widget-pills", (
+            f"branch pill text wrong: {branch_text!r}"
+        )
+
+        # ── issue pill ──────────────────────────────────────────
+        issue = page.locator("#project-chrome-issue")
+        await issue.wait_for(state="visible", timeout=5000)
+        issue_text = await issue.inner_text()
+        assert issue_text == "#42", f"issue pill text wrong: {issue_text!r}"
+        issue_href = await issue.get_attribute("href")
+        assert issue_href == "https://github.com/nearai/ironclaw-e2e-test/issues/42", (
+            f"issue pill href wrong: {issue_href!r}"
+        )
+        issue_title = await issue.get_attribute("title")
+        assert issue_title == "Widget pills don't update on thread_metadata_set", (
+            f"issue pill hover title wrong: {issue_title!r}"
+        )
+
+        # ── PR pill ─────────────────────────────────────────────
+        pr = page.locator("#project-chrome-pr")
+        await pr.wait_for(state="visible", timeout=5000)
+        pr_text = await pr.inner_text()
+        # The renderer joins "PR #{n} {state}" so a regression that drops
+        # the state label is caught here, not swallowed into a passing
+        # partial match.
+        assert "PR #17" in pr_text and "open" in pr_text, (
+            f"PR pill text wrong: {pr_text!r}"
+        )
+        pr_href = await pr.get_attribute("href")
+        assert pr_href == "https://github.com/nearai/ironclaw-e2e-test/pull/17", (
+            f"PR pill href wrong: {pr_href!r}"
+        )
+
+
+async def test_dev_project_pills_hide_when_fields_absent(page, ironclaw_server):
+    """Pills hide cleanly when the underlying `dev.*` keys aren't set.
+
+    Ensures the chrome doesn't paint a stale pill after the thread
+    transitions out of a dev-workflow (agent switches to a different
+    project, or clears `thread.metadata.dev`). The missing-field branch
+    is tested separately because the happy-path assertion above passes
+    even if the hide-on-null logic is wrong — a stale pill would just
+    never clear.
+    """
+    with tempfile.TemporaryDirectory(prefix="ironclaw-e2e-pills-") as tmp:
+        project_path = Path(tmp) / "no-pills-project"
+        await _create_active_project(ironclaw_server, project_path)
+
+        await page.reload(wait_until="domcontentloaded")
+        await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=10000)
+        await page.locator("#project-chrome").wait_for(state="visible", timeout=10000)
+
+        # Payload without github_repo / issue / pr — only the basics.
+        await page.evaluate(
+            """(projectPath) => {
+                window.ProjectUI.refreshChromeFromThread({
+                    id: "11111111-2222-3333-4444-555555555555",
+                    name: "no-pills-project",
+                    workspace_path: projectPath,
+                    default_branch: "main",
+                    is_override: false
+                });
+            }""",
+            str(project_path),
+        )
+
+        # All four optional pills must be hidden.
+        for pill_id in (
+            "#project-chrome-repo",
+            "#project-chrome-branch",
+            "#project-chrome-issue",
+            "#project-chrome-pr",
+        ):
+            hidden = await page.evaluate(
+                f"() => document.querySelector('{pill_id}').hidden"
+            )
+            assert hidden, f"expected {pill_id} to be hidden with no dev.* fields"
+
+
 async def test_github_repo_validation_rejects_invalid_slug(ironclaw_server):
     """`POST /api/engine/projects` rejects malformed github_repo values.
 

@@ -239,6 +239,85 @@ pub fn count_matches(haystack: &str, needle: &str) -> (usize, MatchMethod) {
     (0, MatchMethod::Exact)
 }
 
+/// Locate a likely-intended region in `haystack` when no fuzzy form of
+/// `needle` matches, and return a short quote-able snippet the agent can
+/// compare against its `old_string`.
+///
+/// The strategy is "longest unique-enough line": pick the first non-blank
+/// line of the needle, search for it verbatim in the haystack. If found,
+/// widen the result to a few neighbouring lines around that match so the
+/// agent sees surrounding context. If the first line is noisy (common
+/// opener like `}` or `return` alone) we fall through subsequent non-blank
+/// lines and pick the first one whose occurrence count in the haystack is
+/// 1–3 — a balance between "too generic to be useful" and "rare enough
+/// to point somewhere meaningful".
+///
+/// Returns `None` when nothing useful could be found; callers should
+/// still emit the generic "string not found" message in that case.
+pub fn find_nearest_context(haystack: &str, needle: &str) -> Option<String> {
+    const MIN_LINE_LEN: usize = 3;
+    const MAX_LINE_LEN_FOR_PROBE: usize = 160;
+    const CONTEXT_LINES_BEFORE: usize = 1;
+    const CONTEXT_LINES_AFTER: usize = 3;
+    const MAX_SNIPPET_CHARS: usize = 400;
+
+    let haystack_lines: Vec<&str> = haystack.lines().collect();
+
+    // Rank candidate lines from `needle` by how discriminating they are:
+    // non-blank, at least MIN_LINE_LEN chars, capped at MAX_LINE_LEN_FOR_PROBE
+    // so we don't use a 400-char line as a probe and overflow the snippet.
+    let mut candidates: Vec<&str> = needle
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.len() >= MIN_LINE_LEN)
+        .collect();
+    // Longer lines first — more discriminating.
+    candidates.sort_by_key(|l| std::cmp::Reverse(l.len().min(MAX_LINE_LEN_FOR_PROBE)));
+
+    for probe in candidates {
+        let probe = if probe.len() > MAX_LINE_LEN_FOR_PROBE {
+            &probe[..MAX_LINE_LEN_FOR_PROBE]
+        } else {
+            probe
+        };
+
+        // Collect every haystack line whose trimmed content contains the
+        // probe. Require at least one match and at most three — if the
+        // probe fires on every third line it's noise, not signal.
+        let hits: Vec<usize> = haystack_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim().contains(probe))
+            .map(|(i, _)| i)
+            .take(4)
+            .collect();
+        if hits.is_empty() || hits.len() > 3 {
+            continue;
+        }
+
+        let first = hits[0];
+        let start = first.saturating_sub(CONTEXT_LINES_BEFORE);
+        let end = (first + 1 + CONTEXT_LINES_AFTER).min(haystack_lines.len());
+        // Prefix each line with its 1-based number so the agent can see
+        // exactly where in the file the match landed and pair it with
+        // its previous `read_file` output.
+        let numbered: String = haystack_lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| format!("{:>5} | {}", start + offset + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let numbered = if numbered.len() > MAX_SNIPPET_CHARS {
+            let truncated: String = numbered.chars().take(MAX_SNIPPET_CHARS).collect();
+            format!("{truncated}…")
+        } else {
+            numbered
+        };
+        return Some(numbered);
+    }
+    None
+}
+
 /// Strip trailing whitespace from each line while preserving line endings.
 fn strip_trailing_whitespace(s: &str) -> String {
     s.lines()

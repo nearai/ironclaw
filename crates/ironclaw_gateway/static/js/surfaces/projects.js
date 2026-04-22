@@ -1426,9 +1426,13 @@ function formatRelativeTime(isoString) {
       });
   };
 
-  // Expose a compact surface for hooks + tests.
+  // Expose a compact surface for hooks + tests. `refreshChromeFromThread`
+  // is test-visible so Playwright can drive the chrome directly with a
+  // mocked `project` payload — otherwise the pill-render path can only
+  // be reached via a full end-to-end agent run with real SSE traffic.
   window.ProjectUI = {
     refreshCurrentThread,
+    refreshChromeFromThread,
     openModal: openProjectModal,
     fetchList: fetchProjectList,
     fetchActive,

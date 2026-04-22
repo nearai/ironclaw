@@ -686,13 +686,24 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply targeted edits to a file using search/replace. **Prefer this over write_file** \
+        "Apply a targeted edit to a file using search/replace. **Prefer this over write_file** \
          for modifying existing files — it sends only the changed portion. \
-         The old_string must match exactly (including whitespace and indentation). \
-         The edit will FAIL if old_string is not unique — provide more context to make it unique, \
-         or set replace_all=true. **You must read_file before editing.** \
-         When editing text from read_file output, preserve the exact indentation (tabs/spaces) \
-         as it appears after the line number prefix."
+         **You must read_file before editing.** \
+         \n\n\
+         Parameters: `path` is the filesystem path (must NOT contain newlines or code — \
+         that is the common LLM mistake of packing old_string into path); `old_string` is \
+         the exact snippet to find; `new_string` replaces it. \
+         \n\n\
+         Pick the **smallest old_string that uniquely identifies the target** — usually \
+         2–4 adjacent lines is enough; avoid 10+ lines of context when less uniquely \
+         identifies it. The edit fails if old_string is not unique; either provide more \
+         surrounding context or set replace_all=true. \
+         \n\n\
+         When copying text from read_file output, preserve the exact indentation \
+         (tabs/spaces) as it appears AFTER the line-number prefix (e.g. `42 | fn foo()` \
+         → copy `fn foo()`, not `42 | fn foo()`). If the edit fails with \"String to \
+         replace not found\", re-read the file and check the error message — it will \
+         quote the nearest matching region so you can align your old_string to it."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -726,6 +737,32 @@ impl Tool for ApplyPatchTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
+
+        // Common LLM failure mode: the model packs the `old_string` content
+        // (or the entire new-module body) into the `path` argument. Catching
+        // the shape up front turns a confusing "Cannot access file: No such
+        // file or directory" into a clear message pointing at the argument
+        // mismatch — no filesystem call wasted, no read-before-edit state
+        // corruption from a nonsense path. Heuristic: filesystem paths are
+        // one line and shorter than ~512 chars; anything else is almost
+        // certainly mis-routed content.
+        if path_str.contains('\n') || path_str.len() > 512 {
+            let preview: String = path_str
+                .lines()
+                .next()
+                .unwrap_or(path_str)
+                .chars()
+                .take(80)
+                .collect();
+            return Err(ToolError::InvalidParameters(format!(
+                "`path` looks like content, not a filesystem path (starts with {preview:?}, \
+                 {len} bytes, newlines={newlines}). Check the argument order: \
+                 `path` is the file to edit; `old_string` is the snippet to find; \
+                 `new_string` is its replacement.",
+                len = path_str.len(),
+                newlines = path_str.contains('\n'),
+            )));
+        }
 
         // Reject workspace paths
         if is_workspace_path(path_str) {
@@ -796,13 +833,26 @@ impl Tool for ApplyPatchTool {
             } else {
                 old_string.to_string()
             };
+            // Quote the nearest region we could find so the agent can
+            // compare its old_string against the file's actual content
+            // (whitespace drift, outdated copy of the file, missing
+            // closing brace, etc.). Without this hint the agent usually
+            // retries with the same wrong string — the error message
+            // carries no new signal.
+            let nearest_hint = match file_edit_guard::find_nearest_context(&content, old_string) {
+                Some(snippet) => format!(
+                    "\n\nNearest region in the file (line-numbered):\n{snippet}\n\n\
+                     Align your old_string to exactly what appears above and retry. \
+                     Re-read the file with read_file if the file may have changed."
+                ),
+                None => String::new(),
+            };
             return Err(ToolError::ExecutionFailed(format!(
                 "String to replace not found in {}.\n\
-                 old_string:\n{}\n\n\
-                 Make sure old_string matches the file content exactly, \
-                 including whitespace and indentation.",
+                 old_string:\n{}{}\n",
                 path.display(),
-                preview
+                preview,
+                nearest_hint,
             )));
         }
 
@@ -922,7 +972,9 @@ impl Tool for ApplyPatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::builtin::file_edit_guard::shared_read_file_state;
     use crate::tools::builtin::path_utils::normalize_lexical;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1399,6 +1451,94 @@ mod tests {
     }
 
     // --- ApplyPatchTool enhancement tests ---
+
+    #[tokio::test]
+    async fn test_apply_patch_rejects_content_in_path_arg() {
+        // LLM failure mode from the live fix-issue runs: the model packed
+        // an entire module body (or even multi-line module-registration
+        // code) into the `path` argument. Surface a helpful error so the
+        // agent re-reads its args instead of burning retries on a
+        // "Cannot access file" surfaced from the OS.
+        let dir = TempDir::new().unwrap();
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "mod time;\nmod thread_metadata;\nmod tool_info;",
+                    "old_string": "mod time;",
+                    "new_string": "mod time;\nmod thread_metadata;",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("looks like content") && msg.contains("path"),
+            "expected path-vs-content guard message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_not_found_includes_nearest_context() {
+        // When the agent's old_string doesn't match, the error must
+        // quote the nearest region in the file so the agent can see the
+        // drift (whitespace, quote style, outdated copy) and correct
+        // its input. Without this hint the agent retries with the same
+        // wrong string — no new signal in the error.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        let content = "fn greet(name: &str) -> String {\n    \
+            format!(\"Hello, {name}!\")\n}\n\n\
+            fn farewell(name: &str) -> String {\n    \
+            format!(\"Bye, {name}!\")\n}\n";
+        std::fs::write(&file_path, content).unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+        let read_state = shared_read_file_state();
+        let tool = tool.with_read_state(Arc::clone(&read_state));
+
+        // Simulate a prior read so the read-before-edit guard is satisfied;
+        // the diagnostic we're testing is purely about the match-failure path.
+        let mtime = std::fs::metadata(&file_path).unwrap().modified().unwrap();
+        read_state
+            .write()
+            .await
+            .record_read(ctx.job_id, &file_path, mtime, false);
+
+        // Ask to replace a string that resembles the file but with a
+        // typo — "Helo" vs "Hello" — so no fuzzy fallback matches.
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "fn greet(name: &str) -> String {\n    format!(\"Helo, {name}!\")\n}",
+                    "new_string": "fn greet(name: &str) -> String {\n    println!(\"{name}\");\n    String::new()\n}",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Nearest region"),
+            "expected error to include nearest-region hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("fn greet"),
+            "expected error to quote the actual `fn greet` line, got: {msg}"
+        );
+        assert!(
+            msg.contains("Hello, {name}!"),
+            "expected error to show the actual (not agent-supplied) Hello line so \
+             the agent can see the typo, got: {msg}"
+        );
+    }
 
     #[tokio::test]
     async fn test_apply_patch_rejects_workspace_paths() {
