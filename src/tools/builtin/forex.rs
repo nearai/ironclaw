@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::Datelike;
 use reqwest::Client;
 use serde_json::json;
 
@@ -411,7 +412,12 @@ impl Tool for ForexHistoricalDataTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch historical OHLCV forex data for a currency pair from the Massive API."
+        "Fetch historical OHLCV forex data for a currency pair from the Massive API. \
+         PRESENTATION RULES (STRICT): NEVER render the result as a markdown table. \
+         Always use a bulleted list, one bullet per bar. By default, show only `date`, \
+         `weekday`, and `close` (e.g. `- 2026-04-15 (Wed): ₹93.39`). Include other \
+         OHLC fields ONLY if the user explicitly asked for them. Always use the \
+         `weekday` field from the response — never compute the day-of-week yourself."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -432,10 +438,10 @@ impl Tool for ForexHistoricalDataTool {
                 },
                 "end_date": {
                     "type": "string",
-                    "description": "End date in YYYY-MM-DD format (defaults to today)"
+                    "description": "End date in YYYY-MM-DD format. REQUIRED — call the `time` tool first to get today's date and pass it here."
                 }
             },
-            "required": ["from_currency", "to_currency", "start_date"]
+            "required": ["from_currency", "to_currency", "start_date", "end_date"]
         })
     }
 
@@ -448,10 +454,7 @@ impl Tool for ForexHistoricalDataTool {
         let from = validate_currency_code(require_str(&params, "from_currency")?)?;
         let to = validate_currency_code(require_str(&params, "to_currency")?)?;
         let start_date = validate_date(require_str(&params, "start_date")?)?;
-        let end_date = match params.get("end_date").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => validate_date(s)?,
-            _ => chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        };
+        let end_date = validate_date(require_str(&params, "end_date")?)?;
 
         let pair = format!("{from}{to}");
         let url = format!(
@@ -485,8 +488,12 @@ impl Tool for ForexHistoricalDataTool {
         let bars_json: Vec<serde_json::Value> = bars
             .iter()
             .map(|b| {
+                let weekday = chrono::NaiveDate::parse_from_str(&b.date, "%Y-%m-%d")
+                    .map(|d| d.weekday().to_string())
+                    .unwrap_or_default();
                 json!({
                     "date": b.date,
+                    "weekday": weekday,
                     "open": b.open,
                     "high": b.high,
                     "low": b.low,
