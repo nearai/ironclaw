@@ -333,18 +333,20 @@ async fn webhook_handler(
 
     tracing::info!(
         channel = %channel.channel_name(),
+        dispatch_key = %channel.channel_dispatch_key(),
         "Found channel for webhook"
     );
 
     let channel_name = channel.channel_name();
+    let channel_dispatch_key = channel.channel_dispatch_key();
 
     // Track whether any authentication was performed and passed.
     let mut did_authenticate = false;
 
     // Check if secret is required
-    if state.router.requires_secret(channel_name).await {
+    if state.router.requires_secret(channel_dispatch_key).await {
         // Get the secret header name for this channel (from capabilities or default)
-        let secret_header_name = state.router.get_secret_header(channel_name).await;
+        let secret_header_name = state.router.get_secret_header(channel_dispatch_key).await;
 
         // Try to get secret from query param or the channel's configured header
         let provided_secret = query
@@ -377,7 +379,11 @@ async fn webhook_handler(
 
         match provided_secret {
             Some(secret) => {
-                if !state.router.validate_secret(channel_name, &secret).await {
+                if !state
+                    .router
+                    .validate_secret(channel_dispatch_key, &secret)
+                    .await
+                {
                     tracing::warn!(
                         channel = %channel_name,
                         "Webhook secret validation failed"
@@ -408,7 +414,7 @@ async fn webhook_handler(
     }
 
     // Ed25519 signature verification (Discord-style)
-    if let Some(pub_key_hex) = state.router.get_signature_key(channel_name).await {
+    if let Some(pub_key_hex) = state.router.get_signature_key(channel_dispatch_key).await {
         let sig_hex = headers
             .get("x-signature-ed25519")
             .and_then(|v| v.to_str().ok());
@@ -460,7 +466,7 @@ async fn webhook_handler(
     }
 
     // HMAC-SHA256 signature verification (Slack-style)
-    if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
+    if let Some(hmac_secret) = state.router.get_hmac_secret(channel_dispatch_key).await {
         let timestamp = headers
             .get("x-slack-request-timestamp")
             .and_then(|v| v.to_str().ok());
@@ -1397,6 +1403,30 @@ mod tests {
         (wasm_router, app)
     }
 
+    async fn setup_telegram_dispatch_secret_router() -> (Arc<WasmChannelRouter>, AxumRouter) {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel_with_dispatch_key("telegram", "tenant-a:telegram");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "tenant-a:telegram".to_string(),
+            path: "/webhook/tenant-a:telegram".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                Some("tenant-a-secret".to_string()),
+                Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
+            )
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        (wasm_router, app)
+    }
+
     #[tokio::test]
     async fn test_telegram_webhook_secret_rejects_missing_header() {
         let (_wasm_router, app) = setup_telegram_secret_router().await;
@@ -1453,6 +1483,46 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Valid Telegram webhook secret should not return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_key_webhook_secret_rejects_invalid_header() {
+        let (_wasm_router, app) = setup_telegram_dispatch_secret_router().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/tenant-a:telegram")
+            .header("content-type", "application/json")
+            .header("X-Telegram-Bot-Api-Secret-Token", "wrong-secret")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid dispatch-key Telegram webhook secret should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_key_webhook_secret_accepts_valid_header() {
+        let (_wasm_router, app) = setup_telegram_dispatch_secret_router().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/tenant-a:telegram")
+            .header("content-type", "application/json")
+            .header("X-Telegram-Bot-Api-Secret-Token", "tenant-a-secret")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid dispatch-key Telegram webhook secret should not return 401"
         );
     }
 

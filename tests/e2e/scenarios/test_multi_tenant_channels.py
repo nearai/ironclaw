@@ -24,8 +24,8 @@ import pytest
 from helpers import api_get, api_post, auth_headers, create_member_user
 
 # Per-tenant bot tokens (distinct so they're traceable in the fake API)
-ALICE_BOT_TOKEN = "111ALICE:FAKE_ALICE_TOKEN"
-BOB_BOT_TOKEN = "222BOB:FAKE_BOB_TOKEN"
+ALICE_BOT_TOKEN = "111222333:FAKE_ALICE_TOKEN"
+BOB_BOT_TOKEN = "444555666:FAKE_BOB_TOKEN"
 
 # Per-tenant webhook secrets
 ALICE_WEBHOOK_SECRET = "e2e-alice-webhook-secret"
