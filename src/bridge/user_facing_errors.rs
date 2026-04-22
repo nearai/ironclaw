@@ -444,14 +444,36 @@ mod tests {
         // Regression for PR #2844: `EventKind::OrchestratorRollback.reason`
         // originates from `format!("execution failed: {e}")` in the engine,
         // where `e: EngineError` can render DB connection strings, file
-        // paths, and upstream HTTP bodies. The sanitizer must strip those.
-        let raw = "execution failed: store error: connection 'postgres://bob:hunter2@db:5432/x' refused: \
+        // paths, tokens, and upstream HTTP bodies. The sanitizer must
+        // produce an output that is fully independent of the raw engine
+        // detail — two unrelated leaky strings must collapse to the same
+        // classified message. `assert_eq!(msg_a, msg_b)` is the load-
+        // bearing check; the `contains` probes below are sentinel sniffs
+        // for the specific leak shapes the fix is meant to prevent.
+        let raw_a = "execution failed: store error: connection \
+            'postgres://bob:hunter2@db:5432/x' refused: \
             File \"/home/runner/.ironclaw/state.db\" not found";
-        let msg = user_facing_rollback_reason(raw);
-        assert_eq!(msg, "execution failed");
-        assert!(!msg.contains("postgres://"));
-        assert!(!msg.contains("hunter2"));
-        assert!(!msg.contains("/home/runner"));
+        // Deliberately avoid any substring that the classifier recognises
+        // (no `upstream`, no `http 5xx`, no `rate limited`, etc.) so both
+        // inputs fall into the `Unknown` category — the test is about
+        // sanitisation, not classification.
+        let raw_b = "execution failed: store error: leaked \
+            token sk_live_123 and request id req_abc123 at /etc/secrets/keyring";
+
+        let msg_a = user_facing_rollback_reason(raw_a);
+        let msg_b = user_facing_rollback_reason(raw_b);
+
+        assert_eq!(msg_a, "execution failed");
+        assert_eq!(msg_b, "execution failed");
+        assert_eq!(
+            msg_a, msg_b,
+            "sanitized rollback reason must be independent of raw engine detail"
+        );
+        assert!(!msg_a.contains("postgres://"));
+        assert!(!msg_a.contains("hunter2"));
+        assert!(!msg_a.contains("/home/runner"));
+        assert!(!msg_b.contains("sk_live_123"));
+        assert!(!msg_b.contains("req_abc123"));
     }
 
     #[test]

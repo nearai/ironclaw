@@ -4774,17 +4774,19 @@ fn thread_event_to_app_events(
             }]
         }
 
-        // Explicitly-dropped engine variants. These are NOT bridged to
-        // `AppEvent` because an equivalent event is emitted by a
-        // different source log today, and double-emission would have
-        // the UI rendering the same thing twice. Migration plan per
-        // #2792 Phase 1 PR 3:
+        // Temporarily-suppressed engine variants. These are NOT bridged
+        // to `AppEvent` today because equivalent gate events are still
+        // emitted directly by the gate manager, and forwarding them
+        // here as well would make the UI render the same state twice.
+        // Migration plan per #2792 Phase 1 PR 3:
         //
-        // - `ApprovalRequested` / `ApprovalReceived` → migrate the gate
-        //   manager to emit through the engine event log (replacing its
-        //   current direct `AppEvent::GateRequired` / `GateResolved`
-        //   broadcasts), then drop these arms and let the bridge
-        //   project the engine events.
+        // - `ApprovalRequested` / `ApprovalReceived` are suppressed
+        //   only until the gate manager stops broadcasting direct
+        //   `AppEvent::GateRequired` / `GateResolved` events.
+        // - Once that migration lands, this function remains the
+        //   bridge: map these engine variants to the corresponding
+        //   `AppEvent`s here (or remove the direct emits), rather
+        //   than treating them as permanently dropped.
         EventKind::ApprovalRequested { .. } => vec![],
         EventKind::ApprovalReceived { .. } => vec![],
 
@@ -7348,6 +7350,100 @@ mod tests {
         assert_eq!(lease_id, &lease.to_string());
         assert_eq!(capability_name, "http_fetch");
         assert_eq!(thread_id.as_deref(), Some("thread-lease"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_revoked() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseRevoked {
+                lease_id: lease,
+                reason: "policy check failed".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-revoke");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseRevoked {
+            lease_id,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseRevoked, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(reason, "policy check failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-revoke"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_expired() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseExpired { lease_id: lease },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-expire");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseExpired {
+            lease_id,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseExpired, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(thread_id.as_deref(), Some("thread-expire"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_started() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementStarted,
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-start");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(phase, &ironclaw_common::SelfImprovementPhase::Started);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-start"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementFailed {
+                error: "diagnosis prompt timed out".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Failed { error } = phase else {
+            panic!("expected SelfImprovementPhase::Failed, got {phase:?}");
+        };
+        assert_eq!(error, "diagnosis prompt timed out");
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-fail"));
     }
 
     #[test]
