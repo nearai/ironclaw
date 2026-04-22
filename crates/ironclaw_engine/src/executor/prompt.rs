@@ -1,7 +1,8 @@
 //! System prompt construction for the execution loop.
 //!
 //! Builds a CodeAct/RLM system prompt that instructs the LLM to write
-//! Python code in ```repl blocks with tools available as callable functions.
+//! Python code in ```repl blocks while keeping non-callable capability
+//! background in one canonical always-on location.
 //!
 //! Prompt templates live in `crates/ironclaw_engine/prompts/` as plain
 //! markdown files for easy inspection and iteration. They are embedded
@@ -14,6 +15,7 @@ use crate::traits::store::Store;
 use crate::types::capability::{
     ActionDef, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind,
 };
+use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 
 /// Runtime platform metadata injected into system prompts for self-awareness.
@@ -77,8 +79,11 @@ impl PlatformInfo {
 /// The main instruction block (before tool listing).
 const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");
 
-/// The strategy/closing block (after tool listing).
+/// The strategy/closing block appended after the dynamic metadata sections.
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
+
+/// Marker for the engine-owned CodeAct system prompt.
+const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt -->\n";
 
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
@@ -134,12 +139,13 @@ pub fn build_codeact_system_prompt_with_docs(
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
 fn build_codeact_system_prompt_inner(
-    actions: &[ActionDef],
+    _actions: &[ActionDef],
     capabilities: &[CapabilitySummary],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
-    let mut prompt = String::from(CODEACT_PREAMBLE);
+    let mut prompt = String::from(CODEACT_SYSTEM_PROMPT_MARKER);
+    prompt.push_str(CODEACT_PREAMBLE);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -150,22 +156,6 @@ fn build_codeact_system_prompt_inner(
     if let Some(overlay) = overlay {
         prompt.push_str("\n\n## Learned Rules (from self-improvement)\n\n");
         prompt.push_str(overlay);
-    }
-
-    // Add tool documentation
-    if !actions.is_empty() {
-        prompt.push_str("\n## Available tools (call as Python functions)\n\n");
-        for action in actions {
-            prompt.push_str(&format!("- `{}(", action.name));
-            // Extract parameter names from JSON schema
-            if let Some(props) = action.parameters_schema.get("properties")
-                && let Some(obj) = props.as_object()
-            {
-                let params: Vec<&str> = obj.keys().map(String::as_str).collect();
-                prompt.push_str(&params.join(", "));
-            }
-            prompt.push_str(&format!(")` — {}\n", action.description));
-        }
     }
 
     if !capabilities.is_empty() {
@@ -194,6 +184,55 @@ fn build_codeact_system_prompt_inner(
 
     prompt.push_str(CODEACT_POSTAMBLE);
     prompt
+}
+
+pub fn is_codeact_system_prompt(content: &str) -> bool {
+    content.starts_with(CODEACT_SYSTEM_PROMPT_MARKER) || content.starts_with(CODEACT_PREAMBLE)
+}
+
+pub fn refresh_codeact_system_prompt(existing_content: &str, system_prompt: &str) -> String {
+    if !is_codeact_system_prompt(existing_content) {
+        return system_prompt.to_string();
+    }
+
+    let suffix = existing_content
+        .rfind(CODEACT_POSTAMBLE)
+        .map(|idx| &existing_content[idx + CODEACT_POSTAMBLE.len()..])
+        .unwrap_or_default();
+
+    if suffix.is_empty() {
+        system_prompt.to_string()
+    } else {
+        let mut refreshed = String::from(system_prompt);
+        refreshed.push_str(suffix);
+        refreshed
+    }
+}
+
+pub fn upsert_codeact_system_prompt(
+    messages: &mut Vec<ThreadMessage>,
+    system_prompt: String,
+) -> bool {
+    if let Some(message) = messages.iter_mut().find(|message| {
+        message.role == MessageRole::System && is_codeact_system_prompt(&message.content)
+    }) {
+        let refreshed = refresh_codeact_system_prompt(&message.content, &system_prompt);
+        if message.content == refreshed {
+            return false;
+        }
+        message.content = refreshed;
+        return true;
+    }
+
+    if messages
+        .iter()
+        .any(|message| message.role == MessageRole::System)
+    {
+        return false;
+    }
+
+    messages.insert(0, ThreadMessage::system(system_prompt));
+    true
 }
 
 const fn capability_status_label(status: CapabilityStatus) -> &'static str {
@@ -413,5 +452,81 @@ mod tests {
         assert!(prompt.contains("Usable through message"));
         assert!(prompt.contains("`slack` [provider]"));
         assert!(prompt.contains("needs_auth"));
+    }
+
+    #[test]
+    fn prompt_no_longer_duplicates_callable_tool_inventory() {
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[ActionDef {
+                name: "message".into(),
+                description: "Send a message".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}}
+                }),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            &[],
+            &[],
+            None,
+        );
+
+        assert!(!prompt.contains("## Available tools (call as Python functions)"));
+        assert!(!prompt.contains("`message(text)`"));
+    }
+
+    #[test]
+    fn upsert_replaces_engine_owned_system_prompt() {
+        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
+        let new_prompt = build_codeact_system_prompt_with_docs(
+            &[],
+            &[CapabilitySummary {
+                name: "telegram".into(),
+                display_name: None,
+                kind: CapabilitySummaryKind::Channel,
+                status: CapabilityStatus::ReadyScoped,
+                description: None,
+                routing_hint: Some("Usable through message".into()),
+            }],
+            &[],
+            None,
+        );
+        let mut messages = vec![ThreadMessage::system(old_prompt), ThreadMessage::user("hi")];
+
+        assert!(upsert_codeact_system_prompt(
+            &mut messages,
+            new_prompt.clone()
+        ));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::System);
+        assert_eq!(messages[0].content, new_prompt);
+    }
+
+    #[test]
+    fn refresh_preserves_step_zero_system_appends() {
+        let old_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
+        let existing = format!(
+            "{old_prompt}\n\n## Prior Knowledge (from completed threads)\n\n### [LESSON] Use http\n\n<skill name=\"github\" version=\"1\">\nGitHub API Skill\n</skill>\n\nThe user explicitly requested slash skill(s) that are not installed."
+        );
+        let new_prompt = build_codeact_system_prompt_with_docs(
+            &[],
+            &[CapabilitySummary {
+                name: "slack".into(),
+                display_name: None,
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: None,
+                routing_hint: None,
+            }],
+            &[],
+            None,
+        );
+
+        let refreshed = refresh_codeact_system_prompt(&existing, &new_prompt);
+        assert!(refreshed.starts_with(&new_prompt));
+        assert!(refreshed.contains("## Prior Knowledge (from completed threads)"));
+        assert!(refreshed.contains("GitHub API Skill"));
+        assert!(refreshed.contains("slash skill(s) that are not installed"));
     }
 }
