@@ -1201,7 +1201,7 @@ enum ToolResultAdapter {
     ReadText,
     ReadJson,
     WriteText,
-    HttpGet,
+    HttpResponse,
     Run,
     ListEntries,
     FindFiles,
@@ -1228,6 +1228,7 @@ fn register_host_shim_names(known_actions: &mut std::collections::HashSet<String
     }
     if available.contains("http") {
         known_actions.insert("http_get".into());
+        known_actions.insert("http_request".into());
     }
     if available.contains("shell") {
         known_actions.insert("run".into());
@@ -1331,24 +1332,16 @@ fn build_shim_dispatch(
                 result_adapter: ToolResultAdapter::FindFiles,
             }))
         }
-        "http_get" => {
-            let mut map = serde_json::Map::new();
-            map.insert("method".into(), serde_json::Value::String("GET".into()));
-            map.insert(
-                "url".into(),
-                serde_json::Value::String(required_string_param(params, "url", 0, "http_get")?),
-            );
-            if let Some(headers) = optional_param(params, "headers", 1) {
-                if !headers.is_null() {
-                    map.insert("headers".into(), headers.clone());
-                }
-            }
-            Ok(Some(ShimDispatch {
-                action_name: "http".into(),
-                parameters: serde_json::Value::Object(map),
-                result_adapter: ToolResultAdapter::HttpGet,
-            }))
-        }
+        "http_get" => Ok(Some(ShimDispatch {
+            action_name: "http".into(),
+            parameters: build_http_request_parameters(params, "http_get", Some("GET"))?,
+            result_adapter: ToolResultAdapter::HttpResponse,
+        })),
+        "http_request" => Ok(Some(ShimDispatch {
+            action_name: "http".into(),
+            parameters: build_http_request_parameters(params, "http_request", None)?,
+            result_adapter: ToolResultAdapter::HttpResponse,
+        })),
         "run" => {
             let mut map = serde_json::Map::new();
             map.insert(
@@ -1420,6 +1413,51 @@ fn serialize_json_for_write(value: &serde_json::Value) -> Result<String, ExtFunc
     })
 }
 
+fn build_http_request_parameters(
+    params: &serde_json::Value,
+    shim_name: &str,
+    default_method: Option<&str>,
+) -> Result<serde_json::Value, ExtFunctionResult> {
+    let method = match default_method {
+        Some(method) => method.to_string(),
+        None => required_string_param(params, "method", 0, shim_name)?,
+    };
+    let url_position = if default_method.is_some() { 0 } else { 1 };
+    let headers_position = if default_method.is_some() { 1 } else { 2 };
+    let body_position = if default_method.is_some() { 2 } else { 3 };
+    let json_position = if default_method.is_some() { 3 } else { 4 };
+
+    let url = required_string_param(params, "url", url_position, shim_name)?;
+    let body = optional_param(params, "body", body_position).filter(|value| !value.is_null());
+    let json = optional_param(params, "json", json_position).filter(|value| !value.is_null());
+
+    if body.is_some() && json.is_some() {
+        return Err(ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!(
+                "{shim_name}() accepts either 'body' or 'json', not both"
+            )),
+        )));
+    }
+
+    let mut map = serde_json::Map::new();
+    map.insert("method".into(), serde_json::Value::String(method));
+    map.insert("url".into(), serde_json::Value::String(url));
+    if let Some(headers) = optional_param(params, "headers", headers_position)
+        && !headers.is_null()
+    {
+        map.insert("headers".into(), headers.clone());
+    }
+    if let Some(body) = body {
+        map.insert("body".into(), body.clone());
+    }
+    if let Some(json) = json {
+        map.insert("body".into(), json.clone());
+    }
+
+    Ok(serde_json::Value::Object(map))
+}
+
 fn required_string_param_with_aliases(
     params: &serde_json::Value,
     names: &[&str],
@@ -1462,7 +1500,7 @@ fn adapt_tool_output(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         })),
-        ToolResultAdapter::HttpGet => Ok(adapt_http_get_output(output)),
+        ToolResultAdapter::HttpResponse => Ok(adapt_http_response_output(output)),
         ToolResultAdapter::Run => Ok(serde_json::json!({
             "ok": output.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
             "exit_code": output.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
@@ -1532,7 +1570,7 @@ fn adapt_read_json_output(output: &serde_json::Value) -> Result<serde_json::Valu
     }
 }
 
-fn adapt_http_get_output(output: &serde_json::Value) -> serde_json::Value {
+fn adapt_http_response_output(output: &serde_json::Value) -> serde_json::Value {
     let status = output
         .get("status")
         .and_then(|v| v.as_u64())
@@ -3048,6 +3086,72 @@ FINAL(str(resp["ok"]) + "|" + str(resp["status"]) + "|" + str(resp["json_body"][
         assert_eq!(
             calls[0].1,
             serde_json::json!({"method": "GET", "url": "https://example.com/api"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_request_uses_http_with_json_body_and_headers() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("http")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "http".into(),
+                output: serde_json::json!({
+                    "status": 201,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"created": true}
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+resp = await http_request("POST", "https://example.com/items", headers={"x-test": "1"}, json={"name": "widget"})
+FINAL(str(resp["ok"]) + "|" + str(resp["status"]) + "|" + str(resp["json_body"]["created"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|201|True"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "http");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({
+                "method": "POST",
+                "url": "https://example.com/items",
+                "headers": {"x-test": "1"},
+                "body": {"name": "widget"}
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_request_rejects_body_and_json_together() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(vec![test_action("http")], vec![]));
+
+        let code = r#"
+await http_request("POST", "https://example.com/items", body="raw", json={"name": "widget"})
+FINAL("should-not-run")
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.final_answer.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(
+            result.failure,
+            Some(CodeExecutionFailure::RuntimeError),
+            "expected body/json conflict to surface as a runtime error"
+        );
+        assert!(
+            effects.recorded_calls().is_empty(),
+            "http should not be called"
         );
     }
 

@@ -71,6 +71,7 @@ Phase 1 / 2 add a small ergonomic shim layer for common workflows:
 - `list_entries(path=".", recursive=False, max_depth=3)` → canonical `list_dir`
 - `find_files(pattern, path=".", max_results=None)` → canonical `glob`
 - `http_get(url, headers=None)` → canonical `http` with `method="GET"`
+- `http_request(method, url, headers=None, body=None, json=None)` → canonical `http` with normalized response output
 - `run(command, timeout=None, workdir=None)` → canonical `shell`
 
 These shims do **not** create new privileges. The canonical underlying action remains the trust boundary for leases, approvals, policy checks, logging, and effect execution. Raw tool functions remain available as escape hatches for advanced cases.
