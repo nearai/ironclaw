@@ -146,6 +146,13 @@ struct StoreData {
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
+/// Represents a single WebSocket frame collected during an exchange.
+/// Text frames carry UTF-8 strings; binary frames carry raw bytes.
+enum WsFrame {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
 impl StoreData {
     fn new(
         memory_limit: u64,
@@ -323,27 +330,63 @@ impl StoreData {
             let (mut tx, mut rx) = ws_stream.split();
 
             // Send body if provided. On send error, attempt clean close before returning.
+            // Supports both text (UTF-8) and binary payloads.
             if let Some(body_bytes) = body {
-                let msg = String::from_utf8(body_bytes)
-                    .map_err(|_| "WS body is not valid UTF-8".to_string())?;
-                if tx.send(Message::Text(msg.into())).await.is_err() {
+                let msg = match String::from_utf8(body_bytes) {
+                    Ok(text) => Message::Text(text.into()),
+                    Err(e) => Message::Binary(e.into_bytes()),
+                };
+                if tx.send(msg).await.is_err() {
                     let _ = tx.close().await;
                     return Err("WS send failed".to_string());
                 }
             }
 
-            let collected = Self::ws_exchange(&mut rx, &mut tx, timeout_ms).await;
+            // Use the configured max_response_bytes from capabilities, fallback to 2 MiB.
+            let max_response = self
+                .host_state
+                .capabilities()
+                .http
+                .as_ref()
+                .map(|h| h.max_response_bytes)
+                .unwrap_or(2 * 1024 * 1024)
+                .max(64 * 1024); // floor at 64 KiB
 
-            // Leak scan on collected messages
-            let body_text = collected.join("\n");
+            let collected =
+                Self::ws_exchange(&mut rx, &mut tx, timeout_ms, max_response).await;
+
+            // Leak scan on collected text messages (skip binary payloads)
+            let text_concat: String = collected
+                .iter()
+                .filter_map(|frame| match frame {
+                    WsFrame::Text(t) => Some(t.as_str()),
+                    WsFrame::Binary(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             leak_detector
-                .scan_and_clean(&body_text)
+                .scan_and_clean(&text_concat)
                 .map_err(|e| format!("Potential secret leak in WS response: {}", e))?;
+
+            // Return messages as a JSON array so the guest can reliably parse
+            // individual frames without splitting on newlines (which are fragile
+            // since messages can contain literal newlines).
+            let json_array: Vec<serde_json::Value> = collected
+                .into_iter()
+                .map(|frame| match frame {
+                    WsFrame::Text(t) => serde_json::Value::String(t),
+                    WsFrame::Binary(b) => {
+                        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&b))
+                    }
+                })
+                .collect();
+            let body_bytes = serde_json::to_vec(&json_array)
+                .map_err(|e| format!("WS response serialization: {}", e))?;
 
             Ok(near::agent::host::HttpResponse {
                 status: 101, // Switching Protocols — signals WS success
                 headers_json: "{}".to_string(),
-                body: body_text.into_bytes(),
+                body: body_bytes,
             })
         });
 
@@ -452,11 +495,9 @@ impl StoreData {
             Message,
         >,
         timeout_ms: u64,
-    ) -> Vec<String> {
-        /// Maximum bytes we'll collect from the relay before cutting off.
-        const MAX_WS_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
-
-        let mut collected: Vec<String> = Vec::new();
+        max_response_bytes: usize,
+    ) -> Vec<WsFrame> {
+        let mut collected: Vec<WsFrame> = Vec::new();
         let mut total_bytes: usize = 0;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
 
@@ -469,17 +510,24 @@ impl StoreData {
             match tokio::time::timeout(remaining, rx.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     total_bytes += text.len();
-                    if total_bytes > MAX_WS_RESPONSE_BYTES {
+                    if total_bytes > max_response_bytes {
                         break; // size cap reached — close cleanly below
                     }
-                    collected.push(text.to_string());
+                    collected.push(WsFrame::Text(text.to_string()));
+                }
+                Ok(Some(Ok(Message::Binary(data)))) => {
+                    total_bytes += data.len();
+                    if total_bytes > max_response_bytes {
+                        break; // size cap reached — close cleanly below
+                    }
+                    collected.push(WsFrame::Binary(data));
                 }
                 Ok(Some(Ok(Message::Close(_)))) => break,
                 Ok(Some(Ok(Message::Ping(_)))) => {
                     // tungstenite auto-responds with pong — no action needed
                     continue;
                 }
-                Ok(Some(Ok(_))) => continue, // binary/pong/frame — ignore
+                Ok(Some(Ok(_))) => continue, // pong/frame — ignore
                 Ok(Some(Err(_))) => break,   // read error — stop, return what we have
                 Ok(None) => break,           // stream ended
                 Err(_) => break,             // timeout
@@ -4229,8 +4277,11 @@ mod tests {
         let resp = result.expect("ws_roundtrip should succeed");
         assert_eq!(resp.status, 101, "status should be 101 (Switching Protocols)");
         let body = String::from_utf8(resp.body).expect("body should be valid UTF-8");
+        // Body is now a JSON array of frame strings, e.g. ["echo:hello world"]
+        let frames: Vec<String> = serde_json::from_str(&body)
+            .expect("body should be a JSON array of strings");
         assert!(
-            body.contains("echo:hello world"),
+            frames.iter().any(|f| f.contains("echo:hello world")),
             "echo server should have replied with 'echo:hello world', got: {body}"
         );
     }

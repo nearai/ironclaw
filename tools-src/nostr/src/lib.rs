@@ -193,6 +193,10 @@ fn execute_get_profile(pubkey: &str) -> Result<String, String> {
     let pk_hex = hex::encode(pk_bytes);
 
     let relays = resolve_relays(&[]);
+    if relays.is_empty() {
+        return Err("No relays configured".to_string());
+    }
+
     let filter = serde_json::json!({
         "kinds": [0],
         "authors": [pk_hex],
@@ -200,19 +204,37 @@ fn execute_get_profile(pubkey: &str) -> Result<String, String> {
     })
     .to_string();
 
-    let relay = relays.first().ok_or("No relays configured")?;
-    let response = transport::query_events(relay, &filter)?;
+    // Query multiple relays, return first valid profile found
+    let mut last_error: Option<String> = None;
+    for relay in &relays {
+        match transport::query_events(relay, &filter) {
+            Ok(response) => {
+                if let Some(profile) = parse_profile_from_relay_response(&response, &pk_hex) {
+                    return serde_json::to_string(&profile)
+                        .map_err(|e| format!("Serialization: {e}"));
+                }
+            }
+            Err(e) => {
+                near::agent::host::log(
+                    near::agent::host::LogLevel::Warn,
+                    &format!("Failed to query relay {relay} for profile: {e}"),
+                );
+                last_error = Some(format!("{relay}: {e}"));
+            }
+        }
+    }
 
-    // Parse relay response -- may contain ["EVENT", sub_id, event] lines
-    let profile = parse_profile_from_relay_response(&response, &pk_hex);
-
-    match profile {
-        Some(p) => serde_json::to_string(&p).map_err(|e| format!("Serialization: {e}")),
-        None => Ok(serde_json::json!({
+    // No profile found on any relay
+    match last_error {
+        Some(err) if relays.len() == 1 => {
+            // Only one relay was queried and it failed — propagate the error
+            Err(format!("Relay query failed: {err}"))
+        }
+        _ => Ok(serde_json::json!({
             "pubkey": pk_hex,
             "npub": nip19::encode_npub(&pk_bytes).unwrap_or_default(),
             "profile": null,
-            "message": "No profile metadata found"
+            "message": "No profile metadata found on any relay"
         })
         .to_string()),
     }
@@ -300,13 +322,14 @@ fn execute_search_notes(query: &str, limit: u32) -> Result<String, String> {
 fn execute_get_notes(authors: &[String], limit: u32) -> Result<String, String> {
     let author_hexs: Vec<String> = authors
         .iter()
-        .map(|a| {
-            nip19::parse_pubkey(a)
-                .map(|pk| hex::encode(pk))
-        })
+        .map(|a| nip19::parse_pubkey(a).map(|pk| hex::encode(pk)))
         .collect::<Result<Vec<_>, _>>()?;
 
     let relays = resolve_relays(&[]);
+    if relays.is_empty() {
+        return Err("No relays configured".to_string());
+    }
+
     let filter = serde_json::json!({
         "kinds": [1],
         "authors": author_hexs,
@@ -314,12 +337,31 @@ fn execute_get_notes(authors: &[String], limit: u32) -> Result<String, String> {
     })
     .to_string();
 
-    let relay = relays.first().ok_or("No relays configured")?;
-    let response = transport::query_events(relay, &filter)?;
+    // Query all relays, aggregate and deduplicate by event_id
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut all_notes: Vec<NoteInfo> = Vec::new();
 
-    let notes = parse_events_from_relay_response(&response);
-    let count = notes.len();
-    let result = SearchResult { notes, count };
+    for relay in &relays {
+        match transport::query_events(relay, &filter) {
+            Ok(response) => {
+                let notes = parse_events_from_relay_response(&response);
+                for note in notes {
+                    if seen_ids.insert(note.event_id.clone()) {
+                        all_notes.push(note);
+                    }
+                }
+            }
+            Err(e) => {
+                near::agent::host::log(
+                    near::agent::host::LogLevel::Warn,
+                    &format!("Failed to query relay {relay} for notes: {e}"),
+                );
+            }
+        }
+    }
+
+    let count = all_notes.len();
+    let result = SearchResult { notes: all_notes, count };
     serde_json::to_string(&result).map_err(|e| format!("Serialization: {e}"))
 }
 
@@ -451,9 +493,23 @@ fn execute_get_relays() -> Result<String, String> {
 // Relay response parsing helpers
 // ---------------------------------------------------------------------------
 
+/// Parse the JSON array of WS frame strings from the host.
+///
+/// The host ws_roundtrip returns a JSON array like `["msg1","msg2"]`.
+/// Falls back to treating the body as a single string for backward compat.
+fn parse_frames_from_response(response: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(response).unwrap_or_else(|_| {
+        // Fallback: split on newlines for backward compat
+        response.lines().map(|l| l.to_string()).collect()
+    })
+}
+
 /// Parse a profile (kind 0) from relay response.
+///
+/// The response is a JSON array of frame strings from the host.
 fn parse_profile_from_relay_response(response: &str, _expected_pubkey: &str) -> Option<serde_json::Value> {
-    for line in response.lines() {
+    let frames = parse_frames_from_response(response);
+    for line in frames.iter() {
         let line = line.trim();
         if !line.starts_with("['EVENT") && !line.starts_with("[\"EVENT") {
             continue;
@@ -473,9 +529,12 @@ fn parse_profile_from_relay_response(response: &str, _expected_pubkey: &str) -> 
 }
 
 /// Parse events from relay response.
+///
+/// The response is a JSON array of frame strings from the host.
 fn parse_events_from_relay_response(response: &str) -> Vec<NoteInfo> {
+    let frames = parse_frames_from_response(response);
     let mut notes = Vec::new();
-    for line in response.lines() {
+    for line in frames.iter() {
         let line = line.trim();
         if !line.starts_with("['EVENT") && !line.starts_with("[\"EVENT") {
             continue;

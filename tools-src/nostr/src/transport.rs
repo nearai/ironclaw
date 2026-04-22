@@ -15,6 +15,18 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://nos.lol",
 ];
 
+/// Parse a JSON array of WS frame strings returned by the host.
+///
+/// The host's ws_roundtrip now returns a JSON array like `["msg1","msg2"]`
+/// instead of newline-separated text. Binary frames appear as base64 strings
+/// but for nostr relay communication all frames are text.
+fn parse_ws_response_frames(body: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(body).unwrap_or_else(|_| {
+        // Fallback: treat the whole body as a single frame (backward compat)
+        vec![body.to_string()]
+    })
+}
+
 /// Publish a signed event to a relay via WebSocket.
 ///
 /// Sends: ["EVENT", <event_json>]
@@ -40,13 +52,15 @@ pub fn publish_event(relay_url: &str, event_json: &str) -> Result<String, String
         ));
     }
 
-    // Look for ["OK", event_id, true, "..."] in the response
+    // Look for ["OK", event_id, true, "..."] in the response frames
     let response_text = String::from_utf8(resp.body)
         .map_err(|e| format!("Invalid UTF-8 response: {e}"))?;
 
-    // Check for OK in any line of the response
-    for line in response_text.lines() {
-        let line = line.trim();
+    let frames = parse_ws_response_frames(&response_text);
+
+    // Check for OK in any frame
+    for frame in &frames {
+        let line = frame.trim();
         if let Ok(arr) = serde_json::from_str::<serde_json::Value>(line) {
             if arr.get(0).and_then(|v| v.as_str()) == Some("OK") {
                 let ok = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -61,13 +75,14 @@ pub fn publish_event(relay_url: &str, event_json: &str) -> Result<String, String
     }
 
     // No OK received — relay may not have responded in time
-    Ok(response_text)
+    Ok(frames.join("\n"))
 }
 
 /// Query a relay via WebSocket.
 ///
 /// Sends: ["REQ", "<sub-id>", <filter_json>]
 /// Collects all ["EVENT", sub_id, event] responses until timeout.
+/// Returns the raw JSON array of frame strings from the host.
 pub fn query_events(relay_url: &str, filter_json: &str) -> Result<String, String> {
     let sub_id = format!("q{}", &hash_short(filter_json));
     let payload = format!("[\"REQ\",\"{sub_id}\",{filter_json}]");
@@ -91,6 +106,7 @@ pub fn query_events(relay_url: &str, filter_json: &str) -> Result<String, String
         ));
     }
 
+    // Return the raw response body (JSON array of frames) for the caller to parse
     String::from_utf8(resp.body).map_err(|e| format!("Invalid UTF-8 response: {e}"))
 }
 
