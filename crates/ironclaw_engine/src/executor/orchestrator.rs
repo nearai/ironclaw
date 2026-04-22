@@ -30,6 +30,8 @@ use monty::{
 };
 use tracing::{debug, warn};
 
+use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
+use super::thread_context::thread_execution_context;
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
@@ -45,9 +47,6 @@ use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
-use ironclaw_common::ValidTimezone;
-
-use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
@@ -64,24 +63,6 @@ pub struct OrchestratorResult {
     pub outcome: ThreadOutcome,
     /// Total tokens used by LLM calls within the orchestrator.
     pub tokens_used: TokenUsage,
-}
-
-/// Extract source_channel from thread metadata (set by ConversationManager).
-fn thread_source_channel(thread: &Thread) -> Option<String> {
-    thread
-        .metadata
-        .get("source_channel")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract and validate user_timezone from thread metadata (set by bridge router).
-fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
-    thread
-        .metadata
-        .get("user_timezone")
-        .and_then(|v| v.as_str())
-        .and_then(ValidTimezone::parse)
 }
 
 fn normalize_pause_outcome(
@@ -731,9 +712,10 @@ async fn handle_llm_complete(
     }
 
     let active_leases = deps.leases.active_for_thread(thread.id).await;
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
     let actions = deps
         .effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
 
@@ -833,17 +815,7 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: None,
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), None);
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -1008,17 +980,7 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: Some(call_id.clone()),
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1066,7 +1028,7 @@ async fn handle_execute_action(
 
     // 2. Check policy
     let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
+        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
         .await
         .ok()
         .and_then(|actions| actions.into_iter().find(|a| a.name == name));
@@ -1407,8 +1369,9 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
+            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
             .await
             .ok()
             .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
@@ -1567,22 +1530,7 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = ThreadExecutionContext {
-            thread_id: thread.id,
-            thread_type: thread.thread_type,
-            project_id: thread.project_id,
-            user_id: thread.user_id.clone(),
-            step_id,
-            current_call_id: Some(pc.call_id.clone()),
-            // Read source_channel from thread metadata so downstream tools
-            // (e.g. mission_create) can default notify_channels to the
-            // originating channel. Hardcoding `None` here was a bug — it
-            // silently dropped the gateway routing for any tool dispatched
-            // through the parallel batch path.
-            source_channel: thread_source_channel(thread),
-            user_timezone: thread_user_timezone(thread),
-            thread_goal: Some(thread.goal.clone()),
-        };
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1606,27 +1554,13 @@ async fn handle_execute_actions_parallel(
         let effects = effects.clone();
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
-        let parallel_source_channel = thread_source_channel(thread);
-        let parallel_user_timezone = thread_user_timezone(thread);
-
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = ThreadExecutionContext {
-                thread_id: thread.id,
-                thread_type: thread.thread_type,
-                project_id: thread.project_id,
-                user_id: thread.user_id.clone(),
-                step_id,
-                current_call_id: Some(pc_call_id.clone()),
-                // See comment above — read from thread metadata, not None.
-                source_channel: parallel_source_channel.clone(),
-                user_timezone: parallel_user_timezone,
-                thread_goal: Some(thread.goal.clone()),
-            };
+            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -2057,7 +1991,11 @@ async fn handle_get_actions(
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
-    match effects.available_actions(&active_leases).await {
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    match effects
+        .available_actions(&active_leases, &actions_context)
+        .await
+    {
         Ok(actions) => {
             let actions_json: Vec<serde_json::Value> = actions
                 .iter()
@@ -3638,7 +3576,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
         ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
