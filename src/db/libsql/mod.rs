@@ -334,7 +334,7 @@ impl Database for LibSqlBackend {
         conn.query("PRAGMA journal_mode=WAL", ())
             .await
             .map_err(|e| DatabaseError::Migration(format!("Failed to enable WAL mode: {}", e)))?;
-        conn.execute_batch(libsql_migrations::SCHEMA)
+        conn.execute_batch(crate::db::libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
         // Apply incremental migrations (V9+) tracked in _migrations table.
@@ -572,6 +572,89 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let timeout: i64 = row.get(0).unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    /// Smoke test: V25 budget tables materialise on a fresh libSQL
+    /// database, and the unique index permits the documented row shape.
+    ///
+    /// Uses `new_local` with a tempfile rather than `new_memory` because
+    /// `:memory:` databases are connection-local in SQLite — tables
+    /// created by one connection are invisible to the next.
+    #[tokio::test]
+    async fn v25_budget_schema_applies_and_accepts_a_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("budgets_smoke.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        let mut all = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = all.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        let found = names.join(", ");
+
+        for table in ["budgets", "budget_ledgers", "budget_events"] {
+            assert!(
+                names.iter().any(|n| n == table),
+                "{table} missing from schema after run_migrations(); got: {found}"
+            );
+        }
+
+        // Insert one row per table in documented shape. Any SQL
+        // regression (column count, CHECK violation, wrong type) surfaces
+        // here before the rest of the store code is written.
+        conn.execute(
+            "INSERT INTO budgets (
+                id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                source, active, created_at, created_by
+            ) VALUES (
+                'b-1', 'alice', 'user', 'alice', '5.00', NULL, NULL,
+                'rolling_24h', NULL, NULL, 'default', 1,
+                '2026-04-21T00:00:00.000Z', 'alice'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO budget_ledgers (
+                budget_id, period_start, period_end, spent_usd,
+                reserved_usd, tokens_used, updated_at
+            ) VALUES (
+                'b-1',
+                '2026-04-21T00:00:00.000Z',
+                '2026-04-22T00:00:00.000Z',
+                '0.00', '0.00', 0,
+                '2026-04-21T00:00:00.000Z'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO budget_events (
+                id, budget_id, thread_id, event_kind,
+                amount_usd, tokens, reason, actor_user_id, created_at
+            ) VALUES (
+                'e-1', 'b-1', NULL, 'reserve',
+                '0.10', 100, NULL, 'alice',
+                '2026-04-21T00:00:00.000Z'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
     }
 
     /// Regression test: save_job must persist user_id and get_job must return it.

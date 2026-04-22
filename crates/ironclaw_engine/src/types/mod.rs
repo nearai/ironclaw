@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 
+pub mod budget;
 pub mod capability;
 pub mod conversation;
 pub mod error;

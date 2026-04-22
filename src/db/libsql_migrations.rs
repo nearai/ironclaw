@@ -674,6 +674,66 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 
+-- ==================== Budgets (V25 / issue #2843) ====================
+
+CREATE TABLE IF NOT EXISTS budgets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    limit_usd TEXT NOT NULL,
+    limit_tokens INTEGER,
+    limit_wall_clock_secs INTEGER,
+    period_kind TEXT NOT NULL,
+    period_tz TEXT,
+    period_unit TEXT,
+    source TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE (scope_kind, scope_id, period_kind, period_unit, active)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budgets_scope
+    ON budgets (scope_kind, scope_id)
+    WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_budgets_user_active
+    ON budgets (user_id)
+    WHERE active = 1;
+
+CREATE TABLE IF NOT EXISTS budget_ledgers (
+    budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    spent_usd TEXT NOT NULL DEFAULT '0',
+    reserved_usd TEXT NOT NULL DEFAULT '0',
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (budget_id, period_start),
+    CHECK (tokens_used >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_ledgers_period_end
+    ON budget_ledgers (budget_id, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS budget_events (
+    id TEXT PRIMARY KEY,
+    budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
+    thread_id TEXT,
+    event_kind TEXT NOT NULL,
+    amount_usd TEXT,
+    tokens INTEGER,
+    reason TEXT,
+    actor_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_events_budget_created
+    ON budget_events (budget_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_budget_events_thread
+    ON budget_events (thread_id)
+    WHERE thread_id IS NOT NULL;
+
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -990,6 +1050,77 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
         "llm_calls_created_at_index",
         r#"
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
+"#,
+    ),
+    (
+        25,
+        "budgets",
+        // Cost-based budgets (issue #2843). Three tables — budgets,
+        // budget_ledgers, budget_events — form the backing store for
+        // the BudgetEnforcer runtime. libSQL translation of the V25
+        // PostgreSQL migration:
+        //   UUID         -> TEXT
+        //   TIMESTAMPTZ  -> TEXT (ISO-8601 via fmt_ts/get_ts helpers)
+        //   NUMERIC      -> TEXT (preserves rust_decimal precision)
+        //   BOOLEAN      -> INTEGER (0/1)
+        r#"
+CREATE TABLE IF NOT EXISTS budgets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    limit_usd TEXT NOT NULL,
+    limit_tokens INTEGER,
+    limit_wall_clock_secs INTEGER,
+    period_kind TEXT NOT NULL,
+    period_tz TEXT,
+    period_unit TEXT,
+    source TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE (scope_kind, scope_id, period_kind, period_unit, active)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budgets_scope
+    ON budgets (scope_kind, scope_id)
+    WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_budgets_user_active
+    ON budgets (user_id)
+    WHERE active = 1;
+
+CREATE TABLE IF NOT EXISTS budget_ledgers (
+    budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    spent_usd TEXT NOT NULL DEFAULT '0',
+    reserved_usd TEXT NOT NULL DEFAULT '0',
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (budget_id, period_start),
+    CHECK (tokens_used >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_ledgers_period_end
+    ON budget_ledgers (budget_id, period_end DESC);
+
+CREATE TABLE IF NOT EXISTS budget_events (
+    id TEXT PRIMARY KEY,
+    budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
+    thread_id TEXT,
+    event_kind TEXT NOT NULL,
+    amount_usd TEXT,
+    tokens INTEGER,
+    reason TEXT,
+    actor_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_events_budget_created
+    ON budget_events (budget_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_budget_events_thread
+    ON budget_events (thread_id)
+    WHERE thread_id IS NOT NULL;
 "#,
     ),
 ];
