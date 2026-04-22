@@ -368,17 +368,6 @@ At least one of the following should improve without hurting pass rate:
 - fewer total turns
 - better scenario success rate
 
-### Additional rich-object canary (2026-04-22)
-
-Added one live/replay scenario specifically for the new result-object layer:
-
-- `codeact_completed_process_shim_vs_rich_objects`
-  - baseline: shimmed `run(...)` returning the existing normalized dict-like result
-  - variant: shimmed `run(...)` with `CODEACT_HOST_RESULT_OBJECTS` enabled so the model sees `CompletedProcess`
-  - task: run a tiny local script, verify success, and summarize stdout lines
-
-This is intentionally a **canary / ergonomics benchmark**, not a claim that rich objects are already a large ROI win. It verifies that the richer object layer is replayable, preserves canonical `shell` execution underneath, and can be compared against the stable shim baseline with the same harness.
-
 ## Feature flag / rollout suggestion
 
 Introduce a temporary feature gate if needed so we can A/B test safely. Options:

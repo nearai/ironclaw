@@ -1,13 +1,8 @@
 //! Live/replay A/B benchmarks for CodeAct host-backed shims.
 //!
-//! These scenarios compare paired prompt styles for the same task.
-//! Most scenarios are:
+//! These scenarios compare two prompt styles for the same task:
 //! - **raw**: force canonical host-tool usage (`read_file`, `write_file`, `glob`, ...)
 //! - **shim**: prefer the new Pythonic helpers (`read_json`, `append_text`, `find_files`, ...)
-//!
-//! A smaller set can also compare:
-//! - **shim**: current normalized dict-like shim results
-//! - **rich**: experimental host-backed rich result objects (`HttpResponse`, `CompletedProcess`)
 //!
 //! The goal is not to make a fragile claim about exact token counts. Instead,
 //! these tests verify that both variants succeed end-to-end through engine v2,
@@ -41,7 +36,6 @@ mod tests {
     use crate::support::cleanup::CleanupGuard;
     use crate::support::live_harness::{LiveTestHarnessBuilder, TestMode};
     use crate::support::metrics::{RunResult, ScenarioResult, TraceMetrics, compare_runs};
-    use crate::support::trace_llm::{LlmTrace, TraceResponse};
 
     const ROOT: &str = "/tmp/ironclaw_live_codeact_shims";
 
@@ -68,7 +62,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct VariantRun {
         scenario_id: &'static str,
-        variant: &'static str,
+        variant: Variant,
         trace: TraceMetrics,
         response: String,
         tool_calls_started: Vec<String>,
@@ -92,36 +86,29 @@ mod tests {
             .is_some()
     }
 
-    fn variant_test_name_for_label(scenario_id: &str, label: &str) -> String {
-        format!("codeact_host_shims_{scenario_id}_{label}")
+    fn variant_test_name(scenario_id: &str, variant: Variant) -> String {
+        format!("codeact_host_shims_{scenario_id}_{}", variant.label())
     }
 
-    fn should_run_fixture_names(scenario_id: &str, labels: &[&str]) -> bool {
+    fn should_run_fixture_pair(scenario_id: &str) -> bool {
         if is_live_mode() {
             return true;
         }
 
-        let missing: Vec<PathBuf> = labels
-            .iter()
-            .map(|label| trace_fixture_path(&variant_test_name_for_label(scenario_id, label)))
-            .filter(|path| !path.exists())
-            .collect();
-
-        if missing.is_empty() {
+        let raw = variant_test_name(scenario_id, Variant::Raw);
+        let shim = variant_test_name(scenario_id, Variant::Shim);
+        let raw_path = trace_fixture_path(&raw);
+        let shim_path = trace_fixture_path(&shim);
+        if raw_path.exists() && shim_path.exists() {
             true
         } else {
             eprintln!(
-                "[{scenario_id}] replay fixtures missing; record these variants in live mode first:"
+                "[{scenario_id}] replay fixtures missing; record both variants in live mode first:\n  - {}\n  - {}",
+                raw_path.display(),
+                shim_path.display()
             );
-            for path in missing {
-                eprintln!("  - {}", path.display());
-            }
             false
         }
-    }
-
-    fn should_run_fixture_pair(scenario_id: &str) -> bool {
-        should_run_fixture_names(scenario_id, &[Variant::Raw.label(), Variant::Shim.label()])
     }
 
     fn reset_dir(path: &Path) {
@@ -138,24 +125,6 @@ mod tests {
             error: None,
             turn_metrics: Vec::new(),
         }
-    }
-
-    fn recorded_text_response(scenario_id: &str, label: &str) -> String {
-        let trace = LlmTrace::from_file(trace_fixture_path(&variant_test_name_for_label(
-            scenario_id,
-            label,
-        )))
-        .unwrap_or_else(|e| panic!("failed to load recorded trace for {scenario_id}/{label}: {e}"));
-
-        trace
-            .turns
-            .iter()
-            .flat_map(|turn| turn.steps.iter())
-            .find_map(|step| match &step.response {
-                TraceResponse::Text { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing recorded text response for {scenario_id}/{label}"))
     }
 
     fn total_tokens(trace: &TraceMetrics) -> u32 {
@@ -220,55 +189,55 @@ mod tests {
         );
     }
 
-    fn print_pair_report(baseline: &VariantRun, candidate: &VariantRun) {
-        let baseline_run = RunResult::from_scenarios(
-            format!("{}-{}", baseline.scenario_id, baseline.variant),
-            vec![scenario_result(baseline)],
+    fn print_pair_report(raw: &VariantRun, shim: &VariantRun) {
+        let raw_run = RunResult::from_scenarios(
+            format!("{}-raw", raw.scenario_id),
+            vec![scenario_result(raw)],
         );
-        let candidate_run = RunResult::from_scenarios(
-            format!("{}-{}", candidate.scenario_id, candidate.variant),
-            vec![scenario_result(candidate)],
+        let shim_run = RunResult::from_scenarios(
+            format!("{}-shim", shim.scenario_id),
+            vec![scenario_result(shim)],
         );
-        let deltas = compare_runs(&baseline_run, &candidate_run, 0.0);
+        let deltas = compare_runs(&raw_run, &shim_run, 0.0);
 
         eprintln!(
             "[CodeactHostShims][{}] {}:   llm_calls={} total_tokens={} tool_calls={} completed_tools={} turns={} wall={}ms",
-            baseline.scenario_id,
-            baseline.variant,
-            baseline.trace.llm_calls,
-            total_tokens(&baseline.trace),
-            baseline.trace.total_tool_calls(),
-            baseline.tool_calls_completed.len(),
-            baseline.trace.turns,
-            baseline.trace.wall_time_ms,
+            raw.scenario_id,
+            raw.variant.label(),
+            raw.trace.llm_calls,
+            total_tokens(&raw.trace),
+            raw.trace.total_tool_calls(),
+            raw.tool_calls_completed.len(),
+            raw.trace.turns,
+            raw.trace.wall_time_ms,
         );
         eprintln!(
             "[CodeactHostShims][{}] {}:  llm_calls={} total_tokens={} tool_calls={} completed_tools={} turns={} wall={}ms",
-            candidate.scenario_id,
-            candidate.variant,
-            candidate.trace.llm_calls,
-            total_tokens(&candidate.trace),
-            candidate.trace.total_tool_calls(),
-            candidate.tool_calls_completed.len(),
-            candidate.trace.turns,
-            candidate.trace.wall_time_ms,
+            shim.scenario_id,
+            shim.variant.label(),
+            shim.trace.llm_calls,
+            total_tokens(&shim.trace),
+            shim.trace.total_tool_calls(),
+            shim.tool_calls_completed.len(),
+            shim.trace.turns,
+            shim.trace.wall_time_ms,
         );
-        if !baseline.trace_errors.is_empty() {
+        if !raw.trace_errors.is_empty() {
             eprintln!(
-                "[CodeactHostShims][{}] {} trace errors: {:?}",
-                baseline.scenario_id, baseline.variant, baseline.trace_errors
+                "[CodeactHostShims][{}] raw trace errors: {:?}",
+                raw.scenario_id, raw.trace_errors
             );
         }
-        if !candidate.trace_errors.is_empty() {
+        if !shim.trace_errors.is_empty() {
             eprintln!(
-                "[CodeactHostShims][{}] {} trace errors: {:?}",
-                candidate.scenario_id, candidate.variant, candidate.trace_errors
+                "[CodeactHostShims][{}] shim trace errors: {:?}",
+                shim.scenario_id, shim.trace_errors
             );
         }
         for delta in deltas {
             eprintln!(
                 "[CodeactHostShims][{}] delta {}: baseline={} current={} change={:+.2}%",
-                baseline.scenario_id,
+                raw.scenario_id,
                 delta.metric,
                 delta.baseline,
                 delta.current,
@@ -282,12 +251,11 @@ mod tests {
         variant: Variant,
         prompt: String,
     ) -> VariantRun {
-        run_named_variant_with(
+        run_variant_with(
             scenario_id,
-            variant.label(),
+            variant,
             prompt,
             /* tolerate_host_failures */ false,
-            /* rich_result_objects */ false,
         )
         .await
     }
@@ -297,46 +265,26 @@ mod tests {
         variant: Variant,
         prompt: String,
     ) -> VariantRun {
-        run_named_variant_with(
+        run_variant_with(
             scenario_id,
-            variant.label(),
+            variant,
             prompt,
             /* tolerate_host_failures */ true,
-            /* rich_result_objects */ false,
         )
         .await
     }
 
-    async fn run_named_variant(
+    async fn run_variant_with(
         scenario_id: &'static str,
-        label: &'static str,
-        prompt: String,
-        rich_result_objects: bool,
-    ) -> VariantRun {
-        run_named_variant_with(
-            scenario_id,
-            label,
-            prompt,
-            /* tolerate_host_failures */ false,
-            rich_result_objects,
-        )
-        .await
-    }
-
-    async fn run_named_variant_with(
-        scenario_id: &'static str,
-        label: &'static str,
+        variant: Variant,
         prompt: String,
         tolerate_host_failures: bool,
-        rich_result_objects: bool,
     ) -> VariantRun {
-        let test_name = variant_test_name_for_label(scenario_id, label);
+        let test_name = variant_test_name(scenario_id, variant);
         let harness = LiveTestHarnessBuilder::new(&test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_allow_local_tools(true)
-            .with_codeact_host_shims(true)
-            .with_codeact_host_result_objects(rich_result_objects)
             .with_max_tool_iterations(40)
             .build()
             .await;
@@ -362,7 +310,7 @@ mod tests {
         assert!(
             !new_responses.is_empty(),
             "expected at least one response for {scenario_id} {}",
-            label
+            variant.label()
         );
 
         let response = new_responses.join("\n");
@@ -378,7 +326,7 @@ mod tests {
 
         VariantRun {
             scenario_id,
-            variant: label,
+            variant,
             trace,
             response,
             tool_calls_started,
@@ -407,29 +355,6 @@ mod tests {
         (
             CleanupGuard::new().dir(dir.display().to_string()),
             file.display().to_string(),
-        )
-    }
-
-    fn setup_completed_process_result_object(label: &str) -> (CleanupGuard, String) {
-        let dir = Path::new(ROOT)
-            .join("completed_process_result_object")
-            .join(label);
-        reset_dir(&dir);
-        let script = dir.join("emit_lines.sh");
-        fs::write(&script, "#!/bin/sh\nprintf 'alpha\\nbeta\\n'")
-            .expect("failed to seed emit_lines.sh");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script)
-                .expect("failed to stat emit_lines.sh")
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script, perms).expect("failed to chmod emit_lines.sh");
-        }
-        (
-            CleanupGuard::new().dir(dir.display().to_string()),
-            dir.display().to_string(),
         )
     }
 
@@ -1005,21 +930,6 @@ mod tests {
             Variant::Shim => format!(
                 "Use a Python CodeAct script, not plain prose. Append the text `beta` to the file at {path:?}, then read the file back and call FINAL exactly with `text=alphabeta`. The existing file already contains exactly `alpha`. IMPORTANT: this is the SHIM variant, so prefer append_text(path, text) and read_text(path) unless they fail. `append_text` concatenates raw text directly, so pass plain `beta` here."
             ),
-        }
-    }
-
-    fn completed_process_result_object_prompt(root: &str, rich_result_objects: bool) -> String {
-        let preamble = format!(
-            "Use a Python CodeAct script, not plain prose. In the directory {root:?}, run `./emit_lines.sh` with the `run(...)` helper using that directory as the workdir. The script prints exactly two lines: `alpha` and `beta`. Verify the command succeeded, split stdout into non-empty lines, and call FINAL exactly with `lines=alpha,beta`."
-        );
-        if rich_result_objects {
-            format!(
-                "{preamble} IMPORTANT: this is the RICH variant. Rich host result objects are enabled, so treat `await run(...)` as returning a `CompletedProcess` object. Use `proc.check_returncode()` to verify success, then read `proc.stdout` to build the final answer."
-            )
-        } else {
-            format!(
-                "{preamble} IMPORTANT: this is the SHIM baseline variant, not the rich-object variant. Treat `await run(...)` as the current normalized dict-like result with fields like `ok`, `exit_code`, `stdout`, `stderr`, and `sandboxed`. Do not assume object methods like `check_returncode()` are available."
-            )
         }
     }
 
@@ -1625,75 +1535,5 @@ mod tests {
         assert_cargo_toml_rust_version_sync(&raw_root);
         assert_exact_suffix(&shim.response, "done=", "alpha,beta,gamma");
         assert_cargo_toml_rust_version_sync(&shim_root);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn codeact_completed_process_shim_vs_rich_objects() {
-        let _guard = engine_v2_live_lock().lock().await;
-        if !should_run_fixture_names("completed_process_result_object", &["shim", "rich"]) {
-            return;
-        }
-
-        let (_cleanup_shim, shim_root) = setup_completed_process_result_object("shim");
-        let shim = run_named_variant(
-            "completed_process_result_object",
-            "shim",
-            completed_process_result_object_prompt(&shim_root, false),
-            false,
-        )
-        .await;
-
-        let (_cleanup_rich, rich_root) = setup_completed_process_result_object("rich");
-        let rich = run_named_variant(
-            "completed_process_result_object",
-            "rich",
-            completed_process_result_object_prompt(&rich_root, true),
-            true,
-        )
-        .await;
-
-        print_pair_report(&shim, &rich);
-        assert_exact_suffix(&shim.response, "lines=", "alpha,beta");
-        assert_exact_suffix(&rich.response, "lines=", "alpha,beta");
-        assert!(
-            shim.tool_calls_started
-                .iter()
-                .any(|name| name.starts_with("shell")),
-            "shim baseline should call shell, got {:?}",
-            shim.tool_calls_started
-        );
-        assert!(
-            rich.tool_calls_started
-                .iter()
-                .any(|name| name.starts_with("shell")),
-            "rich variant should still call canonical shell, got {:?}",
-            rich.tool_calls_started
-        );
-
-        let shim_code = recorded_text_response("completed_process_result_object", "shim");
-        assert!(
-            shim_code.contains("result.get(\"stdout\"")
-                || shim_code.contains("result.get('stdout'"),
-            "shim baseline should use dict-like stdout access, got: {}",
-            shim_code
-        );
-        assert!(
-            !shim_code.contains("check_returncode"),
-            "shim baseline should not use rich-object methods, got: {}",
-            shim_code
-        );
-
-        let rich_code = recorded_text_response("completed_process_result_object", "rich");
-        assert!(
-            rich_code.contains("check_returncode()"),
-            "rich variant should exercise CompletedProcess.check_returncode(), got: {}",
-            rich_code
-        );
-        assert!(
-            rich_code.contains("proc.stdout"),
-            "rich variant should use attribute access on CompletedProcess, got: {}",
-            rich_code
-        );
     }
 }
