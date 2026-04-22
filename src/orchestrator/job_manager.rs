@@ -18,6 +18,28 @@ use crate::sandbox::connect_docker;
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
+/// A port mapping from a container-internal port to the host-side port
+/// allocated by Docker. Used to expose services (e.g., dev servers)
+/// running inside sandbox containers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExposedPort {
+    /// Port number inside the container (e.g., 5173 for a Vite dev server).
+    pub container_port: u16,
+    /// Port number on the host that Docker mapped to the container port.
+    pub host_port: u16,
+}
+
+impl std::fmt::Display for ExposedPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.container_port, self.host_port)
+    }
+}
+
+/// Default starting port for host-side port allocation. Containers that
+/// declare `expose_ports` get host ports allocated sequentially starting
+/// from this value.
+const HOST_PORT_BASE: u16 = 14000;
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -68,6 +90,11 @@ pub struct JobCreationParams {
     /// from a hardcoded host file path which bootstrap moves into the DB on
     /// first run, so per-job MCP filtering silently no-op'd on most installs.
     pub master_mcp_config: Option<serde_json::Value>,
+    /// Container ports to expose to the host. Each entry is a port number
+    /// inside the container (e.g., 5173 for a Vite dev server). Docker will
+    /// map each to a host port starting from 14000. The resulting mappings
+    /// are stored in `ContainerHandle::exposed_ports` and persisted to DB.
+    pub expose_ports: Vec<u16>,
 }
 
 /// Configuration for the container job manager.
@@ -167,6 +194,9 @@ pub struct ContainerHandle {
     pub worker_iteration: u32,
     /// Completion result from the worker (set when the worker reports done).
     pub completion_result: Option<CompletionResult>,
+    /// Port mappings for services exposed by this container (e.g., dev servers).
+    /// Populated after Docker assigns host ports during container creation.
+    pub exposed_ports: Vec<ExposedPort>,
     // NOTE: auth_token is intentionally NOT in this struct.
     // It lives only in the TokenStore (never logged, serialized, or persisted).
 }
@@ -259,6 +289,18 @@ pub struct ContainerJobManager {
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
     /// Cached Docker connection (created on first use).
     docker: Arc<RwLock<Option<bollard::Docker>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::orchestrator::ContainerPortResolver for ContainerJobManager {
+    async fn exposed_ports(&self, job_id: Uuid) -> Option<Vec<ExposedPort>> {
+        let handle = self.containers.read().await.get(&job_id).cloned()?;
+        if handle.exposed_ports.is_empty() {
+            None
+        } else {
+            Some(handle.exposed_ports)
+        }
+    }
 }
 
 impl ContainerJobManager {
@@ -359,6 +401,7 @@ impl ContainerJobManager {
             max_iterations,
             acp_agent,
             master_mcp_config,
+            expose_ports,
         } = params;
 
         self.token_store
@@ -377,6 +420,7 @@ impl ContainerJobManager {
             last_worker_status: None,
             worker_iteration: 0,
             completion_result: None,
+            exposed_ports: vec![],
         };
         self.containers.write().await.insert(job_id, handle);
 
@@ -392,6 +436,7 @@ impl ContainerJobManager {
                 max_iterations,
                 acp_agent,
                 master_mcp_config,
+                expose_ports,
             )
             .await
         {
@@ -416,6 +461,7 @@ impl ContainerJobManager {
         max_iterations: Option<u32>,
         acp_agent: Option<crate::config::acp::AcpAgentConfig>,
         master_mcp_config: Option<serde_json::Value>,
+        expose_ports: Vec<u16>,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
@@ -519,15 +565,69 @@ impl ContainerJobManager {
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
+        // Allocate host ports for any container ports the caller wants exposed.
+        let exposed_port_mappings = allocate_host_ports(&expose_ports);
+        if !exposed_port_mappings.is_empty() {
+            let mappings_str = exposed_port_mappings
+                .iter()
+                .map(|p| format!("{}:{}", p.container_port, p.host_port))
+                .collect::<Vec<_>>()
+                .join(",");
+            env_vec.push(format!("IRONCLAW_EXPOSED_PORTS={}", mappings_str));
+        }
+
+        // Clamp the maximum number of exposed ports to prevent a single job
+        // from monopolizing the host port range.
+        const MAX_EXPOSED_PORTS: usize = 64;
+        if expose_ports.len() > MAX_EXPOSED_PORTS {
+            return Err(OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: format!(
+                    "too many exposed ports ({} requested, max {})",
+                    expose_ports.len(),
+                    MAX_EXPOSED_PORTS
+                ),
+            });
+        }
+
         // Create the container
         use bollard::container::{Config, CreateContainerOptions};
         use bollard::models::HostConfig;
+
+        // Build port bindings if any ports are exposed.
+        let port_bindings = if exposed_port_mappings.is_empty() {
+            None
+        } else {
+            let mut bindings = HashMap::new();
+            for mapping in &exposed_port_mappings {
+                let port_spec = format!("{}/tcp", mapping.container_port);
+                bindings.insert(
+                    port_spec,
+                    Some(vec![bollard::models::PortBinding {
+                        host_ip: Some("0.0.0.0".to_string()),
+                        host_port: Some(mapping.host_port.to_string()),
+                    }]),
+                );
+            }
+            Some(bindings)
+        };
+
+        let exposed_ports_config = if expose_ports.is_empty() {
+            None
+        } else {
+            let mut ports = HashMap::new();
+            for port in &expose_ports {
+                ports.insert(format!("{}/tcp", port), HashMap::new());
+            }
+            Some(ports)
+        };
 
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
             memory: Some((memory_mb * 1024 * 1024) as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             network_mode: Some("bridge".to_string()),
+            port_bindings,
             extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
@@ -585,6 +685,7 @@ impl ContainerJobManager {
             user: Some("1000:1000".to_string()),
             working_dir: Some("/workspace".to_string()),
             labels: Some(labels),
+            exposed_ports: exposed_ports_config,
             ..Default::default()
         };
 
@@ -617,10 +718,29 @@ impl ContainerJobManager {
                 reason: format!("failed to start container: {}", e),
             })?;
 
-        // Update handle with container ID
+        // Inspect the container to read back actual port mappings from Docker.
+        // Docker may assign different host ports than what we requested (e.g.,
+        // if a port is already in use), though with explicit HostPort bindings
+        // this is unlikely. Still, we trust the inspect result as the source
+        // of truth.
+        let actual_exposed_ports = if !exposed_port_mappings.is_empty() {
+            let inspect = docker
+                .inspect_container(&container_id, None)
+                .await
+                .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to inspect container after start: {}", e),
+                })?;
+            resolve_actual_ports(&inspect, &exposed_port_mappings)
+        } else {
+            vec![]
+        };
+
+        // Update handle with container ID, state, and actual port mappings.
         if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
             handle.container_id = container_id;
             handle.state = ContainerState::Running;
+            handle.exposed_ports = actual_exposed_ports;
         }
 
         tracing::info!(
@@ -961,6 +1081,61 @@ async fn generate_worker_mcp_config(
     Ok(Some(tmp_path))
 }
 
+/// Allocate host ports sequentially starting from `HOST_PORT_BASE` for the
+/// given container ports. This is a deterministic allocation: the i-th
+/// container port gets host port `HOST_PORT_BASE + i`.
+///
+/// In a production deployment with multiple concurrent jobs, a more
+/// sophisticated allocator (e.g., checking for bind errors or using a
+/// central port registry) would be needed. For now, sequential allocation
+/// from a high base range (14000+) is sufficient because the typical
+/// concurrency is low (1-3 jobs at a time).
+fn allocate_host_ports(container_ports: &[u16]) -> Vec<ExposedPort> {
+    container_ports
+        .iter()
+        .enumerate()
+        .map(|(i, &container_port)| ExposedPort {
+            container_port,
+            host_port: HOST_PORT_BASE + i as u16,
+        })
+        .collect()
+}
+
+/// Extract actual port mappings from a Docker inspect response.
+///
+/// Reads `NetworkSettings.Ports` from the inspection result and matches
+/// against the expected container ports. If Docker assigned a different
+/// host port than what we requested, we use the actual assignment.
+fn resolve_actual_ports(
+    inspect: &bollard::models::ContainerInspectResponse,
+    requested: &[ExposedPort],
+) -> Vec<ExposedPort> {
+    let Some(ports_map) = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.ports.as_ref())
+    else {
+        return requested.to_vec();
+    };
+
+    requested
+        .iter()
+        .map(|ep| {
+            let spec = format!("{}/tcp", ep.container_port);
+            let actual_host_port: Option<u16> = ports_map
+                .get(&spec)
+                .and_then(Option::as_ref)
+                .and_then(|bindings| bindings.first())
+                .and_then(|b| b.host_port.as_deref())
+                .and_then(|s| s.parse::<u16>().ok());
+            ExposedPort {
+                container_port: ep.container_port,
+                host_port: actual_host_port.unwrap_or(ep.host_port),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,6 +1219,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    exposed_ports: vec![],
                 },
             );
         }

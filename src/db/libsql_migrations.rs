@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     started_at TEXT,
     completed_at TEXT,
-    restart_params TEXT
+    restart_params TEXT,
+    exposed_ports TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_jobs(status);
@@ -992,6 +993,16 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
 "#,
     ),
+    (
+        25,
+        "exposed_ports",
+        // Add exposed_ports column to agent_jobs for persisting container port mappings.
+        // Marked idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS) because the base
+        // SCHEMA now includes this column for fresh installs.
+        r#"
+ALTER TABLE agent_jobs ADD COLUMN exposed_ports TEXT;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1002,6 +1013,7 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
     (22, "agent_jobs", "restart_params"),
+    (25, "agent_jobs", "exposed_ports"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

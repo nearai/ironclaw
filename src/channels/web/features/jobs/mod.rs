@@ -1,5 +1,9 @@
 //! Job and sandbox API handlers.
 
+pub mod proxy;
+
+pub use proxy::jobs_proxy_handler;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -264,6 +268,7 @@ pub async fn jobs_detail_handler(
                 can_restart: state.job_manager.is_some(),
                 can_prompt: supports_prompts && state.prompt_queue.is_some(),
                 job_kind: Some("sandbox".to_string()),
+                exposed_ports: job.exposed_ports,
             }));
         }
         Ok(None) => {}
@@ -318,6 +323,7 @@ pub async fn jobs_detail_handler(
                 can_restart: state.scheduler.is_some(),
                 can_prompt: is_promptable && state.scheduler.is_some(),
                 job_kind: Some("agent".to_string()),
+                exposed_ports: vec![],
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
@@ -494,6 +500,7 @@ pub async fn jobs_restart_handler(
                 credential_grants_json: old_job.credential_grants_json.clone(),
                 mcp_servers: restart_mcp_servers.clone(),
                 max_iterations: restart_max_iterations,
+                exposed_ports: vec![],
             };
             store
                 .save_sandbox_job(&record)
@@ -542,6 +549,11 @@ pub async fn jobs_restart_handler(
             .await;
 
             let project_dir = std::path::PathBuf::from(&old_job.project_dir);
+            let restart_expose_ports: Vec<u16> = old_job
+                .exposed_ports
+                .iter()
+                .map(|p| p.container_port)
+                .collect();
             let create_result = jm
                 .create_job(
                     new_job_id,
@@ -554,6 +566,7 @@ pub async fn jobs_restart_handler(
                         max_iterations: restart_max_iterations,
                         acp_agent,
                         master_mcp_config,
+                        expose_ports: restart_expose_ports,
                     },
                 )
                 .await;
@@ -582,6 +595,16 @@ pub async fn jobs_restart_handler(
                 .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
                 .await
                 .map_err(|e| db_error("jobs_restart_handler", e))?;
+
+            // Persist the actual exposed port mappings after container start.
+            #[allow(clippy::collapsible_if)]
+            if let Some(handle) = jm.get_handle(new_job_id).await
+                && !handle.exposed_ports.is_empty()
+            {
+                if let Err(e) = store.update_sandbox_job_exposed_ports(new_job_id, &handle.exposed_ports).await {
+                    tracing::warn!(job_id = %new_job_id, "Failed to persist exposed ports: {}", e);
+                }
+            }
 
             return Ok(Json(serde_json::json!({
                 "status": "restarted",

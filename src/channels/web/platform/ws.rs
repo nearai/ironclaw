@@ -571,6 +571,7 @@ mod tests {
             store: None,
             settings_cache: None,
             job_manager: None,
+            port_resolver: None,
             prompt_queue: None,
             scheduler: None,
             owner_id: "test".to_string(),

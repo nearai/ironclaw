@@ -36,9 +36,23 @@ pub mod reaper;
 pub use api::OrchestratorApi;
 pub use auth::{CredentialGrant, TokenStore};
 pub use job_manager::{
-    CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, JobMode,
+    CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, ExposedPort, JobMode,
 };
 pub use reaper::{ReaperConfig, SandboxReaper};
+
+/// Narrow interface for resolving live container port mappings.
+///
+/// The gateway's reverse proxy handler depends on this trait rather than the
+/// full `ContainerJobManager`, keeping the coupling minimal. The in-memory
+/// `ContainerJobManager` implementation is the canonical provider; the DB
+/// read path (`SandboxJobRecord::exposed_ports`) is used for status display,
+/// not for live routing.
+#[async_trait::async_trait]
+pub trait ContainerPortResolver: Send + Sync {
+    /// Return the exposed port mappings for a running job, or `None` if the
+    /// job is not running or has no exposed ports.
+    async fn exposed_ports(&self, job_id: uuid::Uuid) -> Option<Vec<ExposedPort>>;
+}
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

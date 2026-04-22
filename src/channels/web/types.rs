@@ -366,6 +366,9 @@ pub struct JobDetailResponse {
     /// The kind of job: "sandbox" or "agent".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_kind: Option<String>,
+    /// Port mappings exposed by this container (e.g., dev servers).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub exposed_ports: Vec<crate::orchestrator::ExposedPort>,
 }
 
 // --- Project Files ---

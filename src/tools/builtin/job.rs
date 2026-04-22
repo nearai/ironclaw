@@ -472,6 +472,7 @@ impl CreateJobTool {
             credential_grants_json,
             mcp_servers: params.mcp_servers.clone(),
             max_iterations: params.max_iterations,
+            exposed_ports: vec![],
         });
 
         // Persist the job mode to DB (for non-default modes).
@@ -512,6 +513,19 @@ impl CreateJobTool {
         // Container started successfully.
         let now = Utc::now();
         self.update_status(job_id, "running", None, None, Some(now), None);
+
+        // Persist the actual exposed port mappings (Docker may have assigned
+        // different host ports than requested). The container handle now has
+        // the real mappings after `create_job` inspected the container.
+        #[allow(clippy::collapsible_if)]
+        if let Some(handle) = jm.get_handle(job_id).await
+            && !handle.exposed_ports.is_empty()
+            && let Some(ref store) = self.store
+        {
+            if let Err(e) = store.update_sandbox_job_exposed_ports(job_id, &handle.exposed_ports).await {
+                tracing::warn!(job_id = %job_id, "Failed to persist exposed ports: {}", e);
+            }
+        }
 
         if !wait {
             // Spawn a background monitor that forwards Claude Code output
@@ -922,6 +936,14 @@ impl Tool for CreateJobTool {
                 "description": "Maximum number of agent loop iterations for the worker. \
                                 Defaults to 50, capped at 500. Use lower values for simple tasks."
             }));
+            props.insert("expose_ports".into(), serde_json::json!({
+                "type": "array",
+                "items": { "type": "integer" },
+                "description": "List of TCP port numbers inside the container to expose on the host. \
+                                The gateway will proxy each exposed port so external clients can reach \
+                                services running in the container (e.g., a dev server on port 5173). \
+                                Host ports are allocated starting from 14000. Max 64 ports."
+            }));
             let modes = self.available_modes();
             if modes.len() > 1 {
                 props.insert(
@@ -1064,6 +1086,22 @@ impl Tool for CreateJobTool {
                 None => None,
             };
 
+            let expose_ports: Vec<u16> = match params.get("expose_ports") {
+                Some(v) if v.is_array() => v
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Some(_) => {
+                    tracing::warn!("expose_ports parameter is not an array — ignoring");
+                    vec![]
+                }
+                None => vec![],
+            };
+
             // Load the master MCP config from the per-user DB-backed setting
             // so the orchestrator can mount it into the worker container. We
             // load eagerly here regardless of MCP_PER_JOB_ENABLED — the
@@ -1086,6 +1124,7 @@ impl Tool for CreateJobTool {
                     max_iterations,
                     acp_agent,
                     master_mcp_config,
+                    expose_ports,
                 },
                 ctx,
             )
@@ -1200,11 +1239,21 @@ impl Tool for ListJobsTool {
 /// Tool for checking job status.
 pub struct JobStatusTool {
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
 }
 
 impl JobStatusTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            job_manager: None,
+        }
+    }
+
+    /// Inject sandbox job manager so status can include exposed port mappings.
+    pub fn with_sandbox(mut self, job_manager: Arc<ContainerJobManager>) -> Self {
+        self.job_manager = Some(job_manager);
+        self
     }
 }
 
@@ -1250,7 +1299,7 @@ impl Tool for JobStatusTool {
                     });
                     return Ok(ToolOutput::success(result, start.elapsed()));
                 }
-                let result = serde_json::json!({
+                let mut result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "title": job_ctx.title,
                     "description": job_ctx.description,
@@ -1261,6 +1310,13 @@ impl Tool for JobStatusTool {
                     "actual_cost": job_ctx.actual_cost.to_string(),
                     "fallback_deliverable": job_ctx.metadata.get("fallback_deliverable"),
                 });
+                if let Some(jm) = &self.job_manager
+                    && let Some(handle) = jm.get_handle(job_id).await
+                    && !handle.exposed_ports.is_empty()
+                {
+                    result["exposed_ports"] = serde_json::to_value(&handle.exposed_ports)
+                        .unwrap_or(serde_json::Value::Null);
+                }
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
             Err(e) => {

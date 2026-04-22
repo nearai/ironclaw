@@ -546,6 +546,26 @@ impl Store {
 
 // ==================== Sandbox Jobs ====================
 
+/// Parse the `exposed_ports` column value (JSON array of
+/// `{"container_port":N,"host_port":M}` objects). Returns an empty vec
+/// on NULL, empty string, or parse error (logs a warning on malformed data).
+#[cfg(feature = "postgres")]
+fn parse_exposed_ports(raw: Option<&str>) -> Vec<crate::orchestrator::ExposedPort> {
+    let Some(raw) = raw else {
+        return vec![];
+    };
+    if raw.trim().is_empty() {
+        return vec![];
+    }
+    match serde_json::from_str::<Vec<crate::orchestrator::ExposedPort>>(raw) {
+        Ok(ports) => ports,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse exposed_ports; treating as empty");
+            vec![]
+        }
+    }
+}
+
 /// Record for a sandbox container job, persisted in the `agent_jobs` table
 /// with `source = 'sandbox'`.
 #[derive(Debug, Clone)]
@@ -572,6 +592,10 @@ pub struct SandboxJobRecord {
     /// `create_job` call. Persisted in `restart_params` so a restart honors
     /// the original cap instead of falling back to the worker default.
     pub max_iterations: Option<u32>,
+    /// Port mappings for services exposed by this container (e.g., dev servers).
+    /// Populated after Docker assigns host ports during container creation.
+    /// Persisted in the `exposed_ports` column as JSON.
+    pub exposed_ports: Vec<crate::orchestrator::ExposedPort>,
 }
 
 /// JSON shape stored in the `agent_jobs.restart_params` column. Both fields
@@ -582,29 +606,34 @@ pub struct SandboxRestartParams {
     pub mcp_servers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_ports: Vec<u16>,
 }
 
 impl SandboxRestartParams {
-    /// Build from the two `SandboxJobRecord` fields. Returns `None` when both
-    /// are `None` so the DB column stays NULL for jobs that didn't customize
-    /// either knob.
+    /// Build from the relevant `SandboxJobRecord` fields. Returns `None` when
+    /// all fields are empty/None so the DB column stays NULL for jobs that
+    /// didn't customize any knob.
     pub fn from_record(
         mcp_servers: Option<&[String]>,
         max_iterations: Option<u32>,
+        expose_ports: &[u16],
     ) -> Option<Self> {
-        if mcp_servers.is_none() && max_iterations.is_none() {
+        if mcp_servers.is_none() && max_iterations.is_none() && expose_ports.is_empty() {
             return None;
         }
         Some(Self {
             mcp_servers: mcp_servers.map(<[String]>::to_vec),
             max_iterations,
+            expose_ports: expose_ports.to_vec(),
         })
     }
 
     /// Serialize for storage. Returns `None` for an empty struct so we store
     /// SQL NULL rather than the literal `{}`.
     pub fn to_json(&self) -> Option<String> {
-        if self.mcp_servers.is_none() && self.max_iterations.is_none() {
+        if self.mcp_servers.is_none() && self.max_iterations.is_none() && self.expose_ports.is_empty()
+        {
             return None;
         }
         serde_json::to_string(self).ok()
@@ -700,24 +729,33 @@ impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
     pub async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
-        let restart_params_json =
-            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+        let restart_params_json = SandboxRestartParams::from_record(
+                job.mcp_servers.as_deref(),
+                job.max_iterations,
+                &job.exposed_ports.iter().map(|p| p.container_port).collect::<Vec<_>>(),
+            )
                 .as_ref()
                 .and_then(SandboxRestartParams::to_json);
+        let exposed_ports_json = if job.exposed_ports.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&job.exposed_ports).ok()
+        };
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
                 success, failure_reason, created_at, started_at, completed_at,
-                restart_params
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
+                restart_params, exposed_ports
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at,
-                restart_params = EXCLUDED.restart_params
+                restart_params = EXCLUDED.restart_params,
+                exposed_ports = EXCLUDED.exposed_ports
             "#,
             &[
                 &job.id,
@@ -732,6 +770,7 @@ impl Store {
                 &job.started_at,
                 &job.completed_at,
                 &restart_params_json,
+                &exposed_ports_json,
             ],
         )
         .await?;
@@ -749,7 +788,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
@@ -759,6 +798,9 @@ impl Store {
         Ok(row.map(|r| {
             let restart_params = SandboxRestartParams::from_column(
                 r.get::<_, Option<String>>("restart_params").as_deref(),
+            );
+            let exposed_ports = parse_exposed_ports(
+                r.get::<_, Option<String>>("exposed_ports").as_deref(),
             );
             SandboxJobRecord {
                 id: r.get("id"),
@@ -776,6 +818,7 @@ impl Store {
                 credential_grants_json: r.get::<_, String>("description"),
                 mcp_servers: restart_params.mcp_servers,
                 max_iterations: restart_params.max_iterations,
+                exposed_ports,
             }
         }))
     }
@@ -788,7 +831,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
                 "#,
@@ -801,6 +844,9 @@ impl Store {
             .map(|r| {
                 let restart_params = SandboxRestartParams::from_column(
                     r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                let exposed_ports = parse_exposed_ports(
+                    r.get::<_, Option<String>>("exposed_ports").as_deref(),
                 );
                 SandboxJobRecord {
                     id: r.get("id"),
@@ -818,6 +864,7 @@ impl Store {
                     credential_grants_json: r.get::<_, String>("description"),
                     mcp_servers: restart_params.mcp_servers,
                     max_iterations: restart_params.max_iterations,
+                    exposed_ports,
                 }
             })
             .collect())
@@ -834,7 +881,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
@@ -847,6 +894,9 @@ impl Store {
             .map(|r| {
                 let restart_params = SandboxRestartParams::from_column(
                     r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                let exposed_ports = parse_exposed_ports(
+                    r.get::<_, Option<String>>("exposed_ports").as_deref(),
                 );
                 SandboxJobRecord {
                     id: r.get("id"),
@@ -864,6 +914,7 @@ impl Store {
                     credential_grants_json: r.get::<_, String>("description"),
                     mcp_servers: restart_params.mcp_servers,
                     max_iterations: restart_params.max_iterations,
+                    exposed_ports,
                 }
             })
             .collect())
@@ -1202,6 +1253,26 @@ impl Store {
         conn.execute(
             "UPDATE agent_jobs SET job_mode = $2 WHERE id = $1",
             &[&id, &mode],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update the exposed_ports column after Docker assigns host ports.
+    pub async fn update_sandbox_job_exposed_ports(
+        &self,
+        id: Uuid,
+        exposed_ports: &[crate::orchestrator::ExposedPort],
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let json = if exposed_ports.is_empty() {
+            None
+        } else {
+            serde_json::to_string(exposed_ports).ok()
+        };
+        conn.execute(
+            "UPDATE agent_jobs SET exposed_ports = $2 WHERE id = $1",
+            &[&id, &json],
         )
         .await?;
         Ok(())

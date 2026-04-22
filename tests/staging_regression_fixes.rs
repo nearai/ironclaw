@@ -167,6 +167,7 @@ async fn issue_2_sandbox_restart_params_round_trip_through_database_trait() -> T
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec!["github".into(), "notion".into()]),
         max_iterations: Some(123),
+        exposed_ports: vec![],
     };
     db.save_sandbox_job(&original).await?;
 
@@ -209,6 +210,7 @@ async fn issue_2_explicit_empty_filter_does_not_collapse_on_restart() -> TestRes
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec![]),
         max_iterations: None,
+        exposed_ports: vec![],
     };
     let id = job.id;
     db.save_sandbox_job(&job).await?;
@@ -246,6 +248,7 @@ async fn issue_2_restart_params_hydrated_by_list_sandbox_jobs() -> TestResult {
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec!["serpstat".into()]),
         max_iterations: Some(42),
+        exposed_ports: vec![],
     };
     db.save_sandbox_job(&job).await?;
 
@@ -288,10 +291,10 @@ async fn issue_2_restart_params_hydrated_by_list_sandbox_jobs() -> TestResult {
 /// Locks the contract that callers depend on.
 #[test]
 fn issue_2_restart_params_helper_returns_none_for_default_record() {
-    let params = SandboxRestartParams::from_record(None, None);
+    let params = SandboxRestartParams::from_record(None, None, &[]);
     check_true(params.is_none(), "None inputs must yield None");
 
-    let params = SandboxRestartParams::from_record(Some(&["x".to_string()]), None);
+    let params = SandboxRestartParams::from_record(Some(&["x".to_string()]), None, &[]);
     check_true(params.is_some(), "non-None mcp_servers must yield Some");
     check_true(
         params.and_then(|p| p.to_json()).is_some(),

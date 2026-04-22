@@ -161,6 +161,7 @@ impl GatewayChannel {
             store: None,
             settings_cache: None,
             job_manager: None,
+            port_resolver: None,
             prompt_queue: None,
             scheduler: None,
             owner_id,
@@ -227,6 +228,7 @@ impl GatewayChannel {
             store: self.state.store.clone(),
             settings_cache: self.state.settings_cache.clone(),
             job_manager: self.state.job_manager.clone(),
+            port_resolver: self.state.port_resolver.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
             owner_id: self.state.owner_id.clone(),
@@ -342,6 +344,18 @@ impl GatewayChannel {
     /// Inject the container job manager for sandbox operations.
     pub fn with_job_manager(mut self, jm: Arc<ContainerJobManager>) -> Self {
         self.rebuild_state(|s| s.job_manager = Some(jm));
+        self
+    }
+
+    /// Inject the port resolver for the reverse proxy handler.
+    /// Typically called with the same `ContainerJobManager` as `with_job_manager`,
+    /// but typed as the narrow `ContainerPortResolver` trait to keep the
+    /// proxy handler's dependency surface small.
+    pub fn with_port_resolver(
+        mut self,
+        resolver: Arc<dyn crate::orchestrator::ContainerPortResolver>,
+    ) -> Self {
+        self.rebuild_state(|s| s.port_resolver = Some(resolver));
         self
     }
 

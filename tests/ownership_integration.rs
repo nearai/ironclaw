@@ -400,6 +400,7 @@ mod tests {
             credential_grants_json: "[]".to_string(),
             mcp_servers: None,
             max_iterations: None,
+            exposed_ports: vec![],
         };
         assert_eq!(job.owner_user_id(), "alice");
         assert!(job.is_owned_by("alice"));

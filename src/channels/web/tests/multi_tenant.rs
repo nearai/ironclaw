@@ -67,6 +67,7 @@ fn build_state(
         store,
         settings_cache: None,
         job_manager: None,
+        port_resolver: None,
         prompt_queue,
         owner_id: "test".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
@@ -181,6 +182,7 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
         credential_grants_json: "[]".to_string(),
         mcp_servers: None,
         max_iterations: None,
+        exposed_ports: vec![],
     }
 }
 
@@ -1274,6 +1276,7 @@ mod admin_tool_policy {
             store: Some(db),
             settings_cache: None,
             job_manager: None,
+        port_resolver: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),

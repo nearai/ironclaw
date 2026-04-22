@@ -1452,6 +1452,7 @@ mod tests {
             credential_grants_json: "[]".to_string(),
             mcp_servers: None,
             max_iterations: None,
+            exposed_ports: vec![],
         };
 
         // Create
@@ -1549,6 +1550,7 @@ mod tests {
             credential_grants_json: "[]".to_string(),
             mcp_servers: None,
             max_iterations: None,
+            exposed_ports: vec![],
         };
         db.save_sandbox_job(&job).await.expect("save");
 
@@ -1593,6 +1595,7 @@ mod tests {
             credential_grants_json: "[]".to_string(),
             mcp_servers: None,
             max_iterations: None,
+            exposed_ports: vec![],
         };
         db.save_sandbox_job(&job).await.expect("save job");
 

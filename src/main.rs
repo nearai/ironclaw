@@ -942,6 +942,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
+            gw = gw.with_port_resolver(Arc::clone(jm) as Arc<dyn ironclaw::orchestrator::ContainerPortResolver>);
         }
         gw = gw.with_scheduler(scheduler_slot.clone());
         gw = gw.with_routine_engine_slot(Arc::clone(&shared_routine_engine_slot));
