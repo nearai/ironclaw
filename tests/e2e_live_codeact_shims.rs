@@ -341,6 +341,51 @@ mod tests {
         )
     }
 
+    fn setup_package_json_edit() -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join("package_json_edit");
+        reset_dir(&dir);
+        let file = dir.join("package.json");
+        let package = serde_json::json!({
+            "name": "demo-app",
+            "private": true,
+            "scripts": {
+                "test": "vitest"
+            }
+        });
+        fs::write(
+            &file,
+            serde_json::to_string_pretty(&package).expect("serialize package.json seed"),
+        )
+        .expect("failed to seed package.json");
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            file.display().to_string(),
+        )
+    }
+
+    fn assert_package_json_scripts(path: &str, expected_keys: &[&str]) {
+        let content = fs::read_to_string(path).expect("package.json should exist after edit");
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("package.json should contain valid JSON");
+        let scripts = value
+            .get("scripts")
+            .and_then(|v| v.as_object())
+            .expect("package.json should contain a scripts object");
+        let mut keys: Vec<&str> = scripts.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, expected_keys, "unexpected package.json scripts set");
+        assert_eq!(
+            scripts.get("lint").and_then(|v| v.as_str()),
+            Some("eslint ."),
+            "expected lint script to be added"
+        );
+        assert_eq!(
+            scripts.get("test").and_then(|v| v.as_str()),
+            Some("vitest"),
+            "expected existing test script to be preserved"
+        );
+    }
+
     fn read_json_prompt(path: &str, variant: Variant) -> String {
         match variant {
             Variant::Raw => format!(
@@ -370,6 +415,17 @@ mod tests {
             ),
             Variant::Shim => format!(
                 "Use a Python CodeAct script, not plain prose. Under directory {path:?}, find markdown files recursively and return their basenames sorted alphabetically. Then call FINAL exactly with `matches=alpha.md,beta.md`. IMPORTANT: this is the SHIM variant, so prefer find_files(pattern, path=...) unless it fails. The shim returns the matched file paths directly, so split each returned path on '/'."
+            ),
+        }
+    }
+
+    fn package_json_edit_prompt(path: &str, variant: Variant) -> String {
+        match variant {
+            Variant::Raw => format!(
+                "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real package.json. Add a new script entry `lint: eslint .` under `scripts`, preserve the existing `test: vitest` script, write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `scripts=lint,test`. IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, read_text, or write_text. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {{...}}`; strip everything through the `│` separator before JSON parsing. After writing, derive the final `scripts=...` string from the actual saved file by sorting the script keys alphabetically."
+            ),
+            Variant::Shim => format!(
+                "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real package.json. Add a new script entry `lint: eslint .` under `scripts`, preserve the existing `test: vitest` script, write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `scripts=lint,test`. IMPORTANT: this is the SHIM variant, so prefer read_json(path) and write_json(path, value). In CodeAct these helpers are async, so use `await read_json(...)` and `await write_json(...)`. After writing, re-read the actual file and derive the final `scripts=...` string by sorting the script keys alphabetically."
             ),
         }
     }
@@ -529,6 +585,65 @@ mod tests {
             "shim variant should still hit canonical glob, got {:?}",
             shim.tool_calls_started
         );
+
+        print_pair_report(&raw, &shim);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_package_json_edit_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("package_json_edit") {
+            return;
+        }
+
+        let (_cleanup, path) = setup_package_json_edit();
+        let raw = run_variant(
+            "package_json_edit",
+            Variant::Raw,
+            package_json_edit_prompt(&path, Variant::Raw),
+        )
+        .await;
+        assert_exact_suffix(&raw.response, "scripts=", "lint,test");
+        assert!(
+            raw.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("read_file")),
+            "raw package.json variant should use read_file, got {:?}",
+            raw.tool_calls_started
+        );
+        assert!(
+            raw.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("write_file")),
+            "raw package.json variant should use write_file, got {:?}",
+            raw.tool_calls_started
+        );
+        assert_package_json_scripts(&path, &["lint", "test"]);
+
+        let (_cleanup, path) = setup_package_json_edit();
+        let shim = run_variant(
+            "package_json_edit",
+            Variant::Shim,
+            package_json_edit_prompt(&path, Variant::Shim),
+        )
+        .await;
+        assert_exact_suffix(&shim.response, "scripts=", "lint,test");
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("read_file")),
+            "shim package.json variant should still hit canonical read_file, got {:?}",
+            shim.tool_calls_started
+        );
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("write_file")),
+            "shim package.json variant should still hit canonical write_file, got {:?}",
+            shim.tool_calls_started
+        );
+        assert_package_json_scripts(&path, &["lint", "test"]);
 
         print_pair_report(&raw, &shim);
     }
