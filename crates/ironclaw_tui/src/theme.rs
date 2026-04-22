@@ -23,6 +23,14 @@ pub struct Theme {
     pub border: ThemeColor,
     pub header_bg: ThemeColor,
     pub status_bg: ThemeColor,
+    #[serde(default = "default_nav_bg")]
+    pub nav_bg: ThemeColor,
+    #[serde(default = "default_panel_bg")]
+    pub panel_bg: ThemeColor,
+    #[serde(default = "default_panel_alt_bg")]
+    pub panel_alt_bg: ThemeColor,
+    #[serde(default = "default_selected_bg")]
+    pub selected_bg: ThemeColor,
 }
 
 /// Serialisable color representation.
@@ -55,6 +63,38 @@ impl ThemeColor {
     }
 }
 
+fn default_nav_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 13,
+        g: 17,
+        b: 23,
+    }
+}
+
+fn default_panel_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 15,
+        g: 23,
+        b: 32,
+    }
+}
+
+fn default_panel_alt_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 19,
+        g: 29,
+        b: 40,
+    }
+}
+
+fn default_selected_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 20,
+        g: 44,
+        b: 41,
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
@@ -78,8 +118,20 @@ impl Theme {
             warning: ThemeColor::Named("yellow".to_string()),
             error: ThemeColor::Named("red".to_string()),
             border: ThemeColor::Named("dark_gray".to_string()),
-            header_bg: ThemeColor::Named("reset".to_string()),
-            status_bg: ThemeColor::Named("reset".to_string()),
+            header_bg: ThemeColor::Rgb {
+                r: 10,
+                g: 14,
+                b: 20,
+            },
+            status_bg: ThemeColor::Rgb {
+                r: 10,
+                g: 14,
+                b: 20,
+            },
+            nav_bg: default_nav_bg(),
+            panel_bg: default_panel_bg(),
+            panel_alt_bg: default_panel_alt_bg(),
+            selected_bg: default_selected_bg(),
         }
     }
 
@@ -99,8 +151,36 @@ impl Theme {
             warning: ThemeColor::Named("yellow".to_string()),
             error: ThemeColor::Named("red".to_string()),
             border: ThemeColor::Named("gray".to_string()),
-            header_bg: ThemeColor::Named("white".to_string()),
-            status_bg: ThemeColor::Named("white".to_string()),
+            header_bg: ThemeColor::Rgb {
+                r: 243,
+                g: 246,
+                b: 249,
+            },
+            status_bg: ThemeColor::Rgb {
+                r: 243,
+                g: 246,
+                b: 249,
+            },
+            nav_bg: ThemeColor::Rgb {
+                r: 244,
+                g: 247,
+                b: 250,
+            },
+            panel_bg: ThemeColor::Rgb {
+                r: 255,
+                g: 255,
+                b: 255,
+            },
+            panel_alt_bg: ThemeColor::Rgb {
+                r: 248,
+                g: 250,
+                b: 252,
+            },
+            selected_bg: ThemeColor::Rgb {
+                r: 220,
+                g: 245,
+                b: 235,
+            },
         }
     }
 
@@ -140,6 +220,31 @@ impl Theme {
 
     pub fn border_style(&self) -> Style {
         Style::default().fg(self.border.to_color())
+    }
+
+    pub fn panel_style(&self) -> Style {
+        Style::default()
+            .bg(self.panel_bg.to_color())
+            .fg(self.fg.to_color())
+    }
+
+    pub fn panel_alt_style(&self) -> Style {
+        Style::default()
+            .bg(self.panel_alt_bg.to_color())
+            .fg(self.fg.to_color())
+    }
+
+    pub fn nav_style(&self) -> Style {
+        Style::default()
+            .bg(self.nav_bg.to_color())
+            .fg(self.dim.to_color())
+    }
+
+    pub fn selected_style(&self) -> Style {
+        Style::default()
+            .bg(self.selected_bg.to_color())
+            .fg(self.accent.to_color())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn header_style(&self) -> Style {

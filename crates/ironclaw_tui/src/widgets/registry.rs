@@ -13,13 +13,20 @@ use super::dashboard::DashboardWidget;
 use super::header::HeaderWidget;
 use super::help_overlay::HelpOverlayWidget;
 use super::input_box::InputBoxWidget;
+use super::jobs::JobsWidget;
 use super::logs::LogsWidget;
+use super::missions::MissionsWidget;
 use super::model_picker::ModelPickerWidget;
+use super::nav_rail::NavRailWidget;
+use super::projects::ProjectsWidget;
 use super::settings::SettingsWidget;
 use super::status_bar::StatusBarWidget;
+use super::surface_header::SurfaceHeaderWidget;
+use super::surface_placeholder::SurfacePlaceholderWidget;
 use super::tab_bar::TabBarWidget;
 use super::thread_picker::ThreadPickerWidget;
 use super::work_sidebar::WorkSidebarWidget;
+use super::workspace::WorkspaceWidget;
 
 /// Create the default set of built-in widgets.
 pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
@@ -28,10 +35,17 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
     BuiltinWidgets {
         header: HeaderWidget::new(theme.clone()),
         tab_bar: TabBarWidget::new(theme.clone()),
+        nav_rail: NavRailWidget::new(theme.clone()),
+        surface_header: SurfaceHeaderWidget::new(theme.clone()),
         conversation: ConversationWidget::new(theme.clone()),
+        workspace: WorkspaceWidget::new(theme.clone()),
+        projects: ProjectsWidget::new(theme.clone()),
+        jobs: JobsWidget::new(theme.clone()),
+        missions: MissionsWidget::new(theme.clone()),
         dashboard: DashboardWidget::new(theme.clone()),
         logs: LogsWidget::new(theme.clone()),
         settings: SettingsWidget::new(theme.clone()),
+        surface_placeholder: SurfacePlaceholderWidget::new(theme.clone()),
         input_box: InputBoxWidget::new(theme.clone()),
         status_bar: StatusBarWidget::new(theme.clone()),
         approval: super::approval::ApprovalWidget::new(theme.clone()),
@@ -50,10 +64,17 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
 pub struct BuiltinWidgets {
     pub header: HeaderWidget,
     pub tab_bar: TabBarWidget,
+    pub nav_rail: NavRailWidget,
+    pub surface_header: SurfaceHeaderWidget,
     pub conversation: ConversationWidget,
+    pub workspace: WorkspaceWidget,
+    pub projects: ProjectsWidget,
+    pub jobs: JobsWidget,
+    pub missions: MissionsWidget,
     pub dashboard: DashboardWidget,
     pub logs: LogsWidget,
     pub settings: SettingsWidget,
+    pub surface_placeholder: SurfacePlaceholderWidget,
     pub input_box: InputBoxWidget,
     pub status_bar: StatusBarWidget,
     pub approval: super::approval::ApprovalWidget,
@@ -70,7 +91,13 @@ impl BuiltinWidgets {
         vec![
             &self.header,
             &self.tab_bar,
+            &self.nav_rail,
+            &self.surface_header,
             &self.conversation,
+            &self.workspace,
+            &self.projects,
+            &self.jobs,
+            &self.missions,
             &self.dashboard,
             &self.logs,
             &self.settings,

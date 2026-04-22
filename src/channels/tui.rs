@@ -4,6 +4,7 @@
 //! between the agent's `Channel` trait and `ironclaw_tui`'s event/message
 //! channels.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -191,6 +192,102 @@ fn build_engine_thread_detail_event(detail: crate::bridge::EngineThreadDetail) -
             messages,
         },
     }
+}
+
+fn build_projects_overview_event(
+    overview: crate::bridge::ProjectsOverviewResponse,
+    missions_by_project: &HashMap<String, Vec<crate::bridge::EngineMissionInfo>>,
+    threads_by_project: &HashMap<String, Vec<crate::bridge::EngineThreadInfo>>,
+) -> TuiEvent {
+    let attention = overview
+        .attention
+        .into_iter()
+        .map(|item| ironclaw_tui::widgets::ProjectAttentionItem {
+            kind: item.kind,
+            project_id: item.project_id,
+            project_name: item.project_name,
+            message: item.message,
+            thread_id: item.thread_id,
+        })
+        .collect();
+
+    let projects = overview
+        .projects
+        .into_iter()
+        .map(|project| {
+            let missions = missions_by_project
+                .get(&project.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mission| ironclaw_tui::widgets::ProjectMissionSummary {
+                    id: mission.id.to_string(),
+                    name: mission.name,
+                    status: mission.status,
+                    cadence: mission.cadence_description,
+                    thread_count: mission.thread_count,
+                })
+                .collect();
+
+            let mut recent_activity: Vec<_> = threads_by_project
+                .get(&project.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|thread| ironclaw_tui::widgets::ProjectActivitySummary {
+                    id: thread.id,
+                    label: thread.title.unwrap_or(thread.goal),
+                    status: thread.state,
+                    updated_at: Some(thread.updated_at),
+                })
+                .collect();
+            recent_activity.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            recent_activity.truncate(8);
+
+            ironclaw_tui::widgets::ProjectOverviewCard {
+                id: project.id,
+                name: project.name,
+                description: project.description,
+                health: project.health,
+                active_missions: project.active_missions as usize,
+                threads_today: project.threads_today as usize,
+                cost_today_usd: format!("${:.2}", project.cost_today_usd),
+                last_activity: project.last_activity,
+                goals: project.goals,
+                missions,
+                recent_activity,
+            }
+        })
+        .collect();
+
+    TuiEvent::UpdateProjectsOverview(Box::new(ironclaw_tui::widgets::ProjectsOverviewData {
+        attention,
+        projects,
+    }))
+}
+
+async fn load_projects_overview_event(user_id: &str) -> Result<TuiEvent, crate::error::Error> {
+    let overview = crate::bridge::get_engine_projects_overview(user_id).await?;
+    let mut missions_by_project = HashMap::new();
+    let mut threads_by_project = HashMap::new();
+
+    for project in &overview.projects {
+        let project_id = project.id.as_str();
+        missions_by_project.insert(
+            project.id.clone(),
+            crate::bridge::list_engine_missions(Some(project_id), user_id).await?,
+        );
+        threads_by_project.insert(
+            project.id.clone(),
+            crate::bridge::list_engine_threads(Some(project_id), user_id).await?,
+        );
+    }
+
+    Ok(build_projects_overview_event(
+        overview,
+        &missions_by_project,
+        &threads_by_project,
+    ))
 }
 
 /// Extract human-readable preview from tool output.
@@ -416,6 +513,22 @@ impl Channel for TuiChannel {
 
         // Store event_tx for sending status updates and responses
         *self.event_tx.lock().await = Some(event_tx.clone());
+
+        // Load the projects control-room snapshot from the backend so the
+        // Projects tab starts with real engine data rather than test-only UI
+        // fixtures.
+        let projects_event_tx = event_tx.clone();
+        let projects_user_id = self.user_id.clone();
+        tokio::spawn(async move {
+            match load_projects_overview_event(&projects_user_id).await {
+                Ok(event) => {
+                    let _ = projects_event_tx.send(event).await;
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "Failed to load initial TUI projects overview");
+                }
+            }
+        });
 
         // Forward log entries from the LogBroadcaster to the TUI's Logs tab
         if let Some(ref broadcaster) = self.log_broadcaster {
@@ -778,7 +891,11 @@ impl Channel for TuiChannel {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_tui::TuiUserMessage;
+    use std::collections::HashMap;
+
+    use ironclaw_engine::MissionId;
+    use ironclaw_tui::widgets::ProjectsOverviewData;
+    use ironclaw_tui::{TuiEvent, TuiUserMessage};
 
     #[test]
     fn extract_tool_preview_extracts_json_content() {
@@ -842,5 +959,88 @@ mod tests {
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.timezone.as_deref(), Some("Europe/Istanbul"));
+    }
+
+    #[test]
+    fn build_projects_overview_event_maps_bridge_dtos() {
+        let overview = crate::bridge::ProjectsOverviewResponse {
+            attention: vec![crate::bridge::AttentionItem {
+                kind: "gate".to_string(),
+                project_id: "project-1".to_string(),
+                project_name: "Alpha".to_string(),
+                message: "Needs approval".to_string(),
+                thread_id: Some("thread-9".to_string()),
+            }],
+            projects: vec![crate::bridge::ProjectOverviewEntry {
+                id: "project-1".to_string(),
+                name: "Alpha".to_string(),
+                description: "Primary project".to_string(),
+                goals: vec!["Ship TUI parity".to_string()],
+                health: "yellow".to_string(),
+                active_missions: 2,
+                total_missions: 3,
+                threads_today: 5,
+                cost_today_usd: 1.234,
+                failures_24h: 1,
+                pending_gates: 1,
+                last_activity: Some("2026-04-22T12:00:00Z".to_string()),
+                created_at: "2026-04-21T12:00:00Z".to_string(),
+            }],
+        };
+
+        let mut missions_by_project = HashMap::new();
+        missions_by_project.insert(
+            "project-1".to_string(),
+            vec![crate::bridge::EngineMissionInfo {
+                id: MissionId(uuid::Uuid::nil()),
+                name: "Theme migration".to_string(),
+                goal: "Unify project shell".to_string(),
+                status: "Active".to_string(),
+                cadence_type: "manual".to_string(),
+                cadence_description: "manual".to_string(),
+                thread_count: 2,
+                current_focus: Some("Refine tokens".to_string()),
+                created_at: "2026-04-22T09:00:00Z".to_string(),
+                updated_at: "2026-04-22T12:05:00Z".to_string(),
+            }],
+        );
+
+        let mut threads_by_project = HashMap::new();
+        threads_by_project.insert(
+            "project-1".to_string(),
+            vec![crate::bridge::EngineThreadInfo {
+                id: "thread-1".to_string(),
+                goal: "Refine project widget".to_string(),
+                title: Some("Project widget".to_string()),
+                thread_type: "Foreground".to_string(),
+                state: "Running".to_string(),
+                project_id: "project-1".to_string(),
+                parent_id: None,
+                step_count: 3,
+                total_tokens: 1200,
+                created_at: "2026-04-22T11:00:00Z".to_string(),
+                updated_at: "2026-04-22T12:10:00Z".to_string(),
+            }],
+        );
+
+        let event = super::build_projects_overview_event(
+            overview,
+            &missions_by_project,
+            &threads_by_project,
+        );
+
+        let TuiEvent::UpdateProjectsOverview(data) = event else {
+            panic!("expected projects overview event");
+        };
+        let ProjectsOverviewData {
+            attention,
+            projects,
+        } = *data;
+        assert_eq!(attention.len(), 1);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "Alpha");
+        assert_eq!(projects[0].cost_today_usd, "$1.23");
+        assert_eq!(projects[0].missions[0].name, "Theme migration");
+        assert_eq!(projects[0].recent_activity[0].label, "Project widget");
     }
 }

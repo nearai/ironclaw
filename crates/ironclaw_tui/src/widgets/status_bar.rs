@@ -10,7 +10,7 @@ use crate::layout::TuiSlot;
 use crate::render::{format_duration, format_tokens, truncate};
 use crate::theme::Theme;
 
-use super::{ActiveTab, AppState, PlanStatus, TuiWidget};
+use super::{AppState, PlanStatus, TuiWidget};
 
 pub struct StatusBarWidget {
     theme: Theme,
@@ -78,12 +78,7 @@ impl TuiWidget for StatusBarWidget {
 
         let sep = Span::styled(" \u{2502} ", self.theme.dim_style());
 
-        let tab_label = match state.active_tab {
-            ActiveTab::Conversation => "[Chat]",
-            ActiveTab::Dashboard => "[Dash]",
-            ActiveTab::Logs => "[Logs]",
-            ActiveTab::Settings => "[Settings]",
-        };
+        let tab_label = state.active_tab.status_label();
 
         // Bar width adapts to terminal: use ~16 chars on wide terminals, less on narrow
         let bar_width = if area.width > 100 {

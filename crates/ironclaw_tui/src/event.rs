@@ -378,6 +378,9 @@ pub enum TuiEvent {
     /// Update dashboard introspection data.
     UpdateDashboard(Box<crate::widgets::DashboardData>),
 
+    /// Update projects overview + drill-down data.
+    UpdateProjectsOverview(Box<crate::widgets::ProjectsOverviewData>),
+
     /// Memory entries for the Learnings panel.
     MemoryEntries(Vec<crate::widgets::MemoryEntry>),
 

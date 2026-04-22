@@ -124,7 +124,7 @@ impl DashboardWidget {
 
         let line = Line::from(vec![
             Span::styled("  ◎ ", self.theme.accent_style()),
-            Span::styled("Dashboard", self.theme.bold_accent_style()),
+            Span::styled(state.active_tab.title(), self.theme.bold_accent_style()),
             Span::styled("  ·  ", self.theme.dim_style()),
             Span::styled(state.model.clone(), self.theme.dim_style()),
             Span::styled("  ·  ", self.theme.dim_style()),

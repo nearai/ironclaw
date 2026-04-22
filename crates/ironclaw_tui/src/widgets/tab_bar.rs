@@ -11,9 +11,12 @@ use crate::theme::Theme;
 
 use super::{ActiveTab, AppState, TuiWidget};
 
-const TAB_SPECS: [(ActiveTab, &str, &str); 4] = [
+const TAB_SPECS: [(ActiveTab, &str, &str); 7] = [
     (ActiveTab::Conversation, "\u{25E6}", "Chat"),
-    (ActiveTab::Dashboard, "\u{25A0}", "Dashboard"),
+    (ActiveTab::Workspace, "\u{25C8}", "Workspace"),
+    (ActiveTab::Projects, "\u{25A0}", "Projects"),
+    (ActiveTab::Jobs, "\u{2692}", "Jobs"),
+    (ActiveTab::Missions, "\u{25B6}", "Missions"),
     (ActiveTab::Logs, "\u{25B8}", "Logs"),
     (ActiveTab::Settings, "\u{2699}", "Settings"),
 ];
@@ -21,7 +24,14 @@ const TAB_SPECS: [(ActiveTab, &str, &str); 4] = [
 fn tab_badge_count(tab: ActiveTab, state: &AppState) -> usize {
     match tab {
         ActiveTab::Conversation => state.messages.len(),
-        ActiveTab::Dashboard => 0,
+        ActiveTab::Workspace => state.memory_count,
+        ActiveTab::Projects => state.engine_threads.len(),
+        ActiveTab::Jobs => state.jobs.len(),
+        ActiveTab::Missions => state
+            .engine_threads
+            .iter()
+            .filter(|thread| thread.thread_type.eq_ignore_ascii_case("mission"))
+            .count(),
         ActiveTab::Logs => state.log_entries.len(),
         ActiveTab::Settings => 0,
     }
@@ -198,6 +208,23 @@ mod tests {
     }
 
     #[test]
+    fn tab_bar_exposes_webgui_surface_order() {
+        let tabs: Vec<_> = TAB_SPECS.iter().map(|(tab, _, _)| *tab).collect();
+        assert_eq!(
+            tabs,
+            vec![
+                ActiveTab::Conversation,
+                ActiveTab::Workspace,
+                ActiveTab::Projects,
+                ActiveTab::Jobs,
+                ActiveTab::Missions,
+                ActiveTab::Logs,
+                ActiveTab::Settings,
+            ]
+        );
+    }
+
+    #[test]
     fn tab_hit_areas_expand_for_badges() {
         let mut log_entries = crate::event::LogRingBuffer::new(10);
         log_entries.push(crate::event::TuiLogEntry {
@@ -207,7 +234,7 @@ mod tests {
             timestamp: "now".to_string(),
         });
         let state = AppState {
-            active_tab: ActiveTab::Dashboard,
+            active_tab: ActiveTab::Projects,
             messages: vec![
                 super::super::ChatMessage {
                     role: super::super::MessageRole::User,
@@ -221,7 +248,11 @@ mod tests {
             ..Default::default()
         };
 
-        let hit_areas = tab_hit_areas(Rect::new(0, 0, 80, 1), &state);
+        let hit_areas = tab_hit_areas(Rect::new(0, 0, 120, 1), &state);
+        let (_, missions_range) = hit_areas
+            .iter()
+            .find(|(tab, _)| *tab == ActiveTab::Missions)
+            .expect("missions range");
         let (_, logs_range) = hit_areas
             .iter()
             .find(|(tab, _)| *tab == ActiveTab::Logs)
@@ -231,7 +262,8 @@ mod tests {
             .find(|(tab, _)| *tab == ActiveTab::Settings)
             .expect("settings range");
 
-        assert!(logs_range.end > logs_range.start);
+        assert!(missions_range.end > missions_range.start);
+        assert!(logs_range.start >= missions_range.end);
         assert!(settings_range.start >= logs_range.end);
     }
 }

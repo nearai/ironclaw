@@ -13,16 +13,23 @@ pub mod dashboard;
 pub mod header;
 pub mod help_overlay;
 pub mod input_box;
+pub mod jobs;
 pub mod logs;
+pub mod missions;
 pub mod model_picker;
+pub mod nav_rail;
 pub mod plan;
+pub mod projects;
 pub mod registry;
 pub mod settings;
 pub mod status_bar;
+pub mod surface_header;
+pub mod surface_placeholder;
 pub mod tab_bar;
 pub mod thread_list;
 pub mod thread_picker;
 pub mod work_sidebar;
+pub mod workspace;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -39,9 +46,38 @@ use model_picker::ModelPickerState;
 pub enum ActiveTab {
     #[default]
     Conversation,
-    Dashboard,
+    Workspace,
+    Projects,
+    Jobs,
+    Missions,
     Logs,
     Settings,
+}
+
+impl ActiveTab {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Conversation => "Chat",
+            Self::Workspace => "Workspace",
+            Self::Projects => "Projects",
+            Self::Jobs => "Jobs",
+            Self::Missions => "Missions",
+            Self::Logs => "Logs",
+            Self::Settings => "Settings",
+        }
+    }
+
+    pub const fn status_label(self) -> &'static str {
+        match self {
+            Self::Conversation => "[Chat]",
+            Self::Workspace => "[Workspace]",
+            Self::Projects => "[Projects]",
+            Self::Jobs => "[Jobs]",
+            Self::Missions => "[Missions]",
+            Self::Logs => "[Logs]",
+            Self::Settings => "[Settings]",
+        }
+    }
 }
 
 /// Shared application state visible to all widgets.
@@ -125,6 +161,21 @@ pub struct AppState {
 
     /// Currently active main content tab.
     pub active_tab: ActiveTab,
+
+    /// Workspace browser/viewer state.
+    pub workspace: WorkspaceState,
+
+    /// Projects control-room navigation state.
+    pub projects: ProjectsState,
+
+    /// Projects overview + drill-down data.
+    pub projects_overview: ProjectsOverviewData,
+
+    /// Jobs surface navigation state.
+    pub jobs_surface: JobsState,
+
+    /// Missions surface navigation state.
+    pub missions_surface: MissionsState,
 
     /// Settings browser/editor state.
     pub settings: SettingsState,
@@ -323,6 +374,21 @@ impl SettingEntry {
     }
 }
 
+/// Settings sub-sections mirroring the web settings surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    Inference,
+    Agent,
+    Channels,
+    Networking,
+    Extensions,
+    Mcp,
+    Skills,
+    Users,
+    Tools,
+}
+
 /// Mutable UI state for the Settings tab.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsState {
@@ -332,6 +398,7 @@ pub struct SettingsState {
     pub visible_rows: usize,
     pub editing: bool,
     pub edit_value: String,
+    pub section: SettingsSection,
 }
 
 impl SettingsState {
@@ -396,6 +463,338 @@ impl SettingsState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkspacePreviewMode {
+    #[default]
+    Rendered,
+    Raw,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceState {
+    pub selected: usize,
+    pub scroll: usize,
+    pub visible_rows: usize,
+    pub preview_scroll: usize,
+    pub selected_path: Option<String>,
+    pub search_query: String,
+    pub preview_mode: WorkspacePreviewMode,
+}
+
+impl WorkspaceState {
+    pub fn sync_entries(&mut self, entries: &[MemoryEntry]) {
+        if entries.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            self.selected_path = None;
+            return;
+        }
+
+        if let Some(path) = self.selected_path.as_deref()
+            && let Some(index) = entries.iter().position(|entry| entry.path == path)
+        {
+            self.selected = index;
+        }
+
+        self.selected = self.selected.min(entries.len().saturating_sub(1));
+        self.selected_path = entries.get(self.selected).map(|entry| entry.path.clone());
+        self.ensure_selected_visible(entries.len());
+    }
+
+    pub fn selected_entry<'a>(&self, entries: &'a [MemoryEntry]) -> Option<&'a MemoryEntry> {
+        entries.get(self.selected)
+    }
+
+    pub fn move_selection(&mut self, delta: isize, entries: &[MemoryEntry]) {
+        if entries.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            self.selected_path = None;
+            return;
+        }
+
+        let max = entries.len().saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.selected_path = entries.get(self.selected).map(|entry| entry.path.clone());
+        self.ensure_selected_visible(entries.len());
+        self.preview_scroll = 0;
+    }
+
+    pub fn page(&mut self, delta: isize, entries: &[MemoryEntry]) {
+        let page = self.visible_rows.max(1) as isize;
+        self.move_selection(delta.saturating_mul(page), entries);
+    }
+
+    pub fn ensure_selected_visible(&mut self, total_rows: usize) {
+        let rows = self.visible_rows.max(1);
+        let max_scroll = total_rows.saturating_sub(rows);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + rows {
+            self.scroll = self.selected.saturating_sub(rows.saturating_sub(1));
+        }
+        self.scroll = self.scroll.min(max_scroll);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectsView {
+    #[default]
+    Overview,
+    ProjectDetail,
+    MissionDetail,
+    ThreadDetail,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectsState {
+    pub view: ProjectsView,
+    pub selected_overview: usize,
+    pub selected_project_id: Option<String>,
+    pub selected_mission_id: Option<String>,
+    pub selected_thread_id: Option<String>,
+}
+
+impl ProjectsState {
+    pub fn sync_overview(&mut self, data: &ProjectsOverviewData) {
+        if data.projects.is_empty() {
+            self.selected_overview = 0;
+            if self.view == ProjectsView::Overview {
+                self.selected_project_id = None;
+            }
+            return;
+        }
+
+        if let Some(id) = self.selected_project_id.as_deref()
+            && let Some(index) = data.projects.iter().position(|project| project.id == id)
+        {
+            self.selected_overview = index;
+        }
+
+        self.selected_overview = self
+            .selected_overview
+            .min(data.projects.len().saturating_sub(1));
+        if self.view == ProjectsView::Overview {
+            self.selected_project_id = data
+                .projects
+                .get(self.selected_overview)
+                .map(|project| project.id.clone());
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize, data: &ProjectsOverviewData) {
+        if self.view != ProjectsView::Overview || data.projects.is_empty() {
+            return;
+        }
+
+        let max = data.projects.len().saturating_sub(1) as isize;
+        self.selected_overview = (self.selected_overview as isize + delta).clamp(0, max) as usize;
+        self.selected_project_id = data
+            .projects
+            .get(self.selected_overview)
+            .map(|project| project.id.clone());
+    }
+
+    pub fn open_project(&mut self, project_id: String) {
+        self.view = ProjectsView::ProjectDetail;
+        self.selected_project_id = Some(project_id);
+        self.selected_mission_id = None;
+        self.selected_thread_id = None;
+    }
+
+    pub fn back_to_overview(&mut self, data: &ProjectsOverviewData) {
+        self.view = ProjectsView::Overview;
+        self.selected_mission_id = None;
+        self.selected_thread_id = None;
+        self.sync_overview(data);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectsOverviewData {
+    pub attention: Vec<ProjectAttentionItem>,
+    pub projects: Vec<ProjectOverviewCard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectAttentionItem {
+    pub kind: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub message: String,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOverviewCard {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub health: String,
+    pub active_missions: usize,
+    pub threads_today: usize,
+    pub cost_today_usd: String,
+    pub last_activity: Option<String>,
+    pub goals: Vec<String>,
+    pub missions: Vec<ProjectMissionSummary>,
+    pub recent_activity: Vec<ProjectActivitySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectMissionSummary {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub cadence: String,
+    pub thread_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectActivitySummary {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobDetailTab {
+    #[default]
+    Overview,
+    Activity,
+    Files,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobsView {
+    #[default]
+    List,
+    Detail,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobsState {
+    pub view: JobsView,
+    pub selected_index: usize,
+    pub selected_job_id: Option<String>,
+    pub detail_tab: JobDetailTab,
+}
+
+impl JobsState {
+    pub fn sync_jobs(&mut self, jobs: &[JobInfo]) {
+        if jobs.is_empty() {
+            self.selected_index = 0;
+            self.selected_job_id = None;
+            self.view = JobsView::List;
+            return;
+        }
+
+        if let Some(id) = self.selected_job_id.as_deref()
+            && let Some(index) = jobs.iter().position(|job| job.id == id)
+        {
+            self.selected_index = index;
+        }
+
+        self.selected_index = self.selected_index.min(jobs.len().saturating_sub(1));
+        self.selected_job_id = jobs.get(self.selected_index).map(|job| job.id.clone());
+    }
+
+    pub fn move_selection(&mut self, delta: isize, jobs: &[JobInfo]) {
+        if self.view != JobsView::List || jobs.is_empty() {
+            return;
+        }
+
+        let max = jobs.len().saturating_sub(1) as isize;
+        self.selected_index = (self.selected_index as isize + delta).clamp(0, max) as usize;
+        self.selected_job_id = jobs.get(self.selected_index).map(|job| job.id.clone());
+    }
+
+    pub fn open_job(&mut self, job_id: String) {
+        self.view = JobsView::Detail;
+        self.selected_job_id = Some(job_id);
+    }
+
+    pub fn back_to_list(&mut self, jobs: &[JobInfo]) {
+        self.view = JobsView::List;
+        self.sync_jobs(jobs);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MissionsView {
+    #[default]
+    List,
+    Detail,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissionsState {
+    pub view: MissionsView,
+    pub selected_index: usize,
+    pub selected_mission_id: Option<String>,
+    pub selected_thread_id: Option<String>,
+}
+
+impl MissionsState {
+    pub fn sync_from_overview(&mut self, data: &ProjectsOverviewData) {
+        let missions: Vec<_> = data
+            .projects
+            .iter()
+            .flat_map(|project| project.missions.iter())
+            .collect();
+
+        if missions.is_empty() {
+            self.selected_index = 0;
+            self.selected_mission_id = None;
+            self.selected_thread_id = None;
+            self.view = MissionsView::List;
+            return;
+        }
+
+        if let Some(id) = self.selected_mission_id.as_deref()
+            && let Some(index) = missions.iter().position(|mission| mission.id == id)
+        {
+            self.selected_index = index;
+        }
+
+        self.selected_index = self.selected_index.min(missions.len().saturating_sub(1));
+        self.selected_mission_id = missions
+            .get(self.selected_index)
+            .map(|mission| mission.id.clone());
+    }
+
+    pub fn move_selection(&mut self, delta: isize, data: &ProjectsOverviewData) {
+        if self.view != MissionsView::List {
+            return;
+        }
+        let missions: Vec<_> = data
+            .projects
+            .iter()
+            .flat_map(|project| project.missions.iter())
+            .collect();
+        if missions.is_empty() {
+            return;
+        }
+        let max = missions.len().saturating_sub(1) as isize;
+        self.selected_index = (self.selected_index as isize + delta).clamp(0, max) as usize;
+        self.selected_mission_id = missions
+            .get(self.selected_index)
+            .map(|mission| mission.id.clone());
+    }
+
+    pub fn open_mission(&mut self, mission_id: String) {
+        self.view = MissionsView::Detail;
+        self.selected_mission_id = Some(mission_id);
+        self.selected_thread_id = None;
+    }
+
+    pub fn back_to_list(&mut self, data: &ProjectsOverviewData) {
+        self.view = MissionsView::List;
+        self.selected_thread_id = None;
+        self.sync_from_overview(data);
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -425,6 +824,11 @@ impl Default for AppState {
             pending_approval: None,
             should_quit: false,
             active_tab: ActiveTab::default(),
+            workspace: WorkspaceState::default(),
+            projects: ProjectsState::default(),
+            projects_overview: ProjectsOverviewData::default(),
+            jobs_surface: JobsState::default(),
+            missions_surface: MissionsState::default(),
             settings: SettingsState::default(),
             work_sidebar_visible: true,
             log_entries: LogRingBuffer::new(500),

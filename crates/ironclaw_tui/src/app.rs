@@ -33,17 +33,21 @@ use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
 use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::conversation::ConversationWidget;
 use crate::widgets::help_overlay::HelpOverlayWidget;
+use crate::widgets::jobs::JobsWidget;
 use crate::widgets::logs::LogsWidget;
+use crate::widgets::missions::MissionsWidget;
 use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
+use crate::widgets::projects::ProjectsWidget;
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
 use crate::widgets::thread_picker::ThreadPickerWidget;
+use crate::widgets::workspace::WorkspaceWidget;
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
-    DashboardPanel, DashboardPanelModal, EngineThreadInfo, IdentityFileModal, JobInfo, JobStatus,
-    MemoryEntry, MessageRole, PendingThreadHistory, PlanState, PlanStatus, PlanStep,
-    PlanStepStatus, RoutineInfo, SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint,
-    SkillCategory, TextSelection, ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory,
-    ToolDetailModal, ToolStatus, TuiWidget, TurnCostSummary,
+    DashboardPanel, EngineThreadInfo, IdentityFileModal, JobInfo, JobStatus, MemoryEntry,
+    MessageRole, PendingThreadHistory, PlanState, PlanStatus, PlanStep, PlanStepStatus,
+    RoutineInfo, SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint, SkillCategory,
+    TextSelection, ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory, ToolDetailModal,
+    ToolStatus, TuiWidget, TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -157,6 +161,11 @@ async fn run_tui(
         memory_count: config.memory_count,
         identity_files: config.identity_files,
         identity_file_contents: config.identity_file_contents,
+        workspace: {
+            let mut state = crate::widgets::WorkspaceState::default();
+            state.sync_entries(&config.memory_entries);
+            state
+        },
         memory_entries: config.memory_entries,
         model_picker: ModelPickerState::with_models(config.available_models),
         settings: {
@@ -560,8 +569,8 @@ async fn handle_event(
                 }
                 InputAction::ToggleDashboard => {
                     state.active_tab = match state.active_tab {
-                        ActiveTab::Dashboard => ActiveTab::Conversation,
-                        _ => ActiveTab::Dashboard,
+                        ActiveTab::Projects => ActiveTab::Conversation,
+                        _ => ActiveTab::Projects,
                     };
                 }
                 InputAction::ToggleWorkSidebar => {
@@ -569,10 +578,8 @@ async fn handle_event(
                 }
                 InputAction::ToggleLogs => {
                     state.active_tab = match state.active_tab {
-                        ActiveTab::Conversation => ActiveTab::Dashboard,
-                        ActiveTab::Dashboard => ActiveTab::Logs,
-                        ActiveTab::Logs => ActiveTab::Settings,
-                        ActiveTab::Settings => ActiveTab::Conversation,
+                        ActiveTab::Logs => ActiveTab::Conversation,
+                        _ => ActiveTab::Logs,
                     };
                 }
                 InputAction::ScrollUp => match state.active_tab {
@@ -580,7 +587,20 @@ async fn handle_event(
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
                         ConversationWidget::scroll(state, -page);
                     }
-                    ActiveTab::Dashboard => {}
+                    ActiveTab::Workspace => {
+                        state.workspace.page(-1, &state.memory_entries);
+                    }
+                    ActiveTab::Projects => {
+                        state.projects.move_selection(-1, &state.projects_overview);
+                    }
+                    ActiveTab::Jobs => {
+                        state.jobs_surface.move_selection(-1, &state.jobs);
+                    }
+                    ActiveTab::Missions => {
+                        state
+                            .missions_surface
+                            .move_selection(-1, &state.projects_overview);
+                    }
                     ActiveTab::Settings => {
                         state.settings.page(-1);
                     }
@@ -593,7 +613,20 @@ async fn handle_event(
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
                         ConversationWidget::scroll(state, page);
                     }
-                    ActiveTab::Dashboard => {}
+                    ActiveTab::Workspace => {
+                        state.workspace.page(1, &state.memory_entries);
+                    }
+                    ActiveTab::Projects => {
+                        state.projects.move_selection(1, &state.projects_overview);
+                    }
+                    ActiveTab::Jobs => {
+                        state.jobs_surface.move_selection(1, &state.jobs);
+                    }
+                    ActiveTab::Missions => {
+                        state
+                            .missions_surface
+                            .move_selection(1, &state.projects_overview);
+                    }
                     ActiveTab::Settings => {
                         state.settings.page(1);
                     }
@@ -1094,7 +1127,26 @@ async fn handle_event(
                     ActiveTab::Conversation => {
                         ConversationWidget::scroll(state, delta);
                     }
-                    ActiveTab::Dashboard => {}
+                    ActiveTab::Workspace => {
+                        state
+                            .workspace
+                            .move_selection(delta as isize, &state.memory_entries);
+                    }
+                    ActiveTab::Projects => {
+                        state
+                            .projects
+                            .move_selection(delta as isize, &state.projects_overview);
+                    }
+                    ActiveTab::Jobs => {
+                        state
+                            .jobs_surface
+                            .move_selection(delta as isize, &state.jobs);
+                    }
+                    ActiveTab::Missions => {
+                        state
+                            .missions_surface
+                            .move_selection(delta as isize, &state.projects_overview);
+                    }
                     ActiveTab::Settings => {
                         state.settings.move_selection(delta as isize);
                     }
@@ -1117,8 +1169,18 @@ async fn handle_event(
             state.dashboard = *data;
         }
 
+        TuiEvent::UpdateProjectsOverview(data) => {
+            state.projects_overview = *data;
+            state.projects.sync_overview(&state.projects_overview);
+            state
+                .missions_surface
+                .sync_from_overview(&state.projects_overview);
+        }
+
         TuiEvent::MemoryEntries(entries) => {
             state.memory_entries = entries;
+            state.memory_count = state.memory_entries.len();
+            state.workspace.sync_entries(&state.memory_entries);
         }
 
         TuiEvent::PlanUpdate {
@@ -1421,6 +1483,7 @@ async fn handle_event(
                 status: JobStatus::Running,
                 started_at: now,
             });
+            state.jobs_surface.sync_jobs(&state.jobs);
         }
 
         TuiEvent::JobStatus { job_id, status } => {
@@ -1433,6 +1496,7 @@ async fn handle_event(
             if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                 job.status = new_status;
             }
+            state.jobs_surface.sync_jobs(&state.jobs);
         }
 
         TuiEvent::JobResult { job_id, status } => {
@@ -1444,6 +1508,7 @@ async fn handle_event(
             if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                 job.status = new_status;
             }
+            state.jobs_surface.sync_jobs(&state.jobs);
         }
 
         TuiEvent::RoutineUpdate {
@@ -2356,17 +2421,105 @@ async fn handle_mouse_click(
         return;
     }
 
+    if let Some(tab) = nav_at(terminal, layout, state, column, row) {
+        state.active_tab = tab;
+        state.text_selection = None;
+        return;
+    }
+
     if let Some(tab) = tab_at(terminal, layout, state, column, row) {
         state.active_tab = tab;
         state.text_selection = None;
         return;
     }
 
-    // Click on a dashboard panel opens the expanded modal
-    if state.active_tab == ActiveTab::Dashboard {
-        let main_area = frame_sections(terminal, layout, state)[2];
-        if let Some(panel) = dashboard_panel_at(&widgets_theme(layout), main_area, column, row) {
-            state.expanded_dashboard_panel = Some(DashboardPanelModal { panel, scroll: 0 });
+    if state.active_tab == ActiveTab::Workspace {
+        let main_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
+        let widget = WorkspaceWidget::new(widgets_theme(layout));
+        if let Some(index) = widget.row_index_at(main_area, state, column, row) {
+            state.workspace.selected = index;
+            state.workspace.selected_path = state
+                .memory_entries
+                .get(index)
+                .map(|entry| entry.path.clone());
+            state.workspace.preview_scroll = 0;
+            state.text_selection = None;
+            return;
+        }
+    }
+
+    if state.active_tab == ActiveTab::Projects {
+        let main_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
+        let widget = ProjectsWidget::new(widgets_theme(layout));
+        if let Some(action) = widget.action_at(main_area, state, column, row) {
+            match action {
+                crate::widgets::projects::ProjectsMouseAction::OpenProject(project_id) => {
+                    state.projects.open_project(project_id);
+                }
+                crate::widgets::projects::ProjectsMouseAction::OpenMission(mission_id) => {
+                    state.projects.selected_mission_id = Some(mission_id.clone());
+                    state.active_tab = ActiveTab::Missions;
+                    state.missions_surface.open_mission(mission_id);
+                }
+                crate::widgets::projects::ProjectsMouseAction::OpenThreadDetail(thread_id) => {
+                    state.projects.selected_thread_id = Some(thread_id.clone());
+                    let _ = msg_tx
+                        .send(TuiUserMessage::open_engine_thread_detail(thread_id))
+                        .await;
+                }
+                crate::widgets::projects::ProjectsMouseAction::BackToOverview => {
+                    state.projects.back_to_overview(&state.projects_overview);
+                }
+            }
+            state.text_selection = None;
+            return;
+        }
+    }
+
+    if state.active_tab == ActiveTab::Jobs {
+        let main_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
+        let widget = JobsWidget::new(widgets_theme(layout));
+        if let Some(action) = widget.action_at(main_area, state, column, row) {
+            match action {
+                crate::widgets::jobs::JobsMouseAction::OpenJob(job_id) => {
+                    state.jobs_surface.open_job(job_id);
+                }
+                crate::widgets::jobs::JobsMouseAction::BackToList => {
+                    state.jobs_surface.back_to_list(&state.jobs);
+                }
+                crate::widgets::jobs::JobsMouseAction::SelectTab(tab) => {
+                    state.jobs_surface.detail_tab = tab;
+                }
+            }
+            state.text_selection = None;
+            return;
+        }
+    }
+
+    if state.active_tab == ActiveTab::Missions {
+        let main_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
+        let widget = MissionsWidget::new(widgets_theme(layout));
+        if let Some(action) = widget.action_at(main_area, state, column, row) {
+            match action {
+                crate::widgets::missions::MissionsMouseAction::OpenMission(mission_id) => {
+                    state.missions_surface.open_mission(mission_id);
+                }
+                crate::widgets::missions::MissionsMouseAction::OpenProject(project_id) => {
+                    state.active_tab = ActiveTab::Projects;
+                    state.projects.open_project(project_id);
+                }
+                crate::widgets::missions::MissionsMouseAction::OpenThreadDetail(thread_id) => {
+                    state.missions_surface.selected_thread_id = Some(thread_id.clone());
+                    let _ = msg_tx
+                        .send(TuiUserMessage::open_engine_thread_detail(thread_id))
+                        .await;
+                }
+                crate::widgets::missions::MissionsMouseAction::BackToList => {
+                    state
+                        .missions_surface
+                        .back_to_list(&state.projects_overview);
+                }
+            }
             state.text_selection = None;
             return;
         }
@@ -2374,8 +2527,8 @@ async fn handle_mouse_click(
 
     // Click on a tool block toggles inline expansion
     if state.active_tab == ActiveTab::Conversation {
-        let (conversation_area, _) =
-            conversation_work_areas(frame_sections(terminal, layout, state)[2], state, layout);
+        let content_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
+        let (conversation_area, _) = conversation_work_areas(content_area, state, layout);
         if rect_contains(conversation_area, column, row) {
             if conversation.tool_summary_at_row(row) {
                 state.tool_summary_expanded = !state.tool_summary_expanded;
@@ -2485,6 +2638,58 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
     ]
 }
 
+fn shell_nav_and_content_areas(main_area: Rect, layout: &TuiLayout) -> (Option<Rect>, Rect) {
+    let show_nav = layout.shell.show_nav_rail && main_area.width >= 72;
+    if !show_nav {
+        return (None, main_area);
+    }
+
+    let nav_width = layout
+        .shell
+        .nav_rail_width
+        .max(14)
+        .min(main_area.width.saturating_sub(24));
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(nav_width), Constraint::Min(24)])
+        .split(main_area);
+    (Some(split[0]), split[1])
+}
+
+fn shell_content_sections(content_area: Rect, layout: &TuiLayout) -> (Option<Rect>, Rect) {
+    let show_header = layout.shell.show_surface_header && content_area.height >= 8;
+    if !show_header {
+        return (None, content_area);
+    }
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(4)])
+        .split(content_area);
+    (Some(split[0]), split[1])
+}
+
+fn active_surface_area(main_area: Rect, layout: &TuiLayout) -> Rect {
+    let (_, content_area) = shell_nav_and_content_areas(main_area, layout);
+    let (_, body_area) = shell_content_sections(content_area, layout);
+    body_area
+}
+
+fn nav_at(
+    size: Rect,
+    layout: &TuiLayout,
+    state: &AppState,
+    column: u16,
+    row: u16,
+) -> Option<ActiveTab> {
+    let main_area = frame_sections(size, layout, state)[2];
+    let (nav_area, _) = shell_nav_and_content_areas(main_area, layout);
+    let nav_area = nav_area?;
+    crate::widgets::nav_rail::nav_hit_areas(nav_area)
+        .into_iter()
+        .find_map(|(tab, rect)| rect_contains(rect, column, row).then_some(tab))
+}
+
 fn tab_at(
     size: Rect,
     layout: &TuiLayout,
@@ -2534,7 +2739,9 @@ fn selectable_area_at(
     }
 
     let main_area = frame_sections(size, layout, state)[2];
-    rect_contains(main_area, column, row).then_some(main_area)
+    let (_, content_area) = shell_nav_and_content_areas(main_area, layout);
+    let (_, body_area) = shell_content_sections(content_area, layout);
+    rect_contains(body_area, column, row).then_some(body_area)
 }
 
 fn approval_action_at(
@@ -2631,21 +2838,6 @@ fn expanded_dashboard_thread_id_at(
             .map(|thread| thread.id.clone()),
         _ => None,
     }
-}
-
-fn dashboard_panel_at(
-    theme: &crate::theme::Theme,
-    main_area: Rect,
-    column: u16,
-    row: u16,
-) -> Option<crate::widgets::DashboardPanel> {
-    let widget = crate::widgets::dashboard::DashboardWidget::new(theme.clone());
-    for (panel, area) in widget.panel_areas(main_area) {
-        if rect_contains(area, column, row) {
-            return Some(panel);
-        }
-    }
-    None
 }
 
 fn widgets_theme(layout: &TuiLayout) -> crate::theme::Theme {
@@ -2797,31 +2989,44 @@ fn render_frame(
         .tab_bar
         .render(tab_bar_area, frame.buffer_mut(), state);
 
+    let (nav_area, content_area) = shell_nav_and_content_areas(main_area, layout);
+    if let Some(nav_area) = nav_area {
+        widgets.nav_rail.render(nav_area, frame.buffer_mut(), state);
+    }
+    let (surface_header_area, surface_body_area) = shell_content_sections(content_area, layout);
+    if let Some(surface_header_area) = surface_header_area {
+        widgets
+            .surface_header
+            .render(surface_header_area, frame.buffer_mut(), state);
+    }
+
     // Main area: conversation/logs | sidebar
     match state.active_tab {
         ActiveTab::Logs => {
-            state.conversation_height = main_area.height;
-            // Logs tab takes the full main area (no sidebar)
-            widgets.logs.render(main_area, frame.buffer_mut(), state);
-        }
-        ActiveTab::Dashboard => {
-            state.conversation_height = main_area.height;
+            state.conversation_height = surface_body_area.height;
             widgets
-                .dashboard
-                .render(main_area, frame.buffer_mut(), state);
+                .logs
+                .render(surface_body_area, frame.buffer_mut(), state);
+        }
+        ActiveTab::Projects => {
+            state.conversation_height = surface_body_area.height;
+            state.projects.sync_overview(&state.projects_overview);
+            widgets
+                .projects
+                .render(surface_body_area, frame.buffer_mut(), state);
         }
         ActiveTab::Settings => {
-            state.conversation_height = main_area.height;
+            state.conversation_height = surface_body_area.height;
             state.settings.visible_rows =
-                crate::widgets::settings::SettingsWidget::visible_rows(main_area);
+                crate::widgets::settings::SettingsWidget::visible_rows(surface_body_area);
             state.settings.ensure_selected_visible();
             widgets
                 .settings
-                .render(main_area, frame.buffer_mut(), state);
+                .render(surface_body_area, frame.buffer_mut(), state);
         }
         ActiveTab::Conversation => {
             let (conversation_area, sidebar_area) =
-                conversation_work_areas(main_area, state, layout);
+                conversation_work_areas(surface_body_area, state, layout);
             state.conversation_height = conversation_area.height;
             widgets
                 .conversation
@@ -2831,8 +3036,32 @@ fn render_frame(
                     .work_sidebar
                     .render(sidebar_area, frame.buffer_mut(), state);
             }
-            // Sync max_scroll_offset from the last render for scroll clamping
             state.max_scroll_offset = widgets.conversation.last_max_offset();
+        }
+        ActiveTab::Workspace => {
+            state.conversation_height = surface_body_area.height;
+            let (list_area, _) = WorkspaceWidget::pane_areas(surface_body_area);
+            state.workspace.visible_rows = WorkspaceWidget::list_rows(list_area);
+            state.workspace.sync_entries(&state.memory_entries);
+            widgets
+                .workspace
+                .render(surface_body_area, frame.buffer_mut(), state);
+        }
+        ActiveTab::Jobs => {
+            state.conversation_height = surface_body_area.height;
+            state.jobs_surface.sync_jobs(&state.jobs);
+            widgets
+                .jobs
+                .render(surface_body_area, frame.buffer_mut(), state);
+        }
+        ActiveTab::Missions => {
+            state.conversation_height = surface_body_area.height;
+            state
+                .missions_surface
+                .sync_from_overview(&state.projects_overview);
+            widgets
+                .missions
+                .render(surface_body_area, frame.buffer_mut(), state);
         }
     }
 
@@ -3621,14 +3850,59 @@ mod tests {
     #[tokio::test]
     async fn mouse_click_switches_active_tab() {
         let mut state = AppState::default();
+        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let projects_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
+            .into_iter()
+            .find_map(|(tab, range)| (tab == ActiveTab::Projects).then_some(range))
+            .expect("projects range");
 
-        // Column 12 hits "Dashboard" in: " ◦ Chat  ■ Dashboard  ▸ Logs"
-        apply_event(&mut state, TuiEvent::MouseClick { column: 12, row: 0 }).await;
-        assert_eq!(state.active_tab, ActiveTab::Dashboard);
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: projects_range.start,
+                row: tab_bar_area.y,
+            },
+        )
+        .await;
+        assert_eq!(state.active_tab, ActiveTab::Projects);
 
-        // Column 25 hits "Logs"
-        apply_event(&mut state, TuiEvent::MouseClick { column: 25, row: 0 }).await;
+        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let logs_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
+            .into_iter()
+            .find_map(|(tab, range)| (tab == ActiveTab::Logs).then_some(range))
+            .expect("logs range");
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: logs_range.start,
+                row: tab_bar_area.y,
+            },
+        )
+        .await;
         assert_eq!(state.active_tab, ActiveTab::Logs);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_uses_nav_rail_hit_areas_for_settings() {
+        let mut state = AppState::default();
+        let main_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[2];
+        let (nav_area, _) = shell_nav_and_content_areas(main_area, &TuiLayout::default());
+        let settings_rect = crate::widgets::nav_rail::nav_hit_areas(nav_area.expect("nav area"))
+            .into_iter()
+            .find_map(|(tab, rect)| (tab == ActiveTab::Settings).then_some(rect))
+            .expect("settings nav rect");
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: settings_rect.x + 1,
+                row: settings_rect.y,
+            },
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Settings);
     }
 
     #[tokio::test]
@@ -3641,7 +3915,7 @@ mod tests {
             timestamp: "now".to_string(),
         });
         let mut state = AppState {
-            active_tab: ActiveTab::Dashboard,
+            active_tab: ActiveTab::Projects,
             messages: vec![
                 ChatMessage {
                     role: MessageRole::User,
@@ -3671,6 +3945,506 @@ mod tests {
         .await;
 
         assert_eq!(state.active_tab, ActiveTab::Settings);
+    }
+
+    #[tokio::test]
+    async fn workspace_scroll_moves_selection() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Workspace,
+            memory_entries: vec![
+                MemoryEntry {
+                    path: "a.md".to_string(),
+                    snippet: String::new(),
+                    updated_at: None,
+                },
+                MemoryEntry {
+                    path: "b.md".to_string(),
+                    snippet: String::new(),
+                    updated_at: None,
+                },
+                MemoryEntry {
+                    path: "c.md".to_string(),
+                    snippet: String::new(),
+                    updated_at: None,
+                },
+            ],
+            ..Default::default()
+        };
+        state.workspace.visible_rows = 1;
+        state.workspace.sync_entries(&state.memory_entries);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(state.workspace.selected, 1);
+        assert_eq!(state.workspace.selected_path.as_deref(), Some("b.md"));
+    }
+
+    #[tokio::test]
+    async fn mouse_click_selects_workspace_entry() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Workspace,
+            memory_entries: vec![
+                MemoryEntry {
+                    path: "docs/a.md".to_string(),
+                    snippet: String::new(),
+                    updated_at: None,
+                },
+                MemoryEntry {
+                    path: "docs/b.md".to_string(),
+                    snippet: String::new(),
+                    updated_at: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let terminal = terminal_area();
+        let main_area = active_surface_area(
+            frame_sections(terminal, &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+        let (list_area, _) = WorkspaceWidget::pane_areas(main_area);
+        state.workspace.visible_rows = WorkspaceWidget::list_rows(list_area);
+        state.workspace.sync_entries(&state.memory_entries);
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: list_area.x + 2,
+                row: list_area.y + 2,
+            },
+        )
+        .await;
+
+        assert_eq!(state.workspace.selected, 1);
+        assert_eq!(state.workspace.selected_path.as_deref(), Some("docs/b.md"));
+    }
+
+    #[tokio::test]
+    async fn mouse_click_opens_project_detail() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: vec!["Ship it".to_string()],
+                    missions: Vec::new(),
+                    recent_activity: Vec::new(),
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.sync_overview(&state.projects_overview);
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 2,
+                row: main_area.y + 4,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            state.projects.view,
+            crate::widgets::ProjectsView::ProjectDetail
+        );
+        assert_eq!(
+            state.projects.selected_project_id.as_deref(),
+            Some("project-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_back_returns_projects_to_overview() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: Vec::new(),
+                    recent_activity: Vec::new(),
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.open_project("project-1".to_string());
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 2,
+                row: main_area.y + 1,
+            },
+        )
+        .await;
+
+        assert_eq!(state.projects.view, crate::widgets::ProjectsView::Overview);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_project_mission_opens_missions_surface() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: vec!["Ship it".to_string()],
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.open_project("project-1".to_string());
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 4,
+                row: main_area.y + 8,
+            },
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Missions);
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::Detail
+        );
+        assert_eq!(
+            state.missions_surface.selected_mission_id.as_deref(),
+            Some("mission-1")
+        );
+        assert_eq!(
+            state.projects.selected_mission_id.as_deref(),
+            Some("mission-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_project_activity_requests_engine_thread_detail() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: vec!["Ship it".to_string()],
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.open_project("project-1".to_string());
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 4,
+                row: main_area.y + 11,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            state.projects.selected_thread_id.as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0].ui_action.as_ref(),
+            Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "thread-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mouse_click_opens_job_detail() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Jobs,
+            jobs: vec![JobInfo {
+                id: "job-1".to_string(),
+                title: "Backfill".to_string(),
+                status: JobStatus::Running,
+                started_at: chrono::Utc::now(),
+            }],
+            ..Default::default()
+        };
+        state.jobs_surface.sync_jobs(&state.jobs);
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 2,
+                row: main_area.y + 4,
+            },
+        )
+        .await;
+
+        assert_eq!(state.jobs_surface.view, crate::widgets::JobsView::Detail);
+        assert_eq!(state.jobs_surface.selected_job_id.as_deref(), Some("job-1"));
+    }
+
+    #[tokio::test]
+    async fn mouse_click_opens_mission_detail() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Missions,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: String::new(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 1,
+                    cost_today_usd: "$0.10".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state
+            .missions_surface
+            .sync_from_overview(&state.projects_overview);
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 2,
+                row: main_area.y + 4,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::Detail
+        );
+        assert_eq!(
+            state.missions_surface.selected_mission_id.as_deref(),
+            Some("mission-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_mission_project_opens_projects_surface() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Missions,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: String::new(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 1,
+                    cost_today_usd: "$0.10".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state
+            .missions_surface
+            .sync_from_overview(&state.projects_overview);
+        state.missions_surface.open_mission("mission-1".to_string());
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 4,
+                row: main_area.y + 2,
+            },
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Projects);
+        assert_eq!(
+            state.projects.view,
+            crate::widgets::ProjectsView::ProjectDetail
+        );
+        assert_eq!(
+            state.projects.selected_project_id.as_deref(),
+            Some("project-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_mission_activity_requests_engine_thread_detail() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Missions,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: String::new(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 1,
+                    cost_today_usd: "$0.10".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state
+            .missions_surface
+            .sync_from_overview(&state.projects_overview);
+        state.missions_surface.open_mission("mission-1".to_string());
+        let main_area = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: main_area.x + 4,
+                row: main_area.y + 9,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            state.missions_surface.selected_thread_id.as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0].ui_action.as_ref(),
+            Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "thread-1"
+        ));
     }
 
     #[tokio::test]
@@ -3984,12 +4758,42 @@ mod tests {
             screen_snapshot: make_snapshot(80, 24),
             ..Default::default()
         };
-        write_snapshot_text(&mut state.screen_snapshot, 1, 2, "hello world");
+        let selectable = active_surface_area(
+            frame_sections(terminal_area(), &TuiLayout::default(), &state)[2],
+            &TuiLayout::default(),
+        );
+        write_snapshot_text(
+            &mut state.screen_snapshot,
+            selectable.x + 1,
+            selectable.y + 1,
+            "hello world",
+        );
         take_last_copied_text_for_test();
 
-        apply_event(&mut state, TuiEvent::MouseClick { column: 1, row: 2 }).await;
-        apply_event(&mut state, TuiEvent::MouseDrag { column: 5, row: 2 }).await;
-        apply_event(&mut state, TuiEvent::MouseRelease { column: 5, row: 2 }).await;
+        apply_event(
+            &mut state,
+            TuiEvent::MouseClick {
+                column: selectable.x + 1,
+                row: selectable.y + 1,
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::MouseDrag {
+                column: selectable.x + 5,
+                row: selectable.y + 1,
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::MouseRelease {
+                column: selectable.x + 5,
+                row: selectable.y + 1,
+            },
+        )
+        .await;
 
         assert_eq!(take_last_copied_text_for_test().as_deref(), Some("hello"));
         assert!(state.text_selection.is_some());

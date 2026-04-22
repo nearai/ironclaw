@@ -30,6 +30,10 @@ pub struct TuiLayout {
     #[serde(default)]
     pub conversation: ConversationConfig,
 
+    /// Shell chrome configuration.
+    #[serde(default)]
+    pub shell: ShellConfig,
+
     /// Key binding overrides: action name -> key combo string.
     #[serde(default)]
     pub keybindings: HashMap<String, String>,
@@ -50,6 +54,7 @@ impl Default for TuiLayout {
             header: HeaderConfig::default(),
             status_bar: StatusBarConfig::default(),
             conversation: ConversationConfig::default(),
+            shell: ShellConfig::default(),
             keybindings: HashMap::new(),
             widgets: HashMap::new(),
         }
@@ -190,10 +195,39 @@ impl Default for ConversationConfig {
     }
 }
 
+/// Shell chrome configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellConfig {
+    #[serde(default = "default_true")]
+    pub show_nav_rail: bool,
+
+    #[serde(default = "default_nav_rail_width")]
+    pub nav_rail_width: u16,
+
+    #[serde(default = "default_true")]
+    pub show_surface_header: bool,
+}
+
+fn default_nav_rail_width() -> u16 {
+    18
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            show_nav_rail: true,
+            nav_rail_width: default_nav_rail_width(),
+            show_surface_header: true,
+        }
+    }
+}
+
 /// Where widgets can be placed in the TUI layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TuiSlot {
     Header,
+    NavRail,
+    SurfaceHeader,
     StatusBarLeft,
     StatusBarCenter,
     StatusBarRight,
@@ -212,6 +246,7 @@ mod tests {
         assert_eq!(layout.theme, "dark");
         assert!(!layout.header.visible);
         assert!(layout.status_bar.visible);
+        assert!(layout.shell.show_nav_rail);
     }
 
     #[test]
@@ -220,6 +255,7 @@ mod tests {
         let json = serde_json::to_string(&layout).expect("serialize");
         let back: TuiLayout = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.theme, "dark");
+        assert_eq!(back.shell.nav_rail_width, 18);
     }
 
     #[test]
