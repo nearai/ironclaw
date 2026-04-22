@@ -2016,6 +2016,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some(thread.goal.clone()),
+            thread_metadata: thread.metadata.clone(),
         }
     }
 

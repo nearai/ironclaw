@@ -391,6 +391,19 @@
   color: inherit;
 }
 .project-chrome-pr:hover { text-decoration: underline; }
+.project-chrome-repo,
+.project-chrome-issue {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  background: var(--chip-bg, rgba(0, 0, 0, 0.05));
+  border-radius: 999px;
+  padding: 2px 8px;
+  text-decoration: none;
+  color: inherit;
+}
+.project-chrome-repo:hover,
+.project-chrome-issue:hover { text-decoration: underline; }
 .project-chrome-empty {
   color: var(--text-muted, #888);
   font-size: 12px;

@@ -440,10 +440,13 @@ impl ToolRegistry {
 
     /// Register all built-in tools.
     pub fn register_builtin_tools(&self) {
+        use crate::tools::builtin::ThreadMetadataSetTool;
+
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
         self.register_sync(Arc::new(PlanUpdateTool::new()));
+        self.register_sync(Arc::new(ThreadMetadataSetTool));
 
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {

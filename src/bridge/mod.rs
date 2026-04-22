@@ -44,6 +44,7 @@ pub use router::{
     get_engine_project,
     get_engine_projects_overview,
     get_engine_thread,
+    get_engine_thread_metadata,
     // Action handlers
     handle_approval,
     handle_auth_gate_resolution,

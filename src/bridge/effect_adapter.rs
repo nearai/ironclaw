@@ -1224,7 +1224,16 @@ impl EffectBridgeAdapter {
                     },
                 )))
             } else {
-                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                let worktree_subdir =
+                    crate::bridge::sandbox::thread_worktree_subdir(&context.thread_metadata);
+                match maybe_intercept(
+                    &lookup_name,
+                    &normalized,
+                    context.project_id,
+                    &mounts,
+                    worktree_subdir.as_deref(),
+                )
+                .await
                 {
                     Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
                     Ok(InterceptOutcome::FellThrough) => None,
@@ -2536,6 +2545,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
+            thread_metadata: serde_json::Value::Null,
         }
     }
 
@@ -3417,6 +3427,7 @@ mod tests {
             thread_goal: Some(
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
             ),
+            thread_metadata: serde_json::Value::Null,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3436,6 +3447,7 @@ mod tests {
             thread_goal: Some(
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
             ),
+            thread_metadata: serde_json::Value::Null,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3453,6 +3465,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+            thread_metadata: serde_json::Value::Null,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3470,6 +3483,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+            thread_metadata: serde_json::Value::Null,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3490,6 +3504,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
+            thread_metadata: serde_json::Value::Null,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -3508,6 +3523,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
+            thread_metadata: serde_json::Value::Null,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3721,6 +3737,7 @@ mod tests {
                 source_channel: Some("gateway".to_string()),
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
+                thread_metadata: serde_json::Value::Null,
             }
         }
 
@@ -4002,6 +4019,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            thread_metadata: serde_json::Value::Null,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -4098,6 +4116,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            thread_metadata: serde_json::Value::Null,
         };
 
         let result = adapter
@@ -4208,6 +4227,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            thread_metadata: serde_json::Value::Null,
         };
 
         let result = adapter

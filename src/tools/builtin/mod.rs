@@ -21,6 +21,7 @@ pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
 pub mod system;
+mod thread_metadata;
 mod time;
 mod tool_info;
 
@@ -55,6 +56,7 @@ pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use system::{SystemToolsListTool, SystemVersionTool};
+pub use thread_metadata::ThreadMetadataSetTool;
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
 mod html_converter;

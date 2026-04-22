@@ -527,7 +527,11 @@ impl Agent {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let mut rendered = format!("$ {command}\n");
+        // Wrap in a fenced code block so the TUI's markdown renderer
+        // (`render_markdown` in conversation.rs) treats each newline as a
+        // hard break. Without the fence, `ls` output "file1\nfile2\n..."
+        // collapses into a single soft-wrapped paragraph.
+        let mut rendered = format!("```\n$ {command}\n");
         if !body.is_empty() {
             rendered.push_str(&body);
             if !body.ends_with('\n') {
@@ -537,6 +541,7 @@ impl Agent {
         if exit_code != 0 {
             rendered.push_str(&format!("[exit {exit_code}]\n"));
         }
+        rendered.push_str("```\n");
         Ok(rendered)
     }
 

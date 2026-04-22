@@ -111,11 +111,31 @@ pub struct ThreadProjectContext {
     pub dirty_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr: Option<crate::channels::web::platform::project_context_cache::PrSummary>,
+    /// GitHub issue the thread is working on, lifted from
+    /// `thread.metadata.dev.issue_num` (+ `issue_title` when set). None
+    /// when the thread isn't in an issue-fix flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<ThreadIssueContext>,
     /// Whether this project is assigned to the thread via an explicit
     /// per-thread override (`true`) versus inherited from the user's
     /// active project (`false`). The chrome uses this to decide whether
     /// to render an "override" indicator next to the selector.
     pub is_override: bool,
+}
+
+/// Thread-scoped GitHub issue context, lifted from `thread.metadata.dev`.
+///
+/// The skill-driven `dev-workflow` / `fix-issue` flows write these
+/// fields; the chrome surfaces them as a pill. The URL is derived
+/// server-side from `project.github_repo` + `issue_num` so the skill
+/// only has to stash the numeric id.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadIssueContext {
+    pub number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

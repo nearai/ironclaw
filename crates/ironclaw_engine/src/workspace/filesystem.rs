@@ -7,11 +7,12 @@
 //! path is canonicalized when possible and re-checked against the root to
 //! defend against symlink-based escapes.
 //!
-//! `read`, `write`, and `list` are fully implemented. `patch` and `shell`
-//! return [`MountError::Unsupported`] in this revision; the bridge interceptor
-//! falls through to the host tool when this happens, so callers don't lose
-//! functionality. Both will be implemented when the containerized backend
-//! lands and needs symmetric coverage.
+//! `read`, `write`, `list`, and `shell` are fully implemented. `shell`
+//! spawns `/bin/sh -c` with `cwd` set to the mount root (plus optional
+//! relative subdir) so sandbox-free live/e2e runs get the same `/project/`
+//! routing the containerized backend provides. `patch` still returns
+//! [`MountError::Unsupported`]; the bridge interceptor falls through to
+//! the host tool when this happens, so callers don't lose functionality.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -196,14 +197,54 @@ impl MountBackend for FilesystemBackend {
 
     async fn shell(
         &self,
-        _command: &str,
-        _env: HashMap<String, String>,
-        _cwd: Option<&Path>,
+        command: &str,
+        env: HashMap<String, String>,
+        cwd: Option<&Path>,
     ) -> Result<ShellOutput, MountError> {
-        Err(MountError::Unsupported {
-            operation: "FilesystemBackend::shell (deferred to a later phase; \
-                        bridge falls through to host tool)"
-                .into(),
+        // Resolve cwd relative to the mount root. `None` and empty paths
+        // both mean "run at the mount root"; anything else is validated
+        // against `safe_join` so a malicious `../../etc` in the cwd
+        // argument cannot escape the project workspace.
+        let workdir = match cwd {
+            None => self.root.clone(),
+            Some(p) if p.as_os_str().is_empty() => self.root.clone(),
+            Some(p) => self.safe_join(p)?,
+        };
+        if !workdir.exists() {
+            tokio::fs::create_dir_all(&workdir)
+                .await
+                .map_err(|e| MountError::io(&workdir, &e))?;
+        }
+
+        // Hand the compound command to `/bin/sh -c` so the agent can use
+        // shell features (pipelines, `&&`, `||`, redirects) the same way
+        // the containerized backend does inside the sandbox daemon.
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(command).current_dir(&workdir);
+        cmd.env_clear();
+        // Preserve a minimal safe env so common binaries (git, cargo,
+        // node) are reachable. PATH in particular must be carried; a
+        // fresh Command has no env and git/cargo both need it.
+        for var in ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR"] {
+            if let Ok(v) = std::env::var(var) {
+                cmd.env(var, v);
+            }
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+
+        let output = cmd.output().await.map_err(|e| MountError::Backend {
+            reason: format!(
+                "FilesystemBackend::shell: spawn failed in {}: {e}",
+                workdir.display()
+            ),
+        })?;
+
+        Ok(ShellOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code().unwrap_or(-1),
         })
     }
 }
@@ -402,14 +443,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_and_shell_unsupported_in_phase_1() {
+    async fn patch_unsupported_in_phase_1() {
         let (backend, _dir) = backend();
         let err = backend
             .patch(Path::new("foo"), "old", "new", false)
             .await
             .unwrap_err();
         assert!(matches!(err, MountError::Unsupported { .. }));
-        let err = backend.shell("ls", HashMap::new(), None).await.unwrap_err();
-        assert!(matches!(err, MountError::Unsupported { .. }));
+    }
+
+    #[tokio::test]
+    async fn shell_runs_with_cwd_at_mount_root() {
+        let (backend, dir) = backend();
+        tokio::fs::write(dir.path().join("marker"), b"hello")
+            .await
+            .unwrap();
+        let out = backend
+            .shell("cat marker", HashMap::new(), None)
+            .await
+            .expect("shell should succeed at mount root");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, "hello");
+    }
+
+    #[tokio::test]
+    async fn shell_propagates_nonzero_exit() {
+        let (backend, _dir) = backend();
+        let out = backend
+            .shell("exit 7", HashMap::new(), None)
+            .await
+            .expect("spawn ok even when exit is non-zero");
+        assert_eq!(out.exit_code, 7);
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_parent_dir_escape_in_cwd() {
+        let (backend, _dir) = backend();
+        let err = backend
+            .shell("pwd", HashMap::new(), Some(Path::new("../escape")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MountError::InvalidPath { .. }));
     }
 }

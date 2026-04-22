@@ -51,6 +51,102 @@ use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_stri
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
 
+/// Action name of the `thread_metadata_set` tool. Kept in one place so the
+/// post-execution hook below and any future refactors stay in sync.
+const THREAD_METADATA_SET_ACTION: &str = "thread_metadata_set";
+
+/// Max length (chars) of the compact thread-state system message appended
+/// before each LLM call. Prevents a skill from blowing up the context
+/// window by writing megabytes of metadata — the tool itself caps patch
+/// size, but compounded namespaces could still grow.
+const THREAD_METADATA_PROMPT_MAX_CHARS: usize = 1024;
+
+/// If the successful action was `thread_metadata_set`, apply the patch it
+/// echoed back in its output to the in-memory `thread.metadata`. The tool
+/// itself does not persist — the next `save_thread` on the running executor
+/// carries the mutation to disk.
+///
+/// Semantics: replace-at-top-level-key. Each top-level key in the patch
+/// overwrites the matching key in `thread.metadata` wholesale. See the
+/// tool's module doc for the rationale (namespace-per-skill, no silent
+/// cross-skill drops).
+fn apply_thread_metadata_set_output(
+    thread: &mut Thread,
+    action_name: &str,
+    output: &serde_json::Value,
+) {
+    if action_name != THREAD_METADATA_SET_ACTION {
+        return;
+    }
+    let patch_str = match output {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => return,
+    };
+    let patch: serde_json::Value = match serde_json::from_str(patch_str) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("thread_metadata_set output parse failed: {e}");
+            return;
+        }
+    };
+    let Some(patch_obj) = patch.as_object() else {
+        return;
+    };
+
+    // Ensure thread.metadata is an object before merging.
+    if !thread.metadata.is_object() {
+        thread.metadata = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(meta_obj) = thread.metadata.as_object_mut() {
+        for (k, v) in patch_obj {
+            meta_obj.insert(k.clone(), v.clone());
+        }
+    }
+    thread.updated_at = chrono::Utc::now();
+}
+
+/// Build the compact thread-state section merged into the leading system
+/// message just before each LLM call. Returns `None` when `thread.metadata`
+/// is empty or contains only engine-internal housekeeping (e.g. the
+/// `runtime_checkpoint` blob the orchestrator stashes for resume).
+///
+/// The format is intentionally terse — one line of compact JSON — because
+/// it will be re-sent on every LLM turn.
+fn thread_metadata_prompt_section(thread: &Thread) -> Option<String> {
+    let obj = thread.metadata.as_object()?;
+    // Skip engine-internal keys so the LLM only sees skill-written state.
+    const SKIP: &[&str] = &[
+        "runtime_checkpoint",
+        "orchestrator_version",
+        "active_skills",
+        "pending_approval",
+        "user_timezone",
+        "source_channel",
+    ];
+    let filtered: serde_json::Map<String, serde_json::Value> = obj
+        .iter()
+        .filter(|(k, _)| !SKIP.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let compact = serde_json::to_string(&serde_json::Value::Object(filtered)).ok()?;
+    let compact = if compact.chars().count() > THREAD_METADATA_PROMPT_MAX_CHARS {
+        let truncated: String = compact
+            .chars()
+            .take(THREAD_METADATA_PROMPT_MAX_CHARS)
+            .collect();
+        format!("{truncated}…")
+    } else {
+        compact
+    };
+    Some(format!(
+        "thread_state: {compact}\n(Patch via thread_metadata_set; replace-at-top-level-key.)"
+    ))
+}
+
 /// Well-known title for orchestrator code in the Store.
 pub const ORCHESTRATOR_TITLE: &str = "orchestrator:main";
 
@@ -597,10 +693,32 @@ async fn handle_llm_complete(
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
-    let messages = explicit_messages
+    let mut messages = explicit_messages
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
+
+    // Surface a compact `thread_state: {…}` section so the LLM sees
+    // current thread metadata on every turn and can patch it via
+    // `thread_metadata_set`. Engine-internal keys are filtered out —
+    // see `thread_metadata_prompt_section`.
+    //
+    // Must merge into the existing leading system message rather than
+    // appending a trailing one: several LLM providers (NearAI/Qwen in
+    // particular) reject requests where a system message appears after
+    // any non-system message — "System message must be at the beginning".
+    if let Some(section) = thread_metadata_prompt_section(thread) {
+        use crate::types::message::MessageRole;
+        match messages.first_mut() {
+            Some(first) if first.role == MessageRole::System => {
+                first.content.push_str("\n\n");
+                first.content.push_str(&section);
+            }
+            _ => {
+                messages.insert(0, ThreadMessage::system(section));
+            }
+        }
+    }
 
     if let Err(e) = reconcile_dynamic_tool_lease(
         thread,
@@ -727,6 +845,7 @@ async fn handle_execute_code_step(
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
         thread_goal: Some(thread.goal.clone()),
+        thread_metadata: thread.metadata.clone(),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -902,6 +1021,7 @@ async fn handle_execute_action(
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
         thread_goal: Some(thread.goal.clone()),
+        thread_metadata: thread.metadata.clone(),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -1104,6 +1224,7 @@ async fn handle_execute_action(
                     &name,
                     &r.output,
                 );
+                apply_thread_metadata_set_output(thread, &name, &r.output);
             }
             let result = serde_json::json!({
                 "action_name": r.action_name,
@@ -1466,6 +1587,7 @@ async fn handle_execute_actions_parallel(
             source_channel: thread_source_channel(thread),
             user_timezone: thread_user_timezone(thread),
             thread_goal: Some(thread.goal.clone()),
+            thread_metadata: thread.metadata.clone(),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1492,6 +1614,7 @@ async fn handle_execute_actions_parallel(
         // for the duration of the parallel batch.
         let parallel_source_channel = thread_source_channel(thread);
         let parallel_user_timezone = thread_user_timezone(thread);
+        let parallel_thread_metadata = thread.metadata.clone();
 
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
@@ -1510,6 +1633,7 @@ async fn handle_execute_actions_parallel(
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,
                 thread_goal: Some(thread.goal.clone()),
+                thread_metadata: parallel_thread_metadata.clone(),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1552,9 +1676,15 @@ async fn handle_execute_actions_parallel(
         let result_json = slot_results[idx].take().unwrap_or(
             serde_json::json!({"is_error": true, "output": {"error": "execution slot empty"}}),
         );
-        let _output = slot_outputs[idx]
+        let output = slot_outputs[idx]
             .take()
             .unwrap_or(serde_json::json!({"error": "no output"}));
+
+        // ActionExecuted (non-error) events gate the metadata-patch hook —
+        // parallel calls that failed their tool body still arrive with a
+        // `result_json.is_error == true`, but the event kind is the
+        // authoritative "did this side effect succeed" signal.
+        let succeeded = matches!(slot_events[idx], Some(EventKind::ActionExecuted { .. }));
 
         if let Some(event) = slot_events[idx].take() {
             let ev = ThreadEvent::new(thread.id, event);
@@ -1562,6 +1692,10 @@ async fn handle_execute_actions_parallel(
                 let _ = tx.send(ev.clone());
             }
             thread.events.push(ev);
+        }
+
+        if succeeded {
+            apply_thread_metadata_set_output(thread, &parsed[idx].name, &output);
         }
 
         results_json.push(result_json.clone());

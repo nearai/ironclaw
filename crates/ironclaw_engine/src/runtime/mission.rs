@@ -2555,6 +2555,7 @@ async fn dispatch_protected_write(
         source_channel: None,
         user_timezone: None,
         thread_goal: None,
+        thread_metadata: serde_json::Value::Null,
     };
 
     effects

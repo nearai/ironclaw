@@ -988,6 +988,7 @@ async fn execute_pending_gate_action(
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
+        thread_metadata: thread.metadata.clone(),
     };
 
     state.effect_adapter.reset_call_count();
@@ -4878,6 +4879,32 @@ pub async fn list_engine_threads(
         .map_err(|e| engine_err("list threads", e))?;
 
     Ok(threads.iter().map(thread_to_info).collect())
+}
+
+/// Return `thread.metadata` for the given thread id, scoped to `user_id`.
+///
+/// Used by the web chrome to surface per-thread `dev.*` pills (branch /
+/// issue / PR) without duplicating the store-lookup wiring that
+/// [`get_engine_thread`] already does. Returns `None` when the engine is
+/// not mounted, the thread is missing, the thread id is malformed, or the
+/// user does not own the thread.
+pub async fn get_engine_thread_metadata(
+    thread_id: uuid::Uuid,
+    user_id: &str,
+) -> Option<serde_json::Value> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    let thread = state
+        .store
+        .load_thread(ironclaw_engine::ThreadId(thread_id))
+        .await
+        .ok()
+        .flatten()?;
+    if !thread.is_owned_by(user_id) {
+        return None;
+    }
+    Some(thread.metadata)
 }
 
 /// Get a single engine thread by ID.

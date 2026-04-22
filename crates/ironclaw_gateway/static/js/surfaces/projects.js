@@ -942,7 +942,9 @@ function formatRelativeTime(isoString) {
       + '    <span class="project-chrome-caret">▾</span>'
       + '  </button>'
       + '  <span class="project-chrome-folder" id="project-chrome-folder"></span>'
+      + '  <a class="project-chrome-repo" id="project-chrome-repo" target="_blank" rel="noopener" hidden></a>'
       + '  <span class="project-chrome-branch" id="project-chrome-branch" hidden></span>'
+      + '  <a class="project-chrome-issue" id="project-chrome-issue" target="_blank" rel="noopener" hidden></a>'
       + '  <a class="project-chrome-pr" id="project-chrome-pr" target="_blank" rel="noopener" hidden></a>'
       + '  <span class="project-chrome-empty" id="project-chrome-empty" hidden></span>'
       + '</div>';
@@ -964,10 +966,10 @@ function formatRelativeTime(isoString) {
         'No project',
       );
       bar.querySelector('#project-chrome-folder').textContent = '';
-      const branchEl = bar.querySelector('#project-chrome-branch');
-      branchEl.hidden = true;
-      const prEl = bar.querySelector('#project-chrome-pr');
-      prEl.hidden = true;
+      bar.querySelector('#project-chrome-repo').hidden = true;
+      bar.querySelector('#project-chrome-branch').hidden = true;
+      bar.querySelector('#project-chrome-issue').hidden = true;
+      bar.querySelector('#project-chrome-pr').hidden = true;
       empty.hidden = false;
       empty.textContent = t(
         'project.chrome.noneHint',
@@ -982,6 +984,16 @@ function formatRelativeTime(isoString) {
     const folderEl = bar.querySelector('#project-chrome-folder');
     folderEl.textContent = contractHome(threadProject.workspace_path || '');
     folderEl.title = threadProject.workspace_path || '';
+    // Repo pill: shown when project is a dev project (has github_repo).
+    const repoEl = bar.querySelector('#project-chrome-repo');
+    if (threadProject.github_repo) {
+      repoEl.hidden = false;
+      repoEl.textContent = threadProject.github_repo;
+      repoEl.href = 'https://github.com/' + threadProject.github_repo;
+      repoEl.title = 'GitHub: ' + threadProject.github_repo;
+    } else {
+      repoEl.hidden = true;
+    }
     const branchEl = bar.querySelector('#project-chrome-branch');
     if (threadProject.branch) {
       branchEl.hidden = false;
@@ -992,10 +1004,20 @@ function formatRelativeTime(isoString) {
     } else {
       branchEl.hidden = true;
     }
+    // Issue pill: per-thread from thread.metadata.dev.issue_num.
+    const issueEl = bar.querySelector('#project-chrome-issue');
+    if (threadProject.issue && threadProject.issue.number) {
+      issueEl.hidden = false;
+      issueEl.textContent = '#' + threadProject.issue.number;
+      issueEl.href = threadProject.issue.url || '#';
+      issueEl.title = threadProject.issue.title || 'GitHub issue';
+    } else {
+      issueEl.hidden = true;
+    }
     const prEl = bar.querySelector('#project-chrome-pr');
     if (threadProject.pr) {
       prEl.hidden = false;
-      prEl.textContent = '#' + threadProject.pr.number + ' ' + (threadProject.pr.state || 'open');
+      prEl.textContent = 'PR #' + threadProject.pr.number + ' ' + (threadProject.pr.state || 'open');
       prEl.href = threadProject.pr.url || '#';
       prEl.title = threadProject.pr.title || '';
     } else {

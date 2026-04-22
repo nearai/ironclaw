@@ -95,6 +95,10 @@ async function sendMessage() {
     const command = content.slice(1).trimStart();
     if (!command) return;
     input.value = '';
+    // Programmatic value changes don't fire `input`, so the shell-mode
+    // badge on `.chat-input-wrapper` (toggled in surfaces/projects.js)
+    // stays stuck with a leading `!` after submit. Dispatch manually.
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     autoResizeTextarea(input);
     input.focus();
     if (typeof window.sendShellCommand === 'function') {

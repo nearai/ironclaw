@@ -20,6 +20,44 @@ use crate::bootstrap::ironclaw_base_dir;
 /// Subdirectory under [`ironclaw_base_dir`] that holds per-project workspaces.
 pub const PROJECTS_SUBDIR: &str = "projects";
 
+/// Top-level metadata key under which the `dev-workflow` / `coding-repo`
+/// skills stash per-thread git state (branch, worktree, PR). Keeping the
+/// key in one place prevents drift between the skill prompt and the host
+/// interceptor that reads it.
+pub const DEV_METADATA_KEY: &str = "dev";
+
+/// Metadata sub-key under `dev` that holds the per-thread worktree path,
+/// relative to the project's workspace directory (e.g. `worktrees/<thread_id>`).
+pub const DEV_WORKTREE_KEY: &str = "worktree";
+
+/// Extract the per-thread worktree subdir from thread metadata, if any.
+///
+/// Returns `None` when the thread has no `dev.worktree` key — the caller
+/// falls back to treating `/project/` as the sandbox root, which is the
+/// current behavior for threads with no git-per-thread state.
+///
+/// Rejects paths that would escape the project root: absolute paths,
+/// parent-dir traversal (`..`), and empty components. The rejection is
+/// silent (returns `None`) rather than an error because a malformed
+/// metadata entry should degrade to "no worktree" — not break tool
+/// dispatch. Mount resolution still prevents escape at the mount layer,
+/// so this is defense-in-depth.
+pub fn thread_worktree_subdir(metadata: &serde_json::Value) -> Option<String> {
+    let subdir = metadata
+        .get(DEV_METADATA_KEY)?
+        .get(DEV_WORKTREE_KEY)?
+        .as_str()?;
+    if subdir.is_empty() {
+        return None;
+    }
+    let p = Path::new(subdir);
+    let safe = p.components().all(|c| matches!(c, Component::Normal(_)));
+    if !safe {
+        return None;
+    }
+    Some(subdir.to_string())
+}
+
 /// Resolve the host-filesystem workspace path for a project.
 ///
 /// If the project has an explicit `workspace_path` override, that is returned
@@ -111,6 +149,44 @@ fn ensure_dir(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use ironclaw_engine::Project;
+
+    // ── thread_worktree_subdir tests ─────────────────────────────
+    #[test]
+    fn worktree_subdir_extracts_valid_relative_path() {
+        let md = serde_json::json!({"dev": {"worktree": "worktrees/abc"}});
+        assert_eq!(
+            thread_worktree_subdir(&md).as_deref(),
+            Some("worktrees/abc")
+        );
+    }
+
+    #[test]
+    fn worktree_subdir_rejects_absolute_path() {
+        let md = serde_json::json!({"dev": {"worktree": "/etc/passwd"}});
+        assert_eq!(thread_worktree_subdir(&md), None);
+    }
+
+    #[test]
+    fn worktree_subdir_rejects_parent_traversal() {
+        let md = serde_json::json!({"dev": {"worktree": "../other"}});
+        assert_eq!(thread_worktree_subdir(&md), None);
+        let md = serde_json::json!({"dev": {"worktree": "worktrees/../other"}});
+        assert_eq!(thread_worktree_subdir(&md), None);
+    }
+
+    #[test]
+    fn worktree_subdir_returns_none_when_missing() {
+        assert_eq!(thread_worktree_subdir(&serde_json::Value::Null), None);
+        assert_eq!(thread_worktree_subdir(&serde_json::json!({})), None);
+        assert_eq!(
+            thread_worktree_subdir(&serde_json::json!({"dev": {}})),
+            None
+        );
+        assert_eq!(
+            thread_worktree_subdir(&serde_json::json!({"dev": {"worktree": ""}})),
+            None,
+        );
+    }
 
     #[test]
     fn override_path_is_returned_verbatim() {

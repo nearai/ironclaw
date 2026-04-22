@@ -510,6 +510,8 @@ pub async fn thread_project_context(
     thread_id: uuid::Uuid,
 ) -> Option<crate::channels::web::types::ThreadProjectContext> {
     use crate::bridge::sandbox::workspace_path::default_project_workspace_path;
+    use crate::channels::web::platform::project_context_cache::{PrState, PrSummary};
+    use crate::channels::web::types::ThreadIssueContext;
 
     let (info, is_override) = resolve_thread_project(state, user_id, thread_id).await?;
 
@@ -540,18 +542,73 @@ pub async fn thread_project_context(
         None
     };
 
+    // Lift per-thread `dev` metadata (branch / PR / issue) written by
+    // the coding-repo + fix-issue skills. These values are the skill's
+    // declared current state; they take precedence over the git-polled
+    // project-level branch when set, because a thread's worktree branch
+    // is authoritatively known to the skill.
+    let thread_dev = load_thread_dev_metadata(user_id, thread_id).await;
+    let repo_slug = info
+        .metadata
+        .github_repo
+        .as_ref()
+        .map(|r| r.as_str().to_string());
+    let branch_override = thread_dev
+        .as_ref()
+        .and_then(|d| d.get("branch"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let pr_from_metadata = thread_dev.as_ref().and_then(|d| {
+        let number = d.get("pr_num").and_then(|v| v.as_u64()).map(|n| n as u32)?;
+        let url = d.get("pr_url").and_then(|v| v.as_str())?.to_string();
+        let title = d
+            .get("pr_title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(PrSummary {
+            number,
+            title,
+            url,
+            state: PrState::Draft,
+        })
+    });
+    let issue = thread_dev.as_ref().and_then(|d| {
+        let number = d.get("issue_num").and_then(|v| v.as_u64())?;
+        let title = d
+            .get("issue_title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let url = repo_slug
+            .as_deref()
+            .map(|slug| format!("https://github.com/{slug}/issues/{number}"));
+        Some(ThreadIssueContext { number, title, url })
+    });
+
     Some(crate::channels::web::types::ThreadProjectContext {
         id: info.id,
         name: info.name,
         workspace_path: Some(resolved_path),
         github_repo: info.metadata.github_repo,
         default_branch,
-        branch: cached.as_ref().and_then(|c| c.branch.clone()),
+        branch: branch_override.or_else(|| cached.as_ref().and_then(|c| c.branch.clone())),
         dirty: cached.as_ref().and_then(|c| c.dirty),
         dirty_summary: cached.as_ref().and_then(|c| c.dirty_summary.clone()),
-        pr: cached.as_ref().and_then(|c| c.pr.clone()),
+        pr: pr_from_metadata.or_else(|| cached.as_ref().and_then(|c| c.pr.clone())),
+        issue,
         is_override,
     })
+}
+
+/// Load `thread.metadata.dev` for the given thread via the bridge helper.
+/// Returns `None` when the thread can't be loaded or has no `dev`
+/// namespace yet.
+async fn load_thread_dev_metadata(
+    user_id: &str,
+    thread_id: uuid::Uuid,
+) -> Option<serde_json::Value> {
+    let metadata = crate::bridge::get_engine_thread_metadata(thread_id, user_id).await?;
+    metadata.get("dev").cloned()
 }
 
 pub async fn engine_thread_assign_project_handler(
