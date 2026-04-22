@@ -372,7 +372,11 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::CollectString(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
