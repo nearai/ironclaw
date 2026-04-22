@@ -15,10 +15,11 @@ use ironclaw_common::AppEvent;
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
+use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
@@ -59,6 +60,63 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
         id: uuid::Uuid::nil(),
         reason: format!("engine v2 {context}: {e}"),
     })
+}
+
+/// Build the `BridgeOutcome` for a `ThreadOutcome::Failed`.
+///
+/// Raw engine failures can include Python tracebacks, internal file paths,
+/// and upstream HTTP bodies (see #2546). This helper keeps the raw error
+/// in the server-side logs and returns a short, user-facing summary
+/// derived from the error's shape.
+///
+/// `sse_will_deliver_to_user` signals that the caller already broadcast
+/// an `AppEvent::Error` on a per-user SSE stream that the originating
+/// channel renders to the user (today: the web gateway). In that case
+/// returning `Respond(sanitized)` would double-render the same failed
+/// turn — once as the SSE error card and again as a normal `response`
+/// frame emitted by `GatewayChannel::respond()`. When set we return
+/// `NoResponse`; otherwise we return `Respond(sanitized)` so channels
+/// without an SSE-as-primary-surface (telegram, relay, cli) still
+/// deliver the sanitized failure to the user.
+///
+/// Extracted into a named function so the sanitization flow (log + map to
+/// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
+/// by unit tests without spinning up the full engine.
+fn bridge_outcome_for_failed_thread(
+    error: &str,
+    debug_detail: Option<&str>,
+    user_id: &str,
+    channel: &str,
+    sse_will_deliver_to_user: bool,
+) -> BridgeOutcome {
+    // `warn!` carries only the size of `debug_detail`, not its contents —
+    // a full Python traceback or upstream HTTP body can be multi-KB and
+    // would flood higher-severity logs with internal text that's already
+    // available at `debug!` level. Operators who need the full detail
+    // flip `RUST_LOG=ironclaw::bridge::router=debug`. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`, and
+    // `debug_detail` is deliberately NOT broadcast on the SSE `error`
+    // event — that payload reaches every authenticated consumer.
+    tracing::warn!(
+        user_id = %user_id,
+        channel = %channel,
+        error = %error,
+        debug_detail_bytes = debug_detail.map(|d| d.len()),
+        "engine v2: thread failed; showing user-friendly summary",
+    );
+    if let Some(detail) = debug_detail {
+        tracing::debug!(
+            user_id = %user_id,
+            channel = %channel,
+            detail,
+            "engine v2: thread failure debug detail",
+        );
+    }
+    if sse_will_deliver_to_user {
+        BridgeOutcome::NoResponse
+    } else {
+        BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    }
 }
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
@@ -340,7 +398,7 @@ async fn resolve_extension_for_action(
     // test harness): delegate to the same canonical resolver used by the
     // auth-manager path so the extension-manager branch of the precedence
     // still runs instead of falling through to a stringly credential name.
-    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+    crate::auth::extension::resolve_auth_flow_extension_name(
         action_name,
         parameters,
         credential_fallback,
@@ -949,6 +1007,41 @@ async fn resume_lease_for_pending_gate(
         .await
 }
 
+/// Broadcast a `GateResolved { resolution: "expired" }` event and return the
+/// dismissal outcome. Used when the target thread has been deleted between
+/// `take_verified` and resume, so there's no live thread to execute against.
+///
+/// Callers that persist side effects (e.g. `Approved { always }` writing
+/// `AlwaysAllow` to settings) MUST pre-flight with `state.store.load_thread`
+/// and call this helper *before* persisting, so a missing thread doesn't
+/// silently commit a long-lived preference for a tool that never ran (#2347).
+fn emit_gate_expired_dismissal(
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+) -> BridgeOutcome {
+    tracing::debug!(
+        thread_id = %pending.thread_id,
+        gate = %pending.gate_name,
+        action = %pending.action_name,
+        "thread not found for pending gate; emitting expired resolution"
+    );
+    if let Some(ref sse) = state.sse {
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateResolved {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                resolution: "expired".into(),
+                message: "Thread no longer exists.".into(),
+                thread_id: Some(pending.effective_wire_thread_id()),
+            },
+        );
+    }
+    BridgeOutcome::Respond("Thread no longer exists. Approval dismissed.".into())
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -957,12 +1050,15 @@ async fn execute_pending_gate_action(
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
 ) -> Result<BridgeOutcome, Error> {
-    let thread = state
-        .store
-        .load_thread(pending.thread_id)
-        .await
-        .map_err(|e| engine_err("load thread", e))?
-        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+    let thread = match state.store.load_thread(pending.thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return Ok(emit_gate_expired_dismissal(state, message, pending)),
+        Err(e) => {
+            // Transient DB failure -- propagate so the caller can retry
+            // rather than permanently discarding the gate.
+            return Err(engine_err("load thread", e));
+        }
+    };
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = resume_lease_for_pending_gate(pending, &state.thread_manager.leases)
@@ -2413,6 +2509,22 @@ pub async fn resolve_gate(
             // auto-approval that bypasses every subsequent gate. The gate's
             // own `allow_always` is the authoritative server-side policy.
             let always = clamp_always_to_resume_kind(always, &pending.resume_kind);
+
+            // Pre-flight thread check before committing `AlwaysAllow`
+            // persistence (#2347): if the thread was deleted between
+            // `take_verified` and now, persisting auto-approve would leave
+            // a permanent preference behind for a tool that never ran. The
+            // rollback at the bottom of this branch only fires on `Err`, so
+            // execute_pending_gate_action's graceful `Ok(Respond)` on
+            // missing-thread would bypass it. Short-circuit here instead.
+            match state.store.load_thread(pending.thread_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Ok(emit_gate_expired_dismissal(state, message, &pending));
+                }
+                Err(e) => return Err(engine_err("load thread", e)),
+            }
+
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -2498,8 +2610,17 @@ pub async fn resolve_gate(
                 )
                 .await;
 
+            // Word the deny message carefully: the resume handler treats
+            // certain imperative verb phrases ("execute it", "run it", "send
+            // it", …) as fresh execution intent and re-arms the
+            // require_action_attempt obligation, which then nudges the LLM
+            // to issue another tool call — exactly the opposite of what a
+            // denial should produce. Avoid every phrase in
+            // `crate::llm::user_signals_execution_intent`'s list (the
+            // helper is defined in `src/llm/reasoning.rs` and re-exported
+            // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
-                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                "User denied action '{}'. Do not retry; choose a different approach.{}",
                 pending.action_name,
                 reason
                     .as_deref()
@@ -3102,13 +3223,9 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
                     .stop_thread(*tid, &message.user_id)
                     .await;
             }
-            let _ = state
-                .pending_gates
-                .discard(&PendingGateKey {
-                    user_id: message.user_id.clone(),
-                    thread_id: *tid,
-                })
-                .await;
+            // Discard all pending gates for this thread regardless of user,
+            // preventing orphaned gates that can never be resolved (#2323).
+            state.pending_gates.discard_for_thread(*tid).await;
         }
     }
 
@@ -3894,7 +4011,46 @@ async fn await_thread_outcome(
         ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(BridgeOutcome::Respond(format!("Error: {error}"))),
+        ThreadOutcome::Failed {
+            error,
+            debug_detail,
+        } => {
+            // Emit the sanitized failure on SSE so the web gateway's
+            // chat surface (and the Debug Inspector) renders a structured
+            // error card with activity cleanup + input re-enable. The
+            // raw `debug_detail` is deliberately NOT broadcast — SSE
+            // error frames reach every authenticated consumer, so raw
+            // tracebacks and upstream HTTP bodies must stay server-side
+            // only (logged at `debug!` inside
+            // `bridge_outcome_for_failed_thread`).
+            //
+            // When the originating channel is the gateway itself, that
+            // SSE frame IS the user-visible surface — returning
+            // `Respond(sanitized)` on top of it would double-render the
+            // same failure. For non-gateway channels the SSE frame is
+            // only a secondary per-user stream, so we still return
+            // `Respond(sanitized)` so the primary channel (telegram,
+            // relay, …) delivers the sanitized failure.
+            let sanitized = crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+            let sse_will_deliver_to_user =
+                state.sse.is_some() && message.channel == GATEWAY_CHANNEL_NAME;
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: sanitized,
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            Ok(bridge_outcome_for_failed_thread(
+                &error,
+                debug_detail.as_deref(),
+                &message.user_id,
+                &message.channel,
+                sse_will_deliver_to_user,
+            ))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -4411,6 +4567,31 @@ async fn forward_event_to_channel(
 ///
 /// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
 /// so the frontend creates the card then resolves it).
+/// Bridge engine-side `CodeExecutionFailure` to its wire mirror
+/// `CodeExecutionFailureCategory` in `ironclaw_common`.
+///
+/// Exhaustive on purpose: if the engine enum gains a variant, this must
+/// fail to compile so both enums stay in lockstep. Per
+/// `.claude/rules/types.md` "Wire-stable enums" — do not reach for
+/// `format!("{:?}", ...)` or `.to_string()` here; the serde rename rules
+/// on the two enums independently produce snake_case, and a `Debug`
+/// detour would silently drift.
+fn code_execution_category_to_wire(
+    category: &ironclaw_engine::CodeExecutionFailure,
+) -> ironclaw_common::CodeExecutionFailureCategory {
+    use ironclaw_common::CodeExecutionFailureCategory as Wire;
+    use ironclaw_engine::CodeExecutionFailure as Src;
+    match category {
+        Src::SyntaxError => Wire::SyntaxError,
+        Src::RuntimeError => Wire::RuntimeError,
+        Src::NameLookup => Wire::NameLookup,
+        Src::VmPanic => Wire::VmPanic,
+        Src::ResourceLimit => Wire::ResourceLimit,
+        Src::ToolError => Wire::ToolError,
+        Src::OsDenied => Wire::OsDenied,
+    }
+}
+
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
@@ -4505,6 +4686,27 @@ fn thread_event_to_app_events(
             child_thread_id: child_id.to_string(),
             goal: goal.clone(),
         }],
+        EventKind::ChildCompleted { child_id } => vec![AppEvent::ChildThreadCompleted {
+            parent_thread_id: thread_id.into(),
+            child_thread_id: child_id.to_string(),
+        }],
+        EventKind::StepFailed { error, .. } => vec![AppEvent::Error {
+            message: format!("Step failed: {error}"),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionFailed {
+            category,
+            error,
+            code_hash,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecutionFailed {
+            category: code_execution_category_to_wire(category),
+            error: error.clone(),
+            duration_ms: *duration_ms,
+            code_hash: code_hash.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
@@ -4521,6 +4723,8 @@ fn thread_event_to_app_events(
 pub struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub thread_type: String,
     pub state: String,
     pub project_id: String,
@@ -4837,9 +5041,18 @@ fn describe_cron(expression: &str) -> Option<String> {
 }
 
 fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
+    // Fall back to a derived short label from `goal` for legacy threads
+    // persisted before the `title` field existed. Without this, frontend
+    // consumers of `EngineThreadInfo` (TUI, mission detail views) render
+    // a UUID prefix since the DTO lacks `turn_count`.
+    let title = t
+        .title
+        .clone()
+        .or_else(|| ironclaw_engine::Thread::derive_title_from_message(&t.goal));
     EngineThreadInfo {
         id: t.id.to_string(),
         goal: t.goal.clone(),
+        title,
         thread_type: format!("{:?}", t.thread_type),
         state: format!("{:?}", t.state),
         project_id: t.project_id.to_string(),
@@ -5740,6 +5953,27 @@ pub async fn reset_engine_state() {
     }
 }
 
+/// Test-only override for `EngineState::project_root`.
+///
+/// Attachment persistence resolves paths through the cached
+/// `bootstrap::ironclaw_base_dir()`; in tests that want to assert on a
+/// tempdir this override lets the test redirect writes to a known
+/// location after `init_engine` has populated `ENGINE_STATE`. Returns
+/// `true` if the override was applied.
+#[doc(hidden)]
+#[cfg(feature = "libsql")]
+pub async fn override_engine_project_root_for_test(path: PathBuf) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let mut guard = lock.write().await;
+    let Some(state) = guard.as_mut() else {
+        return false;
+    };
+    state.project_root = path;
+    true
+}
+
 /// Build retrospective `ExecutionTrace`s for every currently-known engine
 /// thread. Returns an empty vector when engine v2 is not initialized.
 ///
@@ -6195,8 +6429,97 @@ mod tests {
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
-    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+    // Share the `test_support::ENGINE_STATE_TEST_LOCK` declared for the rest of
+    // the crate instead of a sibling copy — a private duplicate here would only
+    // serialize against tests in this module and would race against tests in
+    // other modules that already hold `test_support::ENGINE_STATE_TEST_LOCK`,
+    // letting concurrent tests overwrite the shared `ENGINE_STATE` `OnceLock`.
+    use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+
+    // ──────────────────────────────────────────────────────────────────
+    // `bridge_outcome_for_failed_thread` — caller-level coverage.
+    //
+    // These tests drive the same helper that `handle_with_engine_inner`
+    // calls when it receives a `ThreadOutcome::Failed { error }`. They
+    // are the regression fence for issue #2546 (raw Python traceback
+    // from a 502 reaching the user). The sanitization logic proper
+    // lives in `bridge::user_facing_errors` and has its own unit tests;
+    // these assert that the router arm (log + sanitize + wrap) is
+    // actually wired up — per the "Test Through the Caller" rule.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn failed_thread_outcome_hides_python_traceback_from_user() {
+        let raw = "Orchestrator error: effect execution error: Orchestrator error after resume: \
+             Traceback (most recent call last): \
+             File \"orchestrator.py\", line 907, in  \
+             File \"orchestrator.py\", line 548, in run_loop \
+             RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        // Non-gateway channel: SSE is not the primary surface, so the
+        // user-visible delivery comes through `Respond(sanitized)`.
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert_eq!(
+            text,
+            "The AI model is temporarily unavailable. Please try again in a few moments."
+        );
+        // Defense-in-depth: none of the leaky internals must surface.
+        assert!(!text.contains("Traceback"));
+        assert!(!text.contains("orchestrator.py"));
+        assert!(!text.contains("effect execution error"));
+        assert!(!text.contains("nearai_chat"));
+    }
+
+    #[test]
+    fn failed_thread_outcome_maps_unknown_error_to_generic_message() {
+        let outcome = bridge_outcome_for_failed_thread(
+            "some unexpected internal failure",
+            None,
+            "alice",
+            "telegram",
+            false,
+        );
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert_eq!(
+            text,
+            "Something went wrong while processing your message. Please try again."
+        );
+        assert!(!text.contains("some unexpected internal failure"));
+    }
+
+    #[test]
+    fn failed_thread_outcome_maps_context_too_large() {
+        let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
+        let BridgeOutcome::Respond(text) = outcome else {
+            panic!("expected Respond, got {outcome:?}");
+        };
+        assert!(
+            text.starts_with("The request was too large"),
+            "unexpected text: {text}"
+        );
+    }
+
+    /// When the SSE stream is already rendering the failure to the
+    /// originating channel (gateway web UI), the helper must return
+    /// `NoResponse` so `channel.respond()` does not broadcast a second
+    /// SSE `response` frame for the same turn. Regression fence for the
+    /// double-render bug flagged on PR #2753 by serrrfirat.
+    #[test]
+    fn failed_thread_outcome_is_no_response_when_sse_will_deliver() {
+        let raw = "Orchestrator error: Llm { reason: \"HTTP 502 Bad Gateway\" }";
+        let outcome =
+            bridge_outcome_for_failed_thread(raw, Some("debug only"), "alice", "gateway", true);
+        assert!(
+            matches!(outcome, BridgeOutcome::NoResponse),
+            "expected NoResponse to avoid double-rendering an SSE-delivered failure, got {outcome:?}",
+        );
+    }
 
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
@@ -7171,6 +7494,93 @@ mod tests {
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
         ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_step_failed_to_error() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::StepFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                error: "llm provider returned 502".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-step-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::Error { message, thread_id } = &app_events[0] else {
+            panic!("expected AppEvent::Error, got {:?}", app_events[0]);
+        };
+        assert!(
+            message.contains("llm provider returned 502"),
+            "error message should carry the engine error text, got {message:?}"
+        );
+        assert_eq!(thread_id.as_deref(), Some("thread-step-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_child_completed() {
+        let child = ironclaw_engine::ThreadId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ChildCompleted { child_id: child },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-parent");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::ChildThreadCompleted {
+            parent_thread_id,
+            child_thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::ChildThreadCompleted, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(parent_thread_id, "thread-parent");
+        assert_eq!(child_thread_id, &child.to_string());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_code_execution_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "NameError: 'foo' is not defined".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 42,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-codeact");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::CodeExecutionFailed {
+            category,
+            error,
+            duration_ms,
+            code_hash,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::CodeExecutionFailed, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(
+            *category,
+            ironclaw_common::CodeExecutionFailureCategory::RuntimeError
+        );
+        assert_eq!(error, "NameError: 'foo' is not defined");
+        assert_eq!(*duration_ms, 42);
+        assert_eq!(code_hash.as_deref(), Some("abc123"));
+        assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
     }
 
     #[test]
@@ -8354,6 +8764,90 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router no-auth-backend failure test");
+    }
+
+    /// Regression for #2323: when the target thread is deleted between
+    /// `take_verified` and resume, an `Approved` resolution must emit
+    /// `GateResolved { resolution: "expired" }` (not just generic error) and
+    /// must *not* persist `AlwaysAllow` — otherwise the caller's rollback
+    /// (`result.is_err()` branch) would be skipped, leaving a permanent
+    /// auto-approve preference behind for a tool that never ran. Covers
+    /// both the `always: false` SSE contract and the pre-flight thread
+    /// check that gates `persist_always_allow`.
+    #[tokio::test]
+    async fn resolve_gate_approved_with_missing_thread_emits_expired_and_skips_persist() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let sse = Arc::new(SseManager::new());
+            let mut event_stream = Box::pin(
+                sse.subscribe_raw(Some("alice".to_string()), false)
+                    .expect("subscribe raw"),
+            );
+
+            let mut state = make_expected_test_state(store);
+            state.sse = Some(Arc::clone(&sse));
+
+            // Thread deleted / never saved — `state.store.load_thread(tid)`
+            // returns `Ok(None)`, mimicking the #2323 race.
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+            let message =
+                IncomingMessage::new("web", "alice", "approve").with_thread(thread_id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread_id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::Approved { always: true },
+            )
+            .await
+            .expect("resolve gate");
+
+            // Graceful dismissal, not an error.
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text)
+                    if text == "Thread no longer exists. Approval dismissed."
+            ));
+
+            // The first (and only) SSE event on this subscription must be
+            // `expired`. Critically it must NOT be `approved_always` — a
+            // prior implementation emitted that first, then discovered the
+            // missing thread and committed AlwaysAllow before anyone could
+            // roll it back.
+            let event = event_stream.next().await.expect("gate event");
+            assert!(
+                matches!(
+                    &event,
+                    AppEvent::GateResolved { resolution, .. } if resolution == "expired"
+                ),
+                "expected expired gate resolution (pre-flight short-circuit), got: {event:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router orphaned-approved-gate expired test");
     }
 
     /// Unit test for the extension-manager branch of
@@ -9727,5 +10221,61 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn thread_to_info_carries_title_and_goal_separately() {
+        // Regression: mission-spawned threads put `mission.name` in
+        // `title` and the multi-paragraph meta-prompt in `goal`. The
+        // DTO must carry both through so UI callers can render the
+        // short label without reading the full goal.
+        let long_goal = "a".repeat(500);
+        let mut thread = ironclaw_engine::Thread::new(
+            &long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.title = Some("Daily summary".to_string());
+
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Daily summary"));
+        assert_eq!(info.goal.len(), 500);
+    }
+
+    #[test]
+    fn thread_to_info_derives_title_from_goal_when_absent() {
+        // Regression: legacy engine threads persisted before the `title`
+        // field existed deserialize as `title = None`. The DTO must
+        // derive a short label from `goal` so frontend consumers don't
+        // fall through `threadTitle()` to rendering a UUID prefix.
+        let thread = ironclaw_engine::Thread::new(
+            "plain goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("plain goal"));
+        assert_eq!(info.goal, "plain goal");
+    }
+
+    #[test]
+    fn thread_to_info_derives_from_first_line_of_long_goal() {
+        // Multi-paragraph meta-prompt (mission pattern without explicit
+        // title set): derive from first non-empty line, truncated to
+        // the helper's char limit.
+        let long_goal = format!("Short first line\n\n{}\n", "x".repeat(500));
+        let thread = ironclaw_engine::Thread::new(
+            long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Short first line"));
     }
 }

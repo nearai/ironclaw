@@ -57,13 +57,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use crate::config::GatewayConfig;
+use crate::config::{Config, GatewayConfig};
 use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::Workspace;
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
@@ -76,7 +76,7 @@ use self::types::AppEvent;
 
 fn build_gateway_auth_manager(
     state: &GatewayState,
-) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+) -> Option<Arc<crate::auth::extension::AuthManager>> {
     state
         .tool_registry
         .as_ref()
@@ -89,7 +89,7 @@ fn build_gateway_auth_manager(
                 .map(|em| Arc::clone(em.secrets()))
         })
         .map(|secrets| {
-            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            Arc::new(crate::auth::extension::AuthManager::new(
                 secrets,
                 state.skill_registry.clone(),
                 state.extension_manager.clone(),
@@ -152,6 +152,7 @@ impl GatewayChannel {
             )),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -218,6 +219,7 @@ impl GatewayChannel {
             )),
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
+            multi_tenant_mode: self.state.multi_tenant_mode,
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             log_level_handle: self.state.log_level_handle.clone(),
@@ -591,6 +593,39 @@ impl GatewayChannel {
         self
     }
 
+    /// Configure DB-backed workspace access from the resolved runtime config.
+    ///
+    /// Startup should decide multi-tenant mode from explicit config, not from
+    /// current DB contents. This helper keeps the DB-backed workspace pool and
+    /// the `multi_tenant_mode` flag wired together so production startup and
+    /// integration tests exercise the same caller path.
+    pub fn with_db_backing_from_config(
+        mut self,
+        config: &Config,
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        let emb_cache_config = EmbeddingCacheConfig {
+            max_entries: config.embeddings.cache_size,
+        };
+        let pool = Arc::new(platform::state::WorkspacePool::new(
+            db,
+            embeddings,
+            emb_cache_config,
+            config.search.clone(),
+            config.workspace.clone(),
+        ));
+        self = self.with_workspace_pool(pool);
+        self = self.with_multi_tenant_mode(config.is_multi_tenant_deployment());
+        self
+    }
+
+    /// Mark whether the gateway started in multi-tenant mode.
+    pub fn with_multi_tenant_mode(mut self, multi_tenant_mode: bool) -> Self {
+        self.rebuild_state(|s| s.multi_tenant_mode = multi_tenant_mode);
+        self
+    }
+
     /// Inject the shared pairing store for the pairing API endpoints.
     pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
         self.rebuild_state(|s| s.pairing_store = Some(store));
@@ -608,10 +643,18 @@ impl GatewayChannel {
     }
 }
 
+/// Canonical channel name for the web gateway.
+///
+/// Exported so cross-module call sites (e.g. `bridge::router`) can
+/// compare against this constant instead of duplicating the string
+/// literal — the `Channel::name()` impl below references this same
+/// constant, so the value is compile-time-pinned in both places.
+pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
-        "gateway"
+        GATEWAY_CHANNEL_NAME
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

@@ -342,8 +342,20 @@ pub struct GatewayState {
     pub sse: Arc<SseManager>,
     /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
-    /// Per-user workspace pool for multi-user mode.
+    /// Optional per-user workspace resolver/pool.
+    ///
+    /// This is independent of `multi_tenant_mode`: the runtime may provide a
+    /// per-user workspace pool even in single-user mode for plumbing or test
+    /// harnesses.
     pub workspace_pool: Option<Arc<WorkspacePool>>,
+    /// Whether the gateway started in multi-tenant mode.
+    ///
+    /// This is intentionally separate from `workspace_pool.is_some()`: the
+    /// runtime may still use a per-user workspace resolver in single-user mode,
+    /// but the unauthenticated bootstrap routes (`/`, `/style.css`) only need
+    /// to suppress workspace-driven frontend customizations when startup
+    /// actually determined that multiple tenants exist.
+    pub multi_tenant_mode: bool,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -389,7 +401,7 @@ pub struct GatewayState {
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     /// Shared auth manager for gateway auth submission and readiness checks.
-    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
+    pub auth_manager: Option<Arc<crate::auth::extension::AuthManager>>,
     /// Scheduler for sending follow-up messages to running agent jobs.
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).

@@ -314,8 +314,18 @@ pub enum AppEvent {
     },
     #[serde(rename = "error")]
     Error {
+        /// Sanitized, channel-agnostic message shown to users. Never
+        /// carries tracebacks, file paths, HTTP bodies, or internal
+        /// wrapping — see `bridge::user_facing_errors`.
+        ///
+        /// Low-level diagnostic detail (Monty traces, Python tracebacks,
+        /// upstream HTTP bodies) deliberately does NOT travel on this
+        /// payload: every authenticated SSE consumer (chat UI, devtools,
+        /// custom clients) sees the same `error` frame, so the raw text
+        /// is kept server-side only — logged at `debug!` and preserved
+        /// on the engine's typed `OrchestratorFailure::debug_detail`.
         message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "heartbeat")]
@@ -468,6 +478,17 @@ pub enum AppEvent {
         goal: String,
     },
 
+    /// A child thread completed (terminal state reached).
+    ///
+    /// Symmetric to `ChildThreadSpawned`: the UI uses the pair to mark
+    /// child branches finished in tree views. Bridged from engine
+    /// `EventKind::ChildCompleted`.
+    #[serde(rename = "child_thread_completed")]
+    ChildThreadCompleted {
+        parent_thread_id: String,
+        child_thread_id: String,
+    },
+
     /// A mission spawned a new thread.
     #[serde(rename = "mission_thread_spawned")]
     MissionThreadSpawned {
@@ -532,6 +553,51 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+
+    /// CodeAct (Python / Monty) execution failed.
+    ///
+    /// Bridged from engine `EventKind::CodeExecutionFailed`. The engine's
+    /// `CodeExecutionFailure` enum isn't re-exported into this crate
+    /// (dependency direction: `ironclaw_engine` depends on
+    /// `ironclaw_common`, not vice versa), so the wire type is a
+    /// dedicated parallel enum with matching snake_case serialization —
+    /// per `.claude/rules/types.md` "Wire-stable enums", not a stringly
+    /// typed field.
+    #[serde(rename = "code_execution_failed")]
+    CodeExecutionFailed {
+        category: CodeExecutionFailureCategory,
+        error: String,
+        duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+}
+
+/// Wire-side mirror of `ironclaw_engine::CodeExecutionFailure`.
+///
+/// Must be kept in variant-for-variant lock with the engine enum.  Both
+/// types serialize to the same snake_case strings so that a single
+/// frontend matcher handles any direct-engine telemetry path that may
+/// later emerge alongside the bridge projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeExecutionFailureCategory {
+    /// Python parse error — LLM generated invalid syntax.
+    SyntaxError,
+    /// Python runtime error (NameError, TypeError, ValueError, etc.).
+    RuntimeError,
+    /// Name lookup failed — function/variable not in scope and not a known tool.
+    NameLookup,
+    /// Monty VM panicked (caught by `catch_unwind`).
+    VmPanic,
+    /// Resource limit hit (timeout, memory, allocation cap).
+    ResourceLimit,
+    /// A tool call inside code returned an error.
+    ToolError,
+    /// OS operation attempted (blocked by sandbox).
+    OsDenied,
 }
 
 impl AppEvent {
@@ -568,10 +634,12 @@ impl AppEvent {
             Self::TurnMetrics { .. } => "turn_metrics",
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
+            Self::ChildThreadCompleted { .. } => "child_thread_completed",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
             Self::PlanUpdate { .. } => "plan_update",
             Self::ShellCommand { .. } => "shell_command",
             Self::ShellOutput { .. } => "shell_output",
+            Self::CodeExecutionFailed { .. } => "code_execution_failed",
         }
     }
 
@@ -781,6 +849,17 @@ mod tests {
                 stderr: String::new(),
                 exit_code: 0,
                 truncated: false,
+            },
+            AppEvent::ChildThreadCompleted {
+                parent_thread_id: String::new(),
+                child_thread_id: String::new(),
+            },
+            AppEvent::CodeExecutionFailed {
+                category: CodeExecutionFailureCategory::SyntaxError,
+                error: String::new(),
+                duration_ms: 0,
+                code_hash: None,
+                thread_id: None,
             },
         ];
 
