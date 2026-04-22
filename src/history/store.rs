@@ -1489,11 +1489,20 @@ impl Store {
     }
 
     /// List all enabled routines with event triggers (for event matching).
+    ///
+    /// Excludes routines owned by archived workspaces: archiving is the
+    /// workspace-level "stop firing actions" signal, and these selectors are
+    /// the engine-side path that must honor it. Routines with
+    /// `workspace_id IS NULL` (personal routines) are always included.
     pub async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT * FROM routines WHERE enabled AND trigger_type IN ('event', 'system_event')",
+                "SELECT * FROM routines \
+                 WHERE enabled \
+                   AND trigger_type IN ('event', 'system_event') \
+                   AND (workspace_id IS NULL OR workspace_id NOT IN \
+                        (SELECT id FROM workspaces WHERE status = 'archived'))",
                 &[],
             )
             .await?;
@@ -1501,6 +1510,8 @@ impl Store {
     }
 
     /// Find an enabled webhook routine by its configured path (or fallback to ID).
+    ///
+    /// Excludes routines owned by archived workspaces — see `list_event_routines`.
     pub async fn get_webhook_routine_by_path(
         &self,
         path: &str,
@@ -1511,14 +1522,18 @@ impl Store {
             conn.query_opt(
                 "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
                  AND user_id = $2 \
-                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1)) \
+                 AND (workspace_id IS NULL OR workspace_id NOT IN \
+                      (SELECT id FROM workspaces WHERE status = 'archived'))",
                 &[&path, &uid],
             )
             .await?
         } else {
             conn.query_opt(
                 "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
-                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1)) \
+                 AND (workspace_id IS NULL OR workspace_id NOT IN \
+                      (SELECT id FROM workspaces WHERE status = 'archived'))",
                 &[&path],
             )
             .await?
@@ -1527,6 +1542,8 @@ impl Store {
     }
 
     /// List all enabled cron routines whose next_fire_at <= now.
+    ///
+    /// Excludes routines owned by archived workspaces — see `list_event_routines`.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
         let now = Utc::now();
@@ -1538,6 +1555,8 @@ impl Store {
                   AND trigger_type = 'cron'
                   AND next_fire_at IS NOT NULL
                   AND next_fire_at <= $1
+                  AND (workspace_id IS NULL OR workspace_id NOT IN
+                       (SELECT id FROM workspaces WHERE status = 'archived'))
                 "#,
                 &[&now],
             )

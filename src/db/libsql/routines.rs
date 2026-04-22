@@ -193,12 +193,20 @@ impl RoutineStore for LibSqlBackend {
         Ok(routines)
     }
 
+    // Excludes routines owned by archived workspaces: archiving is the
+    // workspace-level "stop firing actions" signal, and these selectors are
+    // the engine-side path that must honor it. Routines with
+    // `workspace_id IS NULL` (personal routines) are always included.
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type IN ('event', 'system_event')",
+                    "SELECT {} FROM routines \
+                     WHERE enabled = 1 \
+                       AND trigger_type IN ('event', 'system_event') \
+                       AND (workspace_id IS NULL OR workspace_id NOT IN \
+                            (SELECT id FROM workspaces WHERE status = 'archived'))",
                     ROUTINE_COLUMNS
                 ),
                 (),
@@ -223,7 +231,13 @@ impl RoutineStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'cron' AND next_fire_at IS NOT NULL AND next_fire_at <= ?1",
+                    "SELECT {} FROM routines \
+                     WHERE enabled = 1 \
+                       AND trigger_type = 'cron' \
+                       AND next_fire_at IS NOT NULL \
+                       AND next_fire_at <= ?1 \
+                       AND (workspace_id IS NULL OR workspace_id NOT IN \
+                            (SELECT id FROM workspaces WHERE status = 'archived'))",
                     ROUTINE_COLUMNS
                 ),
                 params![now],
@@ -575,7 +589,9 @@ impl RoutineStore for LibSqlBackend {
                     "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
                      AND user_id = ?2 \
                      AND (json_extract(trigger_config, '$.path') = ?1 \
-                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
+                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1)) \
+                     AND (workspace_id IS NULL OR workspace_id NOT IN \
+                          (SELECT id FROM workspaces WHERE status = 'archived'))",
                     ROUTINE_COLUMNS
                 ),
                 params![path, uid],
@@ -587,7 +603,9 @@ impl RoutineStore for LibSqlBackend {
                 &format!(
                     "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
                      AND (json_extract(trigger_config, '$.path') = ?1 \
-                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
+                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1)) \
+                     AND (workspace_id IS NULL OR workspace_id NOT IN \
+                          (SELECT id FROM workspaces WHERE status = 'archived'))",
                     ROUTINE_COLUMNS
                 ),
                 params![path],
