@@ -478,7 +478,7 @@ impl MissionManager {
     ///
     /// Shared missions can only be managed by shared owners (system user).
     pub async fn pause_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        let mission = self
+        let mut mission = self
             .store
             .load_mission(id)
             .await?
@@ -496,9 +496,9 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        self.store
-            .update_mission_status(id, MissionStatus::Paused)
-            .await?;
+        mission.status = MissionStatus::Paused;
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
         self.active.write().await.retain(|mid| *mid != id);
         // Drop the in-memory cooldown entry — a paused mission can't fire,
         // so the cooldown is dead state and would otherwise leak until the
@@ -573,7 +573,7 @@ impl MissionManager {
 
     /// Mark a mission as completed.
     pub async fn complete_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        let mission = self
+        let mut mission = self
             .store
             .load_mission(id)
             .await?
@@ -591,9 +591,9 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        self.store
-            .update_mission_status(id, MissionStatus::Completed)
-            .await?;
+        mission.status = MissionStatus::Completed;
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
         self.active.write().await.retain(|mid| *mid != id);
         // Terminal state — drop the cooldown entry so the in-memory map
         // doesn't accumulate an entry per mission ever fired.
