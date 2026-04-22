@@ -75,6 +75,8 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
         | SurfaceSubjectKind::AvailableNotInstalledProviderEntry
         | SurfaceSubjectKind::Channel => SurfaceAssignment::capabilities_only(),
         SurfaceSubjectKind::BuiltinDirectTool | SurfaceSubjectKind::ExtensionDirectAction => {
+            // Execute-time approval is orthogonal to surface placement: direct
+            // actions stay on the callable surface as long as they are ready.
             if is_direct_ready(subject.status) {
                 SurfaceAssignment::actions_only()
             } else {
@@ -139,7 +141,27 @@ mod tests {
                 expected: SurfaceAssignment::actions_only(),
             },
             Case {
+                name: "approval-gated built-in direct tool still stays in available_actions",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::BuiltinDirectTool,
+                    status: CapabilityStatus::Ready,
+                    invocation_mode: InvocationMode::Direct,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::actions_only(),
+            },
+            Case {
                 name: "ready extension direct action",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::Ready,
+                    invocation_mode: InvocationMode::Direct,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::actions_only(),
+            },
+            Case {
+                name: "approval-gated extension direct action still stays in available_actions",
                 subject: SurfacePolicyInput {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::Ready,
