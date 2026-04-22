@@ -394,13 +394,22 @@ fi
 #    Annotation format: `// projection-exempt: <category>, <detail>` — the
 #    category names the source log (`bridge dispatcher`, `channel-lifecycle`,
 #    `sandbox JobEvent`, `legacy v1 auth`) or the transport-only allowlist
-#    (`transport-only, heartbeat`). Unannotated added lines fail the check.
+#    (`transport-only, heartbeat`). The comma is required — an unnamed
+#    `// projection-exempt: legacy` does not suppress the check.
+#
+#    Two match patterns:
+#    1. `sse.broadcast[_for_user](...)` — same-line receiver + method.
+#    2. `.broadcast_for_user(...)` at start of line — rustfmt wraps long
+#       calls like `state\n    .sse\n    .broadcast_for_user(...)`.
+#       Only `broadcast_for_user` is SseManager-unique; the single-name
+#       `.broadcast(` on its own line can be the `Channel` trait method,
+#       which is intentionally out of scope.
 PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
-    | grep -E '\bsse\.(broadcast|broadcast_for_user)\(' \
-    | grep -vE '// projection-exempt:|// safety:|^\+\+\+' \
+    | grep -E '(\bsse\.(broadcast|broadcast_for_user)|^[^:]*:\+[[:space:]]*\.broadcast_for_user)\(' \
+    | grep -vE '// projection-exempt: [^,]+,|// safety:|^\+\+\+' \
     | head -5 || true)
 if [ -n "$PROJECTION_HITS" ]; then
-    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`bridge::thread_event_to_app_events\` (project from a typed source log) or annotate with '// projection-exempt: <reason>'. See .claude/rules/gateway-events.md."
+    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
     echo "$PROJECTION_HITS" | sed 's/^/    /'
 fi
 
@@ -409,7 +418,7 @@ if [ "$WARNINGS" -gt 0 ]; then
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
-    echo "(For PROJECTION warnings, use '// projection-exempt: <reason>' instead.)"
+    echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
     echo ""
     exit 1
 fi

@@ -74,10 +74,23 @@ or it's a violation and should be migrated.
 ## Enforcement
 
 Check #9 in `scripts/pre-commit-safety.sh` (label: `PROJECTION`) flags
-added lines that match `sse\.(broadcast|broadcast_for_user)\(` without
-a `// projection-exempt:` annotation on the same line. Lines in
-`#[cfg(test)] mod tests` blocks and under `tests/` are skipped via the
-shared `strip_test_mod_lines` filter.
+added lines that call `SseManager::broadcast` or
+`SseManager::broadcast_for_user` without a `// projection-exempt:
+<category>, <detail>` annotation on the same line. The comma is
+required — the check rejects bare `// projection-exempt: legacy`. Lines
+in `#[cfg(test)] mod tests` blocks and under `tests/` are skipped via
+the shared `strip_test_mod_lines` filter.
+
+The matcher covers two call-site shapes:
+
+1. Same-line receiver + method — `sse.broadcast(...)` /
+   `state.sse.broadcast_for_user(...)`.
+2. Dangling method-chain — `.broadcast_for_user(...)` at the start of
+   a line, which is how `rustfmt` wraps long calls like
+   `state\n    .sse\n    .broadcast_for_user(...)`. Only
+   `broadcast_for_user` is matched in the dangling form, because a bare
+   `.broadcast(` at line start can legitimately be the
+   `Channel::broadcast` trait method, which is out of scope.
 
 ## Not covered by this rule
 
