@@ -63,6 +63,22 @@ class BrowserProviderCase:
     auth_extension_name: str | None = None
 
 
+# Lifecycle ("write + cleanup") cases exercise real provider mutations —
+# they send emails, create calendar events, etc., and then clean up.
+# Even though each flow is self-cleaning, repeated hourly runs against
+# real accounts are not "low-risk / read-only" and must not be the
+# default selection for the scheduled lane. Callers must opt in by
+# naming these cases explicitly (e.g. `CASES=gmail_roundtrip` or
+# `--case gmail_roundtrip`) — see `configured_seeded_cases` below.
+LIFECYCLE_CASE_NAMES: frozenset[str] = frozenset(
+    {
+        "gmail_roundtrip",
+        "google_calendar_lifecycle",
+        "notion_search_lifecycle",
+    }
+)
+
+
 SEEDED_CASES: dict[str, SeededProviderCase] = {
     "gmail": SeededProviderCase(
         key="gmail",
@@ -184,7 +200,14 @@ def _canary_timestamp() -> str:
 
 def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCase]:
     cases: list[SeededProviderCase] = []
-    names = selected or list(SEEDED_CASES)
+    # When no selection is provided (the scheduled-lane default path),
+    # exclude lifecycle/mutating cases. The scheduled lane must be
+    # low-risk/read-only unless an operator explicitly opts in by
+    # naming lifecycle cases via `--case` / `CASES=`.
+    if selected:
+        names = selected
+    else:
+        names = [n for n in SEEDED_CASES if n not in LIFECYCLE_CASE_NAMES]
     google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
     google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
     if google_refresh and not google_access:

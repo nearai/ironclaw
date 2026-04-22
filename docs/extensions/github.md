@@ -1,9 +1,9 @@
 ---
-title: "Github"
-description: "Let your agent access Github"
+title: "GitHub"
+description: "Let your agent access GitHub"
 ---
 
-The Github extension allows your agent to interact with Github repositories, issues, pull requests, and more, making it ideal for automating code-related tasks, managing projects, or gathering information from Github.
+The GitHub extension allows your agent to interact with GitHub repositories, issues, pull requests, and more, making it ideal for automating code-related tasks, managing projects, or gathering information from GitHub.
 
 ---
 
@@ -12,7 +12,7 @@ The Github extension allows your agent to interact with Github repositories, iss
 
 <Steps>
 
-<Step title="Install the Web Search Extension">
+<Step title="Install the GitHub Extension">
 
 To install the GitHub extension, run:
 
@@ -64,7 +64,7 @@ Be sure to create a fine-grained personal access token with only the necessary p
 
 ## Available Actions:
 
-Here are some of the actions your agent can perform with the Github extension:
+Here are some of the actions your agent can perform with the GitHub extension:
 
 - `get_repo`: Retrieve repository information  
 - `list_issues`: List all issues in a repository  
@@ -96,7 +96,7 @@ Lets configure our agent to have its own github account, which it can use to cre
 
 <Steps>
 
-<Step title="Create a new Github account">
+<Step title="Create a new GitHub account">
 
 Go to https://github.com and create a new account for your agent. If you are already logged in with your personal account you will need to briefly log out to create the new account, but you can log back in right after
 
@@ -104,12 +104,12 @@ Go to https://github.com and create a new account for your agent. If you are alr
 
 <Step title="Generate a Personal Access Token">
 
-On the agent's Github account, go to [Settings -> Developer settings -> Personal access tokens -> Tokens (classic)](https://github.com/settings/tokens) and generate a new token (classic) with the following permissions: `repo` -> `public_repo`
+On the agent's GitHub account, go to [Settings -> Developer settings -> Personal access tokens -> Tokens (classic)](https://github.com/settings/tokens) and generate a new token (classic) with the following permissions: `repo` -> `public_repo`
 
 </Step>
 
-<Step title="Authenticate the Github Extension">
-Now that you have either OAuth app credentials or a PAT, authenticate the Github extension:
+<Step title="Authenticate the GitHub Extension">
+Now that you have either OAuth app credentials or a PAT, authenticate the GitHub extension:
 
 ```bash
 ironclaw tool auth github
@@ -125,7 +125,7 @@ will use browser OAuth. Otherwise it falls back to prompting for a PAT.
 Ask your agent to create a test issue in one of your public repositories, and check if the issue was created successfully.
 
 <Tip>
-Ask your agent to read the [Github Markdown Guidelines](https://github.com/adam-p/markdown-here/wiki/markdown-cheatsheet) and remember then when creating issues and comments, it can make the formatting much nicer!
+Ask your agent to read the [GitHub Markdown Guidelines](https://github.com/adam-p/markdown-here/wiki/markdown-cheatsheet) and remember then when creating issues and comments, it can make the formatting much nicer!
 </Tip>
 
 </Step>

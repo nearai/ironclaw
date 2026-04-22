@@ -19,6 +19,12 @@ patterns=(
   'access[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'refresh[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'secret[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
+  # JSON-quoted token shapes — the seeded/browser auth lanes emit results.json
+  # files containing full OAuth responses, which use `"access_token": "…"` /
+  # `"refresh_token": "…"` form. The `token:` / `token=` patterns above do
+  # not match those, so redaction would silently miss them.
+  '"(access|refresh|id|bearer)_token"[[:space:]]*:[[:space:]]*"[^"]+"'
+  '"(api[_-]?key|client[_-]?secret|password)"[[:space:]]*:[[:space:]]*"[^"]+"'
   'gh[pousr]_[A-Za-z0-9_]{20,}'
   'github_pat_[A-Za-z0-9_]{20,}'
   'ya29\.[A-Za-z0-9._-]{20,}'
@@ -42,7 +48,9 @@ redact_matches() {
     -e 's/(api[_-]?key[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/(access[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/(refresh[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
-    -e 's/(secret[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig'
+    -e 's/(secret[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
+    -e 's/("(access|refresh|id|bearer)_token"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig' \
+    -e 's/("(api[_-]?key|client[_-]?secret|password)"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig'
 }
 
 : > "${tmp_matches}"

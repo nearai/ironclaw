@@ -16,9 +16,47 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use super::client::McpClient;
+use super::protocol::McpTool;
+
+/// Compute a deterministic fingerprint of an MCP server's reported tool
+/// surface. Used by `McpClientStore::check_surface_conflict` to detect
+/// when two users activate the same `server_name` but the backend
+/// returns a different set of tools or different parameter schemas —
+/// the global `ToolRegistry` is keyed by tool name only, so the second
+/// activation's schemas would silently shadow the first and leak
+/// schema shape across tenants.
+///
+/// The fingerprint covers every field that surfaces to the LLM or the
+/// runtime: tool name, description, and the full input-schema JSON.
+/// Sorted by name so server-side ordering doesn't influence the hash.
+pub fn surface_signature(tools: &[McpTool]) -> String {
+    let mut entries: Vec<(String, String, String)> = tools
+        .iter()
+        .map(|t| {
+            (
+                t.name.clone(),
+                t.description.clone(),
+                serde_json::to_string(&t.input_schema).unwrap_or_default(),
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (name, description, schema) in &entries {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(description.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(schema.as_bytes());
+        hasher.update(b"\x01");
+    }
+    format!("{:x}", hasher.finalize())
+}
 
 /// Composite key identifying an MCP client instance: the authenticating
 /// user plus the server name. Both fields participate in `Hash` / `Eq` so
@@ -39,12 +77,22 @@ impl McpClientKey {
     }
 }
 
+/// Per-user MCP client entry: the active client plus the fingerprint
+/// of the tool surface it exposes. The signature is captured at
+/// activation time and is what `check_surface_conflict` compares
+/// across users.
+#[derive(Clone)]
+struct McpClientEntry {
+    client: Arc<McpClient>,
+    surface: String,
+}
+
 /// Per-user MCP client registry. Typically held as `Arc<McpClientStore>`
 /// by both `ExtensionManager` (for lifecycle) and every `McpToolWrapper`
 /// (for dispatch-time lookup).
 #[derive(Default)]
 pub struct McpClientStore {
-    clients: RwLock<HashMap<McpClientKey, Arc<McpClient>>>,
+    clients: RwLock<HashMap<McpClientKey, McpClientEntry>>,
 }
 
 impl McpClientStore {
@@ -52,13 +100,21 @@ impl McpClientStore {
         Self::default()
     }
 
-    /// Insert or replace the client for `(user_id, server_name)`. Replacing
+    /// Insert or replace the client for `(user_id, server_name)`. The
+    /// signature is the fingerprint of the tool surface this client
+    /// reported at activation time (see `surface_signature`). Replacing
     /// is only intended for the same user re-activating the same server.
-    pub async fn insert(&self, user_id: &str, server_name: &str, client: Arc<McpClient>) {
-        self.clients
-            .write()
-            .await
-            .insert(McpClientKey::new(user_id, server_name), client);
+    pub async fn insert(
+        &self,
+        user_id: &str,
+        server_name: &str,
+        client: Arc<McpClient>,
+        surface: String,
+    ) {
+        self.clients.write().await.insert(
+            McpClientKey::new(user_id, server_name),
+            McpClientEntry { client, surface },
+        );
     }
 
     /// Remove and return the client for `(user_id, server_name)`, if any.
@@ -67,6 +123,7 @@ impl McpClientStore {
             .write()
             .await
             .remove(&McpClientKey::new(user_id, server_name))
+            .map(|entry| entry.client)
     }
 
     /// Atomically remove `(user_id, server_name)` and report whether the
@@ -94,7 +151,7 @@ impl McpClientStore {
             .read()
             .await
             .get(&McpClientKey::new(user_id, server_name))
-            .cloned()
+            .map(|entry| entry.client.clone())
     }
 
     /// Whether `(user_id, server_name)` has an active client.
@@ -116,6 +173,37 @@ impl McpClientStore {
             .keys()
             .any(|key| key.server_name == server_name)
     }
+
+    /// Check whether the tool surface `incoming` — fingerprint of the
+    /// tools reported by the activating client — is compatible with any
+    /// OTHER user who already has `server_name` active.
+    ///
+    /// Returns `Some(other_user_id)` if a conflicting entry exists: a
+    /// different user has the same `server_name` active with a DIFFERENT
+    /// surface fingerprint. Same-user re-activations are ignored
+    /// because they're expected to replace the old entry.
+    ///
+    /// The `ToolRegistry` is keyed by tool name only, so two users on
+    /// the "same" server name with different URLs or different
+    /// credentials can produce different schemas. Without this check
+    /// the second user's registration would silently shadow the first's
+    /// — see the reviewer's concern that one user's `list_tools()`
+    /// result becomes the shared wrapper surface for everyone.
+    pub async fn check_surface_conflict(
+        &self,
+        user_id: &str,
+        server_name: &str,
+        incoming: &str,
+    ) -> Option<String> {
+        let clients = self.clients.read().await;
+        for (key, entry) in clients.iter() {
+            if key.server_name == server_name && key.user_id != user_id && entry.surface != incoming
+            {
+                return Some(key.user_id.clone());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -129,8 +217,12 @@ mod tests {
         let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
         let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
 
-        store.insert("user-a", "notion", client_a.clone()).await;
-        store.insert("user-b", "notion", client_b.clone()).await;
+        store
+            .insert("user-a", "notion", client_a.clone(), "sig-a".into())
+            .await;
+        store
+            .insert("user-b", "notion", client_b.clone(), "sig-b".into())
+            .await;
 
         assert!(Arc::ptr_eq(
             &store.get("user-a", "notion").await.expect("a"),
@@ -148,8 +240,12 @@ mod tests {
         let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
         let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
 
-        store.insert("user-a", "notion", client_a).await;
-        store.insert("user-b", "notion", client_b).await;
+        store
+            .insert("user-a", "notion", client_a, "sig".into())
+            .await;
+        store
+            .insert("user-b", "notion", client_b, "sig".into())
+            .await;
 
         assert!(
             !store.remove_and_check_empty("user-a", "notion").await,
@@ -169,7 +265,7 @@ mod tests {
     async fn remove_and_check_empty_is_idempotent_on_missing_user() {
         let store = McpClientStore::new();
         let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
-        store.insert("user-a", "notion", client).await;
+        store.insert("user-a", "notion", client, "sig".into()).await;
 
         assert!(
             !store
@@ -186,9 +282,11 @@ mod tests {
         let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
 
         assert!(!store.any_active_for_server("notion").await);
-        store.insert("user-a", "notion", client.clone()).await;
+        store
+            .insert("user-a", "notion", client.clone(), "sig".into())
+            .await;
         assert!(store.any_active_for_server("notion").await);
-        store.insert("user-b", "notion", client).await;
+        store.insert("user-b", "notion", client, "sig".into()).await;
 
         assert!(store.remove("user-a", "notion").await.is_some());
         assert!(
@@ -197,5 +295,36 @@ mod tests {
         );
         assert!(store.remove("user-b", "notion").await.is_some());
         assert!(!store.any_active_for_server("notion").await);
+    }
+
+    #[tokio::test]
+    async fn check_surface_conflict_flags_divergent_surface_for_same_server() {
+        let store = McpClientStore::new();
+        let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        store
+            .insert("user-a", "notion", client, "surface-v1".into())
+            .await;
+
+        assert_eq!(
+            store
+                .check_surface_conflict("user-b", "notion", "surface-v2")
+                .await,
+            Some("user-a".to_string()),
+            "user-b activating notion with a different surface than user-a must flag user-a as the conflict source",
+        );
+        assert!(
+            store
+                .check_surface_conflict("user-b", "notion", "surface-v1")
+                .await
+                .is_none(),
+            "identical surface fingerprint means no conflict — both users get the same wrapper shape",
+        );
+        assert!(
+            store
+                .check_surface_conflict("user-a", "notion", "surface-v2")
+                .await
+                .is_none(),
+            "same-user re-activation with a new surface is allowed (caller replaces their own entry)",
+        );
     }
 }

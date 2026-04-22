@@ -1213,8 +1213,40 @@ impl ExtensionManager {
         let lifecycle_lock = self.mcp_lifecycle_lock(&name).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
 
+        // Fingerprint the client's tool surface before registering so we
+        // can detect the case where an earlier injected client for the
+        // same `name` (but a different `user_id`) reported a different
+        // set of tools — the `ToolRegistry` is keyed by tool name only,
+        // so the later registration would silently shadow the earlier
+        // one and leak schemas across tenants. The second `list_tools`
+        // call inside `create_tools_with_store` hits the per-client
+        // cache, so fetching the list here doesn't cost a second round
+        // trip.
+        let surface_signature = match client.list_tools().await {
+            Ok(tools) => crate::tools::mcp::surface_signature(&tools),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    server = %name,
+                    "inject_mcp_client: list_tools failed; skipping registration"
+                );
+                return Vec::new();
+            }
+        };
+        if let Some(other) = self
+            .mcp_clients
+            .check_surface_conflict(user_id, &name, &surface_signature)
+            .await
+        {
+            tracing::warn!(
+                server = %name,
+                conflicting_user = %other,
+                "inject_mcp_client: tool surface differs from an already-active user on the same server name; refusing to inject to avoid cross-tenant schema shadowing"
+            );
+            return Vec::new();
+        }
         self.mcp_clients
-            .insert(user_id, &name, client.clone())
+            .insert(user_id, &name, client.clone(), surface_signature)
             .await;
         match client
             .create_tools_with_store(self.mcp_client_store())
@@ -5548,6 +5580,31 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
+        // Before registering any tool wrappers for this user, fingerprint
+        // the tool surface the server reported and reject activation if
+        // another user already has the same `name` active with a
+        // DIFFERENT surface. The `ToolRegistry` keys wrappers by tool
+        // name only, so without this check user B's incoming schemas
+        // would silently shadow user A's — one user's `list_tools()`
+        // result becomes the shared wrapper shape for every tenant.
+        // Reviewer call-out: the earlier (user_id, server_name)
+        // partitioning of the client store addressed the runtime
+        // dispatch leak, but the registry surface was still global and
+        // susceptible to the same cross-tenant leak.
+        let surface_signature = crate::tools::mcp::surface_signature(&mcp_tools);
+        if let Some(other_user) = self
+            .mcp_clients
+            .check_surface_conflict(user_id, name, &surface_signature)
+            .await
+        {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "MCP server '{name}' is already active for another user with a different tool surface (conflicting user: {other_user}). \
+                 The global tool registry is keyed by tool name only, so activating a second client with a different schema would \
+                 shadow the existing user's wrappers. Either use a distinct server name (the user-facing identifier) per backend/account, \
+                 or coordinate so both users connect to a backend that returns an identical tool surface."
+            )));
+        }
+
         // Store the client for this user first, then register the
         // (user-agnostic) tool wrappers. The wrappers resolve the caller's
         // client at dispatch time from the shared `McpClientStore`, so the
@@ -5561,7 +5618,9 @@ impl ExtensionManager {
         // lock held at the top of this function keeps the cleanup safe
         // against concurrent `remove` / re-`activate` on the same server.
         let client = Arc::new(client);
-        self.mcp_clients.insert(user_id, name, client.clone()).await;
+        self.mcp_clients
+            .insert(user_id, name, client.clone(), surface_signature)
+            .await;
 
         let tool_impls = match client
             .create_tools_with_store(self.mcp_client_store())

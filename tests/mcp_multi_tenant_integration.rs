@@ -472,4 +472,106 @@ mod tests {
 
         mock_server.shutdown().await;
     }
+
+    /// Regression for the reviewer's concern that MCP tool registration
+    /// was still coarse-grained after the per-user client store landed.
+    /// The `ToolRegistry` is keyed by tool name only, so if user A
+    /// activates `SERVER_NAME` against backend X with one tool surface
+    /// and user B activates the same `SERVER_NAME` against backend Y
+    /// with a DIFFERENT surface, user B's `list_tools()` result would
+    /// silently shadow user A's in the global registry.
+    ///
+    /// The fix is to reject user B's activation when the surface
+    /// fingerprint disagrees with any other user's active entry for
+    /// the same `server_name`. This test drives `ExtensionManager`
+    /// activation end-to-end for both users and asserts:
+    /// - User A's activation succeeds.
+    /// - User B's activation fails with a clear ActivationFailed
+    ///   explaining the surface conflict.
+    /// - After the rejection, the registry still contains user A's
+    ///   wrappers (unshadowed), and user A can still dispatch.
+    #[tokio::test]
+    async fn activate_rejects_divergent_tool_surface_on_shared_server_name() {
+        let mock_server_a = start_mock_mcp_server(vec![MockToolResponse {
+            name: "mock_search".to_string(),
+            content: serde_json::json!({"ok": true}),
+        }])
+        .await;
+        let mock_server_b = start_mock_mcp_server(vec![MockToolResponse {
+            name: "different_tool".to_string(),
+            content: serde_json::json!({"ok": true}),
+        }])
+        .await;
+        let (db, _db_dir) = test_db().await;
+        let ext_dirs = tempfile::tempdir().expect("extension tempdir");
+        let secrets = test_secrets_store();
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tool_registry),
+            None,
+            None,
+            ext_dirs.path().join("tools"),
+            ext_dirs.path().join("channels"),
+            None,
+            "owner".to_string(),
+            Some(db),
+            Vec::new(),
+        );
+        let server_a = McpServerConfig::new(SERVER_NAME, mock_server_a.mcp_url());
+        let server_b = McpServerConfig::new(SERVER_NAME, mock_server_b.mcp_url());
+
+        let tool_name_a =
+            activate_for_user(&manager, &secrets, &server_a, USER_A, "token-user-a").await;
+        assert!(
+            tool_registry.get(&tool_name_a).await.is_some(),
+            "user-a's wrapper must be registered after successful activation",
+        );
+
+        // User B attempts to install + activate the SAME server name
+        // pointing at a backend with a different tool surface.
+        manager
+            .install(
+                SERVER_NAME,
+                Some(&server_b.url),
+                Some(ExtensionKind::McpServer),
+                USER_B,
+            )
+            .await
+            .expect("install (distinct url) for user-b should succeed — install is per-user");
+
+        secrets
+            .create(
+                USER_B,
+                CreateSecretParams::new(server_b.token_secret_name(), "token-user-b")
+                    .with_provider(SERVER_NAME.to_string()),
+            )
+            .await
+            .expect("store user-b token");
+
+        let activation = manager.activate(SERVER_NAME, USER_B).await;
+        let err = activation
+            .expect_err("user-b activation with a divergent tool surface must be rejected");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("different tool surface") || message.contains("tool surface"),
+            "rejection message should explain the surface conflict, got: {message}"
+        );
+
+        // User A's wrappers must still be live and dispatchable — the
+        // rejection must not have unregistered or shadowed them.
+        assert!(
+            tool_registry.get(&tool_name_a).await.is_some(),
+            "rejecting user-b must leave user-a's wrapper intact in the registry",
+        );
+        assert!(
+            tool_registry.get("different_tool").await.is_none(),
+            "user-b's divergent tool name must NOT have leaked into the registry",
+        );
+
+        mock_server_a.shutdown().await;
+        mock_server_b.shutdown().await;
+    }
 }
