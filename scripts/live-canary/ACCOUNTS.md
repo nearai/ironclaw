@@ -55,12 +55,23 @@ Use it for:
 - Prefer read-only or low-risk probes.
 - Keep one stable fixture per provider so failures are easy to classify.
 
-## GitHub Actions Environments
+## GitHub Actions Secrets
 
-The unified workflow uses two auth-specific environments:
+Live-canary secrets (seeded access / refresh tokens, OAuth client
+secrets, browser storage-state blobs) are stored at **repository
+scope** and consumed directly by the `auth-live-seeded` and
+`auth-browser-consent` jobs in `.github/workflows/live-canary.yml`.
+No GitHub Environment isolation is configured today — the jobs read
+secrets via `${{ secrets.NAME }}` without an `environment:`
+declaration.
 
-- `auth-live-canary` for `auth-live-seeded`
-- `auth-browser-canary` for `auth-browser-consent`
+If future operational needs call for scoped secrets, required
+reviewers, or branch-filter protection rules, migrate the relevant
+AUTH_LIVE_* / AUTH_BROWSER_* secrets into dedicated Environments
+(e.g. `auth-live-canary`, `auth-browser-canary`) and add matching
+`environment: <name>` declarations on the jobs. Until then, operators
+adding new provider credentials should add them under
+`github.com/nearai/ironclaw/settings/secrets/actions` at repo scope.
 
 Only providers with populated secrets are executed.
 

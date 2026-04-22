@@ -169,14 +169,6 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '15 * * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
     runs-on: ubuntu-latest
-    # Scoped to the `auth-live-canary` GitHub Environment — matches the
-    # layout documented in `scripts/live-canary/ACCOUNTS.md`. Secrets
-    # for seeded live-provider tokens (AUTH_LIVE_* access / refresh
-    # tokens, GOOGLE_OAUTH_CLIENT_SECRET, GITHUB_OAUTH_CLIENT_SECRET,
-    # notion client secret) are stored at the environment scope so they
-    # carry environment protection rules (required reviewers, branch
-    # filters) and don't commingle with repo-wide secrets.
-    environment: auth-live-canary
     timeout-minutes: 75
     env:
       LANE: auth-live-seeded
@@ -267,11 +259,6 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '45 * * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
     runs-on: ubuntu-latest
-    # Scoped to the `auth-browser-canary` GitHub Environment — matches
-    # the layout documented in `scripts/live-canary/ACCOUNTS.md`.
-    # Playwright storage state secrets and provider browser credentials
-    # live at environment scope.
-    environment: auth-browser-canary
     timeout-minutes: 90
     env:
       LANE: auth-browser-consent
