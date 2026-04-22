@@ -1371,7 +1371,7 @@ impl ExtensionManager {
     }
 
     /// Load enabled tenant-owned channel instances for process-global startup restore.
-    pub async fn load_enabled_channel_instances_for_startup(
+    async fn load_enabled_channel_instances_for_startup(
         &self,
     ) -> Vec<crate::db::ChannelInstanceRecord> {
         let Some(store) = self.channel_instance_store() else {

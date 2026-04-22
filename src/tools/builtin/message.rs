@@ -387,7 +387,7 @@ impl Tool for MessageTool {
                 .await
             {
                 Ok(()) => {
-                    tracing::info!(
+                    tracing::debug!(
                         message_sent = true,
                         channel = %delivery_channel,
                         target = %target,
@@ -439,7 +439,7 @@ impl Tool for MessageTool {
                 };
                 Err(ToolError::ExecutionFailed(err_msg))
             } else {
-                tracing::info!(
+                tracing::debug!(
                     message_sent = true,
                     channels = ?succeeded,
                     target = %target,
