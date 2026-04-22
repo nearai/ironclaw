@@ -105,13 +105,14 @@ pub async fn build_codeact_system_prompt(
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
     platform: Option<&PlatformInfo>,
+    codeact_host_shims: bool,
 ) -> String {
     let overlay = if let Some(store) = store {
         load_prompt_overlay(store, project_id).await
     } else {
         None
     };
-    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform, codeact_host_shims)
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -123,9 +124,10 @@ pub fn build_codeact_system_prompt_with_docs(
     actions: &[ActionDef],
     system_docs: &[crate::types::memory::MemoryDoc],
     platform: Option<&PlatformInfo>,
+    codeact_host_shims: bool,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform, codeact_host_shims)
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
@@ -133,8 +135,9 @@ fn build_codeact_system_prompt_inner(
     actions: &[ActionDef],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
+    codeact_host_shims: bool,
 ) -> String {
-    let mut prompt = String::from(CODEACT_PREAMBLE);
+    let mut prompt = render_codeact_preamble(codeact_host_shims);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -165,6 +168,32 @@ fn build_codeact_system_prompt_inner(
 
     prompt.push_str(CODEACT_POSTAMBLE);
     prompt
+}
+
+fn render_codeact_preamble(codeact_host_shims: bool) -> String {
+    if codeact_host_shims {
+        return CODEACT_PREAMBLE.to_string();
+    }
+
+    strip_host_shim_section(CODEACT_PREAMBLE)
+}
+
+fn strip_host_shim_section(preamble: &str) -> String {
+    const START: &str = "<!-- HOST_SHIMS_START -->";
+    const END: &str = "<!-- HOST_SHIMS_END -->";
+
+    let Some(start) = preamble.find(START) else {
+        return preamble.to_string();
+    };
+    let Some(end_marker) = preamble.find(END) else {
+        return preamble.to_string();
+    };
+    let end = end_marker + END.len();
+
+    let mut out = String::with_capacity(preamble.len());
+    out.push_str(preamble.get(..start).unwrap_or_default());
+    out.push_str(preamble.get(end..).unwrap_or_default());
+    out
 }
 
 /// Load the prompt overlay from the Store, if one exists for this project.
@@ -199,10 +228,18 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true).await;
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
+    }
+
+    #[test]
+    fn prompt_without_host_shims_omits_shim_guidance() {
+        let prompt = build_codeact_system_prompt_inner(&[], None, None, false);
+        assert!(!prompt.contains("## Preferred host-backed shims"));
+        assert!(!prompt.contains("read_text(path)"));
+        assert!(prompt.contains("## Special functions"));
     }
 
     #[tokio::test]
@@ -223,9 +260,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+            true,
+        )
+        .await;
         assert!(prompt.contains("Learned Rules"));
         assert!(prompt.contains("Never call web_fetch"));
     }
@@ -251,9 +293,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+            true,
+        )
+        .await;
 
         let snowman_count = prompt.chars().filter(|c| *c == '\u{2603}').count();
         assert_eq!(snowman_count, MAX_PROMPT_OVERLAY_CHARS);
@@ -278,9 +325,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+            true,
+        )
+        .await;
         assert!(!prompt.contains("Should not appear"));
         assert!(!prompt.contains("Learned Rules"));
     }
@@ -297,7 +349,8 @@ mod tests {
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info), true)
+                .await;
         assert!(prompt.contains("IronClaw"));
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("nearai"));
@@ -311,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_platform_info_has_no_platform_section() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true).await;
         assert!(!prompt.contains("## Platform"));
     }
 }

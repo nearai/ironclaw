@@ -27,6 +27,36 @@ print(search, page, memories)
 
 This is much faster than calling tools sequentially. Use `asyncio.gather()` whenever tools don't depend on each other's results.
 
+<!-- HOST_SHIMS_START -->
+## Preferred host-backed shims
+
+For common file, HTTP, and shell tasks, prefer these Pythonic shims first:
+
+- `read_text(path)` → reads a file and returns plain text without line-number prefixes
+- `write_text(path, text)` → writes text to a file
+- `append_text(path, text)` → appends text to an existing file
+- `read_json(path)` → reads a JSON file and returns the parsed object
+- `write_json(path, value)` → writes a value as pretty JSON
+- `exists(path)` → returns `True` if a path exists in the parent directory listing
+- `list_entries(path=".", recursive=False, max_depth=3)` → returns just the directory entry strings
+- `find_files(pattern, path=".", max_results=None)` → returns just the matched file paths
+- `http_get(url, headers=None)` → performs a GET request and returns a dict with keys like `ok`, `status`, `body`, `text`, `json_body`
+- `http_request(method, url, headers=None, body=None, json=None)` → performs a generic HTTP request and returns the same normalized response shape as `http_get`
+- `run(command, timeout=None, workdir=None)` → runs a shell command and returns a dict with keys like `ok`, `exit_code`, `stdout`, `stderr`
+
+These are thin facades over the normal host tools (`read_file`, `write_file`, `list_dir`, `glob`, `http`, `shell`). They keep the same approval/policy behavior while giving you a smaller, more Pythonic interface.
+
+They are still async tool calls, so await them just like the canonical tools:
+
+```repl
+cfg = await read_json("package.json")
+cfg["scripts"]["lint"] = "eslint ."
+await write_json("package.json", cfg)
+```
+
+Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), binary/download-specific HTTP options like `save_to`, or other tool-specific parameters.
+<!-- HOST_SHIMS_END -->
+
 ## Special functions
 
 - `llm_query(prompt, context=None, model=None)` — Ask a sub-agent to analyze text or answer a question. Returns a string. Use for summarization, analysis, or any task that needs LLM reasoning on data. Optional `model="..."` overrides which LLM answers this single call (e.g. `model="gpt-4o"`).
@@ -95,4 +125,4 @@ The Python REPL runs in Monty, a lightweight embedded interpreter — not CPytho
 - **Regex quirks — prefer string methods first.** Before reaching for `re`, try `"needle" in text`, `text.startswith(...)`, `text.find(...)`, `text.splitlines()`, `text.split(...)`. These handle the large majority of LLM-flavored pattern matching and sidestep the issues below. When you do need real regex:
     - **`re.search`, `re.match`, `re.fullmatch`, and `re.findall` take positional args only** — `re.search(pat, text, re.M)` works, `re.search(pat, text, flags=re.M)` raises `TypeError: re.search() takes no keyword arguments`. (`re.sub` and `re.split` do accept kwargs.)
     - **The engine is the Rust `regex` crate, not CPython's `re`.** No lookaround (`(?=...)`, `(?!...)`), no backreferences (`\1`), and some character-class shorthands differ — an invalid pattern raises `re.PatternError: Parsing error at position N: Invalid character class`. Keep patterns simple; if you need lookaround or backrefs, compose it with string methods instead.
-- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.
+- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, prefer `await http_get(...)` for simple GETs, `await http_request(...)` for normal API calls, and drop to raw `await http(...)` for download-specific or tool-specific options.

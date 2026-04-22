@@ -58,6 +58,34 @@ These are injected by the IronClaw executor, not by Monty:
 - `globals()` / `locals()` — returns dict of known tool names
 - All tool functions (web_search, http, time, etc.)
 
+### Preferred host-backed shims
+
+Phase 1 / 2 add a small ergonomic shim layer for common workflows:
+
+- `read_text(path)` → canonical `read_file`
+- `write_text(path, text)` → canonical `write_file`
+- `append_text(path, text)` → canonical `read_file` then `write_file`
+- `read_json(path)` → canonical `read_file` + host-side JSON parsing
+- `write_json(path, value)` → canonical `write_file` with pretty JSON serialization
+- `exists(path)` → canonical `list_dir` on the parent directory + host-side entry matching
+- `list_entries(path=".", recursive=False, max_depth=3)` → canonical `list_dir`
+- `find_files(pattern, path=".", max_results=None)` → canonical `glob`
+- `http_get(url, headers=None)` → canonical `http` with `method="GET"`
+- `http_request(method, url, headers=None, body=None, json=None)` → canonical `http` with normalized response output
+- `run(command, timeout=None, workdir=None)` → canonical `shell`
+
+These shims do **not** create new privileges. The canonical underlying action remains the trust boundary for leases, approvals, policy checks, logging, and effect execution. Raw tool functions remain available as escape hatches for advanced cases.
+
+### Rollout / gating
+
+Host shims are now gated at three layers:
+
+- agent config/env: `CODEACT_HOST_SHIMS=true|false`
+- per-thread runtime config: `ThreadConfig.codeact_host_shims`
+- test/live harness overrides: `with_codeact_host_shims(...)`
+
+When disabled, the shim names are removed from CodeAct name lookup and from the built-in CodeAct prompt guidance. Canonical raw tools remain available.
+
 ## Upgrade Changelog
 
 | Date | Pin | Notable changes |

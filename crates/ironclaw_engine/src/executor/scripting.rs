@@ -445,6 +445,10 @@ pub async fn execute_code_with_skills(
         known_actions.insert(name.clone());
     }
 
+    if thread.config.codeact_host_shims {
+        register_host_shim_names(&mut known_actions);
+    }
+
     // Parse and compile (wrap in catch_unwind — Monty 0.0.x can panic)
     let runner = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         MontyRun::new(code.to_string(), "step.py", input_names)
@@ -658,6 +662,130 @@ pub async fn execute_code_with_skills(
                     continue;
                 }
 
+                if thread.config.codeact_host_shims
+                    && let Some(immediate_shim) = maybe_execute_immediate_shim(
+                        &action_name,
+                        &params,
+                        thread,
+                        effects,
+                        leases,
+                        policy,
+                        context,
+                        capability_policies,
+                        &str_call_id,
+                        &mut action_results,
+                        &mut events,
+                    )
+                    .await
+                {
+                    match immediate_shim {
+                        ImmediateShimOutcome::Ready(ext_result) => {
+                            pending_futures
+                                .insert(monty_call_id, PendingFuture::ready_ext(ext_result));
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                call.resume_pending(PrintWriter::Collect(&mut stdout))
+                            })) {
+                                Ok(Ok(p)) => progress = p,
+                                Ok(Err(e)) => {
+                                    stdout.push_str(&format!("\nError: {e}"));
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout,
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(classify_runtime_error(&e.to_string())),
+                                    });
+                                }
+                                Err(_) => {
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout: format!(
+                                            "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                        ),
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(CodeExecutionFailure::VmPanic),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        ImmediateShimOutcome::GatePaused(outcome) => {
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout,
+                                action_results,
+                                events,
+                                need_approval: Some(outcome),
+                                recursive_tokens,
+                                final_answer: None,
+                                failure: None,
+                            });
+                        }
+                    }
+                }
+
+                let shim_dispatch = if thread.config.codeact_host_shims {
+                    match build_shim_dispatch(&action_name, &params) {
+                        Ok(dispatch) => dispatch,
+                        Err(ext_result) => {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                            })) {
+                                Ok(Ok(p)) => progress = p,
+                                Ok(Err(e)) => {
+                                    stdout.push_str(&format!("\nError: {e}"));
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout,
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(classify_runtime_error(&e.to_string())),
+                                    });
+                                }
+                                Err(_) => {
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout: format!(
+                                            "{stdout}\nVmPanic: Monty VM panicked during shim resume"
+                                        ),
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(CodeExecutionFailure::VmPanic),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let dispatch_action_name = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.action_name.as_str())
+                    .unwrap_or(action_name.as_str());
+                let dispatch_params = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.parameters.clone())
+                    .unwrap_or_else(|| params.clone());
+                let result_adapter = shim_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.result_adapter)
+                    .unwrap_or(ToolResultAdapter::Raw);
+
                 // If an LLM call already inserted a pending future, just
                 // resume_pending and continue — no preflight needed.
                 if pending_futures.contains_key(&monty_call_id) {
@@ -702,8 +830,8 @@ pub async fn execute_code_with_skills(
                 // If approved, spawn tokio task and resume_pending().
 
                 let preflight = preflight_action(
-                    &action_name,
-                    &params,
+                    dispatch_action_name,
+                    &dispatch_params,
                     thread,
                     effects,
                     leases,
@@ -719,12 +847,12 @@ pub async fn execute_code_with_skills(
                     PreflightResult::Approved(lease) => {
                         // Spawn async execution
                         let effects = effects.clone();
-                        let name = action_name.clone();
-                        let params_clone = params.clone();
+                        let name = dispatch_action_name.to_string();
+                        let params_clone = dispatch_params.clone();
                         let lease_clone = lease.clone();
                         let mut ctx = context.clone();
                         ctx.current_call_id = Some(str_call_id.clone());
-                        let ps = crate::types::event::summarize_params(&name, &params);
+                        let ps = crate::types::event::summarize_params(&name, &dispatch_params);
 
                         let handle = tokio::spawn(async move {
                             let execution_start = Instant::now();
@@ -738,11 +866,12 @@ pub async fn execute_code_with_skills(
                             monty_call_id,
                             PendingFuture::Tool {
                                 handle,
-                                action_name,
+                                action_name: dispatch_action_name.to_string(),
                                 call_id: str_call_id,
                                 lease_id: lease.id,
-                                parameters: params.clone(),
+                                parameters: dispatch_params.clone(),
                                 params_summary: ps,
+                                result_adapter,
                             },
                         );
 
@@ -851,6 +980,7 @@ pub async fn execute_code_with_skills(
                                 lease_id,
                                 parameters,
                                 params_summary,
+                                result_adapter,
                             } => {
                                 resolve_tool_future(
                                     handle,
@@ -859,6 +989,7 @@ pub async fn execute_code_with_skills(
                                     lease_id,
                                     parameters,
                                     params_summary,
+                                    result_adapter,
                                     leases,
                                     context,
                                     &mut action_results,
@@ -1069,6 +1200,432 @@ pub fn code_hash(code: &str) -> String {
     format!("{hash:016x}")
 }
 
+// ── Host-backed shim helpers ────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolResultAdapter {
+    Raw,
+    ReadText,
+    ReadJson,
+    WriteText,
+    HttpResponse,
+    Run,
+    ListEntries,
+    FindFiles,
+}
+
+struct ShimDispatch {
+    action_name: String,
+    parameters: serde_json::Value,
+    result_adapter: ToolResultAdapter,
+}
+
+fn register_host_shim_names(known_actions: &mut std::collections::HashSet<String>) {
+    let available = known_actions.clone();
+    if available.contains("read_file") {
+        known_actions.insert("read_text".into());
+        known_actions.insert("read_json".into());
+    }
+    if available.contains("write_file") {
+        known_actions.insert("write_text".into());
+        known_actions.insert("write_json".into());
+    }
+    if available.contains("read_file") && available.contains("write_file") {
+        known_actions.insert("append_text".into());
+    }
+    if available.contains("http") {
+        known_actions.insert("http_get".into());
+        known_actions.insert("http_request".into());
+    }
+    if available.contains("shell") {
+        known_actions.insert("run".into());
+    }
+    if available.contains("list_dir") {
+        known_actions.insert("list_entries".into());
+    }
+    if available.contains("read_file") && available.contains("list_dir") {
+        known_actions.insert("exists".into());
+    }
+    if available.contains("glob") {
+        known_actions.insert("find_files".into());
+    }
+}
+
+fn build_shim_dispatch(
+    requested_action: &str,
+    params: &serde_json::Value,
+) -> Result<Option<ShimDispatch>, ExtFunctionResult> {
+    match requested_action {
+        "read_text" => Ok(Some(ShimDispatch {
+            action_name: "read_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "read_text")?,
+            }),
+            result_adapter: ToolResultAdapter::ReadText,
+        })),
+        "write_text" => Ok(Some(ShimDispatch {
+            action_name: "write_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "write_text")?,
+                "content": required_string_param_with_aliases(
+                    params,
+                    &["text", "content"],
+                    1,
+                    "write_text",
+                )?,
+            }),
+            result_adapter: ToolResultAdapter::WriteText,
+        })),
+        "read_json" => Ok(Some(ShimDispatch {
+            action_name: "read_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "read_json")?,
+            }),
+            result_adapter: ToolResultAdapter::ReadJson,
+        })),
+        "write_json" => Ok(Some(ShimDispatch {
+            action_name: "write_file".into(),
+            parameters: serde_json::json!({
+                "path": required_string_param(params, "path", 0, "write_json")?,
+                "content": serialize_json_for_write(required_param(params, "value", 1, "write_json")?)?,
+            }),
+            result_adapter: ToolResultAdapter::WriteText,
+        })),
+        "list_entries" => {
+            let mut map = serde_json::Map::new();
+            if let Some(path) = optional_param(params, "path", 0)
+                && !path.is_null()
+            {
+                map.insert("path".into(), path.clone());
+            }
+            if let Some(recursive) = optional_param(params, "recursive", 1)
+                && !recursive.is_null()
+            {
+                map.insert("recursive".into(), recursive.clone());
+            }
+            if let Some(max_depth) = optional_param(params, "max_depth", 2)
+                && !max_depth.is_null()
+            {
+                map.insert("max_depth".into(), max_depth.clone());
+            }
+            Ok(Some(ShimDispatch {
+                action_name: "list_dir".into(),
+                parameters: serde_json::Value::Object(map),
+                result_adapter: ToolResultAdapter::ListEntries,
+            }))
+        }
+        "find_files" => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "pattern".into(),
+                serde_json::Value::String(required_string_param(
+                    params,
+                    "pattern",
+                    0,
+                    "find_files",
+                )?),
+            );
+            if let Some(path) = optional_param(params, "path", 1)
+                && !path.is_null()
+            {
+                map.insert("path".into(), path.clone());
+            }
+            if let Some(max_results) = optional_param(params, "max_results", 2)
+                && !max_results.is_null()
+            {
+                map.insert("max_results".into(), max_results.clone());
+            }
+            Ok(Some(ShimDispatch {
+                action_name: "glob".into(),
+                parameters: serde_json::Value::Object(map),
+                result_adapter: ToolResultAdapter::FindFiles,
+            }))
+        }
+        "http_get" => Ok(Some(ShimDispatch {
+            action_name: "http".into(),
+            parameters: build_http_request_parameters(params, "http_get", Some("GET"))?,
+            result_adapter: ToolResultAdapter::HttpResponse,
+        })),
+        "http_request" => Ok(Some(ShimDispatch {
+            action_name: "http".into(),
+            parameters: build_http_request_parameters(params, "http_request", None)?,
+            result_adapter: ToolResultAdapter::HttpResponse,
+        })),
+        "run" => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "command".into(),
+                serde_json::Value::String(required_string_param(params, "command", 0, "run")?),
+            );
+            if let Some(timeout) = optional_param(params, "timeout", 1)
+                && !timeout.is_null()
+            {
+                map.insert("timeout".into(), timeout.clone());
+            }
+            if let Some(workdir) = optional_param(params, "workdir", 2)
+                && !workdir.is_null()
+            {
+                map.insert("workdir".into(), workdir.clone());
+            }
+            Ok(Some(ShimDispatch {
+                action_name: "shell".into(),
+                parameters: serde_json::Value::Object(map),
+                result_adapter: ToolResultAdapter::Run,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn optional_param<'a>(
+    params: &'a serde_json::Value,
+    name: &str,
+    position: usize,
+) -> Option<&'a serde_json::Value> {
+    params.get(name).or_else(|| {
+        params
+            .get("_args")
+            .and_then(|args| args.as_array())
+            .and_then(|args| args.get(position))
+    })
+}
+
+fn required_string_param(
+    params: &serde_json::Value,
+    name: &str,
+    position: usize,
+    shim_name: &str,
+) -> Result<String, ExtFunctionResult> {
+    required_string_param_with_aliases(params, &[name], position, shim_name)
+}
+
+fn required_param<'a>(
+    params: &'a serde_json::Value,
+    name: &str,
+    position: usize,
+    shim_name: &str,
+) -> Result<&'a serde_json::Value, ExtFunctionResult> {
+    optional_param(params, name, position).ok_or_else(|| {
+        ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!("{shim_name}() missing required argument '{name}'")),
+        ))
+    })
+}
+
+fn serialize_json_for_write(value: &serde_json::Value) -> Result<String, ExtFunctionResult> {
+    serde_json::to_string_pretty(value).map_err(|e| {
+        ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!("write_json() could not serialize value: {e}")),
+        ))
+    })
+}
+
+fn build_http_request_parameters(
+    params: &serde_json::Value,
+    shim_name: &str,
+    default_method: Option<&str>,
+) -> Result<serde_json::Value, ExtFunctionResult> {
+    let method = match default_method {
+        Some(method) => method.to_string(),
+        None => required_string_param(params, "method", 0, shim_name)?,
+    };
+    let url_position = if default_method.is_some() { 0 } else { 1 };
+    let headers_position = if default_method.is_some() { 1 } else { 2 };
+    let body_position = if default_method.is_some() { 2 } else { 3 };
+    let json_position = if default_method.is_some() { 3 } else { 4 };
+
+    let url = required_string_param(params, "url", url_position, shim_name)?;
+    let body = optional_param(params, "body", body_position).filter(|value| !value.is_null());
+    let json = optional_param(params, "json", json_position).filter(|value| !value.is_null());
+
+    if body.is_some() && json.is_some() {
+        return Err(ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!(
+                "{shim_name}() accepts either 'body' or 'json', not both"
+            )),
+        )));
+    }
+
+    let mut map = serde_json::Map::new();
+    map.insert("method".into(), serde_json::Value::String(method));
+    map.insert("url".into(), serde_json::Value::String(url));
+    if let Some(headers) = optional_param(params, "headers", headers_position)
+        && !headers.is_null()
+    {
+        map.insert("headers".into(), headers.clone());
+    }
+    if let Some(body) = body {
+        map.insert("body".into(), body.clone());
+    }
+    if let Some(json) = json {
+        map.insert("body".into(), json.clone());
+    }
+
+    Ok(serde_json::Value::Object(map))
+}
+
+fn required_string_param_with_aliases(
+    params: &serde_json::Value,
+    names: &[&str],
+    position: usize,
+    shim_name: &str,
+) -> Result<String, ExtFunctionResult> {
+    for name in names {
+        if let Some(value) = optional_param(params, name, position) {
+            return value.as_str().map(String::from).ok_or_else(|| {
+                ExtFunctionResult::Error(MontyException::new(
+                    ExcType::TypeError,
+                    Some(format!("{shim_name}() argument '{name}' must be a string")),
+                ))
+            });
+        }
+    }
+
+    Err(ExtFunctionResult::Error(MontyException::new(
+        ExcType::TypeError,
+        Some(format!(
+            "{shim_name}() missing required argument '{}'",
+            names.first().copied().unwrap_or("value")
+        )),
+    )))
+}
+
+fn adapt_tool_output(
+    adapter: ToolResultAdapter,
+    output: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match adapter {
+        ToolResultAdapter::Raw => Ok(output.clone()),
+        ToolResultAdapter::ReadText => Ok(adapt_read_text_output(output)),
+        ToolResultAdapter::ReadJson => adapt_read_json_output(output),
+        ToolResultAdapter::WriteText => Ok(serde_json::json!({
+            "ok": output.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+            "path": output.get("path").cloned().unwrap_or(serde_json::Value::Null),
+            "bytes_written": output
+                .get("bytes_written")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        })),
+        ToolResultAdapter::HttpResponse => Ok(adapt_http_response_output(output)),
+        ToolResultAdapter::Run => Ok(serde_json::json!({
+            "ok": output.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+            "exit_code": output.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
+            "stdout": output.get("output").cloned().unwrap_or(serde_json::Value::Null),
+            "stderr": output.get("stderr").cloned().unwrap_or(serde_json::Value::Null),
+            "sandboxed": output.get("sandboxed").cloned().unwrap_or(serde_json::Value::Null),
+        })),
+        ToolResultAdapter::ListEntries => Ok(adapt_list_entries_output(output)),
+        ToolResultAdapter::FindFiles => Ok(output
+            .get("files")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))),
+    }
+}
+
+fn adapt_list_entries_output(output: &serde_json::Value) -> serde_json::Value {
+    let entries = match output.get("entries").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return serde_json::Value::Array(Vec::new()),
+    };
+    let normalized: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| match entry.as_str() {
+            Some(raw) => serde_json::Value::String(normalize_list_entry(raw)),
+            None => entry.clone(),
+        })
+        .collect();
+    serde_json::Value::Array(normalized)
+}
+
+fn normalize_list_entry(raw: &str) -> String {
+    let trimmed = raw.trim_end();
+    let without_size = match trimmed.rfind(" (") {
+        Some(idx) if trimmed.ends_with(')') => {
+            let suffix = trimmed.get(idx + 2..trimmed.len() - 1).unwrap_or_default();
+            if is_list_entry_size_suffix(suffix) {
+                trimmed.get(..idx).unwrap_or(trimmed)
+            } else {
+                trimmed
+            }
+        }
+        _ => trimmed,
+    };
+    without_size.trim_end_matches('/').to_string()
+}
+
+fn is_list_entry_size_suffix(raw: &str) -> bool {
+    ["GB", "MB", "KB", "B"].iter().any(|unit| {
+        raw.strip_suffix(unit).is_some_and(|number| {
+            let number = number.trim();
+            !number.is_empty()
+                && number.chars().any(|ch| ch.is_ascii_digit())
+                && number.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        })
+    })
+}
+
+fn adapt_read_text_output(output: &serde_json::Value) -> serde_json::Value {
+    if let Some(content) = output.get("content").and_then(|v| v.as_str()) {
+        let plain = content
+            .lines()
+            .map(|line| {
+                line.split_once('│')
+                    .map(|(_, rest)| rest.strip_prefix(' ').unwrap_or(rest))
+                    .unwrap_or(line)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::Value::String(plain)
+    } else if let Some(content) = output.as_str() {
+        serde_json::Value::String(content.to_string())
+    } else {
+        output.clone()
+    }
+}
+
+fn adapt_read_json_output(output: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let text = adapt_read_text_output(output);
+    match text {
+        serde_json::Value::String(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("read_json() received invalid JSON: {e}")),
+        other if other.is_object() || other.is_array() => Ok(other),
+        _ => Err("read_json() expected text content".into()),
+    }
+}
+
+fn adapt_http_response_output(output: &serde_json::Value) -> serde_json::Value {
+    let status = output
+        .get("status")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
+    let body = output
+        .get("body")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let json_body = if body.is_object() || body.is_array() {
+        body.clone()
+    } else {
+        serde_json::Value::Null
+    };
+    let text = match &body {
+        serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_json::Value::Null => serde_json::Value::String(String::new()),
+        other => serde_json::Value::String(other.to_string()),
+    };
+    serde_json::json!({
+        "ok": (200..300).contains(&status),
+        "status": status,
+        "headers": output.get("headers").cloned().unwrap_or(serde_json::Value::Null),
+        "body": body,
+        "text": text,
+        "json_body": json_body,
+    })
+}
+
 // ── Pending future tracking ─────────────────────────────────
 
 /// A deferred computation spawned as a tokio task, pending resolution
@@ -1082,6 +1639,7 @@ enum PendingFuture {
         lease_id: crate::types::capability::LeaseId,
         parameters: serde_json::Value,
         params_summary: Option<String>,
+        result_adapter: ToolResultAdapter,
     },
     /// LLM call (llm_query / llm_query_batched / rlm_query).
     Llm {
@@ -1090,18 +1648,29 @@ enum PendingFuture {
 }
 
 impl PendingFuture {
+    /// Pending future that resolves immediately with no token usage.
+    fn ready_ext(result: ExtFunctionResult) -> Self {
+        let handle = tokio::spawn(async move { (result, TokenUsage::default()) });
+        PendingFuture::Llm { handle }
+    }
+
     /// Pending future that resolves immediately to `None` with no token
     /// usage. Used for `FINAL` / `FINAL_VAR` so they can be `await`ed
     /// without raising "NoneType can't be awaited".
     fn ready_none() -> Self {
-        let handle = tokio::spawn(async {
-            (
-                ExtFunctionResult::Return(MontyObject::None),
-                TokenUsage::default(),
-            )
-        });
-        PendingFuture::Llm { handle }
+        Self::ready_ext(ExtFunctionResult::Return(MontyObject::None))
     }
+}
+
+enum ImmediateShimOutcome {
+    Ready(ExtFunctionResult),
+    GatePaused(crate::runtime::messaging::ThreadOutcome),
+}
+
+enum ImmediateActionOutcome {
+    Output(serde_json::Value),
+    Error(ExtFunctionResult),
+    GatePaused(crate::runtime::messaging::ThreadOutcome),
 }
 
 /// Result of preflight checks (lease + policy) for a tool call.
@@ -1202,6 +1771,328 @@ async fn preflight_action(
     }
 
     PreflightResult::Approved(lease)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_canonical_action_now(
+    action_name: &str,
+    params: serde_json::Value,
+    thread: &Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &LeaseManager,
+    policy: &PolicyEngine,
+    context: &ThreadExecutionContext,
+    capability_policies: &[crate::types::capability::PolicyRule],
+    call_id: &str,
+    action_results: &mut Vec<ActionResult>,
+    events: &mut Vec<EventKind>,
+) -> ImmediateActionOutcome {
+    let preflight = preflight_action(
+        action_name,
+        &params,
+        thread,
+        effects,
+        leases,
+        policy,
+        context,
+        capability_policies,
+        call_id,
+        events,
+    )
+    .await;
+
+    match preflight {
+        PreflightResult::Approved(lease) => {
+            let mut ctx = context.clone();
+            ctx.current_call_id = Some(call_id.to_string());
+            let params_summary = crate::types::event::summarize_params(action_name, &params);
+            let execution_start = Instant::now();
+            let result = effects
+                .execute_action(action_name, params.clone(), &lease, &ctx)
+                .await;
+            let execution_duration_ms = execution_start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(result) => {
+                    if result.is_error {
+                        let error_msg = result
+                            .output
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| result.output.to_string());
+                        let duration_ms = result.duration.as_millis() as u64;
+                        events.push(EventKind::ActionFailed {
+                            step_id: context.step_id,
+                            action_name: action_name.into(),
+                            call_id: call_id.into(),
+                            error: error_msg.clone(),
+                            duration_ms: if duration_ms > 0 {
+                                duration_ms
+                            } else {
+                                execution_duration_ms
+                            },
+                            params_summary,
+                        });
+                        action_results.push(result);
+                        ImmediateActionOutcome::Error(ExtFunctionResult::Error(
+                            MontyException::new(ExcType::RuntimeError, Some(error_msg)),
+                        ))
+                    } else {
+                        events.push(EventKind::ActionExecuted {
+                            step_id: context.step_id,
+                            action_name: action_name.into(),
+                            call_id: call_id.into(),
+                            duration_ms: result.duration.as_millis() as u64,
+                            params_summary,
+                        });
+                        let output = result.output.clone();
+                        action_results.push(result);
+                        ImmediateActionOutcome::Output(output)
+                    }
+                }
+                Err(EngineError::GatePaused {
+                    gate_name,
+                    action_name,
+                    call_id,
+                    parameters,
+                    resume_kind,
+                    resume_output,
+                    paused_lease,
+                }) => {
+                    let _ = leases.refund_use(lease.id).await;
+                    let parameters = *parameters;
+                    events.push(EventKind::ApprovalRequested {
+                        action_name: action_name.clone(),
+                        call_id: call_id.clone(),
+                        parameters: Some(parameters.clone()),
+                        description: None,
+                        allow_always: match resume_kind.as_ref() {
+                            crate::gate::ResumeKind::Approval { allow_always } => {
+                                Some(*allow_always)
+                            }
+                            _ => None,
+                        },
+                        gate_name: Some(gate_name.clone()),
+                        params_summary,
+                    });
+                    ImmediateActionOutcome::GatePaused(
+                        crate::runtime::messaging::ThreadOutcome::GatePaused {
+                            gate_name,
+                            action_name,
+                            call_id,
+                            parameters,
+                            resume_kind: *resume_kind,
+                            resume_output: resume_output.map(|output| *output),
+                            paused_lease,
+                        },
+                    )
+                }
+                Err(e) => {
+                    events.push(EventKind::ActionFailed {
+                        step_id: context.step_id,
+                        action_name: action_name.into(),
+                        call_id: call_id.into(),
+                        error: e.to_string(),
+                        duration_ms: execution_duration_ms,
+                        params_summary,
+                    });
+                    action_results.push(ActionResult {
+                        call_id: call_id.into(),
+                        action_name: action_name.into(),
+                        output: serde_json::json!({"error": e.to_string()}),
+                        is_error: true,
+                        duration: Duration::from_millis(execution_duration_ms),
+                    });
+                    ImmediateActionOutcome::Error(ExtFunctionResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(e.to_string()),
+                    )))
+                }
+            }
+        }
+        PreflightResult::Denied(ext_result) => ImmediateActionOutcome::Error(ext_result),
+        PreflightResult::GatePaused(outcome) => ImmediateActionOutcome::GatePaused(outcome),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn maybe_execute_immediate_shim(
+    action_name: &str,
+    params: &serde_json::Value,
+    thread: &Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &LeaseManager,
+    policy: &PolicyEngine,
+    context: &ThreadExecutionContext,
+    capability_policies: &[crate::types::capability::PolicyRule],
+    call_id: &str,
+    action_results: &mut Vec<ActionResult>,
+    events: &mut Vec<EventKind>,
+) -> Option<ImmediateShimOutcome> {
+    match action_name {
+        "append_text" => {
+            let path = match required_string_param(params, "path", 0, "append_text") {
+                Ok(value) => value,
+                Err(err) => return Some(ImmediateShimOutcome::Ready(err)),
+            };
+            let suffix = match required_string_param_with_aliases(
+                params,
+                &["text", "content"],
+                1,
+                "append_text",
+            ) {
+                Ok(value) => value,
+                Err(err) => return Some(ImmediateShimOutcome::Ready(err)),
+            };
+
+            let read_call_id = format!("{call_id}:read");
+            let existing = match execute_canonical_action_now(
+                "read_file",
+                serde_json::json!({"path": path.clone(), "offset": 1}),
+                thread,
+                effects,
+                leases,
+                policy,
+                context,
+                capability_policies,
+                &read_call_id,
+                action_results,
+                events,
+            )
+            .await
+            {
+                ImmediateActionOutcome::Output(output) => match adapt_read_text_output(&output) {
+                    serde_json::Value::String(text) => text,
+                    other => other.to_string(),
+                },
+                ImmediateActionOutcome::Error(ext_result) => {
+                    return Some(ImmediateShimOutcome::Ready(ext_result));
+                }
+                ImmediateActionOutcome::GatePaused(outcome) => {
+                    return Some(ImmediateShimOutcome::GatePaused(outcome));
+                }
+            };
+
+            let write_call_id = format!("{call_id}:write");
+            let appended = format!("{existing}{suffix}");
+            match execute_canonical_action_now(
+                "write_file",
+                serde_json::json!({"path": path, "content": appended}),
+                thread,
+                effects,
+                leases,
+                policy,
+                context,
+                capability_policies,
+                &write_call_id,
+                action_results,
+                events,
+            )
+            .await
+            {
+                ImmediateActionOutcome::Output(output) => Some(ImmediateShimOutcome::Ready(
+                    ExtFunctionResult::Return(json_to_monty(
+                        &adapt_tool_output(ToolResultAdapter::WriteText, &output).unwrap_or(output),
+                    )),
+                )),
+                ImmediateActionOutcome::Error(ext_result) => {
+                    Some(ImmediateShimOutcome::Ready(ext_result))
+                }
+                ImmediateActionOutcome::GatePaused(outcome) => {
+                    Some(ImmediateShimOutcome::GatePaused(outcome))
+                }
+            }
+        }
+        "exists" => {
+            let raw_path = match required_string_param(params, "path", 0, "exists") {
+                Ok(value) => value,
+                Err(err) => return Some(ImmediateShimOutcome::Ready(err)),
+            };
+            let path = raw_path.trim_end_matches('/');
+            if path.is_empty() || path == "." {
+                return Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
+                    MontyObject::Bool(true),
+                )));
+            }
+
+            match execute_canonical_action_now(
+                "read_file",
+                serde_json::json!({"path": path, "offset": 1, "limit": 1}),
+                thread,
+                effects,
+                leases,
+                policy,
+                context,
+                capability_policies,
+                call_id,
+                action_results,
+                events,
+            )
+            .await
+            {
+                ImmediateActionOutcome::Output(_) => Some(ImmediateShimOutcome::Ready(
+                    ExtFunctionResult::Return(MontyObject::Bool(true)),
+                )),
+                ImmediateActionOutcome::Error(ext_result) => {
+                    let lowered = match &ext_result {
+                        ExtFunctionResult::Error(err) => err.to_string().to_ascii_lowercase(),
+                        _ => String::new(),
+                    };
+                    if lowered.contains("no such file") || lowered.contains("not found") {
+                        Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
+                            MontyObject::Bool(false),
+                        )))
+                    } else if lowered.contains("is a directory") || lowered.contains("directory") {
+                        match execute_canonical_action_now(
+                            "list_dir",
+                            serde_json::json!({"path": path}),
+                            thread,
+                            effects,
+                            leases,
+                            policy,
+                            context,
+                            capability_policies,
+                            call_id,
+                            action_results,
+                            events,
+                        )
+                        .await
+                        {
+                            ImmediateActionOutcome::Output(_) => Some(ImmediateShimOutcome::Ready(
+                                ExtFunctionResult::Return(MontyObject::Bool(true)),
+                            )),
+                            ImmediateActionOutcome::Error(ext_result) => {
+                                let lowered = match &ext_result {
+                                    ExtFunctionResult::Error(err) => {
+                                        err.to_string().to_ascii_lowercase()
+                                    }
+                                    _ => String::new(),
+                                };
+                                if lowered.contains("no such file") || lowered.contains("not found")
+                                {
+                                    Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
+                                        MontyObject::Bool(false),
+                                    )))
+                                } else {
+                                    Some(ImmediateShimOutcome::Ready(ext_result))
+                                }
+                            }
+                            ImmediateActionOutcome::GatePaused(outcome) => {
+                                Some(ImmediateShimOutcome::GatePaused(outcome))
+                            }
+                        }
+                    } else {
+                        Some(ImmediateShimOutcome::Ready(ext_result))
+                    }
+                }
+                ImmediateActionOutcome::GatePaused(outcome) => {
+                    Some(ImmediateShimOutcome::GatePaused(outcome))
+                }
+            }
+        }
+        _ => None,
+    }
 }
 
 // ── llm_query() — recursive subagent (RLM 3.5) ─────────────
@@ -1512,6 +2403,7 @@ async fn handle_rlm_query(
         max_duration: parent_thread.config.max_duration,
         depth: current_depth + 1,
         max_depth,
+        codeact_host_shims: parent_thread.config.codeact_host_shims,
         ..crate::types::thread::ThreadConfig::default()
     };
 
@@ -1646,6 +2538,7 @@ async fn resolve_tool_future(
     lease_id: crate::types::capability::LeaseId,
     parameters: serde_json::Value,
     params_summary: Option<String>,
+    result_adapter: ToolResultAdapter,
     leases: &LeaseManager,
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
@@ -1688,9 +2581,14 @@ async fn resolve_tool_future(
                     params_summary,
                 });
             }
-            let monty_val = json_to_monty(&result.output);
-            action_results.push(result);
-            ExtFunctionResult::Return(monty_val)
+            action_results.push(result.clone());
+            match adapt_tool_output(result_adapter, &result.output) {
+                Ok(adapted) => ExtFunctionResult::Return(json_to_monty(&adapted)),
+                Err(message) => ExtFunctionResult::Error(MontyException::new(
+                    ExcType::ValueError,
+                    Some(message),
+                )),
+            }
         }
         Ok((
             Err(EngineError::GatePaused {
@@ -1943,6 +2841,7 @@ mod tests {
     struct MockEffects {
         results: Mutex<Vec<Result<ActionResult, EngineError>>>,
         actions: Vec<ActionDef>,
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     impl MockEffects {
@@ -1950,7 +2849,12 @@ mod tests {
             Self {
                 results: Mutex::new(results),
                 actions,
+                calls: Mutex::new(Vec::new()),
             }
+        }
+
+        fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -1959,10 +2863,11 @@ mod tests {
         async fn execute_action(
             &self,
             name: &str,
-            _params: serde_json::Value,
+            params: serde_json::Value,
             _lease: &CapabilityLease,
             _ctx: &ThreadExecutionContext,
         ) -> Result<ActionResult, EngineError> {
+            self.calls.lock().unwrap().push((name.into(), params));
             let mut results = self.results.lock().unwrap();
             if results.is_empty() {
                 Ok(ActionResult {
@@ -2071,6 +2976,23 @@ mod tests {
         .await
     }
 
+    async fn measure_code_runs<F>(
+        thread: &Thread,
+        code: &str,
+        iterations: usize,
+        mut make_effects: F,
+    ) -> Duration
+    where
+        F: FnMut() -> Arc<dyn EffectExecutor>,
+    {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let result = run_code(code, make_effects(), thread).await.unwrap();
+            assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        }
+        start.elapsed()
+    }
+
     // ── Single await tool call ──────────────────────────────
 
     #[tokio::test]
@@ -2104,6 +3026,820 @@ FINAL(str(result))
             result.stdout
         );
         assert_eq!(result.action_results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shim_read_text_uses_read_file_and_strips_line_numbers() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: serde_json::json!({
+                    "content": "     1│ alpha\n     2│ beta",
+                    "total_lines": 2,
+                    "lines_shown": 2,
+                    "truncated_by_default": false,
+                    "path": "notes.txt"
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+text = await read_text("notes.txt")
+FINAL(text)
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("alpha\nbeta"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "notes.txt"}));
+    }
+
+    #[tokio::test]
+    async fn shim_write_text_uses_write_file() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("write_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "write_file".into(),
+                output: serde_json::json!({
+                    "path": "out.txt",
+                    "bytes_written": 5,
+                    "success": true
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+result = await write_text("out.txt", "hello")
+FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|5"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "write_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "out.txt", "content": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_get_uses_http_and_normalizes_response() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("http")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "http".into(),
+                output: serde_json::json!({
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"answer": 42}
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+resp = await http_get("https://example.com/api")
+FINAL(str(resp["ok"]) + "|" + str(resp["status"]) + "|" + str(resp["json_body"]["answer"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|200|42"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "http");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"method": "GET", "url": "https://example.com/api"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_request_uses_http_with_json_body_and_headers() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("http")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "http".into(),
+                output: serde_json::json!({
+                    "status": 201,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"created": true}
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+resp = await http_request("POST", "https://example.com/items", headers={"x-test": "1"}, json={"name": "widget"})
+FINAL(str(resp["ok"]) + "|" + str(resp["status"]) + "|" + str(resp["json_body"]["created"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|201|True"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "http");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({
+                "method": "POST",
+                "url": "https://example.com/items",
+                "headers": {"x-test": "1"},
+                "body": {"name": "widget"}
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_http_request_rejects_body_and_json_together() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(vec![test_action("http")], vec![]));
+
+        let code = r#"
+await http_request("POST", "https://example.com/items", body="raw", json={"name": "widget"})
+FINAL("should-not-run")
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.final_answer.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(
+            result.failure,
+            Some(CodeExecutionFailure::RuntimeError),
+            "expected body/json conflict to surface as a runtime error"
+        );
+        assert!(
+            effects.recorded_calls().is_empty(),
+            "http should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_config_can_disable_host_shim_registration() {
+        let mut thread = make_test_thread();
+        thread.config.codeact_host_shims = false;
+        let effects = Arc::new(MockEffects::new(vec![test_action("read_file")], vec![]));
+
+        let code = r#"
+FINAL(str("read_text" in globals()) + "|" + str("read_file" in globals()))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("False|True"));
+        assert!(
+            effects.recorded_calls().is_empty(),
+            "no tool calls expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_run_uses_shell_and_normalizes_process_result() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("shell")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "shell".into(),
+                output: serde_json::json!({
+                    "output": "hi\n",
+                    "exit_code": 0,
+                    "success": true,
+                    "sandboxed": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+proc = await run("echo hi", timeout=5)
+FINAL(str(proc["ok"]) + "|" + str(proc["exit_code"]) + "|" + proc["stdout"])
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|0|hi\n"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "shell");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "shell");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"command": "echo hi", "timeout": 5})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_append_text_reads_then_writes_appended_content() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("write_file")],
+            vec![
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "read_file".into(),
+                    output: serde_json::json!({
+                        "content": "     1│ alpha",
+                        "total_lines": 1,
+                        "lines_shown": 1,
+                        "truncated_by_default": false,
+                        "path": "notes.txt"
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                }),
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "write_file".into(),
+                    output: serde_json::json!({
+                        "path": "notes.txt",
+                        "bytes_written": 10,
+                        "success": true
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                }),
+            ],
+        ));
+
+        let code = r#"
+result = await append_text("notes.txt", "\nbeta")
+FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|10"));
+        assert_eq!(result.action_results.len(), 2);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+        assert_eq!(result.action_results[1].action_name, "write_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "notes.txt", "offset": 1})
+        );
+        assert_eq!(calls[1].0, "write_file");
+        assert_eq!(
+            calls[1].1,
+            serde_json::json!({"path": "notes.txt", "content": "alpha\nbeta"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_append_text_propagates_execution_gate_pause() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("write_file")],
+            vec![Err(EngineError::GatePaused {
+                gate_name: "approval".into(),
+                action_name: "read_file".into(),
+                call_id: "append:read".into(),
+                parameters: Box::new(serde_json::json!({"path": "notes.txt", "offset": 1})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Approval { allow_always: true }),
+                resume_output: None,
+                paused_lease: None,
+            })],
+        ));
+
+        let code = r#"
+await append_text("notes.txt", "\nbeta")
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert!(result.final_answer.is_none());
+        match result.need_approval.as_ref() {
+            Some(crate::runtime::messaging::ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "read_file");
+                assert_eq!(call_id, "append:read");
+                assert_eq!(
+                    parameters,
+                    &serde_json::json!({"path": "notes.txt", "offset": 1})
+                );
+                assert!(matches!(
+                    resume_kind,
+                    crate::gate::ResumeKind::Approval { allow_always: true }
+                ));
+            }
+            other => panic!("expected GatePaused approval outcome, got {other:?}"),
+        }
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            EventKind::ApprovalRequested {
+                action_name,
+                call_id,
+                gate_name: Some(gate_name),
+                ..
+            } if action_name == "read_file" && call_id == "append:read" && gate_name == "approval"
+        )));
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "notes.txt", "offset": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_exists_uses_read_file_probe_for_files() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("list_dir")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: serde_json::json!({
+                    "content": "     1│ [package]",
+                    "total_lines": 1,
+                    "lines_shown": 1,
+                    "truncated_by_default": false,
+                    "path": "Cargo.toml"
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+value = await exists("Cargo.toml")
+FINAL(str(value))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "Cargo.toml", "offset": 1, "limit": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_exists_falls_back_to_list_dir_for_directories() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("list_dir")],
+            vec![
+                Err(EngineError::Effect {
+                    reason: "Cannot access file: Is a directory (os error 21)".into(),
+                }),
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "list_dir".into(),
+                    output: serde_json::json!({
+                        "path": "src",
+                        "entries": ["lib.rs", "main.rs"],
+                        "count": 2,
+                        "truncated": false
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                }),
+            ],
+        ));
+
+        let code = r#"
+value = await exists("src")
+FINAL(str(value))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True"));
+        assert_eq!(result.action_results.len(), 2);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+        assert!(result.action_results[0].is_error);
+        assert_eq!(result.action_results[1].action_name, "list_dir");
+        assert!(!result.action_results[1].is_error);
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "src", "offset": 1, "limit": 1})
+        );
+        assert_eq!(calls[1].0, "list_dir");
+        assert_eq!(calls[1].1, serde_json::json!({"path": "src"}));
+    }
+
+    #[tokio::test]
+    async fn shim_read_json_uses_read_file_and_parses_json() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "read_file".into(),
+                output: serde_json::json!({
+                    "content": "     1│ {\"answer\": 42}",
+                    "total_lines": 1,
+                    "lines_shown": 1,
+                    "truncated_by_default": false,
+                    "path": "data.json"
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+data = await read_json("data.json")
+FINAL(str(data["answer"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("42"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "data.json"}));
+    }
+
+    #[tokio::test]
+    async fn shim_write_json_serializes_then_uses_write_file() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("write_file")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "write_file".into(),
+                output: serde_json::json!({
+                    "path": "data.json",
+                    "bytes_written": 18,
+                    "success": true
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+result = await write_json("data.json", {"answer": 42})
+FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True|18"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "write_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "data.json", "content": "{\n  \"answer\": 42\n}"})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_list_entries_returns_pythonic_names_without_trailing_slash_or_size() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("list_dir")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "list_dir".into(),
+                output: serde_json::json!({
+                    "path": "src",
+                    "entries": ["bin/", "main.rs (1.0KB)", "nested/sub/", "README.md"],
+                    "count": 4,
+                    "truncated": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+entries = await list_entries("src")
+FINAL(",".join(entries))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("bin,main.rs,nested/sub,README.md"),
+            "list_entries should return Pythonic names without trailing slashes or size annotations"
+        );
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "list_dir");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "list_dir");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "src"}));
+    }
+
+    #[tokio::test]
+    async fn shim_list_entries_preserves_parenthetical_filenames() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("list_dir")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "list_dir".into(),
+                output: serde_json::json!({
+                    "path": "docs",
+                    "entries": ["Report (Final)", "archive (2024)", "main.rs (1.0KB)"],
+                    "count": 3,
+                    "truncated": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+entries = await list_entries("docs")
+FINAL(",".join(entries))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("Report (Final),archive (2024),main.rs"),
+            "list_entries should only strip real size suffixes, not legitimate parenthetical names"
+        );
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "list_dir");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "docs"}));
+    }
+
+    #[tokio::test]
+    async fn shim_find_files_uses_glob_and_returns_files_list() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("glob")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "glob".into(),
+                output: serde_json::json!({
+                    "files": ["src/lib.rs", "src/main.rs"],
+                    "count": 2,
+                    "truncated": false,
+                    "duration_ms": 1
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+files = await find_files("*.rs", "src")
+FINAL(files[1] + "|" + str(len(files)))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("src/main.rs|2"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "glob");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "glob");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"pattern": "*.rs", "path": "src"})
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_phase2_shims_vs_raw_equivalents() {
+        let thread = make_test_thread();
+        let iterations = 200;
+
+        let raw_read_json = r#"
+import json
+raw = await read_file(path="data.json")
+parts = []
+for line in raw["content"].splitlines():
+    rest = line.split("│", 1)[1]
+    if rest.startswith(" "):
+        rest = rest[1:]
+    parts.append(rest)
+text = "\n".join(parts)
+data = json.loads(text)
+FINAL(str(data["answer"]))
+"#;
+        let shim_read_json = r#"
+data = await read_json("data.json")
+FINAL(str(data["answer"]))
+"#;
+
+        let raw_list_entries = r#"
+listing = await list_dir(path="src")
+entries = listing["entries"]
+FINAL(entries[0])
+"#;
+        let shim_list_entries = r#"
+entries = await list_entries("src")
+FINAL(entries[0])
+"#;
+
+        let raw_find_files = r#"
+result = await glob(pattern="*.rs", path="src")
+files = result["files"]
+FINAL(files[0])
+"#;
+        let shim_find_files = r#"
+files = await find_files("*.rs", "src")
+FINAL(files[0])
+"#;
+
+        let raw_read_json_ms = measure_code_runs(&thread, raw_read_json, iterations, || {
+            Arc::new(MockEffects::new(
+                vec![test_action("read_file")],
+                vec![Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "read_file".into(),
+                    output: serde_json::json!({
+                        "content": "     1│ {\"answer\": 42}",
+                        "total_lines": 1,
+                        "lines_shown": 1,
+                        "truncated_by_default": false,
+                        "path": "data.json"
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })],
+            ))
+        })
+        .await
+        .as_millis();
+
+        let shim_read_json_ms = measure_code_runs(&thread, shim_read_json, iterations, || {
+            Arc::new(MockEffects::new(
+                vec![test_action("read_file")],
+                vec![Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "read_file".into(),
+                    output: serde_json::json!({
+                        "content": "     1│ {\"answer\": 42}",
+                        "total_lines": 1,
+                        "lines_shown": 1,
+                        "truncated_by_default": false,
+                        "path": "data.json"
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })],
+            ))
+        })
+        .await
+        .as_millis();
+
+        let raw_list_entries_ms = measure_code_runs(&thread, raw_list_entries, iterations, || {
+            Arc::new(MockEffects::new(
+                vec![test_action("list_dir")],
+                vec![Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "list_dir".into(),
+                    output: serde_json::json!({
+                        "path": "src",
+                        "entries": ["bin/", "main.rs (1.0KB)"],
+                        "count": 2,
+                        "truncated": false
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })],
+            ))
+        })
+        .await
+        .as_millis();
+
+        let shim_list_entries_ms =
+            measure_code_runs(&thread, shim_list_entries, iterations, || {
+                Arc::new(MockEffects::new(
+                    vec![test_action("list_dir")],
+                    vec![Ok(ActionResult {
+                        call_id: String::new(),
+                        action_name: "list_dir".into(),
+                        output: serde_json::json!({
+                            "path": "src",
+                            "entries": ["bin/", "main.rs (1.0KB)"],
+                            "count": 2,
+                            "truncated": false
+                        }),
+                        is_error: false,
+                        duration: Duration::from_millis(1),
+                    })],
+                ))
+            })
+            .await
+            .as_millis();
+
+        let raw_find_files_ms = measure_code_runs(&thread, raw_find_files, iterations, || {
+            Arc::new(MockEffects::new(
+                vec![test_action("glob")],
+                vec![Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "glob".into(),
+                    output: serde_json::json!({
+                        "files": ["src/lib.rs", "src/main.rs"],
+                        "count": 2,
+                        "truncated": false,
+                        "duration_ms": 1
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })],
+            ))
+        })
+        .await
+        .as_millis();
+
+        let shim_find_files_ms = measure_code_runs(&thread, shim_find_files, iterations, || {
+            Arc::new(MockEffects::new(
+                vec![test_action("glob")],
+                vec![Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "glob".into(),
+                    output: serde_json::json!({
+                        "files": ["src/lib.rs", "src/main.rs"],
+                        "count": 2,
+                        "truncated": false,
+                        "duration_ms": 1
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })],
+            ))
+        })
+        .await
+        .as_millis();
+
+        eprintln!(
+            "phase2_shim_microbench iterations={iterations} read_json raw={raw_read_json_ms}ms shim={shim_read_json_ms}ms list_entries raw={raw_list_entries_ms}ms shim={shim_list_entries_ms}ms find_files raw={raw_find_files_ms}ms shim={shim_find_files_ms}ms"
+        );
     }
 
     // ── asyncio.gather parallel execution ───────────────────

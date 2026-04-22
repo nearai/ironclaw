@@ -229,6 +229,7 @@ impl ExecutionLoop {
                 &actions,
                 &system_docs,
                 self.platform_info.as_ref(),
+                self.thread.config.codeact_host_shims,
             );
 
             // Skill selection and injection happens in the Python orchestrator

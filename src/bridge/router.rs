@@ -3639,7 +3639,10 @@ async fn handle_with_engine_inner(
 
     // Detect execution intent and configure obligation accordingly
     let thread_config = {
-        let mut cfg = ThreadConfig::default();
+        let mut cfg = ThreadConfig {
+            codeact_host_shims: agent.config().codeact_host_shims,
+            ..ThreadConfig::default()
+        };
         if crate::llm::user_signals_execution_intent(content) {
             cfg.require_action_attempt = true;
         }
@@ -6701,6 +6704,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: true,
+                codeact_host_shims: true,
             },
             deps,
             channels,
@@ -8094,6 +8098,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: true,
+                codeact_host_shims: true,
             },
             deps,
             Arc::new(manager),
