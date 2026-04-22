@@ -31,7 +31,7 @@ PAIRING_CODE_RE = re.compile(r"approve telegram ([A-Z0-9]+)|`([A-Z0-9]+)`")
 # Scenario-specific assertions use much larger IDs (100, 200, ...), so these
 # bootstrap/pairing helper IDs stay out of the way.
 _TEST_UPDATE_IDS = count(1)
-_ACTIVATED_TELEGRAM_SERVERS: set[str] = set()
+_ACTIVATED_TELEGRAM_SERVERS: dict[str, str] = {}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -57,6 +57,62 @@ async def install_telegram(base_url: str):
     # 200 = freshly installed, 409 = already installed — both are fine.
     assert r.status_code in (200, 409), (
         f"Telegram install failed ({r.status_code}): {r.text}"
+    )
+
+
+async def get_active_dispatch_keys(http_url: str) -> list[str]:
+    """Get all active WASM channel dispatch keys from the router health endpoint."""
+    async with httpx.AsyncClient() as c:
+        response = await c.get(f"{http_url}/wasm-channels/health", timeout=5)
+        response.raise_for_status()
+        return response.json().get("channels", [])
+
+
+async def resolve_telegram_dispatch_key(
+    http_url: str,
+    *,
+    known_keys: set[str] | None = None,
+    timeout: float = 15,
+) -> str:
+    """Resolve the active Telegram dispatch key for webhook delivery.
+
+    When known_keys is provided, waits for a newly-activated Telegram dispatch
+    key to appear relative to that snapshot. Otherwise expects exactly one
+    active Telegram dispatch key.
+    """
+    deadline = time.monotonic() + timeout
+    last_seen: set[str] = set()
+    while time.monotonic() < deadline:
+        telegram_keys = {
+            key for key in await get_active_dispatch_keys(http_url) if key.startswith("telegram")
+        }
+        last_seen = telegram_keys
+        if known_keys is not None:
+            new_keys = telegram_keys - known_keys
+            if len(new_keys) == 1:
+                return next(iter(new_keys))
+            if len(new_keys) > 1:
+                raise AssertionError(
+                    f"Expected one new Telegram dispatch key, got: {sorted(new_keys)}"
+                )
+        else:
+            if len(telegram_keys) == 1:
+                return next(iter(telegram_keys))
+            if len(telegram_keys) > 1:
+                raise AssertionError(
+                    "Expected exactly one active Telegram dispatch key for legacy E2E, "
+                    f"got: {sorted(telegram_keys)}"
+                )
+        await asyncio.sleep(0.5)
+
+    if known_keys is not None:
+        raise AssertionError(
+            f"Timed out resolving new Telegram dispatch key. Known keys: {sorted(known_keys)}, "
+            f"last seen: {sorted(last_seen)}"
+        )
+
+    raise AssertionError(
+        f"Timed out resolving active Telegram dispatch key. Last seen: {sorted(last_seen)}"
     )
 
 
@@ -110,7 +166,7 @@ def _patch_capabilities_for_testing(channels_dir: str):
 
 async def activate_telegram(
     base_url: str, http_url: str, fake_tg_url: str, channels_dir: str
-) -> None:
+) -> str:
     """Install (if needed) and run the Telegram setup flow.
 
     The E2E fixtures reuse the same Telegram server process across multiple tests,
@@ -121,7 +177,11 @@ async def activate_telegram(
     ensures the shared server is activated and paired exactly once.
     """
     if base_url in _ACTIVATED_TELEGRAM_SERVERS:
-        return
+        return _ACTIVATED_TELEGRAM_SERVERS[base_url]
+
+    keys_before = {
+        key for key in await get_active_dispatch_keys(http_url) if key.startswith("telegram")
+    }
 
     await reset_fake_tg(fake_tg_url)
     await install_telegram(base_url)
@@ -153,6 +213,11 @@ async def activate_telegram(
     # straight to activation and use the generic pairing flow for ownership.
     assert body1.get("activated"), f"Setup call did not activate Telegram: {body1}"
 
+    dispatch_key = await resolve_telegram_dispatch_key(
+        http_url,
+        known_keys=keys_before,
+    )
+
     await reset_fake_tg(fake_tg_url)
 
     # Complete the pairing flow so OWNER_USER_ID can chat normally in the
@@ -174,6 +239,7 @@ async def activate_telegram(
             },
         },
         secret=WEBHOOK_SECRET,
+        dispatch_key=dispatch_key,
     )
     assert pairing_resp.status_code == 200
 
@@ -181,8 +247,9 @@ async def activate_telegram(
     code = extract_pairing_code(messages)
     if code:
         await approve_pairing(base_url, code)
-    _ACTIVATED_TELEGRAM_SERVERS.add(base_url)
+    _ACTIVATED_TELEGRAM_SERVERS[base_url] = dispatch_key
     await reset_fake_tg(fake_tg_url)
+    return dispatch_key
 
 
 @pytest.fixture
@@ -193,9 +260,9 @@ async def active_telegram(telegram_e2e_server):
     fake_tg_url = telegram_e2e_server["fake_tg_url"]
     channels_dir = telegram_e2e_server["channels_dir"]
 
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    dispatch_key = await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
     await reset_fake_tg(fake_tg_url)
-    return telegram_e2e_server
+    return {**telegram_e2e_server, "dispatch_key": dispatch_key}
 
 
 @pytest.fixture
@@ -206,9 +273,9 @@ async def active_telegram_with_routines(telegram_e2e_server_with_routines):
     fake_tg_url = telegram_e2e_server_with_routines["fake_tg_url"]
     channels_dir = telegram_e2e_server_with_routines["channels_dir"]
 
-    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    dispatch_key = await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
     await reset_fake_tg(fake_tg_url)
-    return telegram_e2e_server_with_routines
+    return {**telegram_e2e_server_with_routines, "dispatch_key": dispatch_key}
 
 
 def extract_pairing_code(messages: list[dict]) -> str | None:
@@ -376,14 +443,16 @@ async def post_telegram_webhook(
     update: dict,
     *,
     secret: str | None = None,
+    dispatch_key: str | None = None,
 ) -> httpx.Response:
     """POST a Telegram-shaped update to IronClaw's webhook endpoint."""
     headers = {"Content-Type": "application/json"}
     if secret is not None:
         headers["X-Telegram-Bot-Api-Secret-Token"] = secret
+    resolved_dispatch_key = dispatch_key or await resolve_telegram_dispatch_key(http_url)
     async with httpx.AsyncClient() as c:
         return await c.post(
-            f"{http_url}/webhook/telegram",
+            f"{http_url}/webhook/{resolved_dispatch_key}",
             json=update,
             headers=headers,
             timeout=10,
@@ -1061,6 +1130,7 @@ async def test_telegram_malformed_payload_resilience(active_telegram):
     base_url = active_telegram["base_url"]
     http_url = active_telegram["http_url"]
     fake_tg_url = active_telegram["fake_tg_url"]
+    dispatch_key = active_telegram["dispatch_key"]
 
     # Send a completely malformed payload (not valid Telegram update JSON)
     headers = {
@@ -1069,7 +1139,7 @@ async def test_telegram_malformed_payload_resilience(active_telegram):
     }
     async with httpx.AsyncClient() as c:
         resp = await c.post(
-            f"{http_url}/webhook/telegram",
+            f"{http_url}/webhook/{dispatch_key}",
             content=b'{"not_a_valid_update": true}',
             headers=headers,
             timeout=10,

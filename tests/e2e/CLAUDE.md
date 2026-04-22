@@ -33,6 +33,13 @@ pytest scenarios/
 pytest scenarios/test_chat.py
 pytest scenarios/test_sse_reconnect.py
 
+# Run the Telegram-focused batch
+pytest -v \
+  scenarios/test_telegram_token_validation.py \
+  scenarios/test_telegram_hot_activation.py \
+  scenarios/test_telegram_e2e.py \
+  scenarios/test_multi_tenant_channels.py
+
 # Run with verbose output
 pytest scenarios/ -v
 
@@ -55,6 +62,8 @@ HEADED=1 pytest scenarios/
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, and verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret` |
+| `test_telegram_e2e.py` | Full-process Telegram activation, pairing, webhook delivery, webhook-secret enforcement, polling mode, markdown fallback, rate limiting, attachment download failures, and malformed payload resilience |
+| `test_multi_tenant_channels.py` | Full-process multi-tenant Telegram isolation: two tenants activate Telegram independently, get distinct dispatch-key webhook paths, and stay isolated for routing, threads, secrets, and per-user extension state |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
