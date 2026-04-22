@@ -538,6 +538,100 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+
+    /// A capability lease was granted to a thread.
+    ///
+    /// Bridged from engine `EventKind::LeaseGranted`. Security-visible:
+    /// capability grants should be auditable in the UI.
+    #[serde(rename = "lease_granted")]
+    LeaseGranted {
+        lease_id: String,
+        capability_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// A capability lease was explicitly revoked.
+    ///
+    /// Bridged from engine `EventKind::LeaseRevoked`. `reason` is the
+    /// engine's revocation message, surfaced so users can tell a
+    /// revocation apart from an expiry.
+    #[serde(rename = "lease_revoked")]
+    LeaseRevoked {
+        lease_id: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// A capability lease reached its TTL and expired.
+    ///
+    /// Bridged from engine `EventKind::LeaseExpired`. Without this, tools
+    /// begin failing after a lease's TTL with no visible explanation.
+    #[serde(rename = "lease_expired")]
+    LeaseExpired {
+        lease_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Background self-improvement lifecycle event.
+    ///
+    /// Bridged from engine `EventKind::SelfImprovement{Started,Complete,Failed}`.
+    /// The three engine variants collapse into one wire event with a
+    /// nested `SelfImprovementPhase` carrying per-phase data — consumers
+    /// need one handler, and the compiler enforces that phase-specific
+    /// fields travel with their phase (no `Option<T>` sentinels that
+    /// claim "maybe present" when the phase excludes them).
+    ///
+    /// Wire shape uses `#[serde(flatten)]` + the phase enum's
+    /// `#[serde(tag = "phase")]`, so the JSON payload is flat:
+    /// `{"type": "self_improvement", "phase": "complete", "prompt_updated": true, ...}`.
+    #[serde(rename = "self_improvement")]
+    SelfImprovement {
+        #[serde(flatten)]
+        phase: SelfImprovementPhase,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Orchestrator version was rolled back.
+    ///
+    /// Bridged from engine `EventKind::OrchestratorRollback`. Operator-
+    /// facing; surfaces the from/to versions so failures after an
+    /// upgrade are correlatable with the rollback point.
+    #[serde(rename = "orchestrator_rollback")]
+    OrchestratorRollback {
+        from_version: u64,
+        to_version: u64,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+}
+
+/// Phase data for `AppEvent::SelfImprovement`.
+///
+/// Mirrors engine `EventKind::SelfImprovement{Started,Complete,Failed}`
+/// as a single typed wire enum. Variant-specific fields are part of the
+/// variant, not optional fields on the outer event — per
+/// `.claude/rules/types.md` the compiler should reject a `Failed` value
+/// carrying `prompt_updated`, which an `Option`-field approach cannot.
+///
+/// Serialized with an internally-tagged `phase` discriminator; the
+/// outer `AppEvent::SelfImprovement` flattens this into its payload so
+/// the wire shape stays a single flat JSON object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum SelfImprovementPhase {
+    Started,
+    Complete {
+        prompt_updated: bool,
+        patterns_added: usize,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Wire-side mirror of `ironclaw_engine::CodeExecutionFailure`.
@@ -603,6 +697,11 @@ impl AppEvent {
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
             Self::PlanUpdate { .. } => "plan_update",
             Self::CodeExecutionFailed { .. } => "code_execution_failed",
+            Self::LeaseGranted { .. } => "lease_granted",
+            Self::LeaseRevoked { .. } => "lease_revoked",
+            Self::LeaseExpired { .. } => "lease_expired",
+            Self::SelfImprovement { .. } => "self_improvement",
+            Self::OrchestratorRollback { .. } => "orchestrator_rollback",
         }
     }
 
@@ -808,6 +907,30 @@ mod tests {
                 error: String::new(),
                 duration_ms: 0,
                 code_hash: None,
+                thread_id: None,
+            },
+            AppEvent::LeaseGranted {
+                lease_id: String::new(),
+                capability_name: String::new(),
+                thread_id: None,
+            },
+            AppEvent::LeaseRevoked {
+                lease_id: String::new(),
+                reason: String::new(),
+                thread_id: None,
+            },
+            AppEvent::LeaseExpired {
+                lease_id: String::new(),
+                thread_id: None,
+            },
+            AppEvent::SelfImprovement {
+                phase: SelfImprovementPhase::Started,
+                thread_id: None,
+            },
+            AppEvent::OrchestratorRollback {
+                from_version: 0,
+                to_version: 0,
+                reason: String::new(),
                 thread_id: None,
             },
         ];

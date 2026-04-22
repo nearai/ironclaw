@@ -4562,10 +4562,6 @@ async fn forward_event_to_channel(
     }
 }
 
-/// Convert a ThreadEvent to AppEvents for the web gateway SSE stream.
-///
-/// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
-/// so the frontend creates the card then resolves it).
 /// Bridge engine-side `CodeExecutionFailure` to its wire mirror
 /// `CodeExecutionFailureCategory` in `ironclaw_common`.
 ///
@@ -4591,6 +4587,10 @@ fn code_execution_category_to_wire(
     }
 }
 
+/// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
+///
+/// Returns multiple events when needed (e.g., `ToolStarted` + `ToolCompleted`
+/// so the frontend creates the card then resolves it).
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
@@ -4711,7 +4711,90 @@ fn thread_event_to_app_events(
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
         }],
-        _ => vec![],
+        EventKind::LeaseGranted {
+            lease_id,
+            capability_name,
+        } => vec![AppEvent::LeaseGranted {
+            lease_id: lease_id.to_string(),
+            capability_name: capability_name.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseRevoked { lease_id, reason } => vec![AppEvent::LeaseRevoked {
+            lease_id: lease_id.to_string(),
+            reason: reason.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseExpired { lease_id } => vec![AppEvent::LeaseExpired {
+            lease_id: lease_id.to_string(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementStarted => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Started,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementComplete {
+            prompt_updated,
+            patterns_added,
+        } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Complete {
+                prompt_updated: *prompt_updated,
+                patterns_added: *patterns_added,
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementFailed { error } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Failed {
+                error: error.clone(),
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+        } => {
+            // `reason` originates from `format!("execution failed: {e}")`
+            // in the engine's rollback path, where `e: EngineError` can
+            // render DB connection strings, file paths, or raw upstream
+            // HTTP bodies. SSE error-adjacent frames reach every
+            // authenticated consumer, so the wire carries a classified
+            // operator-facing message and the raw text stays in the log.
+            tracing::debug!(
+                from_version = *from_version,
+                to_version = *to_version,
+                raw_reason = %reason,
+                "orchestrator rollback event"
+            );
+            vec![AppEvent::OrchestratorRollback {
+                from_version: *from_version,
+                to_version: *to_version,
+                reason: crate::bridge::user_facing_errors::user_facing_rollback_reason(reason)
+                    .to_string(),
+                thread_id: Some(thread_id.into()),
+            }]
+        }
+
+        // Temporarily-suppressed engine variants. These are NOT bridged
+        // to `AppEvent` today because equivalent gate events are still
+        // emitted directly by the gate manager, and forwarding them
+        // here as well would make the UI render the same state twice.
+        // Migration plan per #2792 Phase 1 PR 3:
+        //
+        // - `ApprovalRequested` / `ApprovalReceived` are suppressed
+        //   only until the gate manager stops broadcasting direct
+        //   `AppEvent::GateRequired` / `GateResolved` events.
+        // - Once that migration lands, this function remains the
+        //   bridge: map these engine variants to the corresponding
+        //   `AppEvent`s here (or remove the direct emits), rather
+        //   than treating them as permanently dropped.
+        EventKind::ApprovalRequested { .. } => vec![],
+        EventKind::ApprovalReceived { .. } => vec![],
+
+        // Forward-compat catch-all in the engine enum (see
+        // `#[serde(other)] Unknown` in `ironclaw_engine::EventKind`).
+        // Nothing useful to show; the unknown variant would have been
+        // written by a newer binary during a rolling deploy.
+        EventKind::Unknown => vec![],
     }
 }
 
@@ -7240,6 +7323,257 @@ mod tests {
         assert_eq!(*duration_ms, 42);
         assert_eq!(code_hash.as_deref(), Some("abc123"));
         assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_granted() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseGranted {
+                lease_id: lease,
+                capability_name: "http_fetch".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-lease");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseGranted {
+            lease_id,
+            capability_name,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseGranted, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(capability_name, "http_fetch");
+        assert_eq!(thread_id.as_deref(), Some("thread-lease"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_revoked() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseRevoked {
+                lease_id: lease,
+                reason: "policy check failed".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-revoke");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseRevoked {
+            lease_id,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseRevoked, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(reason, "policy check failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-revoke"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_expired() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseExpired { lease_id: lease },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-expire");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseExpired {
+            lease_id,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseExpired, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(thread_id.as_deref(), Some("thread-expire"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_started() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementStarted,
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-start");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(phase, &ironclaw_common::SelfImprovementPhase::Started);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-start"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementFailed {
+                error: "diagnosis prompt timed out".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Failed { error } = phase else {
+            panic!("expected SelfImprovementPhase::Failed, got {phase:?}");
+        };
+        assert_eq!(error, "diagnosis prompt timed out");
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_complete() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementComplete {
+                prompt_updated: true,
+                patterns_added: 3,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Complete {
+            prompt_updated,
+            patterns_added,
+        } = phase
+        else {
+            panic!("expected SelfImprovementPhase::Complete, got {phase:?}");
+        };
+        assert!(*prompt_updated);
+        assert_eq!(*patterns_added, 3);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_orchestrator_rollback() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 7,
+                to_version: 6,
+                reason: "health probe failed after upgrade".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-rollback");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::OrchestratorRollback, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(*from_version, 7);
+        assert_eq!(*to_version, 6);
+        // Unknown-shape reasons collapse to the safe generic classification.
+        assert_eq!(reason, "execution failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-rollback"));
+    }
+
+    #[test]
+    fn orchestrator_rollback_does_not_leak_engine_error_detail() {
+        // Regression for PR #2844 review: the engine rollback path emits
+        // `format!("execution failed: {e}")` where `e: EngineError`.
+        // Variants like `Store { reason }` / `Llm { reason }` can render
+        // DB connection strings, file paths, and raw upstream HTTP bodies.
+        // The bridge must sanitize before broadcasting to SSE consumers.
+        let leaky = "execution failed: store error: connection string \
+            'postgres://bob:hunter2@db.internal:5432/ironclaw' refused: \
+            File \"/home/runner/.ironclaw/state.db\" not found";
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 3,
+                to_version: 2,
+                reason: leaky.to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-leak");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert!(
+            !reason.contains("postgres://"),
+            "leaked connection string: {reason}"
+        );
+        assert!(!reason.contains("hunter2"), "leaked password: {reason}");
+        assert!(
+            !reason.contains("/home/runner"),
+            "leaked filesystem path: {reason}"
+        );
+        assert!(
+            !reason.contains("store error"),
+            "leaked internal wrap: {reason}"
+        );
+        assert!(
+            !reason.contains("state.db"),
+            "leaked internal filename: {reason}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rollback_classifies_known_upstream_failures() {
+        // A 502 in the rollback reason should still render a classified
+        // operator-facing message, not the bare "execution failed" fallback.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 4,
+                to_version: 3,
+                reason: "execution failed: LLM error: Provider nearai request failed: \
+                     HTTP 502 Bad Gateway"
+                    .to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-502");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert_eq!(reason, "LLM provider unavailable");
     }
 
     #[test]
