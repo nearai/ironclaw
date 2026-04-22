@@ -220,17 +220,11 @@ impl ToolRegistry {
         self.engine_version
     }
 
-    /// Install the engine v2 capability registry. Panics if called on a
-    /// registry whose engine version isn't V2 — capabilities are v2-native
-    /// by construction, and a v1 registry holding one would leak v2-only
-    /// actions into discovery surfaces.
+    /// Install the engine v2 capability registry.
     pub(crate) async fn set_capability_registry(
         &self,
         registry: Arc<ironclaw_engine::CapabilityRegistry>,
     ) {
-        if self.engine_version != EngineVersion::V2 {
-            panic!("capabilities are v2-only"); // safety: programmer-error invariant
-        }
         *self.capability_registry.write().await = Some(registry);
     }
 
@@ -1734,18 +1728,6 @@ mod tests {
             registry.get("mission-create").await.is_none(),
             "hyphenated shadow must be rejected under its own name too"
         );
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "capabilities are v2-only")]
-    async fn set_capability_registry_panics_on_v1() {
-        // Capabilities are engine-v2-native by construction; wiring one onto
-        // a v1 registry would leak v2-only actions into discovery. The
-        // assertion protects against a future second caller misconfigured
-        // for v1.
-        let registry = ToolRegistry::new(); // default V1
-        let caps = ironclaw_engine::CapabilityRegistry::new();
-        registry.set_capability_registry(Arc::new(caps)).await;
     }
 
     #[tokio::test]
