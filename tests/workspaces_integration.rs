@@ -714,6 +714,66 @@ async fn responses_api_fetch_uses_workspace_scope_for_workspace_threads() {
     assert_eq!(outsider_resp.status(), 404);
 }
 
+// Regression: `GET /v1/responses/{id}` derives `workspace_id` from the
+// thread, bypassing `resolve_workspace_scope` and therefore the archived
+// check it applies. After the owning workspace is archived, the response
+// must no longer be retrievable — else an archived workspace stays
+// reachable via any cached response_id.
+#[tokio::test]
+async fn responses_api_fetch_rejects_archived_workspace() {
+    let store = setup_store().await;
+    let workspace = store
+        .create_workspace(
+            "Archive Gate",
+            "archive-gate",
+            "",
+            ALICE_USER_ID,
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    store
+        .add_workspace_member(workspace.id, BOB_USER_ID, "member", Some(ALICE_USER_ID))
+        .await
+        .unwrap();
+
+    let thread_id = store
+        .create_conversation_with_metadata(
+            "gateway",
+            BOB_USER_ID,
+            Some(workspace.id),
+            &json!({ "thread_type": "assistant" }),
+        )
+        .await
+        .unwrap();
+    store
+        .add_conversation_message(thread_id, "assistant", "before archive")
+        .await
+        .unwrap();
+
+    // Archive the owning workspace.
+    assert!(store.archive_workspace(workspace.id).await.unwrap());
+
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+    let response_id = format!("resp_{}{}", Uuid::new_v4().simple(), thread_id.simple());
+
+    // A workspace member who previously had access must not be able to fetch
+    // responses once the workspace is archived — same 410 Gone that
+    // `resolve_workspace_scope` returns for `?workspace=<slug>` lookups.
+    let member_resp = client
+        .get(format!("http://{addr}/v1/responses/{response_id}"))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        member_resp.status(),
+        410,
+        "archived workspaces must not be reachable via /v1/responses/{{id}}"
+    );
+}
+
 // Regression: creating a workspace with a slug that already exists used to
 // surface a generic 500 via `internal_db_error`, which clients could not
 // distinguish from retryable server failures. A UNIQUE-constraint violation

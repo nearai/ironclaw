@@ -137,6 +137,34 @@ pub async fn resolve_workspace_scope(
     }
 }
 
+/// Verify a workspace by ID is still active (not archived).
+///
+/// Callers that derive `workspace_id` from an opaque identifier (e.g. a
+/// thread UUID via `previous_response_id`) bypass `resolve_workspace_scope`
+/// — membership and ownership are checked elsewhere, but the archived
+/// status is not. This helper closes that gap: fetch the workspace and
+/// reject with 410 Gone if archived, matching what `resolve_workspace_scope`
+/// would return on the `?workspace=<slug>` path.
+///
+/// `None` workspace_id means personal scope — no workspace to check.
+pub async fn require_workspace_active(
+    store: &Arc<dyn Database>,
+    workspace_id: Option<Uuid>,
+) -> Result<(), (StatusCode, String)> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(());
+    };
+    let workspace = store
+        .get_workspace(workspace_id)
+        .await
+        .map_err(internal_db_error)?
+        .ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
+    if workspace.is_archived() {
+        return Err((StatusCode::GONE, "Workspace is archived".to_string()));
+    }
+    Ok(())
+}
+
 pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)> {
     if workspace_role_is_manager(role) {
         Ok(())

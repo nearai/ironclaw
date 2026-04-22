@@ -24,7 +24,9 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::handlers::workspaces::{
+    WorkspaceQuery, require_workspace_active, resolve_workspace_scope,
+};
 use crate::channels::web::types::AppEvent;
 use crate::db::Database;
 
@@ -480,6 +482,13 @@ async fn resolve_thread_workspace_id(
             "invalid_request_error",
         ));
     }
+    // The thread→workspace lookup bypasses `resolve_workspace_scope`, which is
+    // the canonical path that applies the archived check. Re-apply it here so
+    // an archived workspace cannot be reached via `previous_response_id` or
+    // `GET /v1/responses/{id}`.
+    require_workspace_active(store, workspace_id)
+        .await
+        .map_err(|(status, msg)| api_error(status, msg, "invalid_request_error"))?;
     Ok(workspace_id)
 }
 
