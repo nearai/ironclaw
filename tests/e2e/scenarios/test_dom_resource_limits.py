@@ -38,6 +38,40 @@ async def test_dom_pruned_after_many_messages(page):
     assert count >= 150, f"Expected at least 150 elements (not over-pruned), got {count}"
 
 
+async def test_prune_removes_assistant_wrappers(page):
+    """pruneOldMessages removes gw-msg wrappers instead of leaving orphan avatars."""
+    state = await page.evaluate("""() => {
+        for (let i = 0; i < 220; i++) {
+            addMessage('assistant', 'Assistant message ' + i);
+        }
+        for (let i = 0; i < 40; i++) {
+            addMessage('user', 'User message ' + i);
+        }
+        pruneOldMessages();
+
+        const wrappers = Array.from(document.querySelectorAll('#chat-messages .gw-msg'));
+        const assistantMessages = document.querySelectorAll('#chat-messages .message.assistant').length;
+        const userMessages = document.querySelectorAll('#chat-messages .message.user').length;
+        const prunableCount = document.querySelectorAll('#chat-messages .message, #chat-messages .activity-group, #chat-messages .time-separator').length;
+
+        return {
+            wrapperCount: wrappers.length,
+            assistantMessageCount: assistantMessages,
+            userMessageCount: userMessages,
+            orphanWrapperCount: wrappers.filter((wrapper) => !wrapper.querySelector('.message.assistant')).length,
+            orphanAvatarCount: wrappers.filter((wrapper) => !wrapper.querySelector('.message.assistant') && wrapper.querySelector('.gw-msg__avatar')).length,
+            prunableCount,
+        };
+    }""")
+
+    assert state["prunableCount"] <= 200, state
+    assert state["assistantMessageCount"] > 0, state
+    assert state["userMessageCount"] > 0, state
+    assert state["orphanWrapperCount"] == 0, state
+    assert state["orphanAvatarCount"] == 0, state
+    assert state["wrapperCount"] == state["assistantMessageCount"], state
+
+
 async def test_no_timer_leak_across_reconnects(page):
     """Reconnect cycles do not accumulate leaked setInterval timers (#2406).
 
