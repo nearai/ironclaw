@@ -251,6 +251,35 @@ mod tests {
         variant: Variant,
         prompt: String,
     ) -> VariantRun {
+        run_variant_with(
+            scenario_id,
+            variant,
+            prompt,
+            /* tolerate_host_failures */ false,
+        )
+        .await
+    }
+
+    async fn run_variant_tolerant(
+        scenario_id: &'static str,
+        variant: Variant,
+        prompt: String,
+    ) -> VariantRun {
+        run_variant_with(
+            scenario_id,
+            variant,
+            prompt,
+            /* tolerate_host_failures */ true,
+        )
+        .await
+    }
+
+    async fn run_variant_with(
+        scenario_id: &'static str,
+        variant: Variant,
+        prompt: String,
+        tolerate_host_failures: bool,
+    ) -> VariantRun {
         let test_name = variant_test_name(scenario_id, variant);
         let harness = LiveTestHarnessBuilder::new(&test_name)
             .with_engine_v2(true)
@@ -288,7 +317,9 @@ mod tests {
         let tool_calls_started = rig.tool_calls_started();
         let tool_calls_completed = rig.tool_calls_completed();
         let trace_errors = harness.collect_trace_errors();
-        assert_no_non_codeact_failures(&tool_calls_completed, &trace_errors);
+        if !tolerate_host_failures {
+            assert_no_non_codeact_failures(&tool_calls_completed, &trace_errors);
+        }
         let trace = rig.collect_metrics().await;
 
         harness.finish(&prompt, &new_responses).await;
@@ -620,6 +651,177 @@ mod tests {
         assert_eq!(include[0].as_str(), Some("src"));
     }
 
+    fn setup_js_codemod_use_strict(variant: Variant) -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join(format!("js_codemod_use_strict_{}", variant.label()));
+        reset_dir(&dir);
+        let src = dir.join("src");
+        fs::create_dir_all(&src).expect("failed to create src dir");
+        fs::write(src.join("a.js"), "export const a = 1;\n").expect("seed a.js");
+        fs::write(src.join("b.js"), "export const b = 2;\n").expect("seed b.js");
+        fs::write(src.join("c.js"), "export const c = 3;\n").expect("seed c.js");
+        let sub = src.join("sub");
+        fs::create_dir_all(&sub).expect("failed to create sub dir");
+        fs::write(sub.join("d.js"), "export const d = 4;\n").expect("seed sub/d.js");
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    fn assert_js_codemod_use_strict(root: &str) {
+        let src = Path::new(root).join("src");
+        let cases: &[(&str, &str)] = &[
+            ("a.js", "export const a = 1"),
+            ("b.js", "export const b = 2"),
+            ("c.js", "export const c = 3"),
+            ("sub/d.js", "export const d = 4"),
+        ];
+        for (rel, must_contain_decl) in cases {
+            let path = src.join(rel);
+            let actual =
+                fs::read_to_string(&path).unwrap_or_else(|e| panic!("missing js file {rel}: {e}"));
+            assert!(
+                actual.starts_with("'use strict';\n"),
+                "expected {rel} to start with `'use strict';` pragma; got: {actual:?}"
+            );
+            assert_eq!(
+                actual.matches("'use strict';").count(),
+                1,
+                "expected exactly one `'use strict';` occurrence in {rel}; got: {actual:?}"
+            );
+            assert!(
+                actual.contains(must_contain_decl),
+                "expected {rel} to preserve original declaration `{must_contain_decl}`; got: {actual:?}"
+            );
+        }
+    }
+
+    fn setup_mixed_config_sync(variant: Variant) -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join(format!("mixed_config_sync_{}", variant.label()));
+        reset_dir(&dir);
+        let services = dir.join("services");
+        fs::create_dir_all(&services).expect("failed to create services dir");
+        for name in ["api", "worker", "web"] {
+            let svc = services.join(name);
+            fs::create_dir_all(&svc).expect("failed to create service dir");
+            let pkg = serde_json::json!({
+                "name": format!("@svc/{name}"),
+                "private": true,
+                "version": "0.1.0",
+            });
+            fs::write(
+                svc.join("package.json"),
+                serde_json::to_string_pretty(&pkg).expect("serialize svc package.json"),
+            )
+            .expect("seed svc package.json");
+            let tsc = serde_json::json!({
+                "compilerOptions": {
+                    "module": "ESNext",
+                    "strict": true,
+                },
+                "include": ["src"],
+            });
+            fs::write(
+                svc.join("tsconfig.json"),
+                serde_json::to_string_pretty(&tsc).expect("serialize svc tsconfig.json"),
+            )
+            .expect("seed svc tsconfig.json");
+        }
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    fn assert_mixed_config_sync(root: &str) {
+        let services = Path::new(root).join("services");
+        for name in ["api", "web", "worker"] {
+            let svc = services.join(name);
+            let pkg_content = fs::read_to_string(svc.join("package.json"))
+                .unwrap_or_else(|e| panic!("missing package.json for {name}: {e}"));
+            let pkg: serde_json::Value = serde_json::from_str(&pkg_content)
+                .unwrap_or_else(|e| panic!("invalid package.json for {name}: {e}"));
+            assert_eq!(
+                pkg.get("name").and_then(|v| v.as_str()),
+                Some(format!("@svc/{name}").as_str()),
+                "expected name preserved in {name}/package.json",
+            );
+            assert_eq!(
+                pkg.get("private").and_then(|v| v.as_bool()),
+                Some(true),
+                "expected private preserved in {name}/package.json",
+            );
+            let engines = pkg
+                .get("engines")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("expected engines object in {name}/package.json"));
+            assert_eq!(
+                engines.get("node").and_then(|v| v.as_str()),
+                Some(">=20"),
+                "expected engines.node=>=20 in {name}/package.json",
+            );
+
+            let tsc_content = fs::read_to_string(svc.join("tsconfig.json"))
+                .unwrap_or_else(|e| panic!("missing tsconfig.json for {name}: {e}"));
+            let tsc: serde_json::Value = serde_json::from_str(&tsc_content)
+                .unwrap_or_else(|e| panic!("invalid tsconfig.json for {name}: {e}"));
+            let opts = tsc
+                .get("compilerOptions")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("expected compilerOptions in {name}/tsconfig.json"));
+            assert_eq!(
+                opts.get("target").and_then(|v| v.as_str()),
+                Some("ES2022"),
+                "expected compilerOptions.target=ES2022 in {name}/tsconfig.json",
+            );
+            assert_eq!(
+                opts.get("module").and_then(|v| v.as_str()),
+                Some("ESNext"),
+                "expected compilerOptions.module preserved in {name}/tsconfig.json",
+            );
+            assert_eq!(
+                opts.get("strict").and_then(|v| v.as_bool()),
+                Some(true),
+                "expected compilerOptions.strict preserved in {name}/tsconfig.json",
+            );
+        }
+    }
+
+    fn setup_yaml_workflow_update(variant: Variant) -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join(format!("yaml_workflow_update_{}", variant.label()));
+        reset_dir(&dir);
+        let workflows = dir.join(".github").join("workflows");
+        fs::create_dir_all(&workflows).expect("failed to create workflows dir");
+        let ci = "name: CI\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: cargo test\n";
+        let deploy = "name: Deploy\non:\n  push:\n    branches: [main]\njobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: ./deploy.sh\n";
+        fs::write(workflows.join("ci.yml"), ci).expect("seed ci.yml");
+        fs::write(workflows.join("deploy.yml"), deploy).expect("seed deploy.yml");
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    fn assert_yaml_workflow_update(root: &str) {
+        let workflows = Path::new(root).join(".github").join("workflows");
+        for (name, must_contain) in [("ci.yml", "cargo test"), ("deploy.yml", "./deploy.sh")] {
+            let content = fs::read_to_string(workflows.join(name))
+                .unwrap_or_else(|e| panic!("missing {name}: {e}"));
+            assert!(
+                content.contains("actions/checkout@v4"),
+                "expected {name} to be updated to actions/checkout@v4",
+            );
+            assert!(
+                !content.contains("actions/checkout@v3"),
+                "expected {name} to no longer reference actions/checkout@v3",
+            );
+            assert!(
+                content.contains(must_contain),
+                "expected {name} to preserve `{must_contain}` step",
+            );
+        }
+    }
+
     fn read_json_prompt(path: &str, variant: Variant) -> String {
         match variant {
             Variant::Raw => format!(
@@ -699,6 +901,48 @@ mod tests {
             ),
             Variant::Shim => format!(
                 "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real tsconfig.json. Inside `compilerOptions`, set `strict` to true and add `noUncheckedIndexedAccess: true`, while preserving the existing `target`, `module`, and `include` entries. Write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `flags=noUncheckedIndexedAccess:true,strict:true`. IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)`. After writing, re-read the actual file and derive the final flags string from the saved file."
+            ),
+        }
+    }
+
+    fn js_codemod_use_strict_prompt(root: &str, variant: Variant) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Under the directory {root:?}, find every `.js` file recursively under `src/`. For each file, prepend the literal line `'use strict';\\n` to its content. Preserve every other byte of the existing content exactly (do not add extra whitespace, blank lines, or remove the trailing newline). After updating every file, call FINAL exactly with `done=ok`."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like find_files, read_text, or write_text. Use canonical host tools directly from Python. The canonical glob tool returns a dict with a `files` list of relative paths matching the pattern. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ <text>`; strip everything through the `│` separator before checking the first line. Always pass the full absolute path returned by glob to read_file (do not use just the basename)."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await find_files('**/*.js', path=...)`, `await read_text(path)`, and `await write_text(path, content)`. The text shims return and accept raw file content directly with no line-number framing. All shims are async, so always use `await`."
+            ),
+        }
+    }
+
+    fn mixed_config_sync_prompt(root: &str, variant: Variant) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Under the directory {root:?}, every service has both a `services/<name>/package.json` and a `services/<name>/tsconfig.json`. For each service, ensure the package.json has an object field `engines` with an entry `node: '>=20'` (add the engines object if missing; preserve every other top-level field including `name`, `private`, `version`). For each service, also ensure the tsconfig.json's `compilerOptions` object contains an entry `target: 'ES2022'` (add it if missing; preserve every other field in compilerOptions like `module` and `strict`). Write each updated file back as pretty JSON. Then re-read every saved file to verify, and call FINAL exactly with `done=<comma-joined sorted service names>` — for example `done=api,web,worker`. Only include services where BOTH files now have the required entries."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, list_entries, or read_text. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {{...}}`; strip everything through the `│` separator before JSON parsing. Discover service directories with the canonical `list_dir` tool; its output is a dict with an `entries` list where directories end with `/`."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await list_entries(path)` to discover service directories, and `await read_json(path)` / `await write_json(path, value)` for each JSON file. All shims are async, so always use `await`."
+            ),
+        }
+    }
+
+    fn yaml_workflow_update_prompt(root: &str, variant: Variant) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Under the directory {root:?}, find every `.yml` file recursively under `.github/workflows/`. For each file, replace every literal occurrence of the string `actions/checkout@v3` with `actions/checkout@v4`. Preserve all other content exactly. Write each updated file back, then re-read every workflow to verify the substitution. Build a sorted list of the file basenames you actually modified and call FINAL exactly with `updated=<comma-joined sorted basenames>` — for example `updated=ci.yml,deploy.yml`."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like find_files, read_text, or write_text. Use canonical host tools directly from Python. The canonical glob tool returns a dict with a `files` list of relative paths. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ <text>`; strip everything through the `│` separator before doing the substitution. Do not import os; derive each file's basename by splitting its path on '/'."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await find_files('**/*.yml', path=...)`, `await read_text(path)`, and `await write_text(path, content)`. The text shims return and accept raw file content directly with no line-number framing. All shims are async, so always use `await`. Derive each file's basename by splitting its returned path on '/'."
             ),
         }
     }
@@ -1056,5 +1300,105 @@ mod tests {
         assert_tsconfig_nested_paths(&path);
 
         print_pair_report(&raw, &shim);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_js_codemod_use_strict_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("js_codemod_use_strict") {
+            return;
+        }
+
+        let (_cleanup_raw, raw_root) = setup_js_codemod_use_strict(Variant::Raw);
+        let raw = run_variant_tolerant(
+            "js_codemod_use_strict",
+            Variant::Raw,
+            js_codemod_use_strict_prompt(&raw_root, Variant::Raw),
+        )
+        .await;
+
+        let (_cleanup_shim, shim_root) = setup_js_codemod_use_strict(Variant::Shim);
+        let shim = run_variant_tolerant(
+            "js_codemod_use_strict",
+            Variant::Shim,
+            js_codemod_use_strict_prompt(&shim_root, Variant::Shim),
+        )
+        .await;
+
+        print_pair_report(&raw, &shim);
+        assert_exact_suffix(&raw.response, "done=", "ok");
+        assert_js_codemod_use_strict(&raw_root);
+        assert_exact_suffix(&shim.response, "done=", "ok");
+        assert_js_codemod_use_strict(&shim_root);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_mixed_config_sync_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("mixed_config_sync") {
+            return;
+        }
+
+        let (_cleanup_raw, raw_root) = setup_mixed_config_sync(Variant::Raw);
+        let raw = run_variant_tolerant(
+            "mixed_config_sync",
+            Variant::Raw,
+            mixed_config_sync_prompt(&raw_root, Variant::Raw),
+        )
+        .await;
+
+        let (_cleanup_shim, shim_root) = setup_mixed_config_sync(Variant::Shim);
+        let shim = run_variant_tolerant(
+            "mixed_config_sync",
+            Variant::Shim,
+            mixed_config_sync_prompt(&shim_root, Variant::Shim),
+        )
+        .await;
+
+        print_pair_report(&raw, &shim);
+        assert_exact_suffix(&raw.response, "done=", "api,web,worker");
+        assert_mixed_config_sync(&raw_root);
+        assert_exact_suffix(&shim.response, "done=", "api,web,worker");
+        assert_mixed_config_sync(&shim_root);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_yaml_workflow_update_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("yaml_workflow_update") {
+            return;
+        }
+
+        let (_cleanup_raw, raw_root) = setup_yaml_workflow_update(Variant::Raw);
+        let raw = run_variant_tolerant(
+            "yaml_workflow_update",
+            Variant::Raw,
+            yaml_workflow_update_prompt(&raw_root, Variant::Raw),
+        )
+        .await;
+
+        let (_cleanup_shim, shim_root) = setup_yaml_workflow_update(Variant::Shim);
+        let shim = run_variant_tolerant(
+            "yaml_workflow_update",
+            Variant::Shim,
+            yaml_workflow_update_prompt(&shim_root, Variant::Shim),
+        )
+        .await;
+
+        print_pair_report(&raw, &shim);
+        // Raw variant commonly thrashes past its token budget on this scenario
+        // and finalizes with an empty `updated=`. That's exactly the failure mode
+        // the shim is meant to fix, so we assert the prefix was reached but tolerate
+        // either success or thrash-empty — see shim assertion below for the strict check.
+        assert!(
+            raw.response.contains("updated="),
+            "raw response should finalize with an 'updated=' prefix, got: {}",
+            raw.response
+        );
+        assert_exact_suffix(&shim.response, "updated=", "ci.yml,deploy.yml");
+        assert_yaml_workflow_update(&shim_root);
     }
 }

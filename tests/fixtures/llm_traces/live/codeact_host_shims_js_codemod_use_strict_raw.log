@@ -1,0 +1,60 @@
+# Live Test Session: codeact_host_shims_js_codemod_use_strict_raw
+# Mode: Live
+# LLM calls: 10, Input tokens: 204739, Output tokens: 475
+# Wall time: 90.6s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Under the directory "/tmp/ironclaw_live_codeact_shims/js_codemod_use_strict_raw", find every `.js` file recursively under `src/`. For each file, prepend the literal line `'use strict';\n` to its content. Preserve every other byte of the existing content exactly (do not add extra whitespace, blank lines, or remove the trailing newline). After updating every file, call FINAL exactly with `done=ok`. IMPORTANT: this is the RAW variant, so do not use helper shims like find_files, read_text, or write_text. Use canonical host tools directly from Python. The canonical glob tool returns a dict with a `files` list of relative paths matching the pattern. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ <text>`; strip everything through the `│` separator before checking the first line. Always pass the full absolute path returned by glob to read_file (do not use just the basename).
+────────────────────────────────────────────────────
+done=ok
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19955 in / 46 out tokens
+  ● glob(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ✓ glob(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ○ Calling LLM...
+  ○ Step complete — 20054 in / 49 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ○ Calling LLM...
+  ○ Step complete — 20180 in / 48 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ○ Calling LLM...
+  ○ Step complete — 20304 in / 48 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ○ Calling LLM...
+  ○ Step complete — 20428 in / 48 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/js_codemod_use_st...)
+  ○ Calling LLM...
+  ○ Step complete — 20552 in / 56 out tokens
+  ● write_file('use strict';
+export const d = 4;)
+  ✓ write_file('use strict';
+export const d = 4;)
+  ○ Calling LLM...
+  ○ Step complete — 20659 in / 55 out tokens
+  ● write_file('use strict';
+export const c = 3;)
+  ✓ write_file('use strict';
+export const c = 3;)
+  ○ Calling LLM...
+  ○ Step complete — 20764 in / 55 out tokens
+  ● write_file('use strict';
+export const b = 2;)
+  ✓ write_file('use strict';
+export const b = 2;)
+  ○ Calling LLM...
+  ○ Step complete — 20869 in / 55 out tokens
+  ● write_file('use strict';
+export const a = 1;)
+  ✓ write_file('use strict';
+export const a = 1;)
+  ○ Calling LLM...
+  ○ Step complete — 20974 in / 15 out tokens
+  … Done
