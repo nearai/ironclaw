@@ -81,8 +81,7 @@ fn render_progress_line(plan: &PlanState, usable_width: usize, theme: &Theme) ->
 
     // Mini progress bar
     let bar_width = 16.min(usable_width.saturating_sub(8));
-    let bar = if total > 0 {
-        let filled = (completed * bar_width) / total;
+    let bar = if let Some(filled) = (completed * bar_width).checked_div(total) {
         let empty = bar_width.saturating_sub(filled);
         format!("[{}{}]", "\u{2588}".repeat(filled), " ".repeat(empty),)
     } else {

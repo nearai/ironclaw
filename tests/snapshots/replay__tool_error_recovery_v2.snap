@@ -14,6 +14,8 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 100 in / 25 out tokens
+  - kind: other
+    variant: Other
   - kind: tool_started
     name: json
   - kind: tool_completed
@@ -24,12 +26,14 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 180 in / 35 out tokens
+  - kind: other
+    variant: Other
   - kind: status
     message: done
   - kind: other
     variant: Other
 event_kind_counts:
-  Other: 1
+  Other: 3
   Status: 1
   Thinking: 5
   ToolCompleted: 1

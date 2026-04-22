@@ -14,8 +14,13 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 100 in / 30 out tokens
+  - kind: other
+    variant: Other
   - kind: tool_started
     name: echo
+  - kind: tool_result_preview
+    name: echo
+    preview_len_bucket: 0
   - kind: tool_completed
     name: echo
     success: true
@@ -24,15 +29,18 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 150 in / 15 out tokens
+  - kind: other
+    variant: Other
   - kind: status
     message: done
   - kind: other
     variant: Other
 event_kind_counts:
-  Other: 1
+  Other: 3
   Status: 1
   Thinking: 5
   ToolCompleted: 1
+  ToolResult: 1
   ToolStarted: 1
 llm_call_count: 2
 safety_warning_count: 0

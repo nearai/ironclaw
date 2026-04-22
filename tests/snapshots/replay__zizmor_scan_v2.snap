@@ -17,8 +17,13 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 19610 in / 148 out token
+  - kind: other
+    variant: Other
   - kind: tool_started
     name: shell
+  - kind: tool_result_preview
+    name: shell
+    preview_len_bucket: 600
   - kind: tool_completed
     name: shell
     success: true
@@ -27,8 +32,13 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 19742 in / 112 out token
+  - kind: other
+    variant: Other
   - kind: tool_started
     name: shell
+  - kind: tool_result_preview
+    name: shell
+    preview_len_bucket: 0
   - kind: tool_completed
     name: shell
     success: true
@@ -37,8 +47,13 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 21386 in / 110 out token
+  - kind: other
+    variant: Other
   - kind: tool_started
     name: shell
+  - kind: tool_result_preview
+    name: shell
+    preview_len_bucket: 0
   - kind: tool_completed
     name: shell
     success: true
@@ -47,15 +62,18 @@ events:
     message: calling llm...
   - kind: thinking
     message: step complete — 39477 in / 656 out token
+  - kind: other
+    variant: Other
   - kind: status
     message: done
   - kind: other
     variant: Other
 event_kind_counts:
-  Other: 1
+  Other: 5
   Status: 1
   Thinking: 9
   ToolCompleted: 3
+  ToolResult: 3
   ToolStarted: 3
 llm_call_count: 4
 safety_warning_count: 0
