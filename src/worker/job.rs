@@ -1098,7 +1098,8 @@ or status \"failed\" when you hit an unresolvable blocker."#,
             serde_json::json!({
                 "status": "completed",
                 "success": true,
-                "message": truncate_for_preview(message, 2000),
+                "message": message,
+                "message_preview": truncate_for_preview(message, 2000),
             }),
         );
         self.persist_status(JobState::Completed, None);
