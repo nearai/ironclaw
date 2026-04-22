@@ -40,6 +40,7 @@ For common file, HTTP, and shell tasks, prefer these Pythonic shims first:
 - `list_entries(path=".", recursive=False, max_depth=3)` → returns just the directory entry strings
 - `find_files(pattern, path=".", max_results=None)` → returns just the matched file paths
 - `http_get(url, headers=None)` → performs a GET request and returns a dict with keys like `ok`, `status`, `body`, `text`, `json_body`
+- `http_request(method, url, headers=None, body=None, json=None)` → performs a generic HTTP request and returns the same normalized response shape as `http_get`
 - `run(command, timeout=None, workdir=None)` → runs a shell command and returns a dict with keys like `ok`, `exit_code`, `stdout`, `stderr`
 
 These are thin facades over the normal host tools (`read_file`, `write_file`, `list_dir`, `glob`, `http`, `shell`). They keep the same approval/policy behavior while giving you a smaller, more Pythonic interface.
@@ -52,7 +53,7 @@ cfg["scripts"]["lint"] = "eslint ."
 await write_json("package.json", cfg)
 ```
 
-Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), non-GET HTTP methods, or tool-specific parameters.
+Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), binary/download-specific HTTP options like `save_to`, or other tool-specific parameters.
 
 ## Special functions
 
@@ -122,4 +123,4 @@ The Python REPL runs in Monty, a lightweight embedded interpreter — not CPytho
 - **Regex quirks — prefer string methods first.** Before reaching for `re`, try `"needle" in text`, `text.startswith(...)`, `text.find(...)`, `text.splitlines()`, `text.split(...)`. These handle the large majority of LLM-flavored pattern matching and sidestep the issues below. When you do need real regex:
     - **`re.search`, `re.match`, `re.fullmatch`, and `re.findall` take positional args only** — `re.search(pat, text, re.M)` works, `re.search(pat, text, flags=re.M)` raises `TypeError: re.search() takes no keyword arguments`. (`re.sub` and `re.split` do accept kwargs.)
     - **The engine is the Rust `regex` crate, not CPython's `re`.** No lookaround (`(?=...)`, `(?!...)`), no backreferences (`\1`), and some character-class shorthands differ — an invalid pattern raises `re.PatternError: Parsing error at position N: Invalid character class`. Keep patterns simple; if you need lookaround or backrefs, compose it with string methods instead.
-- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, prefer `await http_get(...)` for simple GETs and use `await http(...)` for advanced requests.
+- For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, prefer `await http_get(...)` for simple GETs, `await http_request(...)` for normal API calls, and drop to raw `await http(...)` for download-specific or tool-specific options.
