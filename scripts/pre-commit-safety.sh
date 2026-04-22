@@ -21,7 +21,7 @@
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 # For check #7, use "// dispatch-exempt: <reason>" instead.
 # For check #8, use "// web-identity-exempt: <reason>" instead.
-# For check #9, use "// projection-exempt: <reason>" instead.
+# For check #9, use "// projection-exempt: <category>, <detail>" instead.
 
 set -euo pipefail
 
@@ -372,8 +372,11 @@ if [ -n "$WEB_IDENTITY_DIFF" ]; then
     # Strip lines inside `#[cfg(test)] mod tests` blocks using the same
     # precomputed boundaries used for other prod-only checks.
     WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
+    # `(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)` is a portable
+    # word boundary; `grep -E`'s `\b` is a GNU extension and is not
+    # recognised by BSD grep.
     WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
-        | grep -E '\bCredentialName\b' \
+        | grep -E '(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)' \
         | grep -vE '// web-identity-exempt:|// safety:|:\+\+\+ ' \
         | head -5 || true)
     if [ -n "$WEB_IDENTITY_HITS" ]; then
@@ -410,9 +413,14 @@ fi
 #       `(^|[^[:alnum:]_])sse\.` is a portable boundary; `grep -E`'s
 #       `\b` is a GNU extension and is not recognised by BSD grep, so
 #       we avoid it here.
+#    Suppression regex requires a non-empty detail after the comma:
+#    `[^,]+,[[:space:]]*[^[:space:]]` — `// projection-exempt: foo,`
+#    (empty detail) does NOT exempt; `// projection-exempt: foo, bar`
+#    does. This matches the documented contract in
+#    `.claude/rules/gateway-events.md`.
 PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
     | grep -E '(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\(' \
-    | grep -vE '// projection-exempt: [^,]+,|// safety:|:\+\+\+ ' \
+    | grep -vE '// projection-exempt: [^,]+,[[:space:]]*[^[:space:]]|// safety:|:\+\+\+ ' \
     | head -5 || true)
 if [ -n "$PROJECTION_HITS" ]; then
     warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."

@@ -58,7 +58,7 @@ assert_flagged() {
 # Exclusions: `// projection-exempt: <category>, <detail>`, `// safety:`,
 #             and diff-header lines (`+++ b/path`) via `:\+\+\+ `.
 PROJ_POS='(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\('
-PROJ_NEG='// projection-exempt: [^,]+,|// safety:|:\+\+\+ '
+PROJ_NEG='// projection-exempt: [^,]+,[[:space:]]*[^[:space:]]|// safety:|:\+\+\+ '
 
 # Diff header lines must be filtered.
 assert_filtered "PROJECTION: diff header line is filtered" \
@@ -116,6 +116,19 @@ assert_flagged "PROJECTION: unnamed 'legacy' suppression still flagged" \
     "$PROJ_POS" \
     "$PROJ_NEG"
 
+# Empty detail after the comma (`// projection-exempt: foo,`) does NOT
+# exempt — the documented format requires a non-empty detail.
+assert_flagged "PROJECTION: empty detail after comma still flagged" \
+    "+    sse.broadcast_for_user(&user, event); // projection-exempt: foo," \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
+# Trailing whitespace after the comma without a detail also does NOT exempt.
+assert_flagged "PROJECTION: comma + whitespace-only detail still flagged" \
+    "+    sse.broadcast_for_user(&user, event); // projection-exempt: foo,   " \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
 # ── DISPATCH ──────────────────────────────────────────────────
 DISPATCH_POS='state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.'
 DISPATCH_NEG='// dispatch-exempt:|// safety:|:\+\+\+ '
@@ -131,11 +144,19 @@ assert_flagged "DISPATCH: direct state.store touch is flagged" \
     "$DISPATCH_NEG"
 
 # ── CREDNAME ──────────────────────────────────────────────────
-CREDNAME_POS='\bCredentialName\b'
+# Portable word boundary: `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` —
+# `grep -E`'s `\b` is a GNU extension and not recognised by BSD grep.
+CREDNAME_POS='(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)'
 CREDNAME_NEG='// web-identity-exempt:|// safety:|:\+\+\+ '
 
 assert_filtered "CREDNAME: diff header line is filtered" \
     "+++ b/src/channels/web/features/settings.rs" \
+    "$CREDNAME_POS" \
+    "$CREDNAME_NEG"
+
+# A similarly-named but distinct identifier must not fire.
+assert_filtered "CREDNAME: CredentialNameExt (different type) is not flagged" \
+    "+    let ext: CredentialNameExt = ...;" \
     "$CREDNAME_POS" \
     "$CREDNAME_NEG"
 
