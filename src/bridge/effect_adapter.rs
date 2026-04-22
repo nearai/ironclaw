@@ -1917,7 +1917,10 @@ async fn resolve_mission_identity(
         });
     }
 
-    obj.insert("id".into(), serde_json::Value::String(mission.id.to_string()));
+    obj.insert(
+        "id".into(),
+        serde_json::Value::String(mission.id.to_string()),
+    );
     Ok(())
 }
 
