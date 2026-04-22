@@ -3234,11 +3234,26 @@ mod tests {
     }
 
     #[test]
-    fn signals_execution_intent_please_halt() {
-        // "please halt" must be detected like "please stop/pause/cancel"
+    fn signals_execution_intent_halt_disable_phrases() {
+        // "halt/disable" pronoun+article phrases and "please halt/disable"
+        assert!(eval_python_bool(r#"signals_execution_intent("halt that")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable it")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable the ticker")"#
+        ));
         assert!(eval_python_bool(
             r#"signals_execution_intent("please halt the mission")"#
         ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please disable the routine")"#
+        ));
+        // Bare "disable" command
+        assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
     }
 
     #[test]

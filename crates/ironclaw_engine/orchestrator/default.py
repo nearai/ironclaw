@@ -165,9 +165,12 @@ def signals_execution_intent(text):
         "stop it", "stop that", "stop this", "stop the ",
         "pause it", "pause that", "pause this", "pause the ",
         "cancel it", "cancel that", "cancel this", "cancel the ",
+        "halt it", "halt that", "halt this", "halt the ",
+        "disable it", "disable that", "disable this", "disable the ",
         "please run ", "please execute ", "please fetch ",
         "please send ", "please deploy ",
-        "please stop ", "please pause ", "please cancel ", "please halt ",
+        "please stop ", "please pause ", "please cancel ",
+        "please halt ", "please disable ",
     ]
     if any(phrase in lower for phrase in EXEC_PHRASES):
         return True
@@ -178,8 +181,8 @@ def signals_execution_intent(text):
     # Checking startswith avoids false positives like "I can't stop".
     # Strip trailing punctuation so "Stop." and "cancel!" still match.
     trimmed = lower.strip().rstrip(".,!?;:")
-    IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt "]
-    BARE_COMMANDS = ["stop", "pause", "cancel", "halt"]
+    IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt ", "disable "]
+    BARE_COMMANDS = ["stop", "pause", "cancel", "halt", "disable"]
     if trimmed in BARE_COMMANDS:
         return True
     if any(trimmed.startswith(s) for s in IMPERATIVE_STARTS):
