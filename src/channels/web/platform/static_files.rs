@@ -171,7 +171,7 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// every widget manifest / JS / CSS file, which would otherwise fire on every
 /// page load.
 ///
-/// **Multi-tenant safety.** In multi-user mode (`workspace_pool` set) this
+/// **Multi-tenant safety.** In multi-tenant mode (`multi_tenant_mode`) this
 /// function ALWAYS returns `None`, regardless of whether `state.workspace` is
 /// also populated. The customization assembly path is fundamentally
 /// single-tenant: `index_handler` (`GET /`) is the unauthenticated bootstrap
@@ -215,7 +215,7 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// right fix is a workspace version generation counter, not a lock
 /// around this function.
 pub(crate) async fn build_frontend_html(state: &GatewayState) -> Option<String> {
-    if state.workspace_pool.is_some() {
+    if state.multi_tenant_mode {
         // Multi-tenant: refuse the assembly path entirely. See the function
         // doc comment above for the full rationale. The cache write below
         // is unreachable on this branch, so the cache stays empty and
@@ -610,7 +610,7 @@ pub(crate) async fn css_handler(
     //
     // **Multi-tenant safety.** This must mirror the same guard
     // `build_frontend_html` already enforces (see its doc comment): in
-    // multi-user mode (`workspace_pool.is_some()`) we cannot resolve a
+    // multi-tenant mode (`multi_tenant_mode`) we cannot resolve a
     // per-user workspace because `/style.css` is the unauthenticated
     // bootstrap stylesheet — there is no user identity at request time.
     // Reading from `state.workspace` here would expose one global
@@ -619,7 +619,7 @@ pub(crate) async fn css_handler(
     // path entirely in multi-tenant mode and serve the embedded base
     // stylesheet to all users; per-user CSS overrides can ride a future
     // authenticated `/api/frontend/custom-css` endpoint.
-    let css: std::borrow::Cow<'static, str> = if state.workspace_pool.is_some() {
+    let css: std::borrow::Cow<'static, str> = if state.multi_tenant_mode {
         std::borrow::Cow::Borrowed(assets::STYLE_CSS)
     } else {
         match &state.workspace {
@@ -1248,6 +1248,7 @@ mod tests {
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
         state_mut.workspace = Some(global_ws);
         state_mut.workspace_pool = Some(pool);
+        state_mut.multi_tenant_mode = true;
 
         let app = Router::new()
             .route("/style.css", get(css_handler))
@@ -1274,7 +1275,7 @@ mod tests {
         assert!(
             !body_str.contains("TENANT-LEAK-BAIT"),
             "custom.css from global workspace leaked into multi-tenant /style.css \
-             response — css_handler is missing its workspace_pool guard"
+             response — css_handler is missing its multi_tenant_mode guard"
         );
 
         // Contract 2: the response is exactly the embedded base
@@ -1401,6 +1402,7 @@ mod tests {
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
         state_mut.workspace = Some(global_ws);
         state_mut.workspace_pool = Some(pool);
+        state_mut.multi_tenant_mode = true;
 
         // Contract 1: build_frontend_html refuses to assemble.
         let html = build_frontend_html(&state).await;

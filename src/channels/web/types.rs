@@ -124,6 +124,10 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
+    /// Channel hint for history views that are not present in the sidebar.
+    /// Used by the frontend to keep deep-linked non-gateway threads read-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,

@@ -356,7 +356,14 @@
     es.addEventListener('error', function (e) {
       try {
         var data = JSON.parse(e.data);
-        addActivity('error', t('debug.activityError'), timeNow(), 'failure', data.message || null, { labelKey: 'debug.activityError' });
+        // SSE `error` carries only the sanitized message — the raw
+        // low-level detail (Monty/Python traceback, upstream HTTP body)
+        // stays server-side and is emitted at `debug!` level so it
+        // doesn't cross the SSE boundary to any authenticated consumer.
+        // Operators who need it flip `RUST_LOG=ironclaw::bridge::router=debug`
+        // or consult `/api/logs/events`.
+        var body = data.message || '';
+        addActivity('error', t('debug.activityError'), timeNow(), 'failure', body || null, { labelKey: 'debug.activityError' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
