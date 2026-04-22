@@ -9,6 +9,12 @@ const socketPath = process.env.MCP_SOCKET_PATH || "/var/run/t3n-mcp/t3n-mcp.sock
 const projectDir = process.env.T3N_PROJECT_DIR || "/app";
 const builtEntrypoint = path.join(projectDir, "dist/esm/index.js");
 
+try {
+  const mcp = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
+  const sdk = JSON.parse(fs.readFileSync("/app/node_modules/@terminal3/t3n-sdk/package.json", "utf8"));
+  process.stderr.write(`[t3n-mcp-bridge] versions t3n-mcp=${mcp.version} t3n-sdk=${sdk.version}\n`);
+} catch { /* non-fatal */ }
+
 function log(message, extra = undefined) {
   if (extra === undefined) {
     process.stderr.write(`[t3n-mcp-bridge] ${message}\n`);

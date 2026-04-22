@@ -12,15 +12,24 @@ RUN apk add --no-cache dumb-init
 # GITHUB_TOKEN is provided via a Docker build secret so it never appears in any
 # image layer.  In CI this is the auto-provided Actions token (no manual setup).
 # For local rebuilds: DOCKER_BUILDKIT=1 docker build --secret id=github_token,env=GITHUB_TOKEN ...
-RUN --mount=type=secret,id=github_token \
-    GITHUB_TOKEN=$(cat /run/secrets/github_token) && \
-    test -n "$GITHUB_TOKEN" || { echo "ERROR: github_token build secret is required (read:packages on Terminal-3/trinity)."; exit 1; } && \
+RUN --mount=type=secret,id=npm_github_token \
+    GITHUB_TOKEN=$(cat /run/secrets/npm_github_token) && \
+    test -n "$GITHUB_TOKEN" || { echo "ERROR: npm_github_token build secret is required (read:packages on Terminal-3/trinity)."; exit 1; } && \
     printf "@terminal-3:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\n" "${GITHUB_TOKEN}" > /root/.npmrc
 
 # Install t3n-mcp directly from the GitHub npm registry.
 # The published package ships a pre-built dist/ (ESM output + shared binaries)
 # so no compile step is needed — npm install is all that's required.
 RUN npm install @terminal-3/t3n-mcp && rm -f /root/.npmrc
+
+# Bake package versions into image labels so `docker inspect` and logs show exactly
+# what was installed — catches SDK/package mismatches without shelling into containers.
+RUN T3N_MCP_VER=$(node -e "process.stdout.write(require('/app/node_modules/@terminal-3/t3n-mcp/package.json').version)") && \
+    T3N_SDK_VER=$(node -e "process.stdout.write(require('/app/node_modules/@terminal3/t3n-sdk/package.json').version)") && \
+    echo "VERSIONS t3n-mcp=${T3N_MCP_VER} t3n-sdk=${T3N_SDK_VER}" && \
+    printf 'T3N_MCP_VERSION=%s\nT3N_SDK_VERSION=%s\n' "${T3N_MCP_VER}" "${T3N_SDK_VER}" > /app/.versions
+
+LABEL org.opencontainers.image.title="t3n-mcp-sidecar"
 
 COPY docker/t3n-mcp-bridge.mjs /bridge/t3n-mcp-bridge.mjs
 

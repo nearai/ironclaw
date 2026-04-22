@@ -114,7 +114,12 @@ RUN set -eux; \
 # Stage 5a: Shared runtime base
 FROM debian:bookworm-slim AS runtime-base
 
-RUN apt-get update \
+# Bootstrap CA bundle from the builder (rust:bookworm) so apt can verify HTTPS.
+# Needed because Fastly blocks plain HTTP to deb.debian.org from some networks.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+RUN sed -i 's|URIs: http://|URIs: https://|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

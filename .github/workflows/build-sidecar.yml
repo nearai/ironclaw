@@ -57,6 +57,6 @@ jobs:
           # baked into an image layer.  It has read:packages on the org, which
           # is all that npm install @terminal-3/t3n-mcp requires.
           secrets: |
-            github_token=${{ secrets.NPM_GITHUB_TOKEN }}
+            npm_github_token=${{ secrets.NPM_GITHUB_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
