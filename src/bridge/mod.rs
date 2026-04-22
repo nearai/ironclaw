@@ -5,7 +5,6 @@
 //! existing behavior is unchanged when the flag is off.
 
 mod action_projector;
-pub mod auth_manager;
 mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;

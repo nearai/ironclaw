@@ -26,9 +26,6 @@ pub(crate) struct SurfacePolicyInput {
     pub(crate) kind: SurfaceSubjectKind,
     pub(crate) status: CapabilityStatus,
     pub(crate) invocation_mode: InvocationMode,
-    /// Direct actions may require approval at execution time, but that does
-    /// not remove them from `available_actions`.
-    pub(crate) approval_gated: bool,
     /// Engine-native direct actions also need a current callable lease before
     /// they belong in `available_actions`.
     pub(crate) leased_and_callable: bool,
@@ -65,6 +62,10 @@ impl SurfaceAssignment {
 }
 
 pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
+    if matches!(subject.status, CapabilityStatus::Error) {
+        return SurfaceAssignment::neither();
+    }
+
     if matches!(subject.invocation_mode, InvocationMode::RoutedOnly) {
         return SurfaceAssignment::capabilities_only();
     }
@@ -75,7 +76,6 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
         | SurfaceSubjectKind::Channel => SurfaceAssignment::capabilities_only(),
         SurfaceSubjectKind::BuiltinDirectTool | SurfaceSubjectKind::ExtensionDirectAction => {
             if is_direct_ready(subject.status) {
-                let _approval_gated = subject.approval_gated;
                 SurfaceAssignment::actions_only()
             } else {
                 fallback_assignment(subject.status)
@@ -83,7 +83,6 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
         }
         SurfaceSubjectKind::EngineNativeDirectAction => {
             if is_direct_ready(subject.status) && subject.leased_and_callable {
-                let _approval_gated = subject.approval_gated;
                 SurfaceAssignment::actions_only()
             } else if is_direct_ready(subject.status) {
                 SurfaceAssignment::capabilities_only()
@@ -100,13 +99,16 @@ const fn is_direct_ready(status: CapabilityStatus) -> bool {
 
 const fn fallback_assignment(status: CapabilityStatus) -> SurfaceAssignment {
     match status {
+        // ReadyScoped subjects are not directly callable but should remain
+        // visible in the capabilities surface so scoped functionality is
+        // discoverable in background context.
         CapabilityStatus::NeedsAuth
         | CapabilityStatus::NeedsSetup
         | CapabilityStatus::Inactive
         | CapabilityStatus::Latent
-        | CapabilityStatus::Error
-        | CapabilityStatus::AvailableNotInstalled => SurfaceAssignment::capabilities_only(),
-        CapabilityStatus::Ready | CapabilityStatus::ReadyScoped => SurfaceAssignment::neither(),
+        | CapabilityStatus::AvailableNotInstalled
+        | CapabilityStatus::ReadyScoped => SurfaceAssignment::capabilities_only(),
+        CapabilityStatus::Ready | CapabilityStatus::Error => SurfaceAssignment::neither(),
     }
 }
 
@@ -132,18 +134,6 @@ mod tests {
                     kind: SurfaceSubjectKind::BuiltinDirectTool,
                     status: CapabilityStatus::Ready,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
-                    leased_and_callable: false,
-                },
-                expected: SurfaceAssignment::actions_only(),
-            },
-            Case {
-                name: "approval-gated direct tool",
-                subject: SurfacePolicyInput {
-                    kind: SurfaceSubjectKind::BuiltinDirectTool,
-                    status: CapabilityStatus::Ready,
-                    invocation_mode: InvocationMode::Direct,
-                    approval_gated: true,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::actions_only(),
@@ -154,7 +144,6 @@ mod tests {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::Ready,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::actions_only(),
@@ -165,7 +154,6 @@ mod tests {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::NeedsAuth,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -176,7 +164,6 @@ mod tests {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::NeedsSetup,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -187,7 +174,6 @@ mod tests {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::Inactive,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -198,18 +184,6 @@ mod tests {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::Error,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
-                    leased_and_callable: false,
-                },
-                expected: SurfaceAssignment::capabilities_only(),
-            },
-            Case {
-                name: "ready-scoped extension direct action is not callable",
-                subject: SurfacePolicyInput {
-                    kind: SurfaceSubjectKind::ExtensionDirectAction,
-                    status: CapabilityStatus::ReadyScoped,
-                    invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::neither(),
@@ -220,7 +194,6 @@ mod tests {
                     kind: SurfaceSubjectKind::LatentProviderAction,
                     status: CapabilityStatus::Latent,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -231,7 +204,6 @@ mod tests {
                     kind: SurfaceSubjectKind::AvailableNotInstalledProviderEntry,
                     status: CapabilityStatus::AvailableNotInstalled,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -242,7 +214,16 @@ mod tests {
                     kind: SurfaceSubjectKind::Channel,
                     status: CapabilityStatus::ReadyScoped,
                     invocation_mode: InvocationMode::RoutedOnly,
-                    approval_gated: false,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::capabilities_only(),
+            },
+            Case {
+                name: "ready-scoped extension direct action is not callable but visible in capabilities",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::ReadyScoped,
+                    invocation_mode: InvocationMode::Direct,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
@@ -253,7 +234,6 @@ mod tests {
                     kind: SurfaceSubjectKind::EngineNativeDirectAction,
                     status: CapabilityStatus::Ready,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: true,
                 },
                 expected: SurfaceAssignment::actions_only(),
@@ -264,29 +244,24 @@ mod tests {
                     kind: SurfaceSubjectKind::EngineNativeDirectAction,
                     status: CapabilityStatus::Ready,
                     invocation_mode: InvocationMode::Direct,
-                    approval_gated: false,
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
+            },
+            Case {
+                name: "error channel stays off all surfaces",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::Channel,
+                    status: CapabilityStatus::Error,
+                    invocation_mode: InvocationMode::RoutedOnly,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::neither(),
             },
         ];
 
         for case in cases {
             assert_eq!(assign_surface(case.subject), case.expected, "{}", case.name);
         }
-    }
-
-    #[test]
-    fn approval_gated_direct_actions_still_land_in_available_actions() {
-        let assignment = assign_surface(SurfacePolicyInput {
-            kind: SurfaceSubjectKind::ExtensionDirectAction,
-            status: CapabilityStatus::Ready,
-            invocation_mode: InvocationMode::Direct,
-            approval_gated: true,
-            leased_and_callable: false,
-        });
-
-        assert!(assignment.available_actions);
-        assert!(!assignment.available_capabilities);
     }
 }

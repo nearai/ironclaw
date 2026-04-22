@@ -8,7 +8,7 @@ use ironclaw_engine::{
     ThreadExecutionContext,
 };
 
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::capability_projector::{
     capability_status_for_extension, capability_surface_subject_for_extension,
 };
@@ -101,7 +101,6 @@ impl ActionProjector {
                         kind,
                         status,
                         invocation_mode,
-                        approval_gated: false,
                         leased_and_callable: false,
                     });
                     if !assignment.available_actions {
@@ -141,7 +140,6 @@ impl ActionProjector {
                         kind: SurfaceSubjectKind::EngineNativeDirectAction,
                         status: CapabilityStatus::Ready,
                         invocation_mode: InvocationMode::Direct,
-                        approval_gated: action.requires_approval,
                         leased_and_callable: true,
                     });
                     if !assignment.available_actions || !seen.insert(action.name.clone()) {

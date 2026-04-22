@@ -139,7 +139,7 @@ pub struct ActionDef {
 ///
 /// This is a normalized projection over host runtime truth. It is not itself
 /// a source of truth for auth, activation, or installation state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityStatus {
     /// Capability is directly usable now.

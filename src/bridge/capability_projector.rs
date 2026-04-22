@@ -5,7 +5,7 @@ use ironclaw_engine::{
     ThreadExecutionContext,
 };
 
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::tool_surface::{
     InvocationMode, SurfacePolicyInput, SurfaceSubjectKind, assign_surface,
 };
@@ -106,7 +106,7 @@ impl CapabilityProjector {
                 kind: SurfaceSubjectKind::LatentProviderAction,
                 status: CapabilityStatus::Latent,
                 invocation_mode: InvocationMode::Direct,
-                approval_gated: false,
+
                 leased_and_callable: false,
             });
             if !assignment.available_capabilities {
@@ -189,7 +189,6 @@ fn summarize_extension(
         kind: subject_kind,
         status,
         invocation_mode,
-        approval_gated: false,
         leased_and_callable: false,
     });
     if !assignment.available_capabilities {
@@ -404,7 +403,9 @@ mod tests {
             by_name["linear"].status,
             CapabilityStatus::AvailableNotInstalled
         );
-        assert_eq!(by_name["broken"].status, CapabilityStatus::Error);
+        // "broken" has Error status which is excluded from all surfaces
+        // (early return in assign_surface), so it should not appear.
+        assert!(!by_name.contains_key("broken"));
         assert_eq!(by_name["discord"].status, CapabilityStatus::Inactive);
         assert_eq!(by_name["discord"].routing_hint, None);
     }
