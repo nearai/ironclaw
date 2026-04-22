@@ -44,6 +44,14 @@ For common file, HTTP, and shell tasks, prefer these Pythonic shims first:
 
 These are thin facades over the normal host tools (`read_file`, `write_file`, `list_dir`, `glob`, `http`, `shell`). They keep the same approval/policy behavior while giving you a smaller, more Pythonic interface.
 
+They are still async tool calls, so await them just like the canonical tools:
+
+```repl
+cfg = await read_json("package.json")
+cfg["scripts"]["lint"] = "eslint ."
+await write_json("package.json", cfg)
+```
+
 Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), non-GET HTTP methods, or tool-specific parameters.
 
 ## Special functions

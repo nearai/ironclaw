@@ -363,6 +363,29 @@ mod tests {
         )
     }
 
+    fn setup_tsconfig_edit() -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join("tsconfig_edit");
+        reset_dir(&dir);
+        let file = dir.join("tsconfig.json");
+        let config = serde_json::json!({
+            "compilerOptions": {
+                "target": "ES2022",
+                "module": "ESNext",
+                "strict": false
+            },
+            "include": ["src"]
+        });
+        fs::write(
+            &file,
+            serde_json::to_string_pretty(&config).expect("serialize tsconfig seed"),
+        )
+        .expect("failed to seed tsconfig.json");
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            file.display().to_string(),
+        )
+    }
+
     fn assert_package_json_scripts(path: &str, expected_keys: &[&str]) {
         let content = fs::read_to_string(path).expect("package.json should exist after edit");
         let value: serde_json::Value =
@@ -384,6 +407,44 @@ mod tests {
             Some("vitest"),
             "expected existing test script to be preserved"
         );
+    }
+
+    fn assert_tsconfig_flags(path: &str) {
+        let content = fs::read_to_string(path).expect("tsconfig.json should exist after edit");
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("tsconfig.json should contain valid JSON");
+        let compiler_options = value
+            .get("compilerOptions")
+            .and_then(|v| v.as_object())
+            .expect("tsconfig.json should contain compilerOptions");
+        assert_eq!(
+            compiler_options.get("strict").and_then(|v| v.as_bool()),
+            Some(true),
+            "expected strict to be true"
+        );
+        assert_eq!(
+            compiler_options
+                .get("noUncheckedIndexedAccess")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "expected noUncheckedIndexedAccess to be true"
+        );
+        assert_eq!(
+            compiler_options.get("target").and_then(|v| v.as_str()),
+            Some("ES2022"),
+            "expected target to be preserved"
+        );
+        assert_eq!(
+            compiler_options.get("module").and_then(|v| v.as_str()),
+            Some("ESNext"),
+            "expected module to be preserved"
+        );
+        let include = value
+            .get("include")
+            .and_then(|v| v.as_array())
+            .expect("expected include array to be preserved");
+        assert_eq!(include.len(), 1, "expected include array length to remain 1");
+        assert_eq!(include[0].as_str(), Some("src"));
     }
 
     fn read_json_prompt(path: &str, variant: Variant) -> String {
@@ -426,6 +487,17 @@ mod tests {
             ),
             Variant::Shim => format!(
                 "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real package.json. Add a new script entry `lint: eslint .` under `scripts`, preserve the existing `test: vitest` script, write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `scripts=lint,test`. IMPORTANT: this is the SHIM variant, so prefer read_json(path) and write_json(path, value). In CodeAct these helpers are async, so use `await read_json(...)` and `await write_json(...)`. After writing, re-read the actual file and derive the final `scripts=...` string by sorting the script keys alphabetically."
+            ),
+        }
+    }
+
+    fn tsconfig_edit_prompt(path: &str, variant: Variant) -> String {
+        match variant {
+            Variant::Raw => format!(
+                "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real tsconfig.json. Inside `compilerOptions`, set `strict` to true and add `noUncheckedIndexedAccess: true`, while preserving the existing `target`, `module`, and `include` entries. Write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `flags=noUncheckedIndexedAccess:true,strict:true`. IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, read_text, or write_text. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {{...}}`; strip everything through the `│` separator before JSON parsing. After writing, derive the final flags string from the actual saved file."
+            ),
+            Variant::Shim => format!(
+                "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real tsconfig.json. Inside `compilerOptions`, set `strict` to true and add `noUncheckedIndexedAccess: true`, while preserving the existing `target`, `module`, and `include` entries. Write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `flags=noUncheckedIndexedAccess:true,strict:true`. IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)`. After writing, re-read the actual file and derive the final flags string from the saved file."
             ),
         }
     }
@@ -644,6 +716,73 @@ mod tests {
             shim.tool_calls_started
         );
         assert_package_json_scripts(&path, &["lint", "test"]);
+
+        print_pair_report(&raw, &shim);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_tsconfig_edit_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("tsconfig_edit") {
+            return;
+        }
+
+        let (_cleanup, path) = setup_tsconfig_edit();
+        let raw = run_variant(
+            "tsconfig_edit",
+            Variant::Raw,
+            tsconfig_edit_prompt(&path, Variant::Raw),
+        )
+        .await;
+        assert_exact_suffix(
+            &raw.response,
+            "flags=",
+            "noUncheckedIndexedAccess:true,strict:true",
+        );
+        assert!(
+            raw.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("read_file")),
+            "raw tsconfig variant should use read_file, got {:?}",
+            raw.tool_calls_started
+        );
+        assert!(
+            raw.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("write_file")),
+            "raw tsconfig variant should use write_file, got {:?}",
+            raw.tool_calls_started
+        );
+        assert_tsconfig_flags(&path);
+
+        let (_cleanup, path) = setup_tsconfig_edit();
+        let shim = run_variant(
+            "tsconfig_edit",
+            Variant::Shim,
+            tsconfig_edit_prompt(&path, Variant::Shim),
+        )
+        .await;
+        assert_exact_suffix(
+            &shim.response,
+            "flags=",
+            "noUncheckedIndexedAccess:true,strict:true",
+        );
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("read_file")),
+            "shim tsconfig variant should still hit canonical read_file, got {:?}",
+            shim.tool_calls_started
+        );
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .any(|name| name.starts_with("write_file")),
+            "shim tsconfig variant should still hit canonical write_file, got {:?}",
+            shim.tool_calls_started
+        );
+        assert_tsconfig_flags(&path);
 
         print_pair_report(&raw, &shim);
     }
