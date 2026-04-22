@@ -13,7 +13,9 @@ use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
 use crate::db::UserStore;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 use ironclaw_safety::LeakDetector;
 
@@ -1094,6 +1096,27 @@ impl Tool for HttpTool {
 
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(30, 500))
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(ToolDiscoverySummary {
+            notes: vec![
+                "Use for raw JSON/HTTP APIs — returns status, headers, parsed JSON body when applicable".into(),
+                "For HTML pages you want to read as text, prefer web_fetch (handles Readability extraction)".into(),
+                "Outbound requests go through the network proxy; targets must be permitted by policy".into(),
+                "Pass headers as a JSON object; use the 'json' field for request bodies to set Content-Type automatically".into(),
+            ],
+            examples: vec![
+                serde_json::json!({"method": "GET", "url": "https://api.example.com/v1/status"}),
+                serde_json::json!({
+                    "method": "POST",
+                    "url": "https://api.example.com/v1/items",
+                    "json": {"name": "example"},
+                    "headers": {"Authorization": "Bearer ..."}
+                }),
+            ],
+            ..Default::default()
+        })
     }
 }
 

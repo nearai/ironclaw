@@ -44,6 +44,22 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 - `mission_fire(id)` — Manually trigger a mission to spawn a thread now.
 - `mission_pause(id)` / `mission_resume(id)` — Pause or resume a mission.
 
+## Tool discovery
+
+When a tool's schema description appends a hint like `Call tool_info(name: "X", detail: "summary") for usage examples, gotchas, and required-field rules`, treat that as a signal that the tool has curated guidance — read it before the first call, especially for `read_file`, `write_file`, `apply_patch`, `shell`, and `http`.
+
+```repl
+info = await tool_info(name="apply_patch", detail="summary")
+print(info)
+```
+
+`detail` accepts:
+- `"summary"` — curated notes, examples, required-field rules (preferred — concise, ready to paste).
+- `"schema"` — full JSON schema (only when you need exact parameter types).
+- `"names"` — every registered tool name (use sparingly; prefer recalling the few core tools you need).
+
+Don't blast `tool_info(detail="schema")` for every tool up front — fetch the summary on demand for the one you're about to call. If the summary already answered your question, don't follow up with the schema.
+
 ## Context variables
 
 - `context` — List of prior conversation messages (each is a dict with 'role' and 'content')

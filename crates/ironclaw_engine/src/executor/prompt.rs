@@ -256,6 +256,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_includes_tool_discovery_section() {
+        let prompt =
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+        assert!(
+            prompt.contains("## Tool discovery"),
+            "compiled preamble must teach the agent about tool_info; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("tool_info(name=\"apply_patch\", detail=\"summary\")"),
+            "preamble must show a concrete tool_info call example"
+        );
+        assert!(
+            prompt.contains("`\"summary\"`") && prompt.contains("`\"schema\"`"),
+            "preamble must document the summary and schema detail levels"
+        );
+    }
+
+    #[tokio::test]
     async fn prompt_with_overlay_appends_rules() {
         let project_id = ProjectId(uuid::Uuid::new_v4());
         let overlay = MemoryDoc {

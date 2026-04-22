@@ -306,6 +306,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_info_summary_curated_for_core_tools() {
+        use crate::tools::builtin::file::{ApplyPatchTool, ReadFileTool, WriteFileTool};
+        use crate::tools::builtin::http::HttpTool;
+        use crate::tools::builtin::shell::ShellTool;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(ReadFileTool::new())).await;
+        registry.register(Arc::new(WriteFileTool::new())).await;
+        registry.register(Arc::new(ApplyPatchTool::new())).await;
+        registry.register(Arc::new(ShellTool::new())).await;
+        registry.register(Arc::new(HttpTool::new())).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+
+        let expectations: &[(&str, &[&str], usize)] = &[
+            (
+                "read_file",
+                &[
+                    "memory_read",
+                    "offset+limit",
+                    "read_file before apply_patch",
+                ],
+                2,
+            ),
+            (
+                "write_file",
+                &["apply_patch for targeted edits", "memory_write"],
+                1,
+            ),
+            (
+                "apply_patch",
+                &["read_file first", "old_string must match"],
+                2,
+            ),
+            (
+                "shell",
+                &[
+                    "Prefer dedicated tools",
+                    "no equivalent dedicated tool",
+                    "sandbox",
+                ],
+                2,
+            ),
+            ("http", &["web_fetch", "network proxy", "Content-Type"], 2),
+        ];
+
+        for (name, required_substrings, min_examples) in expectations {
+            let result = tool
+                .execute(serde_json::json!({"name": name, "detail": "summary"}), &ctx)
+                .await
+                .unwrap_or_else(|err| panic!("tool_info failed for {name}: {err:?}"));
+            let info = &result.result;
+            let summary = info["summary"]
+                .as_object()
+                .unwrap_or_else(|| panic!("expected object summary for {name}: {info:?}"));
+            let notes = summary
+                .get("notes")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{name} summary missing notes array: {summary:?}"));
+            let joined = notes
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for needle in *required_substrings {
+                assert!(
+                    joined.contains(needle),
+                    "{name} notes must mention `{needle}`; got:\n{joined}"
+                );
+            }
+            let examples = summary
+                .get("examples")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{name} summary missing examples array: {summary:?}"));
+            assert!(
+                examples.len() >= *min_examples,
+                "{name} summary should include at least {} example(s); got {}",
+                min_examples,
+                examples.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_core_tool_schema_description_mentions_tool_info() {
+        use crate::tools::builtin::file::{ApplyPatchTool, ReadFileTool, WriteFileTool};
+        use crate::tools::builtin::http::HttpTool;
+        use crate::tools::builtin::shell::ShellTool;
+
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ReadFileTool::new()),
+            Arc::new(WriteFileTool::new()),
+            Arc::new(ApplyPatchTool::new()),
+            Arc::new(ShellTool::new()),
+            Arc::new(HttpTool::new()),
+        ];
+
+        for tool in tools {
+            let schema = tool.schema();
+            let name = tool.name();
+            let description = &schema.description;
+            let expected_fragment = format!("tool_info(name: \"{name}\", detail: \"summary\")");
+            assert!(
+                description.contains(&expected_fragment),
+                "{name} schema description should append `{expected_fragment}`; got:\n{description}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discovery_budget_lazy_summary_beats_inline_schemas() {
+        use crate::tools::builtin::file::{ApplyPatchTool, ReadFileTool, WriteFileTool};
+        use crate::tools::builtin::http::HttpTool;
+        use crate::tools::builtin::shell::ShellTool;
+
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ReadFileTool::new()),
+            Arc::new(WriteFileTool::new()),
+            Arc::new(ApplyPatchTool::new()),
+            Arc::new(ShellTool::new()),
+            Arc::new(HttpTool::new()),
+        ];
+
+        let inline_schema_chars: usize = tools
+            .iter()
+            .map(|t| {
+                let s = t.schema();
+                s.name.len() + s.description.len() + s.parameters.to_string().len()
+            })
+            .sum();
+
+        let lazy_listing_chars: usize = tools
+            .iter()
+            .map(|t| {
+                let s = t.schema();
+                s.name.len() + s.description.len()
+            })
+            .sum();
+
+        // The lazy listing (just name + description, with the tool_info hint
+        // appended) should fit in well under two-thirds of the inline-schema
+        // budget. This codifies the prompt-budget claim of the discovery design
+        // and will fire if a future change inlines a giant schema by accident
+        // or drops the discovery hint without compensating elsewhere.
+        assert!(
+            lazy_listing_chars * 5 < inline_schema_chars * 3,
+            "lazy listing ({lazy_listing_chars} chars) should be < 60% of inline schemas ({inline_schema_chars} chars); \
+             discovery summaries are not pulling their weight"
+        );
+
+        eprintln!(
+            "discovery budget: lazy={lazy_listing_chars}ch vs inline={inline_schema_chars}ch \
+             (savings: {}ch, {}%)",
+            inline_schema_chars - lazy_listing_chars,
+            (inline_schema_chars - lazy_listing_chars) * 100 / inline_schema_chars
+        );
+    }
+
+    #[tokio::test]
     async fn test_tool_info_rejects_v1_only_in_v2_registry() {
         use crate::tools::tool::{EngineCompatibility, EngineVersion};
 
