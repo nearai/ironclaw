@@ -53,10 +53,11 @@ assert_flagged() {
 }
 
 # ── PROJECTION ────────────────────────────────────────────────
-# Positive: direct sse.broadcast / .broadcast_for_user calls.
+# Positive: any `.broadcast_for_user(` (SseManager-unique method) or
+#           `sse.broadcast(` with a portable word boundary.
 # Exclusions: `// projection-exempt: <category>, <detail>`, `// safety:`,
 #             and diff-header lines (`+++ b/path`) via `:\+\+\+ `.
-PROJ_POS='(\bsse\.(broadcast|broadcast_for_user)|^[^:]*:\+[[:space:]]*\.broadcast_for_user)\('
+PROJ_POS='(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\('
 PROJ_NEG='// projection-exempt: [^,]+,|// safety:|:\+\+\+ '
 
 # Diff header lines must be filtered.
@@ -71,9 +72,35 @@ assert_flagged "PROJECTION: bare sse.broadcast_for_user is flagged" \
     "$PROJ_POS" \
     "$PROJ_NEG"
 
+# Chained receiver (state.sse.broadcast_for_user) is flagged.
+assert_flagged "PROJECTION: chained state.sse.broadcast_for_user is flagged" \
+    "+    state.sse.broadcast_for_user(&user, event);" \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
 # A rustfmt-wrapped call is flagged.
 assert_flagged "PROJECTION: rustfmt-wrapped .broadcast_for_user is flagged" \
     "+    .broadcast_for_user(&user, event);" \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
+# Non-`sse` receiver must still fire — `broadcast_for_user` is unique to
+# SseManager, so the method name alone is authoritative.
+assert_flagged "PROJECTION: non-sse receiver .broadcast_for_user is flagged" \
+    "+    manager.broadcast_for_user(&user, event);" \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
+# Plain sse.broadcast call is flagged via the portable word boundary.
+assert_flagged "PROJECTION: bare sse.broadcast is flagged" \
+    "+    sse.broadcast(event);" \
+    "$PROJ_POS" \
+    "$PROJ_NEG"
+
+# The portable boundary must not fire on a longer identifier that ends
+# in 'sse' (e.g. `usse.broadcast(...)` — not a real SseManager).
+assert_filtered "PROJECTION: identifier ending in sse is not flagged" \
+    "+    usse.broadcast(event);" \
     "$PROJ_POS" \
     "$PROJ_NEG"
 

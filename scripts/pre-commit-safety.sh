@@ -398,14 +398,20 @@ fi
 #    `// projection-exempt: legacy` does not suppress the check.
 #
 #    Two match patterns:
-#    1. `sse.broadcast[_for_user](...)` — same-line receiver + method.
-#    2. `.broadcast_for_user(...)` at start of line — rustfmt wraps long
-#       calls like `state\n    .sse\n    .broadcast_for_user(...)`.
-#       Only `broadcast_for_user` is SseManager-unique; the single-name
-#       `.broadcast(` on its own line can be the `Channel` trait method,
-#       which is intentionally out of scope.
+#    1. `*.broadcast_for_user(...)` on any receiver — `broadcast_for_user`
+#       is unique to `SseManager` (see `src/channels/web/platform/sse.rs`),
+#       so matching the method name alone catches both same-line
+#       receivers (`state.sse.broadcast_for_user(...)`) and rustfmt
+#       wraps (`state\n    .sse\n    .broadcast_for_user(...)`) without
+#       risk of false positives from other types.
+#    2. `<word-boundary>sse.broadcast(...)` — the single-name `.broadcast(`
+#       on its own line can be the `Channel` trait method, so this arm
+#       is deliberately narrower and anchors on an `sse` receiver.
+#       `(^|[^[:alnum:]_])sse\.` is a portable boundary; `grep -E`'s
+#       `\b` is a GNU extension and is not recognised by BSD grep, so
+#       we avoid it here.
 PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
-    | grep -E '(\bsse\.(broadcast|broadcast_for_user)|^[^:]*:\+[[:space:]]*\.broadcast_for_user)\(' \
+    | grep -E '(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\(' \
     | grep -vE '// projection-exempt: [^,]+,|// safety:|:\+\+\+ ' \
     | head -5 || true)
 if [ -n "$PROJECTION_HITS" ]; then
