@@ -222,15 +222,15 @@ Learning is driven by trace analysis plus learning missions (`self-improvement`,
 
 Compaction is orchestrator-owned, in Python. See `crates/ironclaw_engine/orchestrator/default.py:240-310`:
 
-- Triggers when token count exceeds 85% of the model limit
+- Triggers when token count exceeds the configured `compaction_threshold` of the model limit (defaults to 85%)
 - Calls `__llm_complete__()` to produce a summary
 - Replaces working messages with `[system message, summary, continuation prompt]`
 - Stores a snapshot in state history for audit
 - Full prior trajectory stays searchable via workspace-backed retrieval; raw history is not replayed into the attention window
 
-Rust side provides token estimation, retrieval helpers, and final transcript commit points; the orchestrator owns the mutable working transcript it sends to the LLM.
+Rust side provides retrieval helpers and final transcript commit points; the orchestrator owns the mutable working transcript it sends to the LLM and performs token estimation via a heuristic.
 
-Note: the crate-structure block above mentions `executor/compaction.rs` — that file was never created. Compaction lives entirely in Python; the Rust side only exposes the primitives the Python orchestrator calls.
+Note: Compaction lives entirely in Python; the Rust side only exposes the primitives the Python orchestrator calls.
 
 ### 4.4 `rlm_query()` — full recursive sub-agent
 Unlike `llm_query()` (single-shot text completion), `rlm_query(prompt)` spawns a **child thread with its own CodeAct executor**:
@@ -274,7 +274,7 @@ pub struct Mission {
 
 ### 4.9 Tool reliability learning
 
-`ReliabilityTracker` (`crates/ironclaw_engine/src/reliability.rs`) records EMA-smoothed success rate and latency per action. Tracked in issue #2800 (PR-B): writes from `EffectBridgeAdapter` after every dispatch, reads from `build_step_context` to append a "recently unreliable actions" section to the system prompt when `call_count ≥ 10` and `success_rate < 0.7` (cap 5 entries, kill switch `ENGINE_V2_RELIABILITY_HINTS`).
+`ReliabilityTracker` (`crates/ironclaw_engine/src/reliability.rs`) records EMA-smoothed success rate and latency per action. Proposed follow-up work tracked in issue #2800 (PR-B): wire `EffectBridgeAdapter` to record outcomes after dispatch, have `build_step_context` optionally surface a "recently unreliable actions" prompt section, and finalize any thresholds, entry caps, and feature-flag/kill-switch behavior (including a possible `ENGINE_V2_RELIABILITY_HINTS` control) once implemented.
 
 ### 4.10 Tests
 - Learning missions produce the correct knowledge artifacts from completed threads
@@ -394,7 +394,7 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 
 #### Routines / Jobs — PARTIAL
 - `routine_create` / `routine_update` / `routine_list` / etc. are translated to mission_* dispatches via `routine_to_mission_alias()` in `src/bridge/effect_adapter.rs` before the v1-denylist check fires. The LLM-facing routine tools go through the mission manager in v2, not the v1 routine engine.
-- Tracked in issue #2800 (PR-C): extend the alias to cover `create_job` / `cancel_job` as well. Only `build_software` remains hard-denylisted as v1-specific infra.
+- Tracked in issue #2800 (PR-C): extend the alias to cover `create_job` / `cancel_job` as well, after which only `build_software` will remain hard-denylisted as v1-specific infra.
 - Routines still work via `/routine` slash commands (fall through to v1 when user is on v1 engine).
 - Remaining work is `create_job` aliasing plus UX communication; greenfield Mission APIs are done.
 
@@ -422,7 +422,7 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 
 For `WriteExternal` + `Financial` effects, the unified gate mechanism satisfies the approval invariant:
 
-- `PolicyEngine::evaluate_with_provenance` injects `RequireApproval` for `WriteExternal` and `Financial` effects when triggered by `LlmGenerated` or `ToolOutput` provenance (`crates/ironclaw_engine/src/capability/policy.rs:126-169`).
+- `PolicyEngine::evaluate_with_provenance` injects `RequireApproval` for `Financial` effects (via `LlmGenerated` or `ToolOutput` provenance) and `WriteExternal` effects (via `LlmGenerated` provenance) (`crates/ironclaw_engine/src/capability/policy.rs:126-169`).
 - The Tier 0 executor halts the batch on `RequireApproval` and emits `ThreadOutcome::GatePaused` (`crates/ironclaw_engine/src/executor/structured.rs:139-171`).
 - Resume flows through `POST /api/chat/gate/resolve` — same path as auth gates.
 
@@ -434,7 +434,7 @@ A separate "simulate → preview → approve → execute" flow is intentionally 
 
 ### 7a. Engine-side cleanup — DONE
 
-The `ironclaw_engine` crate contains zero references to `JobState`, `Session`, `Routine`, or v1 delegate types. The engine was built clean from day one on the five primitives (Thread, Step, Capability, MemoryDoc, Project). No migration work is needed inside the crate.
+The `ironclaw_engine` crate has no runtime dependency on `JobState`, `Session`, `Routine`, or v1 delegate types; any remaining mentions are limited to documentation/comments. The engine was built clean from day one on the five primitives (Thread, Step, Capability, MemoryDoc, Project). No migration work is needed inside the crate.
 
 ### 7b. Host-side cleanup — BLOCKED ON DEFAULT FLIP
 
