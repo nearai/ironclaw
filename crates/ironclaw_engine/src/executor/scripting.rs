@@ -1470,15 +1470,36 @@ fn adapt_tool_output(
             "stderr": output.get("stderr").cloned().unwrap_or(serde_json::Value::Null),
             "sandboxed": output.get("sandboxed").cloned().unwrap_or(serde_json::Value::Null),
         })),
-        ToolResultAdapter::ListEntries => Ok(output
-            .get("entries")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))),
+        ToolResultAdapter::ListEntries => Ok(adapt_list_entries_output(output)),
         ToolResultAdapter::FindFiles => Ok(output
             .get("files")
             .cloned()
             .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))),
     }
+}
+
+fn adapt_list_entries_output(output: &serde_json::Value) -> serde_json::Value {
+    let entries = match output.get("entries").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return serde_json::Value::Array(Vec::new()),
+    };
+    let normalized: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| match entry.as_str() {
+            Some(raw) => serde_json::Value::String(normalize_list_entry(raw)),
+            None => entry.clone(),
+        })
+        .collect();
+    serde_json::Value::Array(normalized)
+}
+
+fn normalize_list_entry(raw: &str) -> String {
+    let trimmed = raw.trim_end();
+    let without_size = match trimmed.rfind(" (") {
+        Some(idx) if trimmed.ends_with(')') => &trimmed[..idx],
+        _ => trimmed,
+    };
+    without_size.trim_end_matches('/').to_string()
 }
 
 fn adapt_read_text_output(output: &serde_json::Value) -> serde_json::Value {
@@ -3240,7 +3261,7 @@ FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
     }
 
     #[tokio::test]
-    async fn shim_list_entries_uses_list_dir_and_returns_entries_list() {
+    async fn shim_list_entries_returns_pythonic_names_without_trailing_slash_or_size() {
         let thread = make_test_thread();
         let effects = Arc::new(MockEffects::new(
             vec![test_action("list_dir")],
@@ -3249,8 +3270,8 @@ FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
                 action_name: "list_dir".into(),
                 output: serde_json::json!({
                     "path": "src",
-                    "entries": ["bin/", "main.rs (1.0KB)"],
-                    "count": 2,
+                    "entries": ["bin/", "main.rs (1.0KB)", "nested/sub/", "README.md"],
+                    "count": 4,
                     "truncated": false
                 }),
                 is_error: false,
@@ -3260,12 +3281,16 @@ FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
 
         let code = r#"
 entries = await list_entries("src")
-FINAL(entries[0] + "|" + str(len(entries)))
+FINAL(",".join(entries))
 "#;
 
         let result = run_code(code, effects.clone(), &thread).await.unwrap();
         assert!(result.failure.is_none(), "stdout: {}", result.stdout);
-        assert_eq!(result.final_answer.as_deref(), Some("bin/|2"));
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("bin,main.rs,nested/sub,README.md"),
+            "list_entries should return Pythonic names without trailing slashes or size annotations"
+        );
         assert_eq!(result.action_results.len(), 1);
         assert_eq!(result.action_results[0].action_name, "list_dir");
 

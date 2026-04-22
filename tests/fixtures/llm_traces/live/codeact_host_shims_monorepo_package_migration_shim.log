@@ -1,0 +1,18 @@
+# Live Test Session: codeact_host_shims_monorepo_package_migration_shim
+# Mode: Live
+# LLM calls: 1, Input tokens: 20071, Output tokens: 268
+# Wall time: 10.9s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Under the monorepo root "/tmp/ironclaw_live_codeact_shims/monorepo_package_migration", every package has a sub-directory at `packages/<name>/package.json`. For each package, ensure that the `scripts` object contains an entry `lint: eslint .` (add it if missing, do not overwrite an existing lint entry). Preserve every other existing script and all other top-level fields like `name` and `private`. Write each updated package.json back as pretty JSON. Then re-read every saved package.json to build a summary. For each package, sort its script keys alphabetically and join them with `,`. Join all packages sorted by package name with `;`. Call FINAL exactly with `summary=<summary>` — for example `admin:build,lint;app:lint,test;docs:lint,preview`. IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)` for each package.json, and `await list_entries(path)` to discover package directories. All three helpers are async, so always use `await`. They are thin facades over the canonical host tools and keep the same approval/policy behavior.
+────────────────────────────────────────────────────
+summary=
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 20071 in / 268 out tokens
+  ● list_dir(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ list_dir(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  … Done

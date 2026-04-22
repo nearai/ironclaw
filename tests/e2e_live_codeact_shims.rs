@@ -363,6 +363,175 @@ mod tests {
         )
     }
 
+    fn setup_monorepo_package_migration() -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join("monorepo_package_migration");
+        reset_dir(&dir);
+        let packages = dir.join("packages");
+        fs::create_dir_all(&packages).expect("failed to create packages dir");
+
+        let seed = [
+            ("app", serde_json::json!({"test": "vitest"})),
+            ("admin", serde_json::json!({"build": "tsup"})),
+            ("docs", serde_json::json!({"preview": "vitepress preview"})),
+        ];
+        for (name, scripts) in seed {
+            let pkg_dir = packages.join(name);
+            fs::create_dir_all(&pkg_dir).expect("failed to create package dir");
+            let pkg = serde_json::json!({
+                "name": format!("@demo/{name}"),
+                "private": true,
+                "scripts": scripts,
+            });
+            fs::write(
+                pkg_dir.join("package.json"),
+                serde_json::to_string_pretty(&pkg).expect("serialize monorepo package.json"),
+            )
+            .expect("failed to seed monorepo package.json");
+        }
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    fn assert_monorepo_package_migration(root: &str) {
+        let packages = Path::new(root).join("packages");
+        let expected: &[(&str, &[(&str, &str)])] = &[
+            ("admin", &[("build", "tsup"), ("lint", "eslint .")]),
+            ("app", &[("lint", "eslint ."), ("test", "vitest")]),
+            (
+                "docs",
+                &[("lint", "eslint ."), ("preview", "vitepress preview")],
+            ),
+        ];
+        for (name, wanted) in expected {
+            let path = packages.join(name).join("package.json");
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing package.json for {name}: {e}"));
+            let value: serde_json::Value = serde_json::from_str(&content)
+                .unwrap_or_else(|e| panic!("invalid JSON for {name}: {e}"));
+            let scripts = value
+                .get("scripts")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("package.json for {name} missing scripts object"));
+            let mut actual: Vec<(&str, &str)> = scripts
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("")))
+                .collect();
+            actual.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            assert_eq!(actual, *wanted, "unexpected scripts for {name}");
+            assert_eq!(
+                value.get("name").and_then(|v| v.as_str()),
+                Some(format!("@demo/{name}").as_str()),
+                "expected name to be preserved for {name}",
+            );
+            assert_eq!(
+                value.get("private").and_then(|v| v.as_bool()),
+                Some(true),
+                "expected private flag to be preserved for {name}",
+            );
+        }
+    }
+
+    fn setup_tsconfig_nested_paths() -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join("tsconfig_nested_paths");
+        reset_dir(&dir);
+        let file = dir.join("tsconfig.json");
+        let config = serde_json::json!({
+            "compilerOptions": {
+                "target": "ES2022",
+                "module": "ESNext",
+                "strict": false,
+                "paths": {
+                    "@app/*": ["src/app/*"],
+                    "@lib/*": ["src/lib/*"]
+                }
+            },
+            "include": ["src"],
+            "exclude": ["dist"]
+        });
+        fs::write(
+            &file,
+            serde_json::to_string_pretty(&config).expect("serialize nested tsconfig seed"),
+        )
+        .expect("failed to seed nested tsconfig.json");
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            file.display().to_string(),
+        )
+    }
+
+    fn assert_tsconfig_nested_paths(path: &str) {
+        let content =
+            fs::read_to_string(path).expect("nested tsconfig.json should exist after edit");
+        let value: serde_json::Value =
+            serde_json::from_str(&content).expect("nested tsconfig.json should contain valid JSON");
+        let compiler_options = value
+            .get("compilerOptions")
+            .and_then(|v| v.as_object())
+            .expect("nested tsconfig.json should contain compilerOptions");
+        assert_eq!(
+            compiler_options.get("strict").and_then(|v| v.as_bool()),
+            Some(true),
+            "expected strict to be true",
+        );
+        assert_eq!(
+            compiler_options
+                .get("noUncheckedIndexedAccess")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "expected noUncheckedIndexedAccess to be true",
+        );
+        assert_eq!(
+            compiler_options.get("target").and_then(|v| v.as_str()),
+            Some("ES2022"),
+        );
+        assert_eq!(
+            compiler_options.get("module").and_then(|v| v.as_str()),
+            Some("ESNext"),
+        );
+        let paths = compiler_options
+            .get("paths")
+            .and_then(|v| v.as_object())
+            .expect("compilerOptions.paths object should be preserved");
+        assert_eq!(
+            paths
+                .get("@app/*")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["src/app/*"]),
+        );
+        assert_eq!(
+            paths
+                .get("@lib/*")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["src/lib/*"]),
+        );
+        assert_eq!(
+            paths
+                .get("@ui/*")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["src/ui/*"]),
+            "expected new @ui/* path mapping to be added",
+        );
+        assert_eq!(
+            value
+                .get("include")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first().and_then(|v| v.as_str())),
+            Some("src"),
+        );
+        assert_eq!(
+            value
+                .get("exclude")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first().and_then(|v| v.as_str())),
+            Some("dist"),
+        );
+    }
+
     fn setup_tsconfig_edit() -> (CleanupGuard, String) {
         let dir = Path::new(ROOT).join("tsconfig_edit");
         reset_dir(&dir);
@@ -443,7 +612,11 @@ mod tests {
             .get("include")
             .and_then(|v| v.as_array())
             .expect("expected include array to be preserved");
-        assert_eq!(include.len(), 1, "expected include array length to remain 1");
+        assert_eq!(
+            include.len(),
+            1,
+            "expected include array length to remain 1"
+        );
         assert_eq!(include[0].as_str(), Some("src"));
     }
 
@@ -487,6 +660,34 @@ mod tests {
             ),
             Variant::Shim => format!(
                 "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a real package.json. Add a new script entry `lint: eslint .` under `scripts`, preserve the existing `test: vitest` script, write the updated file back as pretty JSON, then re-read the saved file and call FINAL exactly with `scripts=lint,test`. IMPORTANT: this is the SHIM variant, so prefer read_json(path) and write_json(path, value). In CodeAct these helpers are async, so use `await read_json(...)` and `await write_json(...)`. After writing, re-read the actual file and derive the final `scripts=...` string by sorting the script keys alphabetically."
+            ),
+        }
+    }
+
+    fn monorepo_package_migration_prompt(root: &str, variant: Variant) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Under the monorepo root {root:?}, every package has a sub-directory at `packages/<name>/package.json`. For each package, ensure that the `scripts` object contains an entry `lint: eslint .` (add it if missing, do not overwrite an existing lint entry). Preserve every other existing script and all other top-level fields like `name` and `private`. Write each updated package.json back as pretty JSON. Then re-read every saved package.json to build a summary. For each package, sort its script keys alphabetically and join them with `,`. Join all packages sorted by package name with `;`. Call FINAL exactly with `summary=<summary>` — for example `admin:build,lint;app:lint,test;docs:lint,preview`."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, read_text, write_text, list_entries, or find_files. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {{...}}`; strip everything through the `│` separator before JSON parsing. You can discover package directories with the canonical `list_dir` tool; its output is a dict with an `entries` list where directories end with `/`."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)` for each package.json, and `await list_entries(path)` to discover package directories. All three helpers are async, so always use `await`. They are thin facades over the canonical host tools and keep the same approval/policy behavior."
+            ),
+        }
+    }
+
+    fn tsconfig_nested_paths_prompt(path: &str, variant: Variant) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Edit the repo file {path:?} as if you were updating a realistic nested tsconfig.json. Inside `compilerOptions`, set `strict` to true and add `noUncheckedIndexedAccess: true`. Inside `compilerOptions.paths`, add a new mapping `@ui/*: [\"src/ui/*\"]` while preserving the existing `@app/*` and `@lib/*` mappings. Preserve every other existing field including `target`, `module`, top-level `include`, and top-level `exclude`. Write the updated file back as pretty JSON, then re-read the saved file. Extract the keys of `compilerOptions.paths` sorted alphabetically and call FINAL exactly with `paths=<keys joined by commas>` — for example `paths=@app/*,@lib/*,@ui/*`."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, read_text, or write_text. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {{...}}`; strip everything through the `│` separator before JSON parsing."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)`. Both are async, so always use `await`."
             ),
         }
     }
@@ -783,6 +984,76 @@ mod tests {
             shim.tool_calls_started
         );
         assert_tsconfig_flags(&path);
+
+        print_pair_report(&raw, &shim);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_monorepo_package_migration_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("monorepo_package_migration") {
+            return;
+        }
+
+        let (_cleanup, root) = setup_monorepo_package_migration();
+        let raw = run_variant(
+            "monorepo_package_migration",
+            Variant::Raw,
+            monorepo_package_migration_prompt(&root, Variant::Raw),
+        )
+        .await;
+        assert_exact_suffix(
+            &raw.response,
+            "summary=",
+            "admin:build,lint;app:lint,test;docs:lint,preview",
+        );
+        assert_monorepo_package_migration(&root);
+
+        let (_cleanup, root) = setup_monorepo_package_migration();
+        let shim = run_variant(
+            "monorepo_package_migration",
+            Variant::Shim,
+            monorepo_package_migration_prompt(&root, Variant::Shim),
+        )
+        .await;
+        assert_exact_suffix(
+            &shim.response,
+            "summary=",
+            "admin:build,lint;app:lint,test;docs:lint,preview",
+        );
+        assert_monorepo_package_migration(&root);
+
+        print_pair_report(&raw, &shim);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_tsconfig_nested_paths_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("tsconfig_nested_paths") {
+            return;
+        }
+
+        let (_cleanup, path) = setup_tsconfig_nested_paths();
+        let raw = run_variant(
+            "tsconfig_nested_paths",
+            Variant::Raw,
+            tsconfig_nested_paths_prompt(&path, Variant::Raw),
+        )
+        .await;
+        assert_exact_suffix(&raw.response, "paths=", "@app/*,@lib/*,@ui/*");
+        assert_tsconfig_nested_paths(&path);
+
+        let (_cleanup, path) = setup_tsconfig_nested_paths();
+        let shim = run_variant(
+            "tsconfig_nested_paths",
+            Variant::Shim,
+            tsconfig_nested_paths_prompt(&path, Variant::Shim),
+        )
+        .await;
+        assert_exact_suffix(&shim.response, "paths=", "@app/*,@lib/*,@ui/*");
+        assert_tsconfig_nested_paths(&path);
 
         print_pair_report(&raw, &shim);
     }
