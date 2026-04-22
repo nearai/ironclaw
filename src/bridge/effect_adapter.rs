@@ -1930,17 +1930,21 @@ fn routine_to_mission_alias(
             })
         }
 
-        // `cancel_job { job_id }` → mission_complete { mission_id }. Pass
-        // the id through under the renamed field; if it doesn't resolve as
-        // a mission id, the orchestrator returns a normal not-found error.
+        // `cancel_job { job_id }` → mission_complete { id }. Pass the id
+        // through under `id` because that's the field the mission_complete
+        // handler reads (`effect_adapter.rs` ~line 697); if it doesn't
+        // resolve as a mission id, the orchestrator returns a normal
+        // not-found error. Accept either `job_id` or already-renamed
+        // `mission_id` / `id` from the caller.
         "cancel_job" | "cancel-job" => {
-            let mission_id = params
+            let id = params
                 .get("job_id")
                 .or_else(|| params.get("mission_id"))
+                .or_else(|| params.get("id"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let mission_params = serde_json::json!({
-                "mission_id": mission_id,
+                "id": id,
             });
             Some(RoutineMissionAlias {
                 mission_action: "mission_complete",
@@ -4053,7 +4057,8 @@ mod tests {
     }
 
     /// `cancel_job { job_id }` should translate to `mission_complete` with
-    /// the id carried through under `mission_id`.
+    /// the id carried through under `id` — the field name the
+    /// `mission_complete` handler reads.
     #[test]
     fn cancel_job_alias_maps_to_mission_complete() {
         let params = serde_json::json!({"job_id": "abc-123"});
@@ -4061,24 +4066,19 @@ mod tests {
             .expect("cancel_job should produce an alias");
         assert_eq!(alias.mission_action, "mission_complete");
         let mp = alias.mission_params.as_object().expect("params object");
-        assert_eq!(
-            mp.get("mission_id").and_then(|v| v.as_str()),
-            Some("abc-123")
-        );
+        assert_eq!(mp.get("id").and_then(|v| v.as_str()), Some("abc-123"));
     }
 
     /// `cancel-job` (hyphen) and an already-renamed `mission_id` field
-    /// should both be accepted.
+    /// should both be accepted and both emit the handler-expected `id`
+    /// key.
     #[test]
     fn cancel_job_alias_accepts_hyphen_and_mission_id_field() {
         let params = serde_json::json!({"mission_id": "m-42"});
         let alias = routine_to_mission_alias("cancel-job", &params)
             .expect("cancel-job should produce an alias");
         let mp = alias.mission_params.as_object().expect("params object");
-        assert_eq!(
-            mp.get("mission_id").and_then(|v| v.as_str()),
-            Some("m-42")
-        );
+        assert_eq!(mp.get("id").and_then(|v| v.as_str()), Some("m-42"));
     }
 
     // ── is_v1_auth_tool tests ─────────────────────────────────
