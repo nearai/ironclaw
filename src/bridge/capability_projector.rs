@@ -21,21 +21,32 @@ struct CapabilityRuntimeSnapshot {
 }
 
 impl CapabilityProjector {
+    /// Project the set of capability summaries from the runtime extension state.
+    ///
+    /// When `prefetched_extensions` is `Some`, the projector uses that list
+    /// instead of fetching from `auth_manager`. This allows the caller
+    /// (typically `EffectBridgeAdapter`) to share a single fetch across
+    /// both `ActionProjector` and `CapabilityProjector`.
     pub(crate) async fn project(
         auth_manager: Option<&AuthManager>,
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
+        prefetched_extensions: Option<Vec<InstalledExtension>>,
     ) -> Result<Vec<CapabilitySummary>, EngineError> {
         let Some(auth_manager) = auth_manager else {
             return Ok(Vec::new());
         };
 
-        let extensions = auth_manager
-            .list_capability_extensions(&context.user_id)
-            .await
-            .map_err(|error| EngineError::Effect {
-                reason: format!("Failed to list extensions for capability projection: {error}"),
-            })?;
+        let extensions = if let Some(prefetched) = prefetched_extensions {
+            prefetched
+        } else {
+            auth_manager
+                .list_capability_extensions(&context.user_id)
+                .await
+                .map_err(|error| EngineError::Effect {
+                    reason: format!("Failed to list extensions for capability projection: {error}"),
+                })?
+        };
 
         let latent_actions = auth_manager.latent_provider_actions(&context.user_id).await;
         let mut channel_routes = HashMap::new();

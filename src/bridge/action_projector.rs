@@ -22,32 +22,49 @@ use crate::tools::ToolRegistry;
 pub(crate) struct ActionProjector;
 
 impl ActionProjector {
+    /// Project the set of available actions from the tool registry and
+    /// capability registry.
+    ///
+    /// When `prefetched_extensions` is `Some`, the projector uses that map
+    /// instead of fetching from `auth_manager`. This allows the caller
+    /// (typically `EffectBridgeAdapter`) to share a single fetch across
+    /// both `ActionProjector` and `CapabilityProjector`.
     pub(crate) async fn project(
         tools: &ToolRegistry,
         auth_manager: Option<&AuthManager>,
         capability_registry: Option<Arc<CapabilityRegistry>>,
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
+        prefetched_extensions: Option<&HashMap<String, InstalledExtension>>,
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = tools.tool_definitions().await;
-        let extension_statuses = if let Some(auth_manager) = auth_manager {
+        let owned_statuses;
+        let extension_statuses: Option<&HashMap<String, InstalledExtension>> = if let Some(
+            prefetched,
+        ) =
+            prefetched_extensions
+        {
+            Some(prefetched)
+        } else if let Some(auth_manager) = auth_manager {
             match auth_manager
                 .list_capability_extensions(&context.user_id)
                 .await
             {
-                Ok(extensions) => Some(
-                    extensions
+                Ok(extensions) => {
+                    owned_statuses = extensions
                         .into_iter()
                         .map(|extension| (extension.name.clone(), extension))
-                        .collect::<HashMap<_, _>>(),
-                ),
+                        .collect::<HashMap<_, _>>();
+                    Some(&owned_statuses)
+                }
                 Err(error) => {
                     debug!(
                         user_id = %context.user_id,
                         error = %error,
                         "failed to load extension inventory for available_actions; omitting extension-backed actions"
                     );
-                    Some(HashMap::new())
+                    owned_statuses = HashMap::new();
+                    Some(&owned_statuses)
                 }
             }
         } else {
@@ -64,7 +81,7 @@ impl ActionProjector {
             }
 
             if let Some(provider_extension) = tools.provider_extension_for_tool(&td.name).await {
-                let Some(extension_statuses) = extension_statuses.as_ref() else {
+                let Some(extension_statuses) = extension_statuses else {
                     continue;
                 };
                 let Some(extension) =
@@ -73,16 +90,23 @@ impl ActionProjector {
                     continue;
                 };
                 let status = capability_status_for_extension(extension, false);
-                let (kind, invocation_mode) = capability_surface_subject_for_extension(extension);
-                let assignment = assign_surface(SurfacePolicyInput {
-                    kind,
-                    status,
-                    invocation_mode,
-                    approval_gated: false,
-                    leased_and_callable: false,
-                });
-                if !assignment.available_actions {
-                    continue;
+                // NeedsAuth tools remain in available_actions so the LLM can
+                // trigger the auth-on-first-call gate by attempting to call them.
+                if status == CapabilityStatus::NeedsAuth {
+                    // Keep in actions — execution will trigger the auth gate.
+                } else {
+                    let (kind, invocation_mode) =
+                        capability_surface_subject_for_extension(extension);
+                    let assignment = assign_surface(SurfacePolicyInput {
+                        kind,
+                        status,
+                        invocation_mode,
+                        approval_gated: false,
+                        leased_and_callable: false,
+                    });
+                    if !assignment.available_actions {
+                        continue;
+                    }
                 }
             }
 
@@ -159,8 +183,9 @@ fn provider_extension_rank(extension: &InstalledExtension) -> u8 {
 mod tests {
     use std::collections::HashMap;
 
-    use super::provider_extension_status;
+    use super::{ActionProjector, provider_extension_status};
     use crate::extensions::{ExtensionKind, InstalledExtension};
+    use crate::tools::ToolRegistry;
 
     fn installed_extension(name: &str) -> InstalledExtension {
         InstalledExtension {
@@ -177,6 +202,13 @@ mod tests {
             installed: true,
             activation_error: None,
             version: None,
+        }
+    }
+
+    fn needs_auth_extension(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            authenticated: false,
+            ..installed_extension(name)
         }
     }
 
@@ -212,5 +244,149 @@ mod tests {
 
         assert_eq!(resolved.name, "linear-server");
         assert!(resolved.installed);
+    }
+
+    /// NeedsAuth provider tools must remain in available_actions so the LLM
+    /// can trigger the auth-on-first-call gate by attempting to call them.
+    #[tokio::test]
+    async fn needs_auth_provider_tools_remain_in_available_actions() {
+        use async_trait::async_trait;
+
+        struct GmailSendTool;
+
+        #[async_trait]
+        impl crate::tools::Tool for GmailSendTool {
+            fn name(&self) -> &str {
+                "gmail_send"
+            }
+            fn description(&self) -> &str {
+                "Send a Gmail message"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                Ok(crate::tools::ToolOutput::success(
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+            fn provider_extension(&self) -> Option<&str> {
+                Some("gmail")
+            }
+        }
+
+        let tools = std::sync::Arc::new(ToolRegistry::new());
+        tools.register(std::sync::Arc::new(GmailSendTool)).await;
+
+        let ext = needs_auth_extension("gmail");
+        let extension_map = HashMap::from([(ext.name.clone(), ext)]);
+
+        let context = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+        };
+
+        let actions = ActionProjector::project(
+            tools.as_ref(),
+            None,
+            None,
+            &[],
+            &context,
+            Some(&extension_map),
+        )
+        .await
+        .expect("project should succeed");
+
+        assert!(
+            actions.iter().any(|a| a.name == "gmail_send"),
+            "NeedsAuth provider tool should remain in available_actions, got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Latent/not-installed provider tools should still be omitted.
+    #[tokio::test]
+    async fn latent_provider_tools_omitted_from_available_actions() {
+        use async_trait::async_trait;
+
+        struct LatentTool;
+
+        #[async_trait]
+        impl crate::tools::Tool for LatentTool {
+            fn name(&self) -> &str {
+                "latent_send"
+            }
+            fn description(&self) -> &str {
+                "Send via latent provider"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                Ok(crate::tools::ToolOutput::success(
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+            fn provider_extension(&self) -> Option<&str> {
+                Some("latent_provider")
+            }
+        }
+
+        let tools = std::sync::Arc::new(ToolRegistry::new());
+        tools.register(std::sync::Arc::new(LatentTool)).await;
+
+        // Extension is not installed — only in registry.
+        let ext = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            ..installed_extension("latent_provider")
+        };
+        let extension_map = HashMap::from([(ext.name.clone(), ext)]);
+
+        let context = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: None,
+            user_timezone: None,
+            thread_goal: None,
+        };
+
+        let actions = ActionProjector::project(
+            tools.as_ref(),
+            None,
+            None,
+            &[],
+            &context,
+            Some(&extension_map),
+        )
+        .await
+        .expect("project should succeed");
+
+        assert!(
+            !actions.iter().any(|a| a.name == "latent_send"),
+            "Not-installed provider tool should be omitted from available_actions"
+        );
     }
 }

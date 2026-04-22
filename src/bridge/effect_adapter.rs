@@ -8,7 +8,7 @@
 //! - Sensitive parameter redaction
 //! - Rate limiting (per-user, per-tool)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +28,7 @@ use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
+use crate::extensions::InstalledExtension;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
@@ -77,6 +78,30 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Short-lived cache for `list_capability_extensions` results. Keyed by
+    /// `user_id` with an expiry timestamp. Both `available_actions` and
+    /// `available_capabilities` are called in quick succession from the engine
+    /// loop; this cache eliminates the duplicate fetch.
+    extension_cache: RwLock<Option<ExtensionCacheEntry>>,
+}
+
+/// Cached extension list with a short TTL to deduplicate the fetch across
+/// `available_actions` and `available_capabilities` when called in sequence.
+struct ExtensionCacheEntry {
+    user_id: String,
+    fetched_at: Instant,
+    extensions: Vec<InstalledExtension>,
+}
+
+impl ExtensionCacheEntry {
+    /// Cache entries expire after 500ms — long enough to cover back-to-back
+    /// calls within a single system-prompt build, short enough to never serve
+    /// stale data across separate engine iterations.
+    const TTL_MS: u128 = 500;
+
+    fn is_valid_for(&self, user_id: &str) -> bool {
+        self.user_id == user_id && self.fetched_at.elapsed().as_millis() < Self::TTL_MS
+    }
 }
 
 impl EffectBridgeAdapter {
@@ -100,6 +125,7 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            extension_cache: RwLock::new(None),
         }
     }
 
@@ -181,6 +207,72 @@ impl EffectBridgeAdapter {
     /// Get the mission manager if available.
     pub async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
         self.mission_manager.read().await.clone()
+    }
+
+    /// Fetch the extension list as a `Vec`, using the short-lived cache when
+    /// available. Returns `Some(vec)` when an auth_manager is present, `None`
+    /// otherwise.
+    async fn fetch_extension_list(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<Vec<InstalledExtension>> {
+        let auth_manager = auth_manager?;
+
+        // Check cache first.
+        {
+            let cache = self.extension_cache.read().await;
+            if let Some(entry) = cache.as_ref()
+                && entry.is_valid_for(&context.user_id)
+            {
+                return Some(entry.extensions.clone());
+            }
+        }
+
+        // Cache miss — fetch from auth_manager.
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
+        {
+            Ok(exts) => exts,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    error = %error,
+                    "failed to load extension inventory; returning empty list"
+                );
+                Vec::new()
+            }
+        };
+
+        // Populate cache for the sibling projector call.
+        {
+            let mut cache = self.extension_cache.write().await;
+            *cache = Some(ExtensionCacheEntry {
+                user_id: context.user_id.clone(),
+                fetched_at: Instant::now(),
+                extensions: extensions.clone(),
+            });
+        }
+
+        Some(extensions)
+    }
+
+    /// Fetch the extension list as a `HashMap<name, InstalledExtension>`, using
+    /// the short-lived cache when available. Returns `Some(map)` when an
+    /// auth_manager is present, `None` otherwise.
+    async fn fetch_extension_map(
+        &self,
+        auth_manager: Option<&AuthManager>,
+        context: &ThreadExecutionContext,
+    ) -> Option<HashMap<String, InstalledExtension>> {
+        let extensions = self.fetch_extension_list(auth_manager, context).await?;
+        Some(
+            extensions
+                .into_iter()
+                .map(|ext| (ext.name.clone(), ext))
+                .collect(),
+        )
     }
 
     async fn sync_skill_install_result(
@@ -1490,12 +1582,16 @@ impl EffectExecutor for EffectBridgeAdapter {
     ) -> Result<Vec<ActionDef>, EngineError> {
         let auth_manager = self.auth_manager.read().await.clone();
         let capability_registry = self.capability_registry.read().await.clone();
+        let extensions = self
+            .fetch_extension_map(auth_manager.as_deref(), context)
+            .await;
         ActionProjector::project(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
             leases,
             context,
+            extensions.as_ref(),
         )
         .await
     }
@@ -1506,7 +1602,10 @@ impl EffectExecutor for EffectBridgeAdapter {
         context: &ThreadExecutionContext,
     ) -> Result<Vec<CapabilitySummary>, EngineError> {
         let auth_manager = self.auth_manager.read().await.clone();
-        CapabilityProjector::project(auth_manager.as_deref(), leases, context).await
+        let extensions = self
+            .fetch_extension_list(auth_manager.as_deref(), context)
+            .await;
+        CapabilityProjector::project(auth_manager.as_deref(), leases, context, extensions).await
     }
 }
 
@@ -4334,6 +4433,13 @@ mod tests {
             .expect("actions");
         assert!(!actions.iter().any(|action| action.name == "linear_search"));
     }
+
+    // NeedsAuth provider tool preservation is tested directly in
+    // action_projector::tests::needs_auth_provider_tools_remain_in_available_actions
+    // where the extension map can be constructed with correct NeedsAuth status.
+    // An EffectBridgeAdapter-level test would require a real WASM module to
+    // produce installed=true + authenticated=false; fake-wasm files produce
+    // installed=false (AvailableNotInstalled), making the test unreliable.
 
     #[tokio::test]
     async fn available_capabilities_projects_inactive_provider_background() {
