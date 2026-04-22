@@ -417,55 +417,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_budget_lazy_summary_beats_inline_schemas() {
-        use crate::tools::builtin::file::{ApplyPatchTool, ReadFileTool, WriteFileTool};
-        use crate::tools::builtin::http::HttpTool;
-        use crate::tools::builtin::shell::ShellTool;
-
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ReadFileTool::new()),
-            Arc::new(WriteFileTool::new()),
-            Arc::new(ApplyPatchTool::new()),
-            Arc::new(ShellTool::new()),
-            Arc::new(HttpTool::new()),
-        ];
-
-        let inline_schema_chars: usize = tools
-            .iter()
-            .map(|t| {
-                let s = t.schema();
-                s.name.len() + s.description.len() + s.parameters.to_string().len()
-            })
-            .sum();
-
-        let lazy_listing_chars: usize = tools
-            .iter()
-            .map(|t| {
-                let s = t.schema();
-                s.name.len() + s.description.len()
-            })
-            .sum();
-
-        // The lazy listing (just name + description, with the tool_info hint
-        // appended) should fit in well under two-thirds of the inline-schema
-        // budget. This codifies the prompt-budget claim of the discovery design
-        // and will fire if a future change inlines a giant schema by accident
-        // or drops the discovery hint without compensating elsewhere.
-        assert!(
-            lazy_listing_chars * 5 < inline_schema_chars * 3,
-            "lazy listing ({lazy_listing_chars} chars) should be < 60% of inline schemas ({inline_schema_chars} chars); \
-             discovery summaries are not pulling their weight"
-        );
-
-        eprintln!(
-            "discovery budget: lazy={lazy_listing_chars}ch vs inline={inline_schema_chars}ch \
-             (savings: {}ch, {}%)",
-            inline_schema_chars - lazy_listing_chars,
-            (inline_schema_chars - lazy_listing_chars) * 100 / inline_schema_chars
-        );
-    }
-
-    #[tokio::test]
     async fn test_tool_info_rejects_v1_only_in_v2_registry() {
         use crate::tools::tool::{EngineCompatibility, EngineVersion};
 

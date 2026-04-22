@@ -258,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_includes_tool_discovery_section() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(
             prompt.contains("## Tool discovery"),
             "compiled preamble must teach the agent about tool_info; got:\n{prompt}"
