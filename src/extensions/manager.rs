@@ -5574,12 +5574,6 @@ impl ExtensionManager {
             }
         })?;
 
-        let mut updated_server = server.clone();
-        updated_server.cached_tools = mcp_tools.clone();
-        self.update_mcp_server(updated_server, user_id)
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
-
         // Before registering any tool wrappers for this user, fingerprint
         // the tool surface the server reported and reject activation if
         // another user already has the same `name` active with a
@@ -5591,6 +5585,14 @@ impl ExtensionManager {
         // partitioning of the client store addressed the runtime
         // dispatch leak, but the registry surface was still global and
         // susceptible to the same cross-tenant leak.
+        //
+        // CRITICAL: this check must run BEFORE persisting
+        // `cached_tools` on the server row. `latent_provider_actions()`
+        // surfaces `server.cached_tools` for inactive MCP servers, so
+        // writing them first and then rejecting would leave the
+        // affected user seeing tool names and schemas from a backend
+        // that cannot be activated while the other user owns the
+        // shared server name.
         let surface_signature = crate::tools::mcp::surface_signature(&mcp_tools);
         if let Some(other_user) = self
             .mcp_clients
@@ -5604,6 +5606,12 @@ impl ExtensionManager {
                  or coordinate so both users connect to a backend that returns an identical tool surface."
             )));
         }
+
+        let mut updated_server = server.clone();
+        updated_server.cached_tools = mcp_tools.clone();
+        self.update_mcp_server(updated_server, user_id)
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
         // Store the client for this user first, then register the
         // (user-agnostic) tool wrappers. The wrappers resolve the caller's

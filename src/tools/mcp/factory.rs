@@ -64,7 +64,13 @@ pub async fn create_client_from_config(
     match server.effective_transport() {
         EffectiveTransport::Stdio { command, args, env } => {
             let transport = process_manager
-                .spawn_stdio(validated_name.as_str(), command, args.to_vec(), env.clone())
+                .spawn_stdio(
+                    user_id,
+                    validated_name.as_str(),
+                    command,
+                    args.to_vec(),
+                    env.clone(),
+                )
                 .await
                 .map_err(|e| McpFactoryError::StdioSpawn {
                     name: server_name.clone(),
