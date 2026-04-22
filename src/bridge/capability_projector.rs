@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ironclaw_engine::{
     CapabilityLease, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind, EngineError,
@@ -9,6 +9,7 @@ use crate::bridge::auth_manager::AuthManager;
 use crate::bridge::tool_surface::{
     InvocationMode, SurfacePolicyInput, SurfaceSubjectKind, assign_surface,
 };
+use crate::extensions::naming::extension_name_candidates;
 use crate::extensions::{ExtensionKind, InstalledExtension, LatentProviderAction};
 
 pub(crate) struct CapabilityProjector;
@@ -71,9 +72,11 @@ impl CapabilityProjector {
     ) -> Vec<CapabilitySummary> {
         let mut summaries = BTreeMap::<String, PrioritizedSummary>::new();
         let mut registry_only = Vec::new();
+        let mut installed_keys = HashSet::new();
 
         for extension in snapshot.extensions {
             if extension.installed {
+                installed_keys.insert(normalized_capability_key(&extension.name));
                 if let Some(summary) = summarize_extension(&extension, &snapshot.channel_routes) {
                     upsert_summary(&mut summaries, summary, ProjectionSource::InstalledRuntime);
                 }
@@ -83,7 +86,8 @@ impl CapabilityProjector {
         }
 
         for latent in unique_latent_providers(snapshot.latent_actions) {
-            if summaries.contains_key(&latent.provider_extension) {
+            let normalized_key = normalized_capability_key(&latent.provider_extension);
+            if installed_keys.contains(&normalized_key) || summaries.contains_key(&normalized_key) {
                 continue;
             }
 
@@ -113,7 +117,8 @@ impl CapabilityProjector {
         }
 
         for extension in registry_only {
-            if summaries.contains_key(&extension.name) {
+            let normalized_key = normalized_capability_key(&extension.name);
+            if installed_keys.contains(&normalized_key) || summaries.contains_key(&normalized_key) {
                 continue;
             }
 
@@ -146,12 +151,20 @@ fn upsert_summary(
     summary: CapabilitySummary,
     source: ProjectionSource,
 ) {
-    match summaries.get(&summary.name) {
+    let key = normalized_capability_key(&summary.name);
+    match summaries.get(&key) {
         Some(existing) if existing.source >= source => {}
         _ => {
-            summaries.insert(summary.name.clone(), PrioritizedSummary { source, summary });
+            summaries.insert(key, PrioritizedSummary { source, summary });
         }
     }
+}
+
+fn normalized_capability_key(name: &str) -> String {
+    extension_name_candidates(name)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn summarize_extension(
@@ -400,6 +413,28 @@ mod tests {
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].name, "gmail");
         assert_eq!(projected[0].status, CapabilityStatus::Inactive);
+    }
+
+    #[test]
+    fn installed_alias_suppresses_registry_only_canonical_duplicate() {
+        let installed = installed_extension("linear-server", ExtensionKind::McpServer);
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("linear_server", ExtensionKind::McpServer)
+        };
+
+        let snapshot = CapabilityRuntimeSnapshot {
+            extensions: vec![installed, registry_only],
+            latent_actions: Vec::new(),
+            channel_routes: HashMap::new(),
+        };
+
+        let projected = CapabilityProjector::project_snapshot(snapshot, &[]);
+        assert!(projected.is_empty());
     }
 
     #[test]

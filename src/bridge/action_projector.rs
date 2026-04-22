@@ -139,7 +139,20 @@ fn provider_extension_status<'a>(
 ) -> Option<&'a InstalledExtension> {
     extension_name_candidates(provider_extension)
         .into_iter()
-        .find_map(|candidate| extension_statuses.get(&candidate))
+        .filter_map(|candidate| extension_statuses.get(&candidate))
+        .max_by_key(|extension| provider_extension_rank(extension))
+}
+
+fn provider_extension_rank(extension: &InstalledExtension) -> u8 {
+    match capability_status_for_extension(extension, false) {
+        CapabilityStatus::Ready => 5,
+        CapabilityStatus::Inactive => 4,
+        CapabilityStatus::NeedsAuth => 3,
+        CapabilityStatus::NeedsSetup => 2,
+        CapabilityStatus::Error => 1,
+        CapabilityStatus::AvailableNotInstalled => 0,
+        CapabilityStatus::ReadyScoped | CapabilityStatus::Latent => 0,
+    }
 }
 
 #[cfg(test)]
@@ -176,5 +189,28 @@ mod tests {
             .expect("legacy hyphen alias should resolve");
 
         assert_eq!(resolved.name, "linear-server");
+    }
+
+    #[test]
+    fn provider_extension_lookup_prefers_installed_alias_over_registry_only_entry() {
+        let installed = installed_extension("linear-server");
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("linear_server")
+        };
+        let statuses = HashMap::from([
+            (installed.name.clone(), installed),
+            (registry_only.name.clone(), registry_only),
+        ]);
+
+        let resolved = provider_extension_status(&statuses, "linear_server")
+            .expect("installed alias should win over registry-only canonical entry");
+
+        assert_eq!(resolved.name, "linear-server");
+        assert!(resolved.installed);
     }
 }
