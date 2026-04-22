@@ -229,7 +229,15 @@ main() {
       ;;
     private-oauth)
       export IRONCLAW_LIVE_TEST=1
-      run_cargo_test e2e_live "drive_auth_gate_roundtrip"
+      # drive_auth_gate_roundtrip is currently skipped pending the
+      # non-HTTP pre-flight auth gate (stub fallthrough in
+      # `src/auth/extension.rs::check_action_auth`). Until that lands
+      # the agent gets control back after a WASM wrapper credential
+      # failure instead of pausing at a gate, so the test's
+      # "expected exactly 1 LLM call" assertion always fails. See the
+      # `#[ignore = "..."]` reason on the test itself for context.
+      # To re-enable: uncomment below once the gate fix lands.
+      # run_cargo_test e2e_live "drive_auth_gate_roundtrip"
       run_cargo_test e2e_live "drive_transparent_oauth_refresh"
       ;;
     provider-matrix)

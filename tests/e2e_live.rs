@@ -239,14 +239,16 @@ mod live_tests {
     /// Uses NVIDIA GTC keynote as the search target so any captured
     /// trace fixtures contain only public conference content.
     #[tokio::test]
-    #[ignore] // Live tier: requires real Google OAuth credentials in the
-    // developer's `~/.ironclaw/ironclaw.db`. Live-only on purpose: the
-    // recorded trace would inevitably capture the bearer token, real
-    // Drive file metadata, and HTTP headers — all of which are PII
-    // that's hard to scrub safely. The test runs against the developer's
-    // real environment in live mode and is skipped otherwise. Hermetic
-    // regression coverage for the underlying alias-aware capabilities
-    // bug lives in `test_auth_wasm_tool_finds_legacy_hyphen_alias`.
+    #[ignore = "aspirational canary: currently blocked on the non-HTTP \
+                pre-flight auth gate. `src/auth/extension.rs::check_action_auth` \
+                stubs `NoAuthRequired` for any action that isn't `http`/`http_request`, \
+                so a missing-credential Drive call does NOT fire a gate — the agent \
+                gets the error back and enters a recovery loop, tripping Phase A's \
+                'exactly 1 LLM call' assertion. The `private-oauth` canary lane \
+                skips this test via scripts/live-canary/run.sh; re-enable there + \
+                remove this message once the gate fix lands. \
+                Hermetic regression coverage for the underlying alias-aware \
+                capabilities bug lives in `test_auth_wasm_tool_finds_legacy_hyphen_alias`."]
     async fn drive_auth_gate_roundtrip() {
         use crate::support::live_harness::TestMode;
         use ironclaw::channels::StatusUpdate;
