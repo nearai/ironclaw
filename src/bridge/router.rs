@@ -15,7 +15,7 @@ use ironclaw_common::AppEvent;
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
@@ -398,7 +398,7 @@ async fn resolve_extension_for_action(
     // test harness): delegate to the same canonical resolver used by the
     // auth-manager path so the extension-manager branch of the precedence
     // still runs instead of falling through to a stringly credential name.
-    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+    crate::auth::extension::resolve_auth_flow_extension_name(
         action_name,
         parameters,
         credential_fallback,
@@ -4566,6 +4566,31 @@ async fn forward_event_to_channel(
 ///
 /// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
 /// so the frontend creates the card then resolves it).
+/// Bridge engine-side `CodeExecutionFailure` to its wire mirror
+/// `CodeExecutionFailureCategory` in `ironclaw_common`.
+///
+/// Exhaustive on purpose: if the engine enum gains a variant, this must
+/// fail to compile so both enums stay in lockstep. Per
+/// `.claude/rules/types.md` "Wire-stable enums" — do not reach for
+/// `format!("{:?}", ...)` or `.to_string()` here; the serde rename rules
+/// on the two enums independently produce snake_case, and a `Debug`
+/// detour would silently drift.
+fn code_execution_category_to_wire(
+    category: &ironclaw_engine::CodeExecutionFailure,
+) -> ironclaw_common::CodeExecutionFailureCategory {
+    use ironclaw_common::CodeExecutionFailureCategory as Wire;
+    use ironclaw_engine::CodeExecutionFailure as Src;
+    match category {
+        Src::SyntaxError => Wire::SyntaxError,
+        Src::RuntimeError => Wire::RuntimeError,
+        Src::NameLookup => Wire::NameLookup,
+        Src::VmPanic => Wire::VmPanic,
+        Src::ResourceLimit => Wire::ResourceLimit,
+        Src::ToolError => Wire::ToolError,
+        Src::OsDenied => Wire::OsDenied,
+    }
+}
+
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
@@ -4659,6 +4684,27 @@ fn thread_event_to_app_events(
             parent_thread_id: thread_id.into(),
             child_thread_id: child_id.to_string(),
             goal: goal.clone(),
+        }],
+        EventKind::ChildCompleted { child_id } => vec![AppEvent::ChildThreadCompleted {
+            parent_thread_id: thread_id.into(),
+            child_thread_id: child_id.to_string(),
+        }],
+        EventKind::StepFailed { error, .. } => vec![AppEvent::Error {
+            message: format!("Step failed: {error}"),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionFailed {
+            category,
+            error,
+            code_hash,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecutionFailed {
+            category: code_execution_category_to_wire(category),
+            error: error.clone(),
+            duration_ms: *duration_ms,
+            code_hash: code_hash.clone(),
+            thread_id: Some(thread_id.into()),
         }],
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
@@ -7107,6 +7153,93 @@ mod tests {
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
         ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_step_failed_to_error() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::StepFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                error: "llm provider returned 502".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-step-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::Error { message, thread_id } = &app_events[0] else {
+            panic!("expected AppEvent::Error, got {:?}", app_events[0]);
+        };
+        assert!(
+            message.contains("llm provider returned 502"),
+            "error message should carry the engine error text, got {message:?}"
+        );
+        assert_eq!(thread_id.as_deref(), Some("thread-step-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_child_completed() {
+        let child = ironclaw_engine::ThreadId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ChildCompleted { child_id: child },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-parent");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::ChildThreadCompleted {
+            parent_thread_id,
+            child_thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::ChildThreadCompleted, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(parent_thread_id, "thread-parent");
+        assert_eq!(child_thread_id, &child.to_string());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_code_execution_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "NameError: 'foo' is not defined".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 42,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-codeact");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::CodeExecutionFailed {
+            category,
+            error,
+            duration_ms,
+            code_hash,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::CodeExecutionFailed, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(
+            *category,
+            ironclaw_common::CodeExecutionFailureCategory::RuntimeError
+        );
+        assert_eq!(error, "NameError: 'foo' is not defined");
+        assert_eq!(*duration_ms, 42);
+        assert_eq!(code_hash.as_deref(), Some("abc123"));
+        assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
     }
 
     #[test]
