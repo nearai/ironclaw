@@ -47,6 +47,10 @@ pub struct PendingGate {
     /// Channel that originated the request.
     /// Resolution MUST come from the same channel (or a trusted channel).
     pub source_channel: String,
+    /// Internal runtime/dispatch key for the channel instance that originated
+    /// the request. Non-trusted resolutions must match this when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_channel_instance_key: Option<String>,
     /// Tool that triggered the gate.
     pub action_name: String,
     /// Tool call ID from the LLM.
@@ -151,6 +155,7 @@ mod tests {
             scope_thread_id: None,
             conversation_id: ironclaw_engine::ConversationId::new(),
             source_channel: "telegram".into(),
+            source_channel_instance_key: None,
             action_name: "shell".into(),
             call_id: "call_1".into(),
             parameters: serde_json::json!({"command": "ls"}),

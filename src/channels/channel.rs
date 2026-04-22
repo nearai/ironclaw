@@ -68,8 +68,11 @@ pub struct IncomingAttachment {
 pub struct IncomingMessage {
     /// Unique message ID.
     pub id: Uuid,
-    /// Channel this message came from.
+    /// Semantic channel kind this message came from (e.g. `telegram`).
     pub channel: String,
+    /// Internal runtime/dispatch identity for this message's originating
+    /// channel instance. When unset, callers should fall back to `channel`.
+    pub channel_instance_key: Option<String>,
     /// Resolved owner identity for this message.
     ///
     /// For owner-capable channels this is the stable instance owner ID when the
@@ -139,6 +142,7 @@ impl IncomingMessage {
         Self {
             id: Uuid::new_v4(),
             channel: channel.into(),
+            channel_instance_key: None,
             sender_id: user_id.clone(),
             user_id,
             user_name: None,
@@ -221,6 +225,20 @@ impl IncomingMessage {
         self.conversation_scope_id = Some(thread_id.as_str().to_string());
         self.thread_id = Some(thread_id);
         self
+    }
+
+    /// Set the internal runtime/dispatch key for the originating channel instance.
+    pub fn with_channel_instance_key(mut self, channel_instance_key: impl Into<String>) -> Self {
+        self.channel_instance_key = Some(channel_instance_key.into());
+        self
+    }
+
+    /// Effective internal dispatch key for routing responses/status back to the
+    /// originating channel instance.
+    pub fn channel_dispatch_key(&self) -> &str {
+        self.channel_instance_key
+            .as_deref()
+            .unwrap_or(self.channel.as_str())
     }
 
     /// Set the channel-specific sender/actor identifier.
@@ -863,8 +881,14 @@ impl ChatApprovalPrompt {
 /// a unified format. They also handle sending responses back.
 #[async_trait]
 pub trait Channel: Send + Sync {
-    /// Get the channel name (e.g., "cli", "slack", "telegram", "http").
+    /// Get the semantic channel name/kind (e.g., "cli", "slack", "telegram", "http").
     fn name(&self) -> &str;
+
+    /// Get the internal dispatch key used to route responses back to this
+    /// concrete runtime instance.
+    fn dispatch_key(&self) -> &str {
+        self.name()
+    }
 
     /// Start listening for messages.
     ///
@@ -1089,6 +1113,26 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn test_incoming_message_prefers_instance_key_for_dispatch() {
+        let msg = IncomingMessage::new("telegram", "user1", "hello")
+            .with_channel_instance_key("tenant-a:telegram");
+
+        assert_eq!(msg.channel, "telegram");
+        assert_eq!(
+            msg.channel_instance_key.as_deref(),
+            Some("tenant-a:telegram")
+        );
+        assert_eq!(msg.channel_dispatch_key(), "tenant-a:telegram");
+    }
+
+    #[test]
+    fn test_incoming_message_dispatch_key_falls_back_to_channel_name() {
+        let msg = IncomingMessage::new("telegram", "user1", "hello");
+
+        assert_eq!(msg.channel_dispatch_key(), "telegram");
     }
 
     #[test]

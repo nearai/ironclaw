@@ -150,6 +150,7 @@ mod tests {
             scope_thread_id: None,
             conversation_id: ConversationId::new(),
             source_channel: "web".into(),
+            source_channel_instance_key: Some("web".into()),
             action_name: "shell".into(),
             call_id: "call_1".into(),
             parameters: serde_json::json!({"cmd":"ls"}),

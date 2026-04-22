@@ -6,6 +6,7 @@
 //! - Turso cloud with embedded replica (sync to cloud)
 //! - In-memory (for testing)
 
+mod channel_instances;
 mod conversations;
 mod identities;
 mod jobs;
@@ -688,6 +689,13 @@ mod tests {
         // pairing_requests exists with expected columns
         conn.execute(
             "SELECT id, channel, code, owner_id FROM pairing_requests LIMIT 0",
+            (),
+        )
+        .await
+        .unwrap();
+        // channel_instances exists with expected columns
+        conn.execute(
+            "SELECT id, user_id, channel_kind, instance_key, enabled FROM channel_instances LIMIT 0",
             (),
         )
         .await

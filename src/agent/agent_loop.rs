@@ -159,6 +159,16 @@ async fn resolve_channel_notification_user(
     }
 
     if let Some(channel_name) = trimmed_option(channel)
+        && let Some(owner_user) = trimmed_option(owner_fallback)
+        && let Some(extension_manager) = extension_manager
+        && let Some(target) = extension_manager
+            .notification_target_for_channel_for_user(&channel_name, owner_user.as_str())
+            .await
+    {
+        return Some(target);
+    }
+
+    if let Some(channel_name) = trimmed_option(channel)
         && let Some(extension_manager) = extension_manager
         && let Some(target) = extension_manager
             .notification_target_for_channel(&channel_name)
@@ -168,6 +178,24 @@ async fn resolve_channel_notification_user(
     }
 
     resolve_owner_scope_notification_user(explicit_user, owner_fallback)
+}
+
+async fn resolve_channel_notification_dispatch_key(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    channel: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    let channel_name = trimmed_option(channel)?;
+    if let Some(owner_user) = trimmed_option(owner_fallback)
+        && let Some(extension_manager) = extension_manager
+    {
+        return Some(
+            extension_manager
+                .notification_channel_dispatch_key_for_user(&channel_name, owner_user.as_str())
+                .await,
+        );
+    }
+    Some(channel_name)
 }
 
 async fn resolve_routine_notification_target(
@@ -911,31 +939,50 @@ impl Agent {
                     .await;
                     let notify_user = heartbeat_notify_user;
                     let channels = self.channels.clone();
+                    let extension_manager = self.deps.extension_manager.clone();
+                    let owner_user_id = self.owner_id().to_string();
+                    let configured_notify_user = hb_config.notify_user.clone();
                     let is_multi_tenant = hb_config.multi_tenant;
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            // In multi-tenant mode, extract the owning user_id from
-                            // the response metadata so notifications reach the
-                            // correct user rather than the agent's owner.
-                            // This intentionally overrides the configured notify_target
-                            // because each user's heartbeat should notify that user.
-                            let effective_user = if is_multi_tenant {
+                            let effective_owner_user = if is_multi_tenant {
                                 response
                                     .metadata
                                     .get("owner_id")
                                     .and_then(|v| v.as_str())
                                     .map(String::from)
                             } else {
-                                None
+                                Some(owner_user_id.clone())
+                            };
+
+                            let effective_target = if let Some(ref channel) = notify_channel {
+                                resolve_channel_notification_user(
+                                    extension_manager.as_ref(),
+                                    Some(channel),
+                                    configured_notify_user.as_deref(),
+                                    effective_owner_user.as_deref(),
+                                )
+                                .await
+                                .or_else(|| notify_target.clone())
+                            } else {
+                                effective_owner_user
+                                    .clone()
+                                    .or_else(|| notify_target.clone())
                             };
 
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
                             let targeted_ok = if let Some(ref channel) = notify_channel {
-                                let target = effective_user.as_deref().or(notify_target.as_deref());
-                                if let Some(user) = target {
+                                let delivery_channel = resolve_channel_notification_dispatch_key(
+                                    extension_manager.as_ref(),
+                                    Some(channel),
+                                    effective_owner_user.as_deref(),
+                                )
+                                .await
+                                .unwrap_or_else(|| channel.clone());
+                                if let Some(user) = effective_target.as_deref() {
                                     channels
-                                        .broadcast(channel, user, response.clone())
+                                        .broadcast(&delivery_channel, user, response.clone())
                                         .await
                                         .is_ok()
                                 } else {
@@ -946,7 +993,8 @@ impl Agent {
                             };
 
                             if !targeted_ok {
-                                let fallback = effective_user.as_deref().or(notify_user.as_deref());
+                                let fallback =
+                                    effective_owner_user.as_deref().or(notify_user.as_deref());
                                 if let Some(user) = fallback {
                                     let results = channels.broadcast_all(user, response).await;
                                     for (ch, result) in results {
@@ -1049,6 +1097,8 @@ impl Agent {
                                     .and_then(|v| v.as_str()),
                                 response.metadata.get("owner_id").and_then(|v| v.as_str()),
                             );
+                            let owner_scope_user =
+                                response.metadata.get("owner_id").and_then(|v| v.as_str());
                             let Some(user) = resolve_routine_notification_target(
                                 extension_manager.as_ref(),
                                 &response.metadata,
@@ -1065,13 +1115,23 @@ impl Agent {
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
                             let targeted_ok = if let Some(ref channel) = notify_channel {
-                                match channels.broadcast(channel, &user, response.clone()).await {
+                                let delivery_channel = resolve_channel_notification_dispatch_key(
+                                    extension_manager.as_ref(),
+                                    Some(channel),
+                                    owner_scope_user,
+                                )
+                                .await
+                                .unwrap_or_else(|| channel.clone());
+                                match channels
+                                    .broadcast(&delivery_channel, &user, response.clone())
+                                    .await
+                                {
                                     Ok(()) => true,
                                     Err(e) => {
                                         let should_fallback =
                                             should_fallback_routine_notification(&e);
                                         tracing::warn!(
-                                            channel = %channel,
+                                            channel = %delivery_channel,
                                             user = %user,
                                             error = %e,
                                             should_fallback,
@@ -1639,9 +1699,11 @@ impl Agent {
                 // actual approvals, not messages about to become UserInput.
 
                 if thread.pending_approval.is_some() {
-                    let authorized = crate::agent::session::is_approval_authorized(
+                    let authorized = crate::agent::session::is_approval_authorized_for_instance(
                         thread.source_channel.as_deref(),
+                        thread.source_channel_instance_key.as_deref(),
                         &message.channel,
+                        Some(message.channel_dispatch_key()),
                     );
                     if !authorized {
                         tracing::warn!(
@@ -1660,9 +1722,10 @@ impl Agent {
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);
                 self.session_manager
-                    .register_thread(
+                    .register_thread_for_channel_instance(
                         &message.user_id,
                         &message.channel,
+                        message.channel_dispatch_key(),
                         target_thread_id,
                         Arc::clone(&session),
                     )
@@ -1671,9 +1734,10 @@ impl Agent {
             } else {
                 drop(sess);
                 self.session_manager
-                    .resolve_thread_with_parsed_uuid(
+                    .resolve_thread_with_parsed_uuid_for_channel_instance(
                         &message.user_id,
                         &message.channel,
+                        message.channel_dispatch_key(),
                         message.conversation_scope(),
                         approval_thread_uuid,
                     )
@@ -1681,9 +1745,10 @@ impl Agent {
             }
         } else {
             self.session_manager
-                .resolve_thread(
+                .resolve_thread_for_channel_instance(
                     &message.user_id,
                     &message.channel,
+                    message.channel_dispatch_key(),
                     message.conversation_scope(),
                 )
                 .await
@@ -2161,8 +2226,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
-        should_fallback_routine_notification, truncate_for_preview,
+        chat_tool_execution_metadata, is_single_message_repl,
+        resolve_channel_notification_dispatch_key, resolve_channel_notification_user,
+        resolve_routine_notification_user, should_fallback_routine_notification,
+        truncate_for_preview,
     };
     use crate::agent::agent_loop::{Agent, AgentDeps, HandleOutcome};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
@@ -2224,6 +2291,56 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+    }
+
+    async fn seed_test_user(store: &Arc<dyn crate::db::Database>, user_id: &str) {
+        store
+            .get_or_create_user(crate::db::UserRecord {
+                id: user_id.to_string(),
+                role: "member".to_string(),
+                display_name: user_id.to_string(),
+                status: "active".to_string(),
+                email: None,
+                last_login_at: None,
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("seed test user");
+    }
+
+    async fn make_test_extension_manager_with_db() -> (
+        Arc<crate::extensions::ExtensionManager>,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let (db, db_tmp) = crate::testing::test_db().await;
+        let tools_dir = tempfile::tempdir().expect("temp tools dir");
+        let channels_dir = tempfile::tempdir().expect("temp channels dir");
+        let master_key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(
+            crate::secrets::SecretsCrypto::new(master_key).expect("create secrets crypto"),
+        );
+        let manager = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(crate::tools::mcp::session::McpSessionManager::new()),
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto)),
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            tools_dir.path().to_path_buf(),
+            channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(Arc::clone(&db)),
+            Vec::new(),
+        ));
+        (manager, db, db_tmp, tools_dir, channels_dir)
     }
 
     fn make_legacy_handle_message_test_agent() -> Agent {
@@ -2381,6 +2498,78 @@ mod tests {
         });
 
         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_notification_user_prefers_tenant_binding() {
+        let (extension_manager, db, _db_tmp, _tools_tmp, _channels_tmp) =
+            make_test_extension_manager_with_db().await;
+        seed_test_user(&db, "tenant-b").await;
+        db.set_setting(
+            "tenant-b",
+            "channels.wasm_channel_owner_ids.telegram",
+            &serde_json::json!(424242_i64),
+        )
+        .await
+        .expect("persist tenant telegram target");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-b:primary".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant channel instance");
+
+        let resolved = resolve_channel_notification_user(
+            Some(&extension_manager),
+            Some("telegram"),
+            None,
+            Some("tenant-b"),
+        )
+        .await;
+
+        assert_eq!(resolved.as_deref(), Some("424242"));
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_notification_dispatch_key_prefers_tenant_instance() {
+        let (extension_manager, db, _db_tmp, _tools_tmp, _channels_tmp) =
+            make_test_extension_manager_with_db().await;
+        seed_test_user(&db, "tenant-b").await;
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-b:primary".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant channel instance");
+
+        let resolved = resolve_channel_notification_dispatch_key(
+            Some(&extension_manager),
+            Some("telegram"),
+            Some("tenant-b"),
+        )
+        .await;
+
+        assert_eq!(resolved.as_deref(), Some("telegram:tenant-b:primary"));
     }
 
     #[test]

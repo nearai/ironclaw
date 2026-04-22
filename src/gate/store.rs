@@ -135,6 +135,19 @@ impl PendingGateStore {
         request_id: Uuid,
         responding_channel: &str,
     ) -> Result<PendingGate, GateStoreError> {
+        self.take_verified_for_channel_instance(key, request_id, responding_channel, None)
+            .await
+    }
+
+    /// Like [`take_verified`](Self::take_verified), but also verifies the
+    /// internal channel-instance dispatch key for non-trusted channels.
+    pub async fn take_verified_for_channel_instance(
+        &self,
+        key: &PendingGateKey,
+        request_id: Uuid,
+        responding_channel: &str,
+        responding_channel_instance_key: Option<&str>,
+    ) -> Result<PendingGate, GateStoreError> {
         let gate = {
             let mut inner = self.inner.lock().await;
 
@@ -145,13 +158,24 @@ impl PendingGateStore {
                 return Err(GateStoreError::RequestIdMismatch);
             }
 
-            // Verify channel authorization
-            let channel_authorized = gate.source_channel == responding_channel
-                || TRUSTED_GATE_CHANNELS.contains(&responding_channel);
+            // Verify channel authorization.
+            let channel_authorized = if TRUSTED_GATE_CHANNELS.contains(&responding_channel) {
+                true
+            } else if let Some(source_instance_key) = gate.source_channel_instance_key.as_deref() {
+                gate.source_channel == responding_channel
+                    && responding_channel_instance_key == Some(source_instance_key)
+            } else {
+                gate.source_channel == responding_channel
+            };
             if !channel_authorized {
                 return Err(GateStoreError::ChannelMismatch {
-                    expected: gate.source_channel.clone(),
-                    actual: responding_channel.to_string(),
+                    expected: gate
+                        .source_channel_instance_key
+                        .clone()
+                        .unwrap_or_else(|| gate.source_channel.clone()),
+                    actual: responding_channel_instance_key
+                        .unwrap_or(responding_channel)
+                        .to_string(),
                 });
             }
 
@@ -353,6 +377,7 @@ mod tests {
             scope_thread_id: None,
             conversation_id: ConversationId::new(),
             source_channel: channel.into(),
+            source_channel_instance_key: None,
             action_name: "shell".into(),
             call_id: "call_1".into(),
             parameters: serde_json::json!({"command": "ls"}),
@@ -484,6 +509,59 @@ mod tests {
             store.take_verified(&key, request_id, "slack").await,
             Err(GateStoreError::ChannelMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_take_verified_requires_matching_instance_key_for_non_trusted_channels() {
+        let store = PendingGateStore::in_memory();
+        let mut gate = sample_gate("telegram");
+        gate.source_channel_instance_key = Some("tenant-a:telegram".into());
+        let key = gate.key();
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        assert!(matches!(
+            store
+                .take_verified_for_channel_instance(
+                    &key,
+                    request_id,
+                    "telegram",
+                    Some("tenant-b:telegram"),
+                )
+                .await,
+            Err(GateStoreError::ChannelMismatch { .. })
+        ));
+
+        let taken = store
+            .take_verified_for_channel_instance(
+                &key,
+                request_id,
+                "telegram",
+                Some("tenant-a:telegram"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            taken.source_channel_instance_key.as_deref(),
+            Some("tenant-a:telegram")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_take_verified_trusted_channel_bypasses_instance_key_match() {
+        let store = PendingGateStore::in_memory();
+        let mut gate = sample_gate("telegram");
+        gate.source_channel_instance_key = Some("tenant-a:telegram".into());
+        let key = gate.key();
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        assert!(
+            store
+                .take_verified_for_channel_instance(&key, request_id, "gateway", None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

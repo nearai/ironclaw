@@ -360,6 +360,14 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
         .unwrap_or_else(|| pending.parameters.clone())
 }
 
+fn engine_conversation_key(message: &IncomingMessage) -> String {
+    let channel_key = message.channel_dispatch_key();
+    match message.conversation_scope() {
+        Some(scope_id) => format!("{}:{}", channel_key, scope_id),
+        None => channel_key.to_string(),
+    }
+}
+
 /// Resolve the owning extension name for a tool action, falling back to a
 /// credential name when the action isn't extension-backed. This is the
 /// shared core of the auth-gate display + submit routing logic — the same
@@ -772,6 +780,7 @@ async fn requeue_auth_pending_gate(
         scope_thread_id: pending.scope_thread_id.clone(),
         conversation_id: pending.conversation_id,
         source_channel: pending.source_channel.clone(),
+        source_channel_instance_key: pending.source_channel_instance_key.clone(),
         action_name: pending.action_name.clone(),
         call_id: pending.call_id.clone(),
         parameters: pending.parameters.clone(),
@@ -802,6 +811,7 @@ fn pairing_pending_gate_from_auth(pending: &PendingGate, extension_name: &str) -
         scope_thread_id: pending.scope_thread_id.clone(),
         conversation_id: pending.conversation_id,
         source_channel: pending.source_channel.clone(),
+        source_channel_instance_key: pending.source_channel_instance_key.clone(),
         action_name: pending.action_name.clone(),
         call_id: pending.call_id.clone(),
         parameters: pending.parameters.clone(),
@@ -1146,6 +1156,7 @@ async fn execute_pending_gate_action(
                 scope_thread_id: pending.scope_thread_id.clone(),
                 conversation_id: pending.conversation_id,
                 source_channel: message.channel.clone(),
+                source_channel_instance_key: Some(message.channel_dispatch_key().to_string()),
                 action_name: action_name.clone(),
                 call_id,
                 parameters: *parameters,
@@ -2480,7 +2491,12 @@ pub async fn resolve_gate(
 
     let pending = state
         .pending_gates
-        .take_verified(&key, request_id, &message.channel)
+        .take_verified_for_channel_instance(
+            &key,
+            request_id,
+            &message.channel,
+            Some(message.channel_dispatch_key()),
+        )
         .await
         .map_err(|e| {
             use crate::gate::store::GateStoreError;
@@ -2964,9 +2980,10 @@ pub async fn handle_interrupt(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
+    let conversation_key = engine_conversation_key(message);
     let conv_id = state
         .conversation_manager
-        .get_or_create_conversation(&message.channel, &message.user_id)
+        .get_or_create_conversation(&conversation_key, &message.user_id)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
@@ -3038,16 +3055,12 @@ pub async fn handle_expected(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    // Find the conversation for this channel+user
-    let scope = message.conversation_scope();
-    let channel_key = match scope {
-        Some(tid) => format!("{}:{}", message.channel, tid),
-        None => message.channel.clone(),
-    };
+    // Find the conversation for this channel instance + user.
+    let conversation_key = engine_conversation_key(message);
 
     let conv_id = state
         .conversation_manager
-        .get_or_create_conversation(&channel_key, &message.user_id)
+        .get_or_create_conversation(&conversation_key, &message.user_id)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
@@ -3207,9 +3220,10 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
+    let conversation_key = engine_conversation_key(message);
     let conv_id = state
         .conversation_manager
-        .get_or_create_conversation(&message.channel, &message.user_id)
+        .get_or_create_conversation(&conversation_key, &message.user_id)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
@@ -3615,15 +3629,12 @@ async fn handle_with_engine_inner(
     // engine conversation. Without this, all threads share one conversation
     // and messages appear in the wrong place.
     let scope = message.conversation_scope();
-    let channel_key = match scope {
-        Some(tid) => format!("{}:{}", message.channel, tid),
-        None => message.channel.clone(),
-    };
+    let conversation_key = engine_conversation_key(message);
 
-    // Get or create conversation for this scoped channel+user
+    // Get or create conversation for this scoped channel instance + user.
     let conv_id = state
         .conversation_manager
-        .get_or_create_conversation(&channel_key, &message.user_id)
+        .get_or_create_conversation(&conversation_key, &message.user_id)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
@@ -3950,6 +3961,7 @@ async fn await_thread_outcome(
                     }),
                     conversation_id: conv_id,
                     source_channel: message.channel.clone(),
+                    source_channel_instance_key: Some(message.channel_dispatch_key().to_string()),
                     action_name: "authentication_fallback".into(),
                     call_id: format!("fallback-auth-{thread_id}"),
                     parameters: serde_json::json!({ "credential_name": cred_name }),
@@ -4090,6 +4102,7 @@ async fn await_thread_outcome(
                 }),
                 conversation_id: conv_id,
                 source_channel: message.channel.clone(),
+                source_channel_instance_key: Some(message.channel_dispatch_key().to_string()),
                 action_name: action_name.clone(),
                 call_id,
                 parameters,
@@ -6118,6 +6131,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn engine_conversation_key_prefers_channel_instance_key() {
+        let message = IncomingMessage::new("telegram", "alice", "hello")
+            .with_channel_instance_key("tenant-a:telegram")
+            .with_conversation_scope("chat-42");
+
+        assert_eq!(
+            engine_conversation_key(&message),
+            "tenant-a:telegram:chat-42"
+        );
+    }
+
+    #[test]
+    fn engine_conversation_key_falls_back_to_semantic_channel_name() {
+        let message =
+            IncomingMessage::new("telegram", "alice", "hello").with_conversation_scope("chat-42");
+
+        assert_eq!(engine_conversation_key(&message), "telegram:chat-42");
+    }
+
     /// When the SSE stream is already rendering the failure to the
     /// originating channel (gateway web UI), the helper must return
     /// `NoResponse` so `channel.respond()` does not broadcast a second
@@ -6447,6 +6480,7 @@ mod tests {
             scope_thread_id: None,
             conversation_id: ironclaw_engine::ConversationId::new(),
             source_channel: "web".into(),
+            source_channel_instance_key: Some("web".into()),
             action_name: "shell".into(),
             call_id: format!("call-{thread_id}"),
             parameters: serde_json::json!({"cmd": "ls"}),

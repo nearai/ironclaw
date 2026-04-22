@@ -728,8 +728,11 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 /// A WASM-based channel implementing the Channel trait.
 #[allow(dead_code)]
 pub struct WasmChannel {
-    /// Channel name.
+    /// Semantic channel kind/name.
     name: String,
+
+    /// Internal dispatch key for this concrete runtime instance.
+    dispatch_key: String,
 
     /// Runtime for WASM execution.
     runtime: Arc<WasmChannelRuntime>,
@@ -1070,6 +1073,7 @@ impl WasmChannel {
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
 
         Self {
+            dispatch_key: name.clone(),
             name,
             runtime,
             prepared,
@@ -1105,6 +1109,12 @@ impl WasmChannel {
     /// the target host (e.g., Bearer token for api.slack.com).
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Override the internal dispatch key for this concrete runtime instance.
+    pub fn with_dispatch_key(mut self, dispatch_key: impl Into<String>) -> Self {
+        self.dispatch_key = dispatch_key.into();
         self
     }
 
@@ -1249,9 +1259,14 @@ impl WasmChannel {
         }
     }
 
-    /// Get the channel name.
+    /// Get the semantic channel name/kind.
     pub fn channel_name(&self) -> &str {
         &self.name
+    }
+
+    /// Get the internal dispatch key for this runtime instance.
+    pub fn channel_dispatch_key(&self) -> &str {
+        &self.dispatch_key
     }
 
     /// Settings key for persisted broadcast metadata.
@@ -1404,6 +1419,7 @@ impl WasmChannel {
         owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) {
         let channel_name = self.name.clone();
+        let dispatch_key = self.dispatch_key.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
@@ -1564,6 +1580,7 @@ impl WasmChannel {
                                                         poll_guard,
                                                         WebsocketPollContext {
                                                             channel_name: channel_name.clone(),
+                                                            dispatch_key: dispatch_key.clone(),
                                                             runtime: Arc::clone(&runtime),
                                                             prepared: Arc::clone(&prepared),
                                                             capabilities: capabilities.clone(),
@@ -2848,6 +2865,7 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
+                .with_channel_instance_key(self.dispatch_key.clone())
                 .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -2964,6 +2982,7 @@ impl WasmChannel {
         owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) -> tokio::task::JoinHandle<()> {
         let channel_name = self.name.clone();
+        let dispatch_key = self.dispatch_key.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let poll_capabilities = self.capabilities.clone();
@@ -3026,6 +3045,7 @@ impl WasmChannel {
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
                                             channel_name: &channel_name,
+                                            dispatch_key: &dispatch_key,
                                             owner_scope_id: &owner_scope_id,
                                             owner_actor_id: current_owner.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
@@ -3245,6 +3265,7 @@ impl WasmChannel {
             // Convert to IncomingMessage
             let mut msg =
                 IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
+                    .with_channel_instance_key(dispatch.dispatch_key)
                     .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
@@ -3328,6 +3349,7 @@ impl WasmChannel {
 
 struct EmitDispatchContext<'a> {
     channel_name: &'a str,
+    dispatch_key: &'a str,
     owner_scope_id: &'a str,
     owner_actor_id: Option<&'a str>,
     pairing_store: &'a PairingStore,
@@ -3341,6 +3363,10 @@ struct EmitDispatchContext<'a> {
 impl Channel for WasmChannel {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn dispatch_key(&self) -> &str {
+        &self.dispatch_key
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -4053,6 +4079,7 @@ fn drain_guest_logs(
 /// single cloneable context so the call site stays readable.
 struct WebsocketPollContext {
     channel_name: String,
+    dispatch_key: String,
     runtime: Arc<WasmChannelRuntime>,
     prepared: Arc<PreparedChannelModule>,
     capabilities: ChannelCapabilities,
@@ -4129,6 +4156,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
                                 channel_name: &ctx.channel_name,
+                                dispatch_key: &ctx.dispatch_key,
                                 owner_scope_id: &ctx.owner_scope_id,
                                 owner_actor_id: current_owner.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
@@ -4359,6 +4387,7 @@ impl std::fmt::Debug for WasmChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasmChannel")
             .field("name", &self.name)
+            .field("dispatch_key", &self.dispatch_key)
             .field("prepared", &self.prepared.name)
             .finish()
     }
@@ -4401,6 +4430,10 @@ impl std::fmt::Debug for SharedWasmChannel {
 impl Channel for SharedWasmChannel {
     fn name(&self) -> &str {
         self.inner.name()
+    }
+
+    fn dispatch_key(&self) -> &str {
+        self.inner.channel_dispatch_key()
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -5853,6 +5886,14 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_channel_can_override_dispatch_key_without_changing_name() {
+        let channel = create_test_channel().with_dispatch_key("tenant-a:test");
+
+        assert_eq!(channel.name(), "test");
+        assert_eq!(Channel::dispatch_key(&channel), "tenant-a:test");
+    }
+
+    #[test]
     fn test_http_response_ok() {
         let response = HttpResponse::ok();
         assert_eq!(response.status, 200);
@@ -6108,6 +6149,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                dispatch_key: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 pairing_store: &pairing_store,
@@ -6126,6 +6168,11 @@ mod tests {
         let msg1 = rx.try_recv().expect("Should receive first message"); // safety: test-only assertion
         assert_eq!(msg1.user_id, "user1"); // safety: test-only assertion
         assert_eq!(msg1.content, "Hello from polling!"); // safety: test-only assertion
+        assert_eq!(
+            msg1.channel_instance_key.as_deref(),
+            Some("test-channel"),
+            "legacy dispatch should fall back to semantic channel name"
+        );
 
         let msg2 = rx.try_recv().expect("Should receive second message"); // safety: test-only assertion
         assert_eq!(msg2.user_id, "user2"); // safety: test-only assertion
@@ -6133,6 +6180,45 @@ mod tests {
 
         // No more messages
         assert!(rx.try_recv().is_err()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_tags_messages_with_instance_dispatch_key() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let pairing_store = PairingStore::new_noop();
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "telegram",
+                dispatch_key: "tenant-a:telegram",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                pairing_store: &pairing_store,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            vec![EmittedMessage::new("user1", "Hello from polling!")],
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.channel, "telegram");
+        assert_eq!(
+            msg.channel_instance_key.as_deref(),
+            Some("tenant-a:telegram")
+        );
     }
 
     #[tokio::test]
@@ -6159,6 +6245,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                dispatch_key: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 pairing_store: &pairing_store,
@@ -6201,6 +6288,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                dispatch_key: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 pairing_store: &pairing_store,
@@ -7463,6 +7551,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                dispatch_key: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 pairing_store: &pairing_store,
@@ -7526,6 +7615,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                dispatch_key: "telegram",
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
                 pairing_store: &pairing_store,
@@ -7603,6 +7693,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                dispatch_key: "telegram",
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
                 pairing_store: &pairing_store,
@@ -7660,6 +7751,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                dispatch_key: "telegram",
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
                 pairing_store: &pairing_store,
@@ -7746,6 +7838,7 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                dispatch_key: "test-channel",
                 owner_scope_id: "default",
                 owner_actor_id: None,
                 pairing_store: &pairing_store,

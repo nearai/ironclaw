@@ -674,6 +674,31 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 
+-- ==================== Channel Instances (V25) ====================
+
+CREATE TABLE IF NOT EXISTS channel_instances (
+    id           TEXT    NOT NULL PRIMARY KEY,
+    user_id      TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_kind TEXT    NOT NULL CHECK (channel_kind = lower(channel_kind)),
+    instance_key TEXT    NOT NULL UNIQUE,
+    display_name TEXT    NOT NULL,
+    is_primary   INTEGER NOT NULL DEFAULT 1,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    config       TEXT    NOT NULL DEFAULT '{}',
+    metadata     TEXT    NOT NULL DEFAULT '{}',
+    last_error   TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_user_kind
+    ON channel_instances(user_id, channel_kind);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_enabled
+    ON channel_instances(enabled)
+    WHERE enabled = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_instances_primary_per_kind
+    ON channel_instances(user_id, channel_kind)
+    WHERE is_primary = 1;
+
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -990,6 +1015,34 @@ ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
         "llm_calls_created_at_index",
         r#"
 CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
+"#,
+    ),
+    (
+        25,
+        "channel_instances",
+        r#"
+CREATE TABLE IF NOT EXISTS channel_instances (
+    id           TEXT    NOT NULL PRIMARY KEY,
+    user_id      TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_kind TEXT    NOT NULL CHECK (channel_kind = lower(channel_kind)),
+    instance_key TEXT    NOT NULL UNIQUE,
+    display_name TEXT    NOT NULL,
+    is_primary   INTEGER NOT NULL DEFAULT 1,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    config       TEXT    NOT NULL DEFAULT '{}',
+    metadata     TEXT    NOT NULL DEFAULT '{}',
+    last_error   TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_user_kind
+    ON channel_instances(user_id, channel_kind);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_enabled
+    ON channel_instances(enabled)
+    WHERE enabled = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_instances_primary_per_kind
+    ON channel_instances(user_id, channel_kind)
+    WHERE is_primary = 1;
 "#,
     ),
 ];

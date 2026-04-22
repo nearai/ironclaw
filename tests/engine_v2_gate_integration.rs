@@ -656,6 +656,7 @@ fn sample_pending_gate(
         scope_thread_id: None,
         conversation_id: ironclaw_engine::ConversationId::new(),
         source_channel: channel.into(),
+        source_channel_instance_key: Some(channel.into()),
         action_name: "http".into(),
         call_id: "call_1".into(),
         parameters: serde_json::json!({"url": "https://example.com"}),

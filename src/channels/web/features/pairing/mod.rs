@@ -160,7 +160,7 @@ pub(crate) async fn pairing_approve_handler(
     // Propagate owner binding to the running channel.
     let propagation_failed = if let Some(ext_mgr) = state.extension_manager.as_ref() {
         match ext_mgr
-            .complete_pairing_approval(&channel, &approval.external_id)
+            .complete_pairing_approval(&channel, &user.user_id, &approval.external_id)
             .await
         // dispatch-exempt: runtime channel mutation; pairing tool migration tracked as follow-up
         {

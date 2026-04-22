@@ -1117,54 +1117,62 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate WASM channels that were active in a previous session.
-        // Relay channels are handled separately below via restore_relay_channels().
-        for name in &persisted_active_wasm_channels {
-            if active_at_startup.contains(name)
-                || ext_mgr.is_relay_channel(name, &ext_user_id).await
-            {
-                continue;
-            }
-            match ext_mgr
-                .ensure_extension_ready(
-                    name,
-                    &ext_user_id,
-                    ironclaw::extensions::EnsureReadyIntent::ExplicitActivate,
-                )
-                .await
-            {
-                Ok(ironclaw::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
-                    let message = activation
-                        .map(|result| result.message)
-                        .unwrap_or_else(|| format!("Channel '{}' already ready", name));
-                    tracing::debug!(
-                        channel = %name,
-                        message = %message,
-                        "Auto-activated persisted WASM channel"
-                    );
+        // Prefer the new process-global channel-instance control plane when it
+        // has enabled rows. Fall back to the legacy owner-scoped
+        // `activated_channels` compatibility path only when no instance rows
+        // exist yet. Relay channels are handled separately below via
+        // restore_relay_channels().
+        let restored_from_channel_instances =
+            ext_mgr.restore_enabled_wasm_channel_instances().await;
+        if restored_from_channel_instances == 0 {
+            for name in &persisted_active_wasm_channels {
+                if active_at_startup.contains(name)
+                    || ext_mgr.is_relay_channel(name, &ext_user_id).await
+                {
+                    continue;
                 }
-                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
-                    tracing::warn!(
-                        channel = %name,
-                        instructions = ?auth.instructions(),
-                        "Persisted WASM channel still needs authentication"
-                    );
-                }
-                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
-                    instructions, ..
-                }) => {
-                    tracing::warn!(
-                        channel = %name,
-                        instructions = %instructions,
-                        "Persisted WASM channel still needs setup"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        channel = %name,
-                        error = %e,
-                        "Failed to auto-activate persisted WASM channel"
-                    );
+                match ext_mgr
+                    .ensure_extension_ready(
+                        name,
+                        &ext_user_id,
+                        ironclaw::extensions::EnsureReadyIntent::ExplicitActivate,
+                    )
+                    .await
+                {
+                    Ok(ironclaw::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
+                        let message = activation
+                            .map(|result| result.message)
+                            .unwrap_or_else(|| format!("Channel '{}' already ready", name));
+                        tracing::debug!(
+                            channel = %name,
+                            message = %message,
+                            "Auto-activated persisted WASM channel"
+                        );
+                    }
+                    Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
+                        tracing::warn!(
+                            channel = %name,
+                            instructions = ?auth.instructions(),
+                            "Persisted WASM channel still needs authentication"
+                        );
+                    }
+                    Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
+                        instructions,
+                        ..
+                    }) => {
+                        tracing::warn!(
+                            channel = %name,
+                            instructions = %instructions,
+                            "Persisted WASM channel still needs setup"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %name,
+                            error = %e,
+                            "Failed to auto-activate persisted WASM channel"
+                        );
+                    }
                 }
             }
         }

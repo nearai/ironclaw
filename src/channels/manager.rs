@@ -41,12 +41,12 @@ impl ChannelManager {
 
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
-        let name = channel.name().to_string();
+        let dispatch_key = channel.dispatch_key().to_string();
         self.channels
             .write()
             .await
-            .insert(name.clone(), Arc::from(channel));
-        tracing::debug!("Added channel: {}", name);
+            .insert(dispatch_key.clone(), Arc::from(channel));
+        tracing::debug!(channel = %dispatch_key, "Added channel");
     }
 
     /// Hot-add a channel to a running agent.
@@ -55,14 +55,14 @@ impl ChannelManager {
     /// and spawns a task that forwards its stream messages through `inject_tx` into
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
-        let name = channel.name().to_string();
+        let dispatch_key = channel.dispatch_key().to_string();
 
-        // Shut down any existing channel with the same name to avoid parallel consumers.
-        // The old forwarding task will stop when the channel's stream ends after shutdown.
+        // Shut down any existing channel with the same dispatch key to avoid
+        // parallel consumers for the same runtime instance.
         {
             let channels = self.channels.read().await;
-            if let Some(existing) = channels.get(&name) {
-                tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
+            if let Some(existing) = channels.get(&dispatch_key) {
+                tracing::debug!(channel = %dispatch_key, "Shutting down existing channel before hot-add replacement");
                 let _ = existing.shutdown().await;
             }
         }
@@ -73,7 +73,7 @@ impl ChannelManager {
         self.channels
             .write()
             .await
-            .insert(name.clone(), Arc::from(channel));
+            .insert(dispatch_key.clone(), Arc::from(channel));
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
@@ -82,11 +82,11 @@ impl ChannelManager {
             let mut stream = stream;
             while let Some(msg) = stream.next().await {
                 if tx.send(msg).await.is_err() {
-                    tracing::warn!(channel = %name, "Inject channel closed, stopping hot-added channel");
+                    tracing::warn!(channel = %dispatch_key, "Inject channel closed, stopping hot-added channel");
                     break;
                 }
             }
-            tracing::debug!(channel = %name, "Hot-added channel stream ended");
+            tracing::debug!(channel = %dispatch_key, "Hot-added channel stream ended");
         });
 
         Ok(())
@@ -138,12 +138,13 @@ impl ChannelManager {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let dispatch_key = msg.channel_dispatch_key();
         let channels = self.channels.read().await;
-        if let Some(channel) = channels.get(&msg.channel) {
+        if let Some(channel) = channels.get(dispatch_key) {
             channel.respond(msg, response).await
         } else {
             Err(ChannelError::SendFailed {
-                name: msg.channel.clone(),
+                name: dispatch_key.to_string(),
                 reason: "Channel not found".to_string(),
             })
         }
@@ -230,9 +231,16 @@ impl ChannelManager {
         Ok(())
     }
 
-    /// Get list of channel names.
+    /// Get the set of semantic channel names currently registered.
     pub async fn channel_names(&self) -> Vec<String> {
-        self.channels.read().await.keys().cloned().collect()
+        let channels = self.channels.read().await;
+        let mut names: Vec<String> = channels
+            .values()
+            .map(|channel| channel.name().to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Get a channel by name.
@@ -307,6 +315,46 @@ mod tests {
         let msg = IncomingMessage::new("nonexistent", "user1", "test");
         let result = manager.respond(&msg, OutgoingResponse::text("hi")).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_same_semantic_channel_names_can_coexist_with_distinct_dispatch_keys() {
+        let manager = ChannelManager::new();
+        let (stub_a, _tx_a) = StubChannel::with_dispatch_key("telegram", "tenant-a:telegram");
+        let (stub_b, _tx_b) = StubChannel::with_dispatch_key("telegram", "tenant-b:telegram");
+
+        manager.add(Box::new(stub_a)).await;
+        manager.add(Box::new(stub_b)).await;
+
+        let channels = manager.channels.read().await;
+        assert_eq!(channels.len(), 2);
+        assert!(channels.contains_key("tenant-a:telegram"));
+        assert!(channels.contains_key("tenant-b:telegram"));
+    }
+
+    #[tokio::test]
+    async fn test_respond_routes_by_instance_key_before_semantic_channel_name() {
+        let manager = ChannelManager::new();
+        let (stub_a, _tx_a) = StubChannel::with_dispatch_key("telegram", "tenant-a:telegram");
+        let (stub_b, _tx_b) = StubChannel::with_dispatch_key("telegram", "tenant-b:telegram");
+
+        let responses_a = stub_a.captured_responses_handle();
+        let responses_b = stub_b.captured_responses_handle();
+
+        manager.add(Box::new(stub_a)).await;
+        manager.add(Box::new(stub_b)).await;
+
+        let msg = IncomingMessage::new("telegram", "user1", "request")
+            .with_channel_instance_key("tenant-b:telegram");
+        manager
+            .respond(&msg, OutgoingResponse::text("reply"))
+            .await
+            .expect("respond failed");
+
+        assert!(responses_a.lock().expect("poisoned").is_empty());
+        let captured_b = responses_b.lock().expect("poisoned");
+        assert_eq!(captured_b.len(), 1);
+        assert_eq!(captured_b[0].1.content, "reply");
     }
 
     #[tokio::test]

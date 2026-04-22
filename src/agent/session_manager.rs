@@ -20,6 +20,8 @@ const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct ThreadKey {
     user_id: String,
+    /// Internal channel dispatch identity used to isolate concrete runtime
+    /// instances that may share the same semantic channel kind.
     channel: String,
     external_thread_id: Option<String>,
 }
@@ -110,8 +112,27 @@ impl SessionManager {
         channel: &str,
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
-        self.resolve_thread_with_parsed_uuid(user_id, channel, external_thread_id, None)
+        self.resolve_thread_for_channel_instance(user_id, channel, channel, external_thread_id)
             .await
+    }
+
+    /// Resolve an external thread ID while preserving a semantic source
+    /// channel separate from the internal channel dispatch key.
+    pub async fn resolve_thread_for_channel_instance(
+        &self,
+        user_id: &str,
+        source_channel: &str,
+        channel_dispatch_key: &str,
+        external_thread_id: Option<&str>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
+        self.resolve_thread_with_parsed_uuid_for_channel_instance(
+            user_id,
+            source_channel,
+            channel_dispatch_key,
+            external_thread_id,
+            None,
+        )
+        .await
     }
 
     /// Like [`resolve_thread`](Self::resolve_thread), but accepts a pre-parsed
@@ -127,11 +148,32 @@ impl SessionManager {
         external_thread_id: Option<&str>,
         parsed_uuid: Option<Uuid>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
+        self.resolve_thread_with_parsed_uuid_for_channel_instance(
+            user_id,
+            channel,
+            channel,
+            external_thread_id,
+            parsed_uuid,
+        )
+        .await
+    }
+
+    /// Like [`resolve_thread_with_parsed_uuid`](Self::resolve_thread_with_parsed_uuid),
+    /// but distinguishes the semantic source channel from the internal channel
+    /// dispatch key used to isolate concrete runtime instances.
+    pub async fn resolve_thread_with_parsed_uuid_for_channel_instance(
+        &self,
+        user_id: &str,
+        source_channel: &str,
+        channel_dispatch_key: &str,
+        external_thread_id: Option<&str>,
+        parsed_uuid: Option<Uuid>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
         let session = self.get_or_create_session(user_id).await;
 
         let key = ThreadKey {
             user_id: user_id.to_string(),
-            channel: channel.to_string(),
+            channel: channel_dispatch_key.to_string(),
             external_thread_id: external_thread_id.map(String::from),
         };
 
@@ -218,10 +260,11 @@ impl SessionManager {
 
             let mut sess = session.lock().await;
             let thread = if let Some(uuid) = safe_ext_uuid {
-                sess.create_thread_with_id(uuid, Some(channel))
+                sess.create_thread_with_id(uuid, Some(source_channel))
             } else {
-                sess.create_thread(Some(channel))
+                sess.create_thread(Some(source_channel))
             };
+            thread.source_channel_instance_key = Some(channel_dispatch_key.to_string());
             thread.id
         };
 
@@ -250,9 +293,23 @@ impl SessionManager {
         thread_id: Uuid,
         session: Arc<Mutex<Session>>,
     ) {
+        self.register_thread_for_channel_instance(user_id, channel, channel, thread_id, session)
+            .await;
+    }
+
+    /// Register a hydrated thread with a separate semantic source channel and
+    /// internal dispatch key.
+    pub async fn register_thread_for_channel_instance(
+        &self,
+        user_id: &str,
+        _source_channel: &str,
+        channel_dispatch_key: &str,
+        thread_id: Uuid,
+        session: Arc<Mutex<Session>>,
+    ) {
         let key = ThreadKey {
             user_id: user_id.to_string(),
-            channel: channel.to_string(),
+            channel: channel_dispatch_key.to_string(),
             external_thread_id: Some(thread_id.to_string()),
         };
 
@@ -586,6 +643,46 @@ mod tests {
 
         // Same user + same external ID but different channels = different threads
         assert_ne!(t1, t2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_same_semantic_channel_different_dispatch_keys_isolated() {
+        let manager = SessionManager::new();
+
+        let (session, t1) = manager
+            .resolve_thread_for_channel_instance(
+                "user-1",
+                "telegram",
+                "tenant-a:telegram",
+                Some("thread-x"),
+            )
+            .await;
+        let (_, t2) = manager
+            .resolve_thread_for_channel_instance(
+                "user-1",
+                "telegram",
+                "tenant-b:telegram",
+                Some("thread-x"),
+            )
+            .await;
+
+        assert_ne!(t1, t2);
+
+        let session = session.lock().await;
+        assert_eq!(
+            session
+                .threads
+                .get(&t1)
+                .and_then(|thread| thread.source_channel.as_deref()),
+            Some("telegram")
+        );
+        assert_eq!(
+            session
+                .threads
+                .get(&t2)
+                .and_then(|thread| thread.source_channel.as_deref()),
+            Some("telegram")
+        );
     }
 
     #[tokio::test]

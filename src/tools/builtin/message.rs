@@ -94,18 +94,27 @@ fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option
     }
 }
 
+fn effective_owner_scope_user<'a>(
+    owner_scope_target: Option<&'a str>,
+    ctx_user_id: &'a str,
+) -> &'a str {
+    owner_scope_target.unwrap_or(ctx_user_id)
+}
+
 async fn resolve_channel_fallback_target(
     extension_manager: Option<&Arc<ExtensionManager>>,
     channel: Option<&str>,
     owner_scope_target: Option<&str>,
     ctx_user_id: &str,
 ) -> Option<String> {
+    let owner_scope_user = effective_owner_scope_user(owner_scope_target, ctx_user_id);
+
     // Prefer an explicit channel binding when the extension manager knows the
     // durable delivery target (for example, a bound Telegram chat ID).
     if let Some(channel_name) = channel
         && let Some(extension_manager) = extension_manager
         && let Some(target) = extension_manager
-            .notification_target_for_channel(channel_name)
+            .notification_target_for_channel_for_user(channel_name, owner_scope_user)
             .await
     {
         return Some(target);
@@ -117,6 +126,24 @@ async fn resolve_channel_fallback_target(
     owner_scope_target
         .map(ToOwned::to_owned)
         .or_else(|| Some(ctx_user_id.to_string()))
+}
+
+async fn resolve_channel_dispatch_key(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    channel: Option<&str>,
+    owner_scope_target: Option<&str>,
+    ctx_user_id: &str,
+) -> Option<String> {
+    let channel_name = channel?;
+    if let Some(extension_manager) = extension_manager {
+        let owner_scope_user = effective_owner_scope_user(owner_scope_target, ctx_user_id);
+        return Some(
+            extension_manager
+                .notification_channel_dispatch_key_for_user(channel_name, owner_scope_user)
+                .await,
+        );
+    }
+    Some(channel_name.to_string())
 }
 
 struct MessageTargetResolution<'a> {
@@ -279,7 +306,7 @@ impl Tool for MessageTool {
             extension_manager: self.extension_manager.as_ref(),
             explicit_target,
             metadata_target,
-            owner_scope_target,
+            owner_scope_target: owner_scope_target.clone(),
             default_target,
             channel: channel.as_deref(),
             metadata_channel: metadata_channel.as_deref(),
@@ -344,21 +371,30 @@ impl Tool for MessageTool {
         }
 
         if let Some(ref channel) = channel {
+            let delivery_channel = resolve_channel_dispatch_key(
+                self.extension_manager.as_ref(),
+                Some(channel),
+                owner_scope_target.as_deref(),
+                &ctx.user_id,
+            )
+            .await
+            .unwrap_or_else(|| channel.clone());
+
             // Send to a specific channel
             match self
                 .channel_manager
-                .broadcast(channel, &target, response)
+                .broadcast(&delivery_channel, &target, response)
                 .await
             {
                 Ok(()) => {
                     tracing::info!(
                         message_sent = true,
-                        channel = %channel,
+                        channel = %delivery_channel,
                         target = %target,
                         attachments = attachment_count,
                         "Message sent via message tool"
                     );
-                    let msg = format!("Sent message to {}:{}", channel, target);
+                    let msg = format!("Sent message to {}:{}", delivery_channel, target);
                     Ok(ToolOutput::text(msg, start.elapsed()))
                 }
                 Err(e) => {
@@ -366,12 +402,12 @@ impl Tool for MessageTool {
                     let err_msg = if available.is_empty() {
                         format!(
                             "Failed to send to {}:{}: {}. No channels connected.",
-                            channel, target, e
+                            delivery_channel, target, e
                         )
                     } else {
                         format!(
                             "Failed to send to {}:{}. Available channels: {}. Error: {}",
-                            channel, target, available, e
+                            delivery_channel, target, available, e
                         )
                     };
                     Err(ToolError::ExecutionFailed(err_msg))
@@ -438,13 +474,90 @@ impl Tool for MessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+    use crate::channels::{Channel, IncomingMessage, MessageStream, StatusUpdate};
+    use crate::error::ChannelError;
+    use crate::testing::BroadcastCapture;
+
+    struct TestBroadcastChannel {
+        name: &'static str,
+        dispatch_key: &'static str,
+        captures: BroadcastCapture,
+    }
+
+    impl TestBroadcastChannel {
+        fn new(name: &'static str) -> (Self, BroadcastCapture) {
+            Self::with_dispatch_key(name, name)
+        }
+
+        fn with_dispatch_key(
+            name: &'static str,
+            dispatch_key: &'static str,
+        ) -> (Self, BroadcastCapture) {
+            let captures = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    name,
+                    dispatch_key,
+                    captures: Arc::clone(&captures),
+                },
+                captures,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for TestBroadcastChannel {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn dispatch_key(&self) -> &str {
+            self.dispatch_key
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel::<IncomingMessage>(1);
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            _status: StatusUpdate,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            user_id: &str,
+            response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.captures
+                .lock()
+                .await
+                .push((user_id.to_string(), response));
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
 
     async fn message_tool_with_recording_channels()
     -> (MessageTool, BroadcastCapture, BroadcastCapture) {
         let channel_manager = ChannelManager::new();
-        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
-        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        let (gateway, gateway_captures) = TestBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = TestBroadcastChannel::new("telegram");
         channel_manager.add(Box::new(gateway)).await;
         channel_manager.add(Box::new(telegram)).await;
 
@@ -453,6 +566,24 @@ mod tests {
             gateway_captures,
             telegram_captures,
         )
+    }
+
+    async fn seed_test_user(store: &Arc<dyn crate::db::Database>, user_id: &str) {
+        store
+            .get_or_create_user(crate::db::UserRecord {
+                id: user_id.to_string(),
+                role: "member".to_string(),
+                display_name: user_id.to_string(),
+                status: "active".to_string(),
+                email: None,
+                last_login_at: None,
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("seed test user");
     }
 
     #[test]
@@ -919,6 +1050,84 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "interactive-chat-user");
         assert_eq!(telegram[0].1.content, "NEAR price is $5");
+    }
+
+    #[tokio::test]
+    async fn message_tool_owner_scoped_channel_uses_tenant_dispatch_key() {
+        let (db, _db_dir) = crate::testing::test_db().await;
+        seed_test_user(&db, "tenant-b").await;
+        db.set_setting(
+            "tenant-b",
+            "channels.wasm_channel_owner_ids.telegram",
+            &serde_json::json!(424242_i64),
+        )
+        .await
+        .expect("persist tenant telegram target");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-b:primary".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant channel instance");
+
+        let tools_dir = tempfile::tempdir().expect("temp tools dir");
+        let channels_dir = tempfile::tempdir().expect("temp channels dir");
+        let master_key =
+            secrecy::SecretString::from(crate::testing::credentials::TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(
+            crate::secrets::SecretsCrypto::new(master_key).expect("create secrets crypto"),
+        );
+        let extension_manager = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(crate::tools::mcp::session::McpSessionManager::new()),
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
+            Arc::new(crate::secrets::InMemorySecretsStore::new(crypto)),
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            tools_dir.path().to_path_buf(),
+            channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(Arc::clone(&db)),
+            Vec::new(),
+        ));
+
+        let channel_manager = ChannelManager::new();
+        let (telegram, telegram_captures) =
+            TestBroadcastChannel::with_dispatch_key("telegram", "telegram:tenant-b:primary");
+        channel_manager.add(Box::new(telegram)).await;
+        let tool = MessageTool::new(Arc::new(channel_manager))
+            .with_extension_manager(Arc::clone(&extension_manager));
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+            "owner_id": "tenant-b",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect("tenant-scoped telegram notification should resolve via dispatch key");
+
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:tenant-b:primary:424242")
+        );
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "424242");
+        assert_eq!(telegram[0].1.content, "hello");
     }
 
     #[tokio::test]

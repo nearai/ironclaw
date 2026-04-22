@@ -118,10 +118,16 @@ pub(crate) async fn extensions_list_handler(
     let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
+            if ext_mgr
+                .has_wasm_channel_owner_binding_for_user(&ext.name, &user.user_id)
+                .await
+            {
                 owner_bound_channels.insert(ext.name.clone());
             }
-            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
+            if ext_mgr
+                .has_wasm_channel_pairing_for_user(&ext.name, &user.user_id)
+                .await
+            {
                 paired_channels.insert(ext.name.clone());
             }
         }
@@ -661,6 +667,8 @@ pub(crate) async fn extensions_setup_submit_handler(
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use axum::{
         Router,
         http::StatusCode,
@@ -677,7 +685,8 @@ mod tests {
     };
 
     use crate::channels::web::test_helpers::{
-        test_ext_mgr, test_ext_mgr_with_db, test_gateway_state, test_secrets_store,
+        insert_test_user, test_ext_mgr, test_ext_mgr_with_db, test_gateway_state,
+        test_gateway_state_with_dependencies, test_secrets_store,
     };
     use crate::channels::web::types::*;
     use crate::channels::web::types::{
@@ -687,6 +696,42 @@ mod tests {
 
     use super::{derive_activation_status, derive_onboarding};
     use crate::channels::web::types::ChannelOnboardingState;
+
+    async fn make_multi_tenant_extension_test_fixture() -> (
+        Arc<crate::extensions::ExtensionManager>,
+        Arc<dyn crate::db::Database>,
+        Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+        Arc<crate::channels::web::platform::state::GatewayState>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let (db, db_dir) = crate::testing::test_db().await;
+        let secrets = test_secrets_store();
+        let tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(crate::tools::mcp::session::McpSessionManager::new()),
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            tools_dir.path().to_path_buf(),
+            channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(Arc::clone(&db)),
+            Vec::new(),
+        ));
+        let state = test_gateway_state_with_dependencies(
+            Some(Arc::clone(&ext_mgr)),
+            Some(Arc::clone(&db)),
+            None,
+            None,
+        );
+        (ext_mgr, db, secrets, state, db_dir, tools_dir, channels_dir)
+    }
 
     fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
         InstalledExtension {
@@ -1321,6 +1366,263 @@ mod tests {
         assert_eq!(telegram["kind"], "wasm_channel");
         assert_eq!(telegram["active"], false);
         assert_eq!(telegram["activation_status"], "installed");
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_handler_isolates_active_flag_per_tenant_instance() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (ext_mgr, db, _secrets, state, _db_dir, _tools_dir, channels_dir) =
+            make_multi_tenant_extension_test_fixture().await;
+        insert_test_user(&db, "tenant-a", "member").await;
+        insert_test_user(&db, "tenant-b", "member").await;
+        std::fs::write(channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "setup": { "required_secrets": [{ "name": "BOT_TOKEN", "prompt": "Enter bot token" }] },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-a".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-a:primary".to_string(),
+            display_name: "Tenant A Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant-a instance");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant-b instance");
+        ext_mgr
+            .set_active_channels(vec!["telegram".to_string()])
+            .await;
+
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req_tenant_a = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("tenant-a request");
+        req_tenant_a.extensions_mut().insert(UserIdentity {
+            user_id: "tenant-a".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp_tenant_a =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req_tenant_a)
+                .await
+                .expect("tenant-a response");
+        assert_eq!(resp_tenant_a.status(), StatusCode::OK);
+        let body_tenant_a = axum::body::to_bytes(resp_tenant_a.into_body(), 1024 * 64)
+            .await
+            .expect("tenant-a body");
+        let parsed_tenant_a: serde_json::Value =
+            serde_json::from_slice(&body_tenant_a).expect("tenant-a json");
+        let telegram_tenant_a = parsed_tenant_a["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("tenant-a telegram entry");
+        assert_eq!(telegram_tenant_a["active"], false);
+
+        let mut req_tenant_b = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("tenant-b request");
+        req_tenant_b.extensions_mut().insert(UserIdentity {
+            user_id: "tenant-b".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp_tenant_b = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req_tenant_b)
+            .await
+            .expect("tenant-b response");
+        assert_eq!(resp_tenant_b.status(), StatusCode::OK);
+        let body_tenant_b = axum::body::to_bytes(resp_tenant_b.into_body(), 1024 * 64)
+            .await
+            .expect("tenant-b body");
+        let parsed_tenant_b: serde_json::Value =
+            serde_json::from_slice(&body_tenant_b).expect("tenant-b json");
+        let telegram_tenant_b = parsed_tenant_b["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("tenant-b telegram entry");
+        assert_eq!(telegram_tenant_b["active"], true);
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_handler_isolates_owner_binding_status_per_tenant_instance() {
+        use crate::secrets::CreateSecretParams;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (ext_mgr, db, secrets, state, _db_dir, _tools_dir, channels_dir) =
+            make_multi_tenant_extension_test_fixture().await;
+        insert_test_user(&db, "tenant-a", "member").await;
+        insert_test_user(&db, "tenant-b", "member").await;
+        std::fs::write(channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "setup": { "required_secrets": [{ "name": "BOT_TOKEN", "prompt": "Enter bot token" }] },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-a".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-a:primary".to_string(),
+            display_name: "Tenant A Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant-a instance");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram:tenant-b:primary".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant-b instance");
+        secrets
+            .create("tenant-a", CreateSecretParams::new("BOT_TOKEN", "token-a"))
+            .await
+            .expect("seed tenant-a secret");
+        secrets
+            .create("tenant-b", CreateSecretParams::new("BOT_TOKEN", "token-b"))
+            .await
+            .expect("seed tenant-b secret");
+        db.set_setting(
+            "tenant-b",
+            "channels.wasm_channel_owner_ids.telegram",
+            &serde_json::json!(424242_i64),
+        )
+        .await
+        .expect("seed tenant-b owner binding");
+        ext_mgr
+            .set_active_channels(vec![
+                "telegram:tenant-a:primary".to_string(),
+                "telegram:tenant-b:primary".to_string(),
+            ])
+            .await;
+
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req_tenant_a = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("tenant-a request");
+        req_tenant_a.extensions_mut().insert(UserIdentity {
+            user_id: "tenant-a".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp_tenant_a =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req_tenant_a)
+                .await
+                .expect("tenant-a response");
+        assert_eq!(resp_tenant_a.status(), StatusCode::OK);
+        let body_tenant_a = axum::body::to_bytes(resp_tenant_a.into_body(), 1024 * 64)
+            .await
+            .expect("tenant-a body");
+        let parsed_tenant_a: serde_json::Value =
+            serde_json::from_slice(&body_tenant_a).expect("tenant-a json");
+        let telegram_tenant_a = parsed_tenant_a["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("tenant-a telegram entry");
+        assert_eq!(telegram_tenant_a["activation_status"], "pairing");
+
+        let mut req_tenant_b = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("tenant-b request");
+        req_tenant_b.extensions_mut().insert(UserIdentity {
+            user_id: "tenant-b".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp_tenant_b = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req_tenant_b)
+            .await
+            .expect("tenant-b response");
+        assert_eq!(resp_tenant_b.status(), StatusCode::OK);
+        let body_tenant_b = axum::body::to_bytes(resp_tenant_b.into_body(), 1024 * 64)
+            .await
+            .expect("tenant-b body");
+        let parsed_tenant_b: serde_json::Value =
+            serde_json::from_slice(&body_tenant_b).expect("tenant-b json");
+        let telegram_tenant_b = parsed_tenant_b["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("tenant-b telegram entry");
+        assert_eq!(telegram_tenant_b["activation_status"], "active");
     }
 
     /// Caller-level wire-contract regression for nearai/ironclaw#2235.

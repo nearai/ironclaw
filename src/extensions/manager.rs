@@ -372,12 +372,14 @@ pub struct ExtensionManager {
     /// When set, settings reads/writes go through this cache-backed store
     /// instead of the raw `Database`. Populated via `with_settings_store()`.
     settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
-    /// Names of WASM/relay channels that are actively running in this process.
+    /// Semantic channel kinds that are actively running in this process.
     ///
     /// This is runtime state, not install/discovery state. Installed WASM
     /// channels are still discovered from disk in `list()`, but only channels
     /// present in this set are reported as active.
     active_channel_names: RwLock<HashSet<String>>,
+    /// Concrete runtime dispatch keys for active channel instances.
+    active_channel_dispatch_keys: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
     installed_relay_extensions: RwLock<HashSet<String>>,
     /// Last activation error for each WASM channel (ephemeral, cleared on success).
@@ -629,6 +631,7 @@ impl ExtensionManager {
             store,
             settings_override: None,
             active_channel_names: RwLock::new(HashSet::new()),
+            active_channel_dispatch_keys: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
             sse_manager: RwLock::new(None),
@@ -842,26 +845,36 @@ impl ExtensionManager {
         });
     }
 
-    async fn current_channel_owner_id(&self, name: &str) -> Option<i64> {
+    async fn current_channel_owner_id_for_user(
+        &self,
+        name: &str,
+        user_id: &str,
+        dispatch_key: Option<&str>,
+    ) -> Option<i64> {
         {
             let rt_guard = self.channel_runtime.read().await;
-            if let Some(owner_id) = rt_guard
-                .as_ref()
-                .and_then(|rt| rt.wasm_channel_owner_ids.get(name).copied())
-            {
-                return Some(owner_id);
+            if let Some(rt) = rt_guard.as_ref() {
+                if let Some(dispatch_key) = dispatch_key
+                    && let Some(owner_id) = rt.wasm_channel_owner_ids.get(dispatch_key).copied()
+                {
+                    return Some(owner_id);
+                }
+                if let Some(owner_id) = rt.wasm_channel_owner_ids.get(name).copied() {
+                    return Some(owner_id);
+                }
             }
         }
 
         let store = self.settings_store()?;
         let key = format!("channels.wasm_channel_owner_ids.{name}");
-        match store.get_setting(&self.user_id, &key).await {
+        match store.get_setting(user_id, &key).await {
             Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
             Ok(Some(serde_json::Value::String(s))) => s.parse::<i64>().ok(),
             Ok(Some(_)) | Ok(None) => None,
             Err(e) => {
                 tracing::debug!(
                     channel = %name,
+                    user_id = %user_id,
                     error = %e,
                     "Failed to read persisted wasm channel owner id"
                 );
@@ -870,21 +883,41 @@ impl ExtensionManager {
         }
     }
 
-    async fn current_channel_owner_actor_id(&self, name: &str) -> Option<String> {
-        if let Some(owner_id) = self.current_channel_owner_id(name).await {
+    async fn current_channel_owner_actor_id_for_user(
+        &self,
+        name: &str,
+        user_id: &str,
+        dispatch_key: Option<&str>,
+    ) -> Option<String> {
+        if let Some(owner_id) = self
+            .current_channel_owner_id_for_user(name, user_id, dispatch_key)
+            .await
+        {
             return Some(owner_id.to_string());
         }
 
-        let rt_guard = self.channel_runtime.read().await;
-        let rt = (*rt_guard).as_ref()?;
-        rt.pairing_store
-            .external_id_for_owner(
-                name,
-                &crate::ownership::UserId::from_trusted(
-                    self.user_id.clone(),
-                    crate::ownership::UserRole::Regular,
-                ),
-            )
+        {
+            let rt_guard = self.channel_runtime.read().await;
+            if let Some(rt) = (*rt_guard).as_ref()
+                && let Ok(owner) = rt
+                    .pairing_store
+                    .external_id_for_owner(
+                        name,
+                        &crate::ownership::UserId::from_trusted(
+                            user_id.to_string(),
+                            crate::ownership::UserRole::Regular,
+                        ),
+                    )
+                    .await
+                && owner.is_some()
+            {
+                return owner;
+            }
+        }
+
+        let store = self.store.as_ref()?;
+        store
+            .resolve_channel_external_id_for_owner(name, user_id)
             .await
             .ok()
             .flatten()
@@ -893,13 +926,14 @@ impl ExtensionManager {
     async fn load_channel_runtime_config_overrides(
         &self,
         name: &str,
+        user_id: &str,
     ) -> HashMap<String, serde_json::Value> {
         let mut overrides = HashMap::new();
 
         if name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = self.settings_store()
             && let Ok(Some(serde_json::Value::String(username))) = store
-                .get_setting(&self.user_id, &bot_username_setting_key(name))
+                .get_setting(user_id, &bot_username_setting_key(name))
                 .await
             && !username.trim().is_empty()
         {
@@ -913,7 +947,17 @@ impl ExtensionManager {
     }
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
-        self.current_channel_owner_actor_id(name).await.is_some()
+        self.has_wasm_channel_owner_binding_for_user(name, &self.user_id)
+            .await
+    }
+
+    pub async fn has_wasm_channel_owner_binding_for_user(&self, name: &str, user_id: &str) -> bool {
+        let dispatch_key = self
+            .notification_channel_dispatch_key_for_user(name, user_id)
+            .await;
+        self.current_channel_owner_actor_id_for_user(name, user_id, Some(&dispatch_key))
+            .await
+            .is_some()
     }
 
     async fn channel_activation_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -934,13 +978,34 @@ impl ExtensionManager {
     pub async fn complete_pairing_approval(
         &self,
         channel_name: &str,
+        user_id: &str,
         external_id: &str,
     ) -> Result<(), ExtensionError> {
         // Normalize to lowercase — pairing storage and webhook routes are
         // lowercase, so mixed-case requests must resolve consistently.
         let channel_name = channel_name.to_ascii_lowercase();
         let channel_name = channel_name.as_str();
-        let activation_lock = self.channel_activation_lock(channel_name).await;
+        let dispatch_key = if let Some(store) = self.channel_instance_store() {
+            match store
+                .get_primary_channel_instance(user_id, channel_name)
+                .await
+            {
+                Ok(Some(instance)) => instance.instance_key,
+                Ok(None) => channel_name.to_string(),
+                Err(error) => {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        user_id = %user_id,
+                        error = %error,
+                        "Failed to load channel instance for pairing approval; falling back to semantic channel routing"
+                    );
+                    channel_name.to_string()
+                }
+            }
+        } else {
+            channel_name.to_string()
+        };
+        let activation_lock = self.channel_activation_lock(&dispatch_key).await;
         let _guard = activation_lock.lock().await;
 
         let router = {
@@ -951,19 +1016,19 @@ impl ExtensionManager {
             }
         };
 
-        let webhook_path = format!("/webhook/{}", channel_name);
+        let webhook_path = format!("/webhook/{}", dispatch_key);
         let Some(existing_channel) = router.get_channel_for_path(&webhook_path).await else {
             return Ok(());
         };
 
         let external_id = crate::pairing::ExternalId::from(external_id.to_string());
         let config_overrides = self
-            .load_channel_runtime_config_overrides(channel_name)
+            .load_channel_runtime_config_overrides(channel_name, user_id)
             .await;
         let deps = crate::pairing::approval::ApprovalDeps {
             tunnel_url: self.tunnel_url.as_deref(),
             store: self.store.as_ref(),
-            user_id: &self.user_id,
+            user_id,
             config_overrides,
         };
         let result = crate::pairing::approval::propagate_approval(
@@ -984,7 +1049,7 @@ impl ExtensionManager {
             let mut rt_guard = self.channel_runtime.write().await;
             if let Some(rt) = rt_guard.as_mut() {
                 rt.wasm_channel_owner_ids
-                    .insert(channel_name.to_string(), owner_id_numeric);
+                    .insert(dispatch_key, owner_id_numeric);
             }
         }
 
@@ -998,25 +1063,80 @@ impl ExtensionManager {
     /// Returns false if no DB-backed pairing store is available — the noop
     /// pairing store cannot have rows. See nearai/ironclaw#1921.
     pub async fn has_wasm_channel_pairing(&self, name: &str) -> bool {
+        self.has_wasm_channel_pairing_for_user(name, &self.user_id)
+            .await
+    }
+
+    pub async fn has_wasm_channel_pairing_for_user(&self, name: &str, user_id: &str) -> bool {
+        let channel_name = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
+
+        if let Some(store) = self.store.as_ref() {
+            match store
+                .resolve_channel_external_id_for_owner(&channel_name, user_id)
+                .await
+            {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        channel = %channel_name,
+                        user_id = %user_id,
+                        error = %error,
+                        "Failed to read paired sender from database-backed pairing store"
+                    );
+                }
+            }
+        }
+
         let rt_guard = self.channel_runtime.read().await;
         let Some(ref rt) = *rt_guard else {
             return false;
         };
-        match rt.pairing_store.read_allow_from(name).await {
-            Ok(allow) => !allow.is_empty(),
-            Err(error) => {
-                tracing::debug!(
-                    channel = %name,
-                    error = %error,
-                    "Failed to read paired senders from pairing store"
-                );
-                false
-            }
+        rt.pairing_store
+            .external_id_for_owner(
+                &channel_name,
+                &crate::ownership::UserId::from_trusted(
+                    user_id.to_string(),
+                    crate::ownership::UserRole::Regular,
+                ),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    pub(crate) async fn notification_channel_dispatch_key_for_user(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> String {
+        let channel_name = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
+        if let Some(store) = self.channel_instance_store()
+            && let Ok(Some(instance)) = store
+                .get_primary_channel_instance(user_id, &channel_name)
+                .await
+        {
+            return instance.instance_key;
         }
+        channel_name
+    }
+
+    pub(crate) async fn notification_target_for_channel_for_user(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Option<String> {
+        let dispatch_key = self
+            .notification_channel_dispatch_key_for_user(name, user_id)
+            .await;
+        self.current_channel_owner_actor_id_for_user(name, user_id, Some(&dispatch_key))
+            .await
     }
 
     pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
-        self.current_channel_owner_actor_id(name).await
+        self.notification_target_for_channel_for_user(name, &self.user_id)
+            .await
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -1148,13 +1268,28 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
+    fn dispatch_key_matches_channel_name(dispatch_key: &str, channel_name: &str) -> bool {
+        dispatch_key == channel_name || dispatch_key.starts_with(&format!("{channel_name}:"))
+    }
+
+    async fn remove_active_channel_dispatch_keys_for_name(&self, channel_name: &str) {
+        self.active_channel_dispatch_keys
+            .write()
+            .await
+            .retain(|dispatch_key| {
+                !Self::dispatch_key_matches_channel_name(dispatch_key, channel_name)
+            });
+    }
+
     /// Register channel names that are already running in the current process.
     ///
     /// Startup uses this after restoring persisted active channels; hot
     /// activation updates the same set after a channel is successfully started.
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
-        active.extend(names);
+        active.extend(names.iter().cloned());
+        let mut dispatch_keys = self.active_channel_dispatch_keys.write().await;
+        dispatch_keys.extend(names);
     }
 
     /// Persist the set of active channel names to the settings store.
@@ -1235,6 +1370,107 @@ impl ExtensionManager {
         }
     }
 
+    /// Load enabled tenant-owned channel instances for process-global startup restore.
+    pub async fn load_enabled_channel_instances_for_startup(
+        &self,
+    ) -> Vec<crate::db::ChannelInstanceRecord> {
+        let Some(store) = self.channel_instance_store() else {
+            return Vec::new();
+        };
+        match store.list_enabled_channel_instances().await {
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load enabled channel instances for startup restore");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Restore all enabled tenant-owned WASM channel instances.
+    ///
+    /// Returns the number of enabled channel-instance rows that were treated as
+    /// authoritative startup state. A zero means callers may fall back to the
+    /// legacy `activated_channels` compatibility path.
+    pub async fn restore_enabled_wasm_channel_instances(&self) -> usize {
+        let instances = self.load_enabled_channel_instances_for_startup().await;
+        if instances.is_empty() {
+            return 0;
+        }
+
+        let mut seen_dispatch_keys = std::collections::HashSet::new();
+        for instance in instances {
+            if !seen_dispatch_keys.insert(instance.instance_key.clone()) {
+                tracing::warn!(
+                    channel = %instance.channel_kind,
+                    dispatch_key = %instance.instance_key,
+                    user_id = %instance.user_id,
+                    "Skipping duplicate enabled channel instance row during startup restore"
+                );
+                continue;
+            }
+
+            if self
+                .active_channel_dispatch_keys
+                .read()
+                .await
+                .contains(&instance.instance_key)
+            {
+                continue;
+            }
+
+            match self
+                .ensure_extension_ready(
+                    &instance.channel_kind,
+                    &instance.user_id,
+                    crate::extensions::EnsureReadyIntent::ExplicitActivate,
+                )
+                .await
+            {
+                Ok(crate::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
+                    let message = activation.map(|result| result.message).unwrap_or_else(|| {
+                        format!("Channel '{}' already ready", instance.channel_kind)
+                    });
+                    tracing::debug!(
+                        channel = %instance.channel_kind,
+                        dispatch_key = %instance.instance_key,
+                        user_id = %instance.user_id,
+                        message = %message,
+                        "Restored enabled WASM channel instance"
+                    );
+                }
+                Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
+                    tracing::warn!(
+                        channel = %instance.channel_kind,
+                        dispatch_key = %instance.instance_key,
+                        user_id = %instance.user_id,
+                        instructions = ?auth.instructions(),
+                        "Enabled WASM channel instance still needs authentication at startup"
+                    );
+                }
+                Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                    tracing::warn!(
+                        channel = %instance.channel_kind,
+                        dispatch_key = %instance.instance_key,
+                        user_id = %instance.user_id,
+                        instructions = %instructions,
+                        "Enabled WASM channel instance still needs setup at startup"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %instance.channel_kind,
+                        dispatch_key = %instance.instance_key,
+                        user_id = %instance.user_id,
+                        error = %e,
+                        "Failed to restore enabled WASM channel instance"
+                    );
+                }
+            }
+        }
+
+        seen_dispatch_keys.len()
+    }
+
     /// Set the SSE broadcast sender for pushing extension status events to the web UI.
     pub async fn set_sse_sender(&self, sse: Arc<crate::channels::web::sse::SseManager>) {
         *self.sse_manager.write().await = Some(sse);
@@ -1279,6 +1515,13 @@ impl ExtensionManager {
         }
     }
 
+    /// Access the channel-instance control-plane store.
+    fn channel_instance_store(&self) -> Option<&dyn crate::db::ChannelInstanceStore> {
+        self.store
+            .as_ref()
+            .map(|db| db.as_ref() as &dyn crate::db::ChannelInstanceStore)
+    }
+
     /// Attach a cached settings store so settings reads/writes route through
     /// the cache layer, keeping the agent loop's view coherent.
     pub fn with_settings_store(
@@ -1287,6 +1530,111 @@ impl ExtensionManager {
     ) -> Self {
         self.settings_override = Some(store);
         self
+    }
+
+    fn default_channel_instance_display_name(channel_kind: &str) -> String {
+        channel_kind.replace('_', " ")
+    }
+
+    async fn upsert_primary_channel_instance_record(
+        &self,
+        channel_kind: &str,
+        user_id: &str,
+    ) -> Result<Option<crate::db::ChannelInstanceRecord>, ExtensionError> {
+        let Some(store) = self.channel_instance_store() else {
+            return Ok(None);
+        };
+        let channel_kind = canonicalize_extension_name(channel_kind)?;
+        let now = chrono::Utc::now();
+
+        if let Some(mut existing) = store
+            .get_primary_channel_instance(user_id, &channel_kind)
+            .await
+            .map_err(|e| ExtensionError::Other(e.to_string()))?
+        {
+            if existing.display_name.trim().is_empty() {
+                existing.display_name = Self::default_channel_instance_display_name(&channel_kind);
+            }
+            existing.enabled = true;
+            existing.is_primary = true;
+            existing.updated_at = now;
+            store
+                .update_channel_instance(&existing)
+                .await
+                .map_err(|e| ExtensionError::Other(e.to_string()))?;
+            return Ok(Some(existing));
+        }
+
+        let existing_same_kind = store
+            .list_channel_instances_for_user_and_kind(user_id, &channel_kind)
+            .await
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        if existing_same_kind.len() == 1 {
+            let mut existing = existing_same_kind[0].clone();
+            if existing.display_name.trim().is_empty() {
+                existing.display_name = Self::default_channel_instance_display_name(&channel_kind);
+            }
+            existing.enabled = true;
+            existing.is_primary = true;
+            existing.updated_at = now;
+            store
+                .update_channel_instance(&existing)
+                .await
+                .map_err(|e| ExtensionError::Other(e.to_string()))?;
+            return Ok(Some(existing));
+        }
+        if existing_same_kind.len() > 1 {
+            return Err(ExtensionError::Other(format!(
+                "Multiple '{}' channel instances exist for user '{}'; unable to choose a primary instance",
+                channel_kind, user_id
+            )));
+        }
+
+        let instance = crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: user_id.to_string(),
+            channel_kind: channel_kind.clone(),
+            instance_key: format!("{}:{}", channel_kind, uuid::Uuid::new_v4()),
+            display_name: Self::default_channel_instance_display_name(&channel_kind),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_channel_instance(&instance)
+            .await
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        Ok(Some(instance))
+    }
+
+    async fn update_channel_instance_activation_error(
+        &self,
+        channel_kind: &str,
+        user_id: &str,
+        error: Option<&str>,
+    ) {
+        let Some(store) = self.channel_instance_store() else {
+            return;
+        };
+        let Ok(channel_kind) = canonicalize_extension_name(channel_kind) else {
+            return;
+        };
+        let Ok(Some(mut instance)) = store
+            .get_primary_channel_instance(user_id, &channel_kind)
+            .await
+        else {
+            return;
+        };
+        instance.enabled = true;
+        instance.last_error = error.map(str::to_string);
+        instance.updated_at = chrono::Utc::now();
+        if let Err(e) = store.update_channel_instance(&instance).await {
+            tracing::debug!(channel = %channel_kind, user_id = %user_id, error = %e, "Failed to update channel instance activation error state");
+        }
     }
 
     async fn clear_pending_extension_auth(&self, name: &str) {
@@ -1658,7 +2006,10 @@ impl ExtensionManager {
             } => {}
         }
 
-        if self.is_extension_active(&name, kind).await {
+        if self
+            .is_extension_active_for_user(&name, kind, user_id)
+            .await
+        {
             return Ok(EnsureReadyOutcome::Ready {
                 name,
                 kind,
@@ -2028,12 +2379,49 @@ impl ExtensionManager {
         {
             match crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await {
                 Ok(channels) => {
-                    let active_names = self.active_channel_names.read().await;
                     let errors = self.activation_errors.read().await;
+                    let enabled_instances = if let Some(store) = self.channel_instance_store() {
+                        store
+                            .list_enabled_channel_instances()
+                            .await
+                            .ok()
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     for (name, discovered) in channels {
-                        let active = active_names.contains(&name);
+                        let user_instance = enabled_instances
+                            .iter()
+                            .find(|instance| {
+                                instance.user_id == user_id && instance.channel_kind == name
+                            })
+                            .cloned();
+                        let any_instance_for_kind = enabled_instances
+                            .iter()
+                            .any(|instance| instance.channel_kind == name);
+                        let active = if let Some(instance) = user_instance.as_ref() {
+                            instance.enabled
+                                && self
+                                    .active_channel_dispatch_keys
+                                    .read()
+                                    .await
+                                    .contains(&instance.instance_key)
+                        } else if any_instance_for_kind {
+                            false
+                        } else {
+                            self.active_channel_names.read().await.contains(&name)
+                        };
                         let auth_state = self.check_channel_auth_status(&name, user_id).await;
-                        let activation_error = errors.get(&name).cloned();
+                        let activation_error = user_instance
+                            .as_ref()
+                            .and_then(|instance| instance.last_error.clone())
+                            .or_else(|| {
+                                if any_instance_for_kind {
+                                    None
+                                } else {
+                                    errors.get(&name).cloned()
+                                }
+                            });
                         let registry_entry = self
                             .registry
                             .get_with_kind(&name, Some(ExtensionKind::WasmChannel))
@@ -2272,6 +2660,8 @@ impl ExtensionManager {
 
                 // Remove from active set and persist
                 self.active_channel_names.write().await.remove(&name);
+                self.remove_active_channel_dispatch_keys_for_name(&name)
+                    .await;
                 self.persist_active_channels(user_id).await;
 
                 // Clear stale activation errors so reinstall starts clean
@@ -2322,6 +2712,10 @@ impl ExtensionManager {
                     for candidate in &candidate_names {
                         active_channels.remove(candidate);
                     }
+                }
+                for candidate in &candidate_names {
+                    self.remove_active_channel_dispatch_keys_for_name(candidate)
+                        .await;
                 }
                 self.persist_active_channels(user_id).await;
                 self.activation_errors.write().await.remove(&name);
@@ -5101,12 +5495,42 @@ impl ExtensionManager {
     }
 
     async fn is_extension_active(&self, name: &str, kind: ExtensionKind) -> bool {
+        self.is_extension_active_for_user(name, kind, &self.user_id)
+            .await
+    }
+
+    async fn is_extension_active_for_user(
+        &self,
+        name: &str,
+        kind: ExtensionKind,
+        user_id: &str,
+    ) -> bool {
         match kind {
             ExtensionKind::McpServer => self.mcp_clients.read().await.contains_key(name),
             ExtensionKind::WasmTool => self.tool_registry.has(name).await,
-            ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
+            ExtensionKind::WasmChannel => {
+                if let Some(store) = self.channel_instance_store() {
+                    if let Ok(Some(instance)) =
+                        store.get_primary_channel_instance(user_id, name).await
+                    {
+                        return instance.enabled
+                            && self
+                                .active_channel_dispatch_keys
+                                .read()
+                                .await
+                                .contains(&instance.instance_key);
+                    }
+                    if let Ok(instances) = store.list_enabled_channel_instances().await
+                        && instances
+                            .iter()
+                            .any(|instance| instance.channel_kind == name)
+                    {
+                        return false;
+                    }
+                }
                 self.active_channel_names.read().await.contains(name)
             }
+            ExtensionKind::ChannelRelay => self.active_channel_names.read().await.contains(name),
             ExtensionKind::AcpAgent => true,
         }
     }
@@ -5577,16 +6001,25 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        let activation_lock = self.channel_activation_lock(name).await;
+        let channel_instance_record = self
+            .upsert_primary_channel_instance_record(name, user_id)
+            .await?;
+        let dispatch_key = channel_instance_record
+            .as_ref()
+            .map(|record| record.instance_key.clone())
+            .unwrap_or_else(|| name.to_string());
+
+        let activation_lock = self.channel_activation_lock(&dispatch_key).await;
         let _guard = activation_lock.lock().await;
 
-        // If already active, re-inject credentials and refresh webhook secret.
-        // Handles the case where a channel was loaded at startup before the
-        // user saved secrets via the web UI.
+        // If this concrete instance is already active, re-inject credentials
+        // and refresh the host-managed webhook state in place.
         {
-            let active = self.active_channel_names.read().await;
-            if active.contains(name) {
-                return self.refresh_active_channel(name, user_id).await;
+            let active = self.active_channel_dispatch_keys.read().await;
+            if active.contains(&dispatch_key) {
+                return self
+                    .refresh_active_channel(name, user_id, &dispatch_key)
+                    .await;
             }
         }
 
@@ -5641,7 +6074,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                self.user_id.clone(),
+                user_id.to_string(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5657,7 +6090,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                self.user_id.clone(),
+                user_id.to_string(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5666,12 +6099,18 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
         };
 
+        let loaded = LoadedChannel {
+            channel: loaded.channel.with_dispatch_key(dispatch_key.clone()),
+            capabilities_file: loaded.capabilities_file,
+        };
+
         self.complete_loaded_wasm_channel_activation(
             name,
             loaded,
             &channel_manager,
             &wasm_channel_router,
             wasm_channel_owner_ids.get(name).copied(),
+            user_id,
         )
         .await
     }
@@ -5683,8 +6122,10 @@ impl ExtensionManager {
         channel_manager: &Arc<ChannelManager>,
         wasm_channel_router: &Arc<WasmChannelRouter>,
         owner_id: Option<i64>,
+        user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
+        let channel_dispatch_key = loaded.channel.channel_dispatch_key().to_string();
         if is_reserved_wasm_channel_name(&channel_name) {
             return Err(ExtensionError::ActivationFailed(format!(
                 "Channel '{}' uses a reserved name and cannot be activated.",
@@ -5696,7 +6137,14 @@ impl ExtensionManager {
         // -> pairing_store external id -> capabilities file.
         let owner_actor_id = if let Some(owner_id) = owner_id {
             Some(owner_id.to_string())
-        } else if let Some(id) = self.current_channel_owner_actor_id(&channel_name).await {
+        } else if let Some(id) = self
+            .current_channel_owner_actor_id_for_user(
+                &channel_name,
+                user_id,
+                Some(&channel_dispatch_key),
+            )
+            .await
+        {
             Some(id)
         } else {
             owner_id_from_capabilities(loaded.capabilities_file.as_ref(), &channel_name)
@@ -5716,7 +6164,7 @@ impl ExtensionManager {
         // Get webhook secret from secrets store
         let webhook_secret = self
             .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
+            .get_decrypted(user_id, &webhook_secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string());
@@ -5731,12 +6179,12 @@ impl ExtensionManager {
                 owner_actor_id.as_deref(),
             );
             config_updates.extend(
-                self.load_channel_runtime_config_overrides(&channel_name)
+                self.load_channel_runtime_config_overrides(&channel_name, user_id)
                     .await,
             );
             inject_wasm_channel_secret_config_mappings(
                 &channel_name,
-                &self.user_id,
+                user_id,
                 self.secrets.as_ref(),
                 &secret_config_mappings,
                 &mut config_updates,
@@ -5747,6 +6195,7 @@ impl ExtensionManager {
                 channel_arc.update_config(config_updates).await;
                 tracing::info!(
                     channel = %channel_name,
+                    dispatch_key = %channel_dispatch_key,
                     has_tunnel = self.tunnel_url.is_some(),
                     has_webhook_secret = webhook_secret.is_some(),
                     "Injected runtime config into hot-activated channel"
@@ -5761,9 +6210,9 @@ impl ExtensionManager {
             } else {
                 None
             };
-            let webhook_path = format!("/webhook/{}", channel_name);
+            let webhook_path = format!("/webhook/{}", channel_dispatch_key);
             let endpoints = vec![RegisteredEndpoint {
-                channel_name: channel_name.clone(),
+                channel_name: channel_dispatch_key.clone(),
                 path: webhook_path,
                 methods: vec!["POST".to_string()],
                 require_secret: host_webhook_secret.is_some(),
@@ -5777,39 +6226,36 @@ impl ExtensionManager {
                     secret_header,
                 )
                 .await;
-            tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+            tracing::info!(channel = %channel_name, dispatch_key = %channel_dispatch_key, "Registered hot-activated channel with webhook router");
 
             // Register Ed25519 signature key if declared in capabilities
             if let Some(ref sig_key_name) = sig_key_secret_name
-                && let Ok(key_secret) = self
-                    .secrets
-                    .get_decrypted(&self.user_id, sig_key_name)
-                    .await
+                && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
             {
                 match wasm_channel_router
-                    .register_signature_key(&channel_name, key_secret.expose())
+                    .register_signature_key(&channel_dispatch_key, key_secret.expose())
                     .await
                 {
                     Ok(()) => {
-                        tracing::info!(channel = %channel_name, "Registered signature key for hot-activated channel")
+                        tracing::info!(channel = %channel_name, dispatch_key = %channel_dispatch_key, "Registered signature key for hot-activated channel")
                     }
                     Err(e) => {
-                        tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
+                        tracing::error!(channel = %channel_name, dispatch_key = %channel_dispatch_key, error = %e, "Failed to register signature key")
                     }
                 }
             }
 
             // Register HMAC signing secret if declared in capabilities
             if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
+                match self.secrets.get_decrypted(user_id, hmac_name).await {
                     Ok(secret) => {
                         wasm_channel_router
-                            .register_hmac_secret(&channel_name, secret.expose())
+                            .register_hmac_secret(&channel_dispatch_key, secret.expose())
                             .await;
-                        tracing::info!(channel = %channel_name, "Registered HMAC signing secret for hot-activated channel");
+                        tracing::info!(channel = %channel_name, dispatch_key = %channel_dispatch_key, "Registered HMAC signing secret for hot-activated channel");
                     }
                     Err(e) => {
-                        tracing::warn!(channel = %channel_name, error = %e, "HMAC secret not found");
+                        tracing::warn!(channel = %channel_name, dispatch_key = %channel_dispatch_key, error = %e, "HMAC secret not found");
                     }
                 }
             }
@@ -5820,7 +6266,7 @@ impl ExtensionManager {
             &channel_arc,
             Some(self.secrets.as_ref()),
             &channel_name,
-            &self.user_id,
+            user_id,
         )
         .await
         {
@@ -5828,6 +6274,7 @@ impl ExtensionManager {
                 if count > 0 {
                     tracing::info!(
                         channel = %channel_name,
+                        dispatch_key = %channel_dispatch_key,
                         credentials_injected = count,
                         "Credentials injected into hot-activated channel"
                     );
@@ -5836,6 +6283,7 @@ impl ExtensionManager {
             Err(e) => {
                 tracing::error!(
                     channel = %channel_name,
+                    dispatch_key = %channel_dispatch_key,
                     error = %e,
                     "Failed to inject credentials into hot-activated channel"
                 );
@@ -5853,9 +6301,15 @@ impl ExtensionManager {
             .write()
             .await
             .insert(channel_name.clone());
+        self.active_channel_dispatch_keys
+            .write()
+            .await
+            .insert(channel_dispatch_key.clone());
 
-        // Persist activation state so the channel auto-activates on restart
-        self.persist_active_channels(&self.user_id).await;
+        // Persist activation state so the channel auto-activates on restart.
+        // This remains semantic-name based for compatibility; channel_instances
+        // are the long-term source of truth for per-tenant restore.
+        self.persist_active_channels(user_id).await;
 
         tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
 
@@ -5875,6 +6329,7 @@ impl ExtensionManager {
         &self,
         name: &str,
         user_id: &str,
+        dispatch_key: &str,
     ) -> Result<ActivateResult, ExtensionError> {
         let router = {
             let rt_guard = self.channel_runtime.read().await;
@@ -5891,7 +6346,7 @@ impl ExtensionManager {
             }
         };
 
-        let webhook_path = format!("/webhook/{}", name);
+        let webhook_path = format!("/webhook/{}", dispatch_key);
         let existing_channel = match router.get_channel_for_path(&webhook_path).await {
             Some(ch) => ch,
             None => {
@@ -5953,7 +6408,7 @@ impl ExtensionManager {
             .unwrap_or_default();
 
         let owner_actor_id = self
-            .current_channel_owner_actor_id(name)
+            .current_channel_owner_actor_id_for_user(name, user_id, Some(dispatch_key))
             .await
             .or_else(|| owner_id_from_capabilities(capabilities_file.as_ref(), name));
         let mut config_updates = build_wasm_channel_runtime_config_updates(
@@ -5961,10 +6416,13 @@ impl ExtensionManager {
             None,
             owner_actor_id.as_deref(),
         );
-        config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        config_updates.extend(
+            self.load_channel_runtime_config_overrides(name, user_id)
+                .await,
+        );
         inject_wasm_channel_secret_config_mappings(
             name,
-            &self.user_id,
+            user_id,
             self.secrets.as_ref(),
             &secret_config_mappings,
             &mut config_updates,
@@ -5980,7 +6438,7 @@ impl ExtensionManager {
                 .await
         {
             router
-                .update_secret(name, secret.expose().to_string())
+                .update_secret(dispatch_key, secret.expose().to_string())
                 .await;
             config_updates.insert(
                 RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
@@ -5994,7 +6452,7 @@ impl ExtensionManager {
             && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
         {
             match router
-                .register_signature_key(name, key_secret.expose())
+                .register_signature_key(dispatch_key, key_secret.expose())
                 .await
             {
                 Ok(()) => {
@@ -6014,7 +6472,9 @@ impl ExtensionManager {
                 .await
             {
                 Ok(secret) => {
-                    router.register_hmac_secret(name, secret.expose()).await;
+                    router
+                        .register_hmac_secret(dispatch_key, secret.expose())
+                        .await;
                     tracing::info!(channel = %name, "Refreshed HMAC signing secret");
                 }
                 Err(e) => {
@@ -6596,21 +7056,29 @@ impl ExtensionManager {
         name: &str,
         fields: &HashMap<String, String>,
     ) -> Result<(), ExtensionError> {
+        let user_id = self.user_id.clone();
+        self.save_tool_setup_fields_for(name, &user_id, fields)
+            .await
+    }
+
+    async fn save_tool_setup_fields_for(
+        &self,
+        name: &str,
+        user_id: &str,
+        fields: &HashMap<String, String>,
+    ) -> Result<(), ExtensionError> {
         let store = self.settings_store().ok_or_else(|| {
             ExtensionError::Other("Settings store unavailable for setup field persistence".into())
         })?;
         let key = Self::setup_fields_setting_key(name);
         let value = serde_json::to_value(fields)
             .map_err(|e| ExtensionError::Other(format!("Failed to encode setup fields: {}", e)))?;
-        store
-            .set_setting(&self.user_id, &key, &value)
-            .await
-            .map_err(|e| {
-                ExtensionError::Other(format!(
-                    "Failed to persist setup fields for '{}': {}",
-                    name, e
-                ))
-            })
+        store.set_setting(user_id, &key, &value).await.map_err(|e| {
+            ExtensionError::Other(format!(
+                "Failed to persist setup fields for '{}': {}",
+                name, e
+            ))
+        })
     }
 
     /// Owner-scoped wrapper around [`is_tool_setup_field_provided_for`]. Used
@@ -6976,7 +7444,13 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
         }
 
-        let mut stored_fields = self.load_tool_setup_fields(&name).await.unwrap_or_default();
+        let mut stored_fields = if kind == ExtensionKind::WasmChannel {
+            self.load_tool_setup_fields_for(&name, user_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            self.load_tool_setup_fields(&name).await.unwrap_or_default()
+        };
 
         for (field_name, field_value) in fields {
             if !allowed_fields.contains(field_name.as_str()) {
@@ -6998,7 +7472,7 @@ impl ExtensionManager {
                     if let Some(setting_path) = &def.setting_path {
                         Self::validate_setup_setting_path(&name, setting_path)?;
                         if let Some(store) = self.settings_store() {
-                            let _ = store.delete_setting(&self.user_id, setting_path).await;
+                            let _ = store.delete_setting(user_id, setting_path).await;
                         }
                     }
                 }
@@ -7018,7 +7492,7 @@ impl ExtensionManager {
                 })?;
                 store
                     .set_setting(
-                        &self.user_id,
+                        user_id,
                         setting_path,
                         &serde_json::Value::String(trimmed.to_string()),
                     )
@@ -7033,17 +7507,26 @@ impl ExtensionManager {
         }
 
         if !allowed_fields.is_empty() && !fields.is_empty() {
-            self.save_tool_setup_fields(&name, &stored_fields).await?;
+            if kind == ExtensionKind::WasmChannel {
+                self.save_tool_setup_fields_for(&name, user_id, &stored_fields)
+                    .await?;
+            } else {
+                self.save_tool_setup_fields(&name, &stored_fields).await?;
+            }
         }
 
         for field_def in setup_field_defs.values() {
             if field_def.optional {
                 continue;
             }
-            if !self
-                .is_tool_setup_field_provided(&name, field_def, &stored_fields)
-                .await
-            {
+            let provided = if kind == ExtensionKind::WasmChannel {
+                self.is_tool_setup_field_provided_for(&name, user_id, field_def, &stored_fields)
+                    .await
+            } else {
+                self.is_tool_setup_field_provided(&name, field_def, &stored_fields)
+                    .await
+            };
+            if !provided {
                 return Err(ExtensionError::Other(format!(
                     "Required field '{}' is missing for extension '{}'",
                     field_def.name, name
@@ -7097,7 +7580,7 @@ impl ExtensionManager {
                 && let Some(store) = self.store.as_ref()
                 && let Err(e) = store
                     .set_setting(
-                        &self.user_id,
+                        user_id,
                         &bot_username_setting_key(&name),
                         &serde_json::json!(username),
                     )
@@ -7109,6 +7592,13 @@ impl ExtensionManager {
                     "Failed to persist bot username; mention detection may be degraded"
                 );
             }
+        }
+
+        let mut channel_instance_record = None;
+        if kind == ExtensionKind::WasmChannel {
+            channel_instance_record = self
+                .upsert_primary_channel_instance_record(&name, user_id)
+                .await?;
         }
 
         // For tools, save and attempt auto-activation, then check auth.
@@ -7236,12 +7726,18 @@ impl ExtensionManager {
         match activate_result {
             Ok(result) => {
                 self.activation_errors.write().await.remove(&name);
+                if channel_instance_record.is_some() {
+                    self.update_channel_instance_activation_error(&name, user_id, None)
+                        .await;
+                }
                 self.broadcast_extension_status(&name, "active", None).await;
 
                 // Check if the channel needs pairing (no owner binding yet).
                 let needs_pairing = kind == ExtensionKind::WasmChannel
-                    && !self.has_wasm_channel_owner_binding(&name).await
-                    && !self.has_wasm_channel_pairing(&name).await;
+                    && !self
+                        .has_wasm_channel_owner_binding_for_user(&name, user_id)
+                        .await
+                    && !self.has_wasm_channel_pairing_for_user(&name, user_id).await;
 
                 if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
                     let onboarding = crate::channels::web::features::extensions::derive_onboarding(
@@ -7310,6 +7806,10 @@ impl ExtensionManager {
                     .write()
                     .await
                     .insert(name.to_string(), error_msg.clone());
+                if channel_instance_record.is_some() {
+                    self.update_channel_instance_activation_error(&name, user_id, Some(&error_msg))
+                        .await;
+                }
                 self.broadcast_extension_status(&name, "failed", Some(&error_msg))
                     .await;
                 Ok(ConfigureResult {
@@ -7926,6 +8426,46 @@ mod tests {
         crate::testing::test_db().await
     }
 
+    async fn seed_test_user(store: &Arc<dyn crate::db::Database>, user_id: &str) {
+        store
+            .get_or_create_user(crate::db::UserRecord {
+                id: user_id.to_string(),
+                role: "member".to_string(),
+                display_name: user_id.to_string(),
+                status: "active".to_string(),
+                email: None,
+                last_login_at: None,
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("seed test user");
+    }
+
+    fn test_channel_instance_record(
+        user_id: &str,
+        channel_kind: &str,
+        instance_key: &str,
+    ) -> crate::db::ChannelInstanceRecord {
+        let now = chrono::Utc::now();
+        crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: user_id.to_string(),
+            channel_kind: channel_kind.to_string(),
+            instance_key: instance_key.to_string(),
+            display_name: format!("{} {}", user_id, channel_kind),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     /// Build a minimal ExtensionManager suitable for unit tests.
     fn make_test_manager_with_dirs(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
@@ -8068,6 +8608,434 @@ mod tests {
         assert!(
             actual.is_empty(),
             "an explicit empty activated_channels setting should keep all channels inactive"
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_wasm_channel_creates_primary_channel_instance_for_request_user() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        seed_test_user(&store, "tenant-a").await;
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "tenant_chat",
+            r#"{
+                "name": "tenant_chat",
+                "description": "Test tenant channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "api_token", "prompt": "API token" }
+                    ]
+                }
+            }"#,
+        );
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+
+        let secrets =
+            std::collections::HashMap::from([("api_token".to_string(), "test-token".to_string())]);
+        let result = mgr
+            .configure(
+                "tenant_chat",
+                &secrets,
+                &std::collections::HashMap::new(),
+                "tenant-a",
+            )
+            .await
+            .expect("configure should succeed even if activation fails");
+        assert!(
+            !result.activated,
+            "no runtime means activation should fail in test"
+        );
+
+        let tenant_instance = store
+            .get_primary_channel_instance("tenant-a", "tenant_chat")
+            .await
+            .expect("load tenant instance")
+            .expect("tenant instance should exist");
+        assert_eq!(tenant_instance.user_id, "tenant-a");
+        assert_eq!(tenant_instance.channel_kind, "tenant_chat");
+        assert!(tenant_instance.enabled);
+        assert!(tenant_instance.instance_key.starts_with("tenant_chat:"));
+
+        let owner_instance = store
+            .get_primary_channel_instance("test", "tenant_chat")
+            .await
+            .expect("load owner instance");
+        assert!(
+            owner_instance.is_none(),
+            "channel instance must be scoped to the request user, not ExtensionManager::user_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_wasm_channel_upserts_existing_primary_instance() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        seed_test_user(&store, "tenant-a").await;
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "tenant_chat",
+            r#"{
+                "name": "tenant_chat",
+                "description": "Test tenant channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "api_token", "prompt": "API token" }
+                    ]
+                }
+            }"#,
+        );
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let secrets =
+            std::collections::HashMap::from([("api_token".to_string(), "test-token".to_string())]);
+
+        mgr.configure(
+            "tenant_chat",
+            &secrets,
+            &std::collections::HashMap::new(),
+            "tenant-a",
+        )
+        .await
+        .expect("first configure");
+        let first = store
+            .get_primary_channel_instance("tenant-a", "tenant_chat")
+            .await
+            .expect("load first")
+            .expect("instance after first configure");
+
+        mgr.configure(
+            "tenant_chat",
+            &secrets,
+            &std::collections::HashMap::new(),
+            "tenant-a",
+        )
+        .await
+        .expect("second configure");
+        let after = store
+            .list_channel_instances_for_user_and_kind("tenant-a", "tenant_chat")
+            .await
+            .expect("list tenant channel instances");
+
+        assert_eq!(after.len(), 1, "configure should upsert, not duplicate");
+        assert_eq!(after[0].instance_key, first.instance_key);
+    }
+
+    #[tokio::test]
+    async fn configure_wasm_channel_activates_distinct_instances_per_user() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        seed_test_user(&store, "tenant-a").await;
+        seed_test_user(&store, "tenant-b").await;
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "tenant_chat",
+            r#"{
+                "name": "tenant_chat",
+                "description": "Test tenant channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "api_token", "prompt": "API token" }
+                    ]
+                }
+            }"#,
+        );
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime init"),
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        mgr.set_channel_runtime(
+            Arc::clone(&channel_manager),
+            Arc::clone(&runtime),
+            Arc::clone(&pairing_store),
+            Arc::clone(&router),
+            std::collections::HashMap::new(),
+        )
+        .await;
+        mgr.set_test_wasm_channel_loader(Arc::new({
+            let runtime = Arc::clone(&runtime);
+            let pairing_store = Arc::clone(&pairing_store);
+            move |_name| {
+                Ok(make_test_loaded_channel(
+                    Arc::clone(&runtime),
+                    "tenant_chat",
+                    Arc::clone(&pairing_store),
+                ))
+            }
+        }))
+        .await;
+
+        let secrets =
+            std::collections::HashMap::from([("api_token".to_string(), "test-token".to_string())]);
+        let result_a = mgr
+            .configure(
+                "tenant_chat",
+                &secrets,
+                &std::collections::HashMap::new(),
+                "tenant-a",
+            )
+            .await
+            .expect("configure tenant-a");
+        let result_b = mgr
+            .configure(
+                "tenant_chat",
+                &secrets,
+                &std::collections::HashMap::new(),
+                "tenant-b",
+            )
+            .await
+            .expect("configure tenant-b");
+
+        assert!(result_a.activated, "tenant-a should activate");
+        assert!(result_b.activated, "tenant-b should activate");
+
+        let instance_a = store
+            .get_primary_channel_instance("tenant-a", "tenant_chat")
+            .await
+            .expect("load tenant-a instance")
+            .expect("tenant-a instance");
+        let instance_b = store
+            .get_primary_channel_instance("tenant-b", "tenant_chat")
+            .await
+            .expect("load tenant-b instance")
+            .expect("tenant-b instance");
+        assert_ne!(instance_a.instance_key, instance_b.instance_key);
+        assert!(
+            channel_manager
+                .get_channel(&instance_a.instance_key)
+                .await
+                .is_some(),
+            "tenant-a dispatch key should be hot-added"
+        );
+        assert!(
+            channel_manager
+                .get_channel(&instance_b.instance_key)
+                .await
+                .is_some(),
+            "tenant-b dispatch key should be hot-added"
+        );
+        assert!(
+            router
+                .get_channel_for_path(&format!("/webhook/{}", instance_a.instance_key))
+                .await
+                .is_some(),
+            "tenant-a webhook path should be registered"
+        );
+        assert!(
+            router
+                .get_channel_for_path(&format!("/webhook/{}", instance_b.instance_key))
+                .await
+                .is_some(),
+            "tenant-b webhook path should be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_enabled_wasm_channel_instances_activates_multiple_tenants() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        seed_test_user(&store, "tenant-a").await;
+        seed_test_user(&store, "tenant-b").await;
+        store
+            .create_channel_instance(&test_channel_instance_record(
+                "tenant-a",
+                "tenant_chat",
+                "tenant_chat:tenant-a:primary",
+            ))
+            .await
+            .expect("seed tenant-a instance");
+        store
+            .create_channel_instance(&test_channel_instance_record(
+                "tenant-b",
+                "tenant_chat",
+                "tenant_chat:tenant-b:primary",
+            ))
+            .await
+            .expect("seed tenant-b instance");
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "tenant_chat",
+            r#"{
+                "name": "tenant_chat",
+                "description": "Test tenant channel",
+                "setup": {
+                    "required_secrets": []
+                }
+            }"#,
+        );
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime init"),
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        mgr.set_channel_runtime(
+            Arc::clone(&channel_manager),
+            Arc::clone(&runtime),
+            Arc::clone(&pairing_store),
+            Arc::clone(&router),
+            std::collections::HashMap::new(),
+        )
+        .await;
+        mgr.set_test_wasm_channel_loader(Arc::new({
+            let runtime = Arc::clone(&runtime);
+            let pairing_store = Arc::clone(&pairing_store);
+            move |_name| {
+                Ok(make_test_loaded_channel(
+                    Arc::clone(&runtime),
+                    "tenant_chat",
+                    Arc::clone(&pairing_store),
+                ))
+            }
+        }))
+        .await;
+
+        let restored = mgr.restore_enabled_wasm_channel_instances().await;
+        assert_eq!(
+            restored, 2,
+            "startup restore should treat both enabled instances as authoritative"
+        );
+        assert!(
+            channel_manager
+                .get_channel("tenant_chat:tenant-a:primary")
+                .await
+                .is_some(),
+            "tenant-a startup instance should be active"
+        );
+        assert!(
+            channel_manager
+                .get_channel("tenant_chat:tenant-b:primary")
+                .await
+                .is_some(),
+            "tenant-b startup instance should be active"
+        );
+        assert!(
+            router
+                .get_channel_for_path("/webhook/tenant_chat:tenant-a:primary")
+                .await
+                .is_some(),
+            "tenant-a startup webhook path should be registered"
+        );
+        assert!(
+            router
+                .get_channel_for_path("/webhook/tenant_chat:tenant-b:primary")
+                .await
+                .is_some(),
+            "tenant-b startup webhook path should be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_pairing_approval_updates_matching_tenant_instance() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        seed_test_user(&store, "tenant-a").await;
+        seed_test_user(&store, "tenant-b").await;
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "tenant_chat",
+            r#"{
+                "name": "tenant_chat",
+                "description": "Test tenant channel",
+                "setup": {
+                    "required_secrets": []
+                }
+            }"#,
+        );
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime init"),
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        mgr.set_channel_runtime(
+            Arc::clone(&channel_manager),
+            Arc::clone(&runtime),
+            Arc::clone(&pairing_store),
+            Arc::clone(&router),
+            std::collections::HashMap::new(),
+        )
+        .await;
+        mgr.set_test_wasm_channel_loader(Arc::new({
+            let runtime = Arc::clone(&runtime);
+            let pairing_store = Arc::clone(&pairing_store);
+            move |_name| {
+                Ok(make_test_loaded_channel(
+                    Arc::clone(&runtime),
+                    "tenant_chat",
+                    Arc::clone(&pairing_store),
+                ))
+            }
+        }))
+        .await;
+
+        mgr.configure(
+            "tenant_chat",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            "tenant-a",
+        )
+        .await
+        .expect("configure tenant-a");
+        mgr.configure(
+            "tenant_chat",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            "tenant-b",
+        )
+        .await
+        .expect("configure tenant-b");
+
+        let tenant_a = store
+            .get_primary_channel_instance("tenant-a", "tenant_chat")
+            .await
+            .expect("load tenant-a instance")
+            .expect("tenant-a instance");
+        let tenant_b = store
+            .get_primary_channel_instance("tenant-b", "tenant_chat")
+            .await
+            .expect("load tenant-b instance")
+            .expect("tenant-b instance");
+
+        mgr.complete_pairing_approval("tenant_chat", "tenant-b", "tg-user-b")
+            .await
+            .expect("propagate pairing approval");
+
+        let tenant_a_channel = router
+            .get_channel_for_path(&format!("/webhook/{}", tenant_a.instance_key))
+            .await
+            .expect("tenant-a runtime channel");
+        let tenant_b_channel = router
+            .get_channel_for_path(&format!("/webhook/{}", tenant_b.instance_key))
+            .await
+            .expect("tenant-b runtime channel");
+
+        assert_eq!(tenant_a_channel.owner_actor_id_for_test().await, None);
+        assert_eq!(
+            tenant_b_channel.owner_actor_id_for_test().await,
+            Some("tg-user-b".to_string())
+        );
+        assert_eq!(
+            tenant_b_channel.get_config().await.get("owner_id"),
+            Some(&serde_json::json!("tg-user-b")),
+            "pairing approval should update the matched tenant runtime config"
         );
     }
 
@@ -9628,6 +10596,7 @@ mod tests {
                 &channel_manager,
                 &router,
                 None,
+                "test",
             )
             .await
             .map_err(|e| format!("activation failed: {e}"))?;
@@ -9663,7 +10632,11 @@ mod tests {
     #[tokio::test]
     async fn test_current_channel_owner_id_uses_runtime_state() -> Result<(), String> {
         let manager = make_manager_with_temp_dirs();
-        if manager.current_channel_owner_id("telegram").await.is_some() {
+        if manager
+            .current_channel_owner_id_for_user("telegram", "test", None)
+            .await
+            .is_some()
+        {
             return Err("expected no owner id for telegram before runtime setup".to_string());
         }
 
@@ -9683,10 +10656,18 @@ mod tests {
             .set_channel_runtime(channels, runtime, pairing_store, router, owner_ids)
             .await;
 
-        if manager.current_channel_owner_id("telegram").await != Some(12345_i64) {
+        if manager
+            .current_channel_owner_id_for_user("telegram", "test", None)
+            .await
+            != Some(12345_i64)
+        {
             return Err("expected runtime owner id fast-path for telegram".to_string());
         }
-        if manager.current_channel_owner_id("slack").await.is_some() {
+        if manager
+            .current_channel_owner_id_for_user("slack", "test", None)
+            .await
+            .is_some()
+        {
             return Err("expected no owner id for slack".to_string());
         }
 
@@ -9742,7 +10723,11 @@ mod tests {
             Vec::new(),
         );
 
-        if manager.current_channel_owner_id("telegram").await.is_some() {
+        if manager
+            .current_channel_owner_id_for_user("telegram", "test", None)
+            .await
+            .is_some()
+        {
             return Err("expected no owner id before settings seed".to_string());
         }
 
@@ -9754,7 +10739,11 @@ mod tests {
         .await
         .map_err(|e| format!("persist owner id in settings failed: {e}"))?;
 
-        if manager.current_channel_owner_id("telegram").await != Some(54321_i64) {
+        if manager
+            .current_channel_owner_id_for_user("telegram", "test", None)
+            .await
+            != Some(54321_i64)
+        {
             return Err("expected store fallback owner id for telegram".to_string());
         }
 
@@ -9773,7 +10762,11 @@ mod tests {
             .set_channel_runtime(channels, runtime, pairing_store, router, owner_ids)
             .await;
 
-        if manager.current_channel_owner_id("telegram").await != Some(12345_i64) {
+        if manager
+            .current_channel_owner_id_for_user("telegram", "test", None)
+            .await
+            != Some(12345_i64)
+        {
             return Err("expected runtime fast-path owner id precedence".to_string());
         }
 

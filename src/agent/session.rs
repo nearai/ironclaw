@@ -310,6 +310,9 @@ pub struct Thread {
     /// Channel that created this thread (for approval authorization).
     #[serde(default)]
     pub source_channel: Option<String>,
+    /// Internal runtime/dispatch key for the originating channel instance.
+    #[serde(default)]
+    pub source_channel_instance_key: Option<String>,
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
@@ -336,10 +339,27 @@ pub const TRUSTED_APPROVAL_CHANNELS: &[&str] = &["web", "gateway"];
 /// - requesting is in `TRUSTED_APPROVAL_CHANNELS` -> always authorized
 /// - Otherwise -> denied
 pub fn is_approval_authorized(source: Option<&str>, requesting: &str) -> bool {
-    match source {
+    is_approval_authorized_for_instance(source, None, requesting, None)
+}
+
+/// Like [`is_approval_authorized`], but additionally constrains approvals to a
+/// specific channel instance when the source thread records one.
+pub fn is_approval_authorized_for_instance(
+    source_channel: Option<&str>,
+    source_channel_instance_key: Option<&str>,
+    requesting_channel: &str,
+    requesting_channel_instance_key: Option<&str>,
+) -> bool {
+    match source_channel {
         None => false,
         Some(src) if src == BOOTSTRAP_SOURCE_CHANNEL => true,
-        Some(src) => src == requesting || TRUSTED_APPROVAL_CHANNELS.contains(&requesting),
+        Some(_) if TRUSTED_APPROVAL_CHANNELS.contains(&requesting_channel) => true,
+        Some(src) => match source_channel_instance_key {
+            Some(source_instance_key) => {
+                requesting_channel_instance_key == Some(source_instance_key)
+            }
+            None => src == requesting_channel,
+        },
     }
 }
 
@@ -359,6 +379,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            source_channel_instance_key: None,
         }
     }
 
@@ -377,7 +398,18 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            source_channel_instance_key: None,
         }
+    }
+
+    /// Set the internal runtime/dispatch key for the channel instance that
+    /// created this thread.
+    pub fn with_source_channel_instance_key(
+        mut self,
+        source_channel_instance_key: Option<String>,
+    ) -> Self {
+        self.source_channel_instance_key = source_channel_instance_key;
+        self
     }
 
     /// Get the current turn number (1-indexed for display).
@@ -1972,6 +2004,16 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_can_store_source_channel_instance_key() {
+        let thread = Thread::new(Uuid::new_v4(), Some("telegram"))
+            .with_source_channel_instance_key(Some("tenant-a:telegram".to_string()));
+        assert_eq!(
+            thread.source_channel_instance_key.as_deref(),
+            Some("tenant-a:telegram")
+        );
+    }
+
+    #[test]
     fn test_thread_new_none_channel() {
         let thread = Thread::new(Uuid::new_v4(), None);
         assert!(thread.source_channel.is_none());
@@ -2001,6 +2043,32 @@ mod tests {
             is_approval_authorized(Some("telegram"), "telegram"),
             "same channel should be authorized"
         );
+    }
+
+    #[test]
+    fn test_approval_authorized_requires_matching_instance_key_for_non_trusted_channels() {
+        assert!(is_approval_authorized_for_instance(
+            Some("telegram"),
+            Some("tenant-a:telegram"),
+            "telegram",
+            Some("tenant-a:telegram"),
+        ));
+        assert!(!is_approval_authorized_for_instance(
+            Some("telegram"),
+            Some("tenant-a:telegram"),
+            "telegram",
+            Some("tenant-b:telegram"),
+        ));
+    }
+
+    #[test]
+    fn test_approval_authorized_trusted_channel_bypasses_instance_match() {
+        assert!(is_approval_authorized_for_instance(
+            Some("telegram"),
+            Some("tenant-a:telegram"),
+            "gateway",
+            None,
+        ));
     }
 
     #[test]

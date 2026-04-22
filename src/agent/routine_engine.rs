@@ -2461,6 +2461,7 @@ mod tests {
         IncomingMessage {
             id: Uuid::new_v4(),
             channel: channel.to_string(),
+            channel_instance_key: None,
             user_id: user_id.to_string(),
             sender_id: user_id.to_string(),
             user_name: None,

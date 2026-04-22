@@ -1107,6 +1107,29 @@ pub struct AdminUsageSummary {
     pub usage_cost: Decimal,
 }
 
+/// Durable tenant-owned channel instance metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelInstanceRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    /// Semantic channel kind (e.g. `telegram`). Always stored lowercased.
+    pub channel_kind: String,
+    /// Opaque runtime dispatch key for this concrete channel instance.
+    pub instance_key: String,
+    pub display_name: String,
+    /// Whether this instance is the default outbound target for `(user, kind)`.
+    pub is_primary: bool,
+    /// Desired runtime state. Enabled rows should be restored on startup.
+    pub enabled: bool,
+    /// Small non-secret configuration blob owned by the control plane.
+    pub config: serde_json::Value,
+    /// Debug/admin metadata for the instance record.
+    pub metadata: serde_json::Value,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A pending pairing request.
 #[derive(Debug, Clone)]
 pub struct PairingRequestRecord {
@@ -1127,6 +1150,56 @@ pub struct PairingApprovalRecord {
     pub external_id: String,
     pub owner_id: String,
     pub previous_owner_id: Option<String>,
+}
+
+/// Tenant-owned channel instance control-plane operations.
+#[async_trait]
+pub trait ChannelInstanceStore: Send + Sync {
+    /// Create a new channel instance row.
+    async fn create_channel_instance(
+        &self,
+        instance: &ChannelInstanceRecord,
+    ) -> Result<(), DatabaseError>;
+
+    /// Update an existing channel instance row, addressed by `instance_key`.
+    async fn update_channel_instance(
+        &self,
+        instance: &ChannelInstanceRecord,
+    ) -> Result<(), DatabaseError>;
+
+    /// Fetch a channel instance by its opaque runtime dispatch key.
+    async fn get_channel_instance_by_key(
+        &self,
+        instance_key: &str,
+    ) -> Result<Option<ChannelInstanceRecord>, DatabaseError>;
+
+    /// List all channel instances owned by a user.
+    async fn list_channel_instances_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError>;
+
+    /// List channel instances owned by a user for a semantic channel kind.
+    async fn list_channel_instances_for_user_and_kind(
+        &self,
+        user_id: &str,
+        channel_kind: &str,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError>;
+
+    /// Resolve the primary/default instance for `(user_id, channel_kind)`.
+    async fn get_primary_channel_instance(
+        &self,
+        user_id: &str,
+        channel_kind: &str,
+    ) -> Result<Option<ChannelInstanceRecord>, DatabaseError>;
+
+    /// List all enabled instances across all users. Used for process-global restore.
+    async fn list_enabled_channel_instances(
+        &self,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError>;
+
+    /// Delete a channel instance by dispatch key.
+    async fn delete_channel_instance(&self, instance_key: &str) -> Result<bool, DatabaseError>;
 }
 
 /// Pairing and channel identity operations.
@@ -1260,6 +1333,7 @@ pub trait Database:
     + SettingsStore
     + WorkspaceStore
     + UserStore
+    + ChannelInstanceStore
     + ChannelPairingStore
     + IdentityStore
     + Send

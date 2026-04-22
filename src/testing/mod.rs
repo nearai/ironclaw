@@ -255,6 +255,7 @@ impl LlmProvider for StubLlm {
 /// ```
 pub struct StubChannel {
     name: String,
+    dispatch_key: String,
     rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
     responses: Arc<Mutex<Vec<(IncomingMessage, OutgoingResponse)>>>,
     statuses: Arc<Mutex<Vec<StatusUpdate>>>,
@@ -267,9 +268,19 @@ impl StubChannel {
     /// The sender is used by tests to inject messages into the channel's stream.
     /// The channel captures all responses and status updates for later assertion.
     pub fn new(name: impl Into<String>) -> (Self, mpsc::Sender<IncomingMessage>) {
+        let name = name.into();
+        Self::with_dispatch_key(name.clone(), name)
+    }
+
+    /// Create a stub channel with distinct semantic name and internal dispatch key.
+    pub fn with_dispatch_key(
+        name: impl Into<String>,
+        dispatch_key: impl Into<String>,
+    ) -> (Self, mpsc::Sender<IncomingMessage>) {
         let (tx, rx) = mpsc::channel(64);
         let channel = Self {
             name: name.into(),
+            dispatch_key: dispatch_key.into(),
             rx: tokio::sync::Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             statuses: Arc::new(Mutex::new(Vec::new())),
@@ -313,6 +324,10 @@ impl StubChannel {
 impl Channel for StubChannel {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn dispatch_key(&self) -> &str {
+        &self.dispatch_key
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

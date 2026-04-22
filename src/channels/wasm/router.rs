@@ -22,7 +22,7 @@ use crate::channels::wasm::wrapper::WasmChannel;
 /// A registered HTTP endpoint for a WASM channel.
 #[derive(Debug, Clone)]
 pub struct RegisteredEndpoint {
-    /// Channel name that owns this endpoint.
+    /// Channel dispatch key that owns this endpoint.
     pub channel_name: String,
     /// HTTP path (e.g., "/webhook/slack").
     pub path: String,
@@ -76,31 +76,36 @@ impl WasmChannelRouter {
         secret: Option<String>,
         secret_header: Option<String>,
     ) {
-        let name = channel.channel_name().to_string();
+        let semantic_name = channel.channel_name().to_string();
+        let dispatch_key = channel.channel_dispatch_key().to_string();
 
-        // Store the channel
-        self.channels.write().await.insert(name.clone(), channel);
+        // Store the channel by its concrete runtime dispatch key.
+        self.channels
+            .write()
+            .await
+            .insert(dispatch_key.clone(), channel);
 
-        // Register path mappings
+        // Register path mappings.
         let mut path_map = self.path_to_channel.write().await;
         for endpoint in endpoints {
-            path_map.insert(endpoint.path.clone(), name.clone());
+            path_map.insert(endpoint.path.clone(), dispatch_key.clone());
             tracing::info!(
-                channel = %name,
+                channel = %semantic_name,
+                dispatch_key = %dispatch_key,
                 path = %endpoint.path,
                 methods = ?endpoint.methods,
                 "Registered WASM channel HTTP endpoint"
             );
         }
 
-        // Store secret if provided
+        // Store secret if provided.
         if let Some(s) = secret {
-            self.secrets.write().await.insert(name.clone(), s);
+            self.secrets.write().await.insert(dispatch_key.clone(), s);
         }
 
-        // Store secret header if provided
+        // Store secret header if provided.
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            self.secret_headers.write().await.insert(dispatch_key, h);
         }
     }
 
@@ -173,7 +178,7 @@ impl WasmChannelRouter {
         self.secrets.read().await.contains_key(channel_name)
     }
 
-    /// List all registered channels.
+    /// List all registered channel dispatch keys.
     pub async fn list_channels(&self) -> Vec<String> {
         self.channels.read().await.keys().cloned().collect()
     }
@@ -662,6 +667,10 @@ mod tests {
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel(name: &str) -> Arc<WasmChannel> {
+        create_test_channel_with_dispatch_key(name, name)
+    }
+
+    fn create_test_channel_with_dispatch_key(name: &str, dispatch_key: &str) -> Arc<WasmChannel> {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
@@ -675,15 +684,18 @@ mod tests {
         let capabilities =
             ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));
 
-        Arc::new(WasmChannel::new(
-            runtime,
-            prepared,
-            capabilities,
-            "default",
-            "{}".to_string(),
-            Arc::new(PairingStore::new_noop()),
-            None,
-        ))
+        Arc::new(
+            WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                Arc::new(PairingStore::new_noop()),
+                None,
+            )
+            .with_dispatch_key(dispatch_key),
+        )
     }
 
     #[tokio::test]
@@ -710,6 +722,70 @@ mod tests {
         // Should not find non-existent path
         let not_found = router.get_channel_for_path("/webhook/telegram").await;
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_router_keeps_distinct_dispatch_instances_for_same_semantic_channel() {
+        let router = WasmChannelRouter::new();
+        let channel_a = create_test_channel_with_dispatch_key("telegram", "tenant-a:telegram");
+        let channel_b = create_test_channel_with_dispatch_key("telegram", "tenant-b:telegram");
+
+        router
+            .register(
+                channel_a,
+                vec![RegisteredEndpoint {
+                    channel_name: "tenant-a:telegram".to_string(),
+                    path: "/webhook/tenant-a-telegram".to_string(),
+                    methods: vec!["POST".to_string()],
+                    require_secret: true,
+                }],
+                Some("secret-a".to_string()),
+                None,
+            )
+            .await;
+        router
+            .register(
+                channel_b,
+                vec![RegisteredEndpoint {
+                    channel_name: "tenant-b:telegram".to_string(),
+                    path: "/webhook/tenant-b-telegram".to_string(),
+                    methods: vec!["POST".to_string()],
+                    require_secret: true,
+                }],
+                Some("secret-b".to_string()),
+                None,
+            )
+            .await;
+
+        let found_a = router
+            .get_channel_for_path("/webhook/tenant-a-telegram")
+            .await
+            .expect("tenant A path should resolve");
+        assert_eq!(found_a.channel_name(), "telegram");
+        assert_eq!(found_a.channel_dispatch_key(), "tenant-a:telegram");
+
+        let found_b = router
+            .get_channel_for_path("/webhook/tenant-b-telegram")
+            .await
+            .expect("tenant B path should resolve");
+        assert_eq!(found_b.channel_name(), "telegram");
+        assert_eq!(found_b.channel_dispatch_key(), "tenant-b:telegram");
+
+        assert!(
+            router
+                .validate_secret("tenant-a:telegram", "secret-a")
+                .await
+        );
+        assert!(
+            !router
+                .validate_secret("tenant-a:telegram", "secret-b")
+                .await
+        );
+        assert!(
+            router
+                .validate_secret("tenant-b:telegram", "secret-b")
+                .await
+        );
     }
 
     #[tokio::test]

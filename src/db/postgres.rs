@@ -16,9 +16,10 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ChannelInstanceRecord, ChannelInstanceStore, ChannelPairingStore,
+    ConversationStore, Database, IdentityStore, JobStore, PairingRequestRecord, RoutineStore,
+    SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
+    WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1099,6 +1100,247 @@ impl UserStore for PgBackend {
         self.store
             .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
+    }
+}
+
+// ==================== ChannelInstanceStore ====================
+
+fn row_to_channel_instance(row: &tokio_postgres::Row) -> ChannelInstanceRecord {
+    ChannelInstanceRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        channel_kind: row.get("channel_kind"),
+        instance_key: row.get("instance_key"),
+        display_name: row.get("display_name"),
+        is_primary: row.get("is_primary"),
+        enabled: row.get("enabled"),
+        config: row.get("config"),
+        metadata: row.get("metadata"),
+        last_error: row.get("last_error"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl ChannelInstanceStore for PgBackend {
+    async fn create_channel_instance(
+        &self,
+        instance: &ChannelInstanceRecord,
+    ) -> Result<(), DatabaseError> {
+        let channel_kind = crate::pairing::normalize_channel_name(&instance.channel_kind);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO channel_instances (
+                     id, user_id, channel_kind, instance_key, display_name,
+                     is_primary, enabled, config, metadata, last_error, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                &[
+                    &instance.id,
+                    &instance.user_id,
+                    &channel_kind,
+                    &instance.instance_key,
+                    &instance.display_name,
+                    &instance.is_primary,
+                    &instance.enabled,
+                    &instance.config,
+                    &instance.metadata,
+                    &instance.last_error,
+                    &instance.created_at,
+                    &instance.updated_at,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_channel_instance(
+        &self,
+        instance: &ChannelInstanceRecord,
+    ) -> Result<(), DatabaseError> {
+        let channel_kind = crate::pairing::normalize_channel_name(&instance.channel_kind);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let updated = client
+            .execute(
+                "UPDATE channel_instances
+                 SET channel_kind = $1,
+                     display_name = $2,
+                     is_primary = $3,
+                     enabled = $4,
+                     config = $5,
+                     metadata = $6,
+                     last_error = $7,
+                     updated_at = $8
+                 WHERE instance_key = $9",
+                &[
+                    &channel_kind,
+                    &instance.display_name,
+                    &instance.is_primary,
+                    &instance.enabled,
+                    &instance.config,
+                    &instance.metadata,
+                    &instance.last_error,
+                    &instance.updated_at,
+                    &instance.instance_key,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "channel_instance".to_string(),
+                id: instance.instance_key.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn get_channel_instance_by_key(
+        &self,
+        instance_key: &str,
+    ) -> Result<Option<ChannelInstanceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, channel_kind, instance_key, display_name,
+                        is_primary, enabled, config, metadata, last_error,
+                        created_at, updated_at
+                 FROM channel_instances
+                 WHERE instance_key = $1",
+                &[&instance_key],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(row.map(|r| row_to_channel_instance(&r)))
+    }
+
+    async fn list_channel_instances_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, user_id, channel_kind, instance_key, display_name,
+                        is_primary, enabled, config, metadata, last_error,
+                        created_at, updated_at
+                 FROM channel_instances
+                 WHERE user_id = $1
+                 ORDER BY channel_kind ASC, display_name ASC, instance_key ASC",
+                &[&user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(rows.iter().map(row_to_channel_instance).collect())
+    }
+
+    async fn list_channel_instances_for_user_and_kind(
+        &self,
+        user_id: &str,
+        channel_kind: &str,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError> {
+        let channel_kind = crate::pairing::normalize_channel_name(channel_kind);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, user_id, channel_kind, instance_key, display_name,
+                        is_primary, enabled, config, metadata, last_error,
+                        created_at, updated_at
+                 FROM channel_instances
+                 WHERE user_id = $1 AND channel_kind = $2
+                 ORDER BY is_primary DESC, display_name ASC, instance_key ASC",
+                &[&user_id, &channel_kind],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(rows.iter().map(row_to_channel_instance).collect())
+    }
+
+    async fn get_primary_channel_instance(
+        &self,
+        user_id: &str,
+        channel_kind: &str,
+    ) -> Result<Option<ChannelInstanceRecord>, DatabaseError> {
+        let channel_kind = crate::pairing::normalize_channel_name(channel_kind);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, channel_kind, instance_key, display_name,
+                        is_primary, enabled, config, metadata, last_error,
+                        created_at, updated_at
+                 FROM channel_instances
+                 WHERE user_id = $1 AND channel_kind = $2 AND is_primary = TRUE
+                 LIMIT 1",
+                &[&user_id, &channel_kind],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(row.map(|r| row_to_channel_instance(&r)))
+    }
+
+    async fn list_enabled_channel_instances(
+        &self,
+    ) -> Result<Vec<ChannelInstanceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, user_id, channel_kind, instance_key, display_name,
+                        is_primary, enabled, config, metadata, last_error,
+                        created_at, updated_at
+                 FROM channel_instances
+                 WHERE enabled = TRUE
+                 ORDER BY user_id ASC, channel_kind ASC, instance_key ASC",
+                &[],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(rows.iter().map(row_to_channel_instance).collect())
+    }
+
+    async fn delete_channel_instance(&self, instance_key: &str) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let deleted = client
+            .execute(
+                "DELETE FROM channel_instances WHERE instance_key = $1",
+                &[&instance_key],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(deleted > 0)
     }
 }
 
