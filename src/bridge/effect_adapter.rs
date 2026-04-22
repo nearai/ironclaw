@@ -366,7 +366,7 @@ impl EffectBridgeAdapter {
         // as `{"name":"Daily Check"}` and fails UUID parsing.
         // Allow the unresolved alias to flow into the normal mission handling
         if let Some(alias) = routine_alias.as_mut() {
-            let _ = resolve_mission_identity(alias, mgr, context).await;
+            let _ = resolve_mission_identity(alias, &mgr, context).await;
         }
 
         let (effective_action, effective_params, post_create_update) =
