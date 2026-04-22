@@ -361,6 +361,8 @@ fn event_kind_name(kind: &ironclaw_engine::EventKind) -> &'static str {
         EventKind::SelfImprovementComplete { .. } => "SelfImprovementComplete",
         EventKind::SelfImprovementFailed { .. } => "SelfImprovementFailed",
         EventKind::SkillActivated { .. } => "SkillActivated",
+        EventKind::CodeExecutionStarted { .. } => "CodeExecutionStarted",
+        EventKind::CodeExecutionCompleted { .. } => "CodeExecutionCompleted",
         EventKind::CodeExecutionFailed { .. } => "CodeExecutionFailed",
         EventKind::OrchestratorRollback { .. } => "OrchestratorRollback",
         EventKind::Unknown => "Unknown",

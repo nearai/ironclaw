@@ -3,9 +3,9 @@
 //! lifecycle activity, not model planning or tool-selection rationale.
 
 use crate::channels::channel::Channel;
-use crate::channels::{StatusUpdate, ToolDecision};
 use crate::channels::web::GatewayChannel;
 use crate::channels::web::sse::DEFAULT_BROADCAST_BUFFER;
+use crate::channels::{StatusUpdate, ToolDecision};
 use crate::config::GatewayConfig;
 use futures::StreamExt;
 

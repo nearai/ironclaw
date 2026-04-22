@@ -4162,20 +4162,17 @@ fn format_action_display_name(action_name: &str, params_summary: &Option<String>
 
 /// Interpret a MessageAdded event into a human-readable status message.
 /// Returns `None` for events that don't need UI surfacing.
+///
+/// User-role code-execution result messages (`[stdout]…`, `[code …]`,
+/// `Traceback`) no longer drive UI status — that surface is owned by the
+/// typed `CodeExecutionStarted`/`CodeExecutionCompleted`/`CodeExecutionFailed`
+/// events emitted by the executor.
 fn interpret_message_event(
     role: &str,
     content_preview: &str,
     assistant_content_kind: Option<&ironclaw_engine::AssistantContentKind>,
 ) -> Option<String> {
-    if role == "User" && content_preview.starts_with("[stdout]") {
-        Some("Code executed".to_string())
-    } else if role == "User" && content_preview.starts_with("[code ") {
-        Some("Code executed (no output)".to_string())
-    } else if role == "User"
-        && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-    {
-        Some("Code error — retrying...".to_string())
-    } else if role == "Assistant" {
+    if role == "Assistant" {
         match assistant_content_kind {
             Some(ironclaw_engine::AssistantContentKind::InternalReasoning) => None,
             Some(ironclaw_engine::AssistantContentKind::UserVisibleNarrative) => {
@@ -4191,6 +4188,15 @@ fn interpret_message_event(
         }
     } else {
         None
+    }
+}
+
+/// Human-readable status text for a `CodeExecutionCompleted` event.
+fn code_execution_completed_status(had_output: bool) -> &'static str {
+    if had_output {
+        "Code executed"
+    } else {
+        "Code executed (no output)"
     }
 }
 
@@ -4577,6 +4583,33 @@ async fn forward_event_to_channel(
                 )
                 .await;
         }
+        EventKind::CodeExecutionStarted { .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking("Executing code...".into()),
+                    metadata,
+                )
+                .await;
+        }
+        EventKind::CodeExecutionCompleted { had_output, .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking(code_execution_completed_status(*had_output).into()),
+                    metadata,
+                )
+                .await;
+        }
+        EventKind::CodeExecutionFailed { .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking("Code error — retrying...".into()),
+                    metadata,
+                )
+                .await;
+        }
         _ => {}
     }
 }
@@ -4730,6 +4763,14 @@ fn thread_event_to_app_events(
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
+        }],
+        EventKind::CodeExecutionStarted { .. } => vec![AppEvent::Thinking {
+            message: "Executing code...".into(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionCompleted { had_output, .. } => vec![AppEvent::Thinking {
+            message: code_execution_completed_status(*had_output).into(),
+            thread_id: Some(thread_id.into()),
         }],
         _ => vec![],
     }
@@ -7132,6 +7173,61 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn forward_event_to_channel_maps_code_execution_lifecycle_events() {
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(RecordingStatusChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let manager = Arc::new(manager);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let step_id = ironclaw_engine::StepId::new();
+
+        let started = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionStarted { step_id },
+        );
+        forward_event_to_channel(&started, &manager, "test", &serde_json::json!({})).await;
+
+        let completed = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: false,
+                duration_ms: 12,
+            },
+        );
+        forward_event_to_channel(&completed, &manager, "test", &serde_json::json!({})).await;
+
+        let failed = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id,
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "Traceback: boom".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 19,
+            },
+        );
+        forward_event_to_channel(&failed, &manager, "test", &serde_json::json!({})).await;
+
+        let statuses = statuses.lock().await;
+        assert!(matches!(
+            statuses.as_slice(),
+            [
+                StatusUpdate::Thinking(started),
+                StatusUpdate::Thinking(completed),
+                StatusUpdate::Thinking(failed)
+            ] if started == "Executing code..."
+                && completed == "Code executed (no output)"
+                && failed == "Code error — retrying..."
+        ));
+    }
+
     #[test]
     fn thread_event_to_app_events_preserves_call_id_for_action_events() {
         let event = ironclaw_engine::ThreadEvent::new(
@@ -7262,6 +7358,53 @@ mod tests {
         assert_eq!(*duration_ms, 42);
         assert_eq!(code_hash.as_deref(), Some("abc123"));
         assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_maps_code_execution_started_and_completed() {
+        let thread_id = "thread-123";
+        let step_id = ironclaw_engine::StepId::new();
+
+        let started = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionStarted { step_id },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&started, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Executing code..."
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+
+        let completed_with_output = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: true,
+                duration_ms: 25,
+            },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&completed_with_output, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Code executed"
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+
+        let completed_without_output = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: false,
+                duration_ms: 25,
+            },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&completed_without_output, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Code executed (no output)"
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
     }
 
     #[test]

@@ -860,6 +860,17 @@ async fn handle_execute_code_step(
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
+    let started_event = ThreadEvent::new(
+        thread.id,
+        EventKind::CodeExecutionStarted {
+            step_id: exec_ctx.step_id,
+        },
+    );
+    if let Some(tx) = event_tx {
+        let _ = tx.send(started_event.clone());
+    }
+    thread.events.push(started_event);
+
     match Box::pin(execute_code(
         &code,
         thread,
@@ -936,6 +947,28 @@ async fn handle_execute_code_step(
                     let _ = tx.send(instrumentation_event.clone());
                 }
                 thread.events.push(instrumentation_event);
+            } else {
+                // Successful code execution: emit a structured Completed event
+                // so the router/SSE layer does not need to guess status from
+                // transcript preview strings like "[stdout]" or "[code ...".
+                let had_output = !result.stdout.is_empty()
+                    || result.return_value != serde_json::Value::Null
+                    || result.action_results.iter().any(|r| {
+                        let out = r.output.as_str().unwrap_or("");
+                        !out.is_empty()
+                    });
+                let completed_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionCompleted {
+                        step_id: exec_ctx.step_id,
+                        had_output,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(completed_event.clone());
+                }
+                thread.events.push(completed_event);
             }
             thread.updated_at = chrono::Utc::now();
 
@@ -3867,7 +3900,10 @@ mod tests {
             Some(AssistantContent::InternalReasoning(text))
                 if text == "I should inspect the page before answering."
         ));
-        let calls = assistant.action_calls.as_ref().expect("assistant action calls");
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant action calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(
             calls[0].rationale.as_deref(),
@@ -4132,7 +4168,10 @@ mod tests {
             Some(AssistantContent::InternalReasoning(text))
                 if text == "I should inspect the page before answering."
         ));
-        let calls = assistant.action_calls.as_ref().expect("assistant action calls");
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant action calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(
             calls[0].rationale.as_deref(),
@@ -4623,6 +4662,109 @@ FINAL(batch_error_count)
     // ── CodeExecutionFailed event emission (caller test) ────────
 
     #[tokio::test]
+    async fn execute_code_step_emits_started_and_completed_events_with_output_flag() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution success instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let args = &[
+            json_to_monty(&serde_json::json!("print('hello from code')")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        assert!(
+            thread
+                .events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::CodeExecutionStarted { .. })),
+            "expected CodeExecutionStarted event"
+        );
+        assert!(
+            thread.events.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::CodeExecutionCompleted {
+                    had_output: true,
+                    ..
+                }
+            )),
+            "expected CodeExecutionCompleted event with had_output=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_code_step_marks_completed_without_output() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution no-output instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let args = &[
+            json_to_monty(&serde_json::json!("x = 1")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        assert!(
+            thread.events.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::CodeExecutionCompleted {
+                    had_output: false,
+                    ..
+                }
+            )),
+            "expected CodeExecutionCompleted event with had_output=false"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_code_step_emits_code_execution_failed_event() {
         let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
             captured: tokio::sync::Mutex::new(Vec::new()),
@@ -4658,6 +4800,14 @@ FINAL(batch_error_count)
             Some(&tx),
         )
         .await;
+
+        assert!(
+            thread
+                .events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::CodeExecutionStarted { .. })),
+            "expected CodeExecutionStarted event"
+        );
 
         // Verify CodeExecutionFailed event was emitted on thread.events
         let code_failed_events: Vec<_> = thread

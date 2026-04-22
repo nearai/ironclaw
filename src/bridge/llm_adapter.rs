@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ironclaw_engine::{
-    ActionDef, AssistantContent, EngineError, LlmBackend, LlmCallConfig, LlmOutput,
-    LlmResponse, ThreadMessage, TokenUsage,
+    ActionDef, AssistantContent, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse,
+    ThreadMessage, TokenUsage,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -873,7 +873,9 @@ mod tests {
                     id: "call_fetch_1".to_string(),
                     name: "web_fetch".to_string(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
-                    reasoning: Some("Need the page contents before I can summarize it.".to_string()),
+                    reasoning: Some(
+                        "Need the page contents before I can summarize it.".to_string(),
+                    ),
                 }],
                 input_tokens: 1,
                 output_tokens: 1,
