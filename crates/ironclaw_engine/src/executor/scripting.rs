@@ -1137,7 +1137,7 @@ async fn preflight_action(
                 call_id: call_id.into(),
                 error: format!("no lease for action '{action_name}'"),
                 duration_ms: 0,
-                params_summary: None,
+                params_summary: crate::types::event::summarize_params(action_name, params),
             });
             return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
@@ -1161,7 +1161,7 @@ async fn preflight_action(
                     call_id: call_id.into(),
                     error: reason.clone(),
                     duration_ms: 0,
-                    params_summary: None,
+                    params_summary: crate::types::event::summarize_params(action_name, params),
                 });
                 return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,

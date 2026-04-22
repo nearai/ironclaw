@@ -236,6 +236,19 @@ pub enum EventKind {
         duration_ms: u64,
     },
 
+    /// CodeAct execution trace — raw code + stdout retained for observers
+    /// (debug panel, trace replay). The in-context chat summary is too
+    /// lossy; this variant keeps the full evidence.
+    CodeExecuted {
+        step_id: StepId,
+        code: String,
+        stdout: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_value: Option<serde_json::Value>,
+        #[serde(default)]
+        duration_ms: u64,
+    },
+
     // ── Orchestrator versioning ───────────────────────────────
     OrchestratorRollback {
         from_version: u64,

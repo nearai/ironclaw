@@ -647,6 +647,21 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
+        // In multi-tenant deployments, scope warnings to the gateway
+        // owner so per-request log context (thread ids, paths, emails)
+        // doesn't bleed across tenants via admin debug panels.
+        if let Some(log_broadcaster) = self.state.log_broadcaster.as_ref() {
+            let owner_scope = self
+                .state
+                .multi_tenant_mode
+                .then(|| self.state.owner_id.clone());
+            log_layer::spawn_warning_bridge(
+                Arc::clone(log_broadcaster),
+                Arc::clone(&self.state.sse),
+                owner_scope,
+            );
+        }
+
         platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))

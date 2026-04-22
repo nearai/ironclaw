@@ -808,6 +808,31 @@ async fn handle_execute_code_step(
                 }
                 thread.events.push(instrumentation_event);
             }
+
+            // Always emit CodeExecuted so debug observers see the exact code
+            // and stdout, regardless of success/failure. The in-context chat
+            // summary is too lossy for diagnostics. Kept separate from
+            // CodeExecutionFailed (which carries the failure classifier) and
+            // the per-action events already broadcast above.
+            let return_value = match &result.return_value {
+                serde_json::Value::Null => None,
+                other => Some(other.clone()),
+            };
+            let code_executed_event = ThreadEvent::new(
+                thread.id,
+                EventKind::CodeExecuted {
+                    step_id: exec_ctx.step_id,
+                    code: code.clone(),
+                    stdout: result.stdout.clone(),
+                    return_value,
+                    duration_ms: code_start.elapsed().as_millis() as u64,
+                },
+            );
+            if let Some(tx) = event_tx {
+                let _ = tx.send(code_executed_event.clone());
+            }
+            thread.events.push(code_executed_event);
+
             thread.updated_at = chrono::Utc::now();
 
             let action_results: Vec<serde_json::Value> = result

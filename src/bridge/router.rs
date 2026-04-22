@@ -4514,7 +4514,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: true,
                     error: None,
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4541,7 +4541,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: false,
                     error: Some(error.clone()),
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4582,6 +4582,19 @@ fn thread_event_to_app_events(
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
+        }],
+        EventKind::CodeExecuted {
+            code,
+            stdout,
+            return_value,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecuted {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            return_value: return_value.clone(),
+            duration_ms: *duration_ms,
+            thread_id: Some(thread_id.into()),
         }],
         _ => vec![],
     }
