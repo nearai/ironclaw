@@ -1326,7 +1326,6 @@ mod tests {
             )
             .await;
 
-        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
@@ -1364,7 +1363,6 @@ mod tests {
             )
             .await;
 
-        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         // is_operator=true: admin/operator may legitimately configure
         // builtin overrides, so the resolve path must keep them.
@@ -1400,7 +1398,6 @@ mod tests {
             )
             .await;
 
-        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
@@ -1437,7 +1434,6 @@ mod tests {
             )
             .await;
 
-        let toml = empty_toml_path();
         let mut cfg = config_for_owner("operator-user");
         let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(

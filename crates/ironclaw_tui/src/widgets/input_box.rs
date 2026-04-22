@@ -54,13 +54,15 @@ impl InputBoxWidget {
 
     /// Insert a literal newline at the cursor.
     pub fn insert_newline(&mut self) {
-        self.textarea.insert_newline();
+        let textarea = self.textarea.get_mut().unwrap_or_else(|e| e.into_inner());
+        textarea.insert_newline();
     }
 
     /// Move the cursor to the very top of the input (row 0, col 0).
     pub fn move_cursor_to_start(&mut self) {
-        self.textarea.move_cursor(tui_textarea::CursorMove::Top);
-        self.textarea.move_cursor(tui_textarea::CursorMove::Head);
+        let textarea = self.textarea.get_mut().unwrap_or_else(|e| e.into_inner());
+        textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+        textarea.move_cursor(ratatui_textarea::CursorMove::Head);
     }
 
     /// Peek at the current text content without consuming it.

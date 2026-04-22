@@ -456,13 +456,14 @@ impl DashboardWidget {
         };
 
         let max_path_len = (inner.width as usize).saturating_sub(11);
-        let path_display = if state.workspace_path.chars().count() > max_path_len && max_path_len > 3 {
-            let skip = state.workspace_path.chars().count() - (max_path_len - 3);
-            let tail: String = state.workspace_path.chars().skip(skip).collect();
-            format!("...{tail}")
-        } else {
-            state.workspace_path.clone()
-        };
+        let path_display =
+            if state.workspace_path.chars().count() > max_path_len && max_path_len > 3 {
+                let skip = state.workspace_path.chars().count() - (max_path_len - 3);
+                let tail: String = state.workspace_path.chars().skip(skip).collect();
+                format!("...{tail}")
+            } else {
+                state.workspace_path.clone()
+            };
 
         let mut lines = vec![
             Line::from(vec![

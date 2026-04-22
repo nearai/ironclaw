@@ -714,7 +714,7 @@ impl Channel for TuiChannel {
                     }
                 }),
             },
-            StatusUpdate::SkillActivated { skill_names } => {
+            StatusUpdate::SkillActivated { skill_names, .. } => {
                 TuiEvent::SkillActivated { skill_names }
             }
             StatusUpdate::ImageGenerated { .. }

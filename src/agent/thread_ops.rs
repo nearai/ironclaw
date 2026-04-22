@@ -777,6 +777,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            let messages = thread.messages();
             drop(sess);
             self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
                 .await;
@@ -784,12 +785,8 @@ impl Agent {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
             }
-            self.send_context_pressure_status(
-                &message.channel,
-                &message.metadata,
-                &thread.messages(),
-            )
-            .await;
+            self.send_context_pressure_status(&message.channel, &message.metadata, &messages)
+                .await;
             let _ = self
                 .channels
                 .send_status(
@@ -838,6 +835,7 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                let thread_messages = thread.messages();
                 drop(sess);
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
@@ -875,7 +873,7 @@ impl Agent {
                 self.send_context_pressure_status(
                     &message.channel,
                     &message.metadata,
-                    &thread.messages(),
+                    &thread_messages,
                 )
                 .await;
 
@@ -892,6 +890,7 @@ impl Agent {
                 let parameters = pending.display_parameters.clone();
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
+                let thread_messages = thread.messages();
                 drop(sess);
                 self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
                     .await;
@@ -900,7 +899,7 @@ impl Agent {
                 self.send_context_pressure_status(
                     &message.channel,
                     &message.metadata,
-                    &thread.messages(),
+                    &thread_messages,
                 )
                 .await;
                 let _ = self
@@ -941,6 +940,7 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                let thread_messages = thread.messages();
                 drop(sess);
                 self.persist_tool_calls(
                     thread_id,
@@ -956,7 +956,7 @@ impl Agent {
                 self.send_context_pressure_status(
                     &message.channel,
                     &message.metadata,
-                    &thread.messages(),
+                    &thread_messages,
                 )
                 .await;
                 Ok(SubmissionResult::auth_pending())
@@ -2209,6 +2209,7 @@ impl Agent {
                     let parameters = new_pending.display_parameters.clone();
                     let allow_always = new_pending.allow_always;
                     thread.await_approval(*new_pending);
+                    let thread_messages = thread.messages();
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
@@ -2221,7 +2222,7 @@ impl Agent {
                     self.send_context_pressure_status(
                         &message.channel,
                         &message.metadata,
-                        &thread.messages(),
+                        &thread_messages,
                     )
                     .await;
                     let _ = self
@@ -3911,7 +3912,7 @@ mod tests {
             );
             turn.record_tool_result_for("call_plan", serde_json::json!("updated"));
         }
-        target_thread.complete_turn("Plan ready.");
+        target_thread.conclude_turn(TurnOutcome::Completed("Plan ready.".to_string()));
 
         {
             let mut sess = session.lock().await;
@@ -3982,7 +3983,7 @@ mod tests {
             );
             turn.record_tool_result_for("call_plan_clear", serde_json::json!("cleared"));
         }
-        target_thread.complete_turn("Plan cleared.");
+        target_thread.conclude_turn(TurnOutcome::Completed("Plan cleared.".to_string()));
 
         {
             let mut sess = session.lock().await;

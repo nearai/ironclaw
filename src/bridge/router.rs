@@ -3702,7 +3702,7 @@ async fn handle_with_engine_inner(
     }
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
-    await_thread_outcome_with_rx(agent, state, message, conv_id, thread_id, event_rx).await
+    await_thread_outcome(agent, state, message, conv_id, thread_id).await
 }
 
 /// Fire active OnEvent missions whose pattern matches the inbound message.
@@ -7166,10 +7166,15 @@ mod tests {
                 call_id: "call-memory-read-1".to_string(),
                 duration_ms: 42,
                 params_summary: Some("notes/today.md".to_string()),
+                output_preview: None,
             },
         );
 
-        forward_event_to_channel(&event, &manager, "test", &serde_json::json!({})).await;
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        forward_event_to_channel(&event, &manager, "test", &serde_json::json!({}), &safety).await;
 
         let statuses = statuses.lock().await;
         assert_eq!(statuses.len(), 2);
@@ -7209,7 +7214,11 @@ mod tests {
             },
         );
 
-        let app_events = thread_event_to_app_events(&event, "thread-123");
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        let app_events = thread_event_to_app_events(&event, "thread-123", &safety);
 
         assert_eq!(app_events.len(), 2);
         assert!(matches!(
@@ -7250,7 +7259,11 @@ mod tests {
             },
         );
 
-        let app_events = thread_event_to_app_events(&event, "thread-step-fail");
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        let app_events = thread_event_to_app_events(&event, "thread-step-fail", &safety);
 
         assert_eq!(app_events.len(), 1);
         let AppEvent::Error { message, thread_id } = &app_events[0] else {
@@ -7271,7 +7284,11 @@ mod tests {
             ironclaw_engine::EventKind::ChildCompleted { child_id: child },
         );
 
-        let app_events = thread_event_to_app_events(&event, "thread-parent");
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        let app_events = thread_event_to_app_events(&event, "thread-parent", &safety);
 
         assert_eq!(app_events.len(), 1);
         let AppEvent::ChildThreadCompleted {
@@ -7301,7 +7318,11 @@ mod tests {
             },
         );
 
-        let app_events = thread_event_to_app_events(&event, "thread-codeact");
+        let safety = ironclaw_safety::SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+        let app_events = thread_event_to_app_events(&event, "thread-codeact", &safety);
 
         assert_eq!(app_events.len(), 1);
         let AppEvent::CodeExecutionFailed {

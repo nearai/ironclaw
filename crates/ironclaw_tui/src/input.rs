@@ -203,7 +203,7 @@ fn map_tool_detail_key(key: KeyEvent) -> InputAction {
 /// Map key events when the expanded dashboard panel modal is active.
 fn map_dashboard_panel_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Esc, _) => InputAction::DashboardPanelClose,
         (KeyCode::PageUp, _) | (KeyCode::Up, _) => InputAction::DashboardPanelScrollUp,
         (KeyCode::PageDown, _) | (KeyCode::Down, _) => InputAction::DashboardPanelScrollDown,
@@ -214,7 +214,7 @@ fn map_dashboard_panel_key(key: KeyEvent) -> InputAction {
 /// Map keys when the identity file viewer modal is active.
 fn map_identity_file_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Esc, _) => InputAction::IdentityFileClose,
         (KeyCode::PageUp, _) | (KeyCode::Up, _) => InputAction::IdentityFileScrollUp,
         (KeyCode::PageDown, _) | (KeyCode::Down, _) => InputAction::IdentityFileScrollDown,
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn dashboard_panel_ctrl_c_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_dashboard_panel(key), InputAction::Quit);
+        assert_eq!(map_dashboard_panel(key), InputAction::ClearOrQuit);
     }
 
     #[test]
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn identity_file_ctrl_c_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_identity_file(key), InputAction::Quit);
+        assert_eq!(map_identity_file(key), InputAction::ClearOrQuit);
     }
 
     #[test]
