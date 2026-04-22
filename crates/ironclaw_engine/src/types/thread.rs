@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
 use crate::types::error::EngineError;
-use crate::types::event::{EventKind, ThreadEvent};
+use crate::types::event::{AssistantContentKind, EventKind, ThreadEvent};
 use crate::types::memory::DocId;
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
@@ -388,6 +388,10 @@ impl Thread {
         self.add_event(EventKind::MessageAdded {
             role: format!("{:?}", message.role),
             content_preview: preview,
+            assistant_content_kind: message
+                .assistant_content
+                .as_ref()
+                .map(AssistantContentKind::from),
         });
         self.messages.push(message);
     }
@@ -403,7 +407,9 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::event::AssistantContentKind;
     use crate::types::memory::DocId;
+    use crate::types::step::AssistantContent;
 
     fn make_thread() -> Thread {
         Thread::new(
@@ -550,7 +556,38 @@ mod tests {
         assert_eq!(t.messages.len(), 1);
         assert_eq!(t.events.len(), 1);
         match &t.events[0].kind {
-            EventKind::MessageAdded { role, .. } => assert_eq!(role, "User"),
+            EventKind::MessageAdded {
+                role,
+                assistant_content_kind,
+                ..
+            } => {
+                assert_eq!(role, "User");
+                assert!(assistant_content_kind.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_assistant_message_records_typed_content_kind() {
+        let mut t = make_thread();
+        t.add_message(ThreadMessage::assistant_with_typed_content(
+            AssistantContent::UserVisibleNarrative("Inspecting the page first...".to_string()),
+        ));
+
+        match &t.events[0].kind {
+            EventKind::MessageAdded {
+                role,
+                content_preview,
+                assistant_content_kind,
+            } => {
+                assert_eq!(role, "Assistant");
+                assert_eq!(content_preview, "Inspecting the page first...");
+                assert_eq!(
+                    *assistant_content_kind,
+                    Some(AssistantContentKind::UserVisibleNarrative)
+                );
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }

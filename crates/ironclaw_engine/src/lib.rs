@@ -40,13 +40,13 @@ pub use types::capability::{
     PolicyEffect, PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
-pub use types::event::{EventId, EventKind, ThreadEvent};
+pub use types::event::{AssistantContentKind, EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
-pub use types::step::AssistantContent;
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};
 pub use types::project::{Project, ProjectId, ProjectMetric};
 pub use types::provenance::Provenance;
+pub use types::step::AssistantContent;
 pub use types::step::{
     ActionCall, ActionResult, CodeExecutionFailure, ExecutionTier, LlmResponse, Step, StepId,
     StepStatus, TokenUsage,
