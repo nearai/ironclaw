@@ -132,14 +132,23 @@ struct PausingHttpMockEffects {
     canned_responses: HashMap<String, serde_json::Value>,
     calls: RwLock<Vec<(String, serde_json::Value)>>,
     approved: RwLock<bool>,
+    capabilities: Vec<ironclaw_engine::CapabilitySummary>,
 }
 
 impl PausingHttpMockEffects {
     fn new(canned: HashMap<String, serde_json::Value>) -> Arc<Self> {
+        Self::with_capabilities(canned, vec![])
+    }
+
+    fn with_capabilities(
+        canned: HashMap<String, serde_json::Value>,
+        capabilities: Vec<ironclaw_engine::CapabilitySummary>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             canned_responses: canned,
             calls: RwLock::new(Vec::new()),
             approved: RwLock::new(false),
+            capabilities,
         })
     }
 
@@ -296,7 +305,7 @@ impl EffectExecutor for PausingHttpMockEffects {
         _leases: &[CapabilityLease],
         _context: &ironclaw_engine::ThreadExecutionContext,
     ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
-        Ok(vec![])
+        Ok(self.capabilities.clone())
     }
 }
 
@@ -869,7 +878,10 @@ async fn skill_prompt_context_survives_pause_and_resume() {
         .expect("spawn_thread");
 
     let first = mgr.join_thread(tid).await.expect("first join");
-    assert!(matches!(first, ThreadOutcome::GatePaused { .. }));
+    assert!(
+        matches!(first, ThreadOutcome::GatePaused { .. }),
+        "unexpected first outcome: {first:?}"
+    );
 
     effects.mark_approved().await;
     mgr.resume_thread(
@@ -893,5 +905,205 @@ async fn skill_prompt_context_survives_pause_and_resume() {
     let resumed_system_prompt = &seen.last().unwrap()[0].content;
     assert!(resumed_system_prompt.contains("GitHub API Skill"));
     assert!(resumed_system_prompt.contains("Active Skills"));
+    assert!(!resumed_system_prompt.contains("## Available tools (call as Python functions)"));
+}
+
+#[tokio::test]
+async fn skill_prompt_context_survives_compaction_and_resume() {
+    let project_id = ProjectId::new();
+    let skill_doc = make_github_skill_doc(project_id);
+    let long_goal = format!(
+        "show me open github issues for test-org/test-repo and use /missing for comparison. {}",
+        "Include the repo state in detail. ".repeat(80)
+    );
+
+    let llm = CapturingScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::Text("Compaction summary text".into()),
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_http_gate_1".into(),
+                    action_name: "http".into(),
+                    parameters: serde_json::json!({
+                        "method": "GET",
+                        "url": "https://api.github.com/repos/test-org/test-repo/issues?state=open&per_page=5"
+                    }),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let mut canned = HashMap::new();
+    canned.insert(
+        "api.github.com/repos/test-org/test-repo/issues".to_string(),
+        canned_github_issues(),
+    );
+    let effects = PausingHttpMockEffects::with_capabilities(
+        canned,
+        vec![ironclaw_engine::CapabilitySummary {
+            name: "slack".into(),
+            display_name: Some("Slack".into()),
+            kind: ironclaw_engine::CapabilitySummaryKind::Provider,
+            status: ironclaw_engine::CapabilityStatus::NeedsAuth,
+            description: Some("Slack workspace integration".into()),
+            routing_hint: None,
+        }],
+    );
+
+    let store = TestStore::new();
+    store.save_memory_doc(&skill_doc).await.unwrap();
+
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "Available tools".into(),
+        actions: vec![ActionDef {
+            name: "http".into(),
+            description: "Make HTTP requests".into(),
+            parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+        }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+
+    let mgr = ThreadManager::new(
+        llm.clone(),
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(caps),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            &long_goal,
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig {
+                enable_compaction: true,
+                model_context_limit: 1_200,
+                compaction_threshold: 0.25,
+                ..ThreadConfig::default()
+            },
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let first = mgr.join_thread(tid).await.expect("first join");
+    assert!(
+        matches!(first, ThreadOutcome::GatePaused { .. }),
+        "unexpected first outcome: {first:?}"
+    );
+
+    let paused_thread = store.load_thread(tid).await.unwrap().unwrap();
+    assert!(
+        paused_thread
+            .internal_messages
+            .iter()
+            .any(|message| message.content == "Compaction summary text"),
+        "compaction summary should be persisted into the active transcript"
+    );
+    assert!(
+        paused_thread.internal_messages.iter().any(|message| message
+            .content
+            .contains("Your conversation has been compacted.")),
+        "compaction notice should be persisted into the active transcript"
+    );
+
+    assert_eq!(
+        paused_thread
+            .internal_messages
+            .iter()
+            .filter(|message| message.role == ironclaw_engine::types::message::MessageRole::System)
+            .count(),
+        1,
+        "compacted paused transcript should preserve exactly one system message"
+    );
+
+    effects.mark_approved().await;
+    mgr.resume_thread(
+        tid,
+        "test-user",
+        Some(ThreadMessage::user("approved")),
+        Some(("call_http_gate_1".into(), true)),
+        None,
+    )
+    .await
+    .expect("resume_thread");
+
+    let resumed = mgr.join_thread(tid).await.expect("second join");
+    assert!(matches!(resumed, ThreadOutcome::Completed { .. }));
+
+    let seen = llm.seen_messages.lock().unwrap();
+    let summary_prompt = "Summarize progress so far in a concise but complete way.";
+    let non_summary_calls: Vec<&Vec<ThreadMessage>> = seen
+        .iter()
+        .filter(|messages| {
+            messages
+                .last()
+                .is_some_and(|message| !message.content.contains(summary_prompt))
+        })
+        .collect();
+    assert_eq!(
+        non_summary_calls.len(),
+        2,
+        "expected exactly one post-compaction call before pause and one resumed call"
+    );
+
+    let post_compaction_call = non_summary_calls[0];
+    let resumed_call = non_summary_calls[1];
+
+    let post_compaction_system_prompt = &post_compaction_call[0].content;
+    assert!(post_compaction_system_prompt.contains("GitHub API Skill"));
+    assert!(post_compaction_system_prompt.contains("Active Skills"));
+    assert!(post_compaction_system_prompt.contains("/missing"));
+    assert!(post_compaction_system_prompt.contains("`slack` [provider]"));
+    assert_eq!(
+        post_compaction_system_prompt
+            .matches("## Available capabilities (background status)")
+            .count(),
+        1
+    );
+    assert!(
+        !post_compaction_system_prompt.contains("## Available tools (call as Python functions)")
+    );
+    assert!(
+        post_compaction_call
+            .iter()
+            .any(|message| message.content == "Compaction summary text"),
+        "first real post-compaction call should include the compaction summary message"
+    );
+    assert!(
+        post_compaction_call.iter().any(|message| message
+            .content
+            .contains("Your conversation has been compacted.")),
+        "first real post-compaction call should include the compaction notice"
+    );
+
+    let resumed_system_prompt = &resumed_call[0].content;
+    assert!(resumed_system_prompt.contains("GitHub API Skill"));
+    assert!(resumed_system_prompt.contains("Active Skills"));
+    assert!(resumed_system_prompt.contains("/missing"));
+    assert!(resumed_system_prompt.contains("`slack` [provider]"));
+    assert_eq!(
+        resumed_system_prompt
+            .matches("## Available capabilities (background status)")
+            .count(),
+        1
+    );
     assert!(!resumed_system_prompt.contains("## Available tools (call as Python functions)"));
 }

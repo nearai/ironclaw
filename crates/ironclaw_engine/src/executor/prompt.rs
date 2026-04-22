@@ -84,6 +84,13 @@ const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md
 
 /// Marker for the engine-owned CodeAct system prompt.
 const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt -->\n";
+const CODEACT_LEGACY_OPENING: &str = "You are an AI assistant with a Python REPL environment.";
+const CODEACT_STRATEGY_HEADING: &str = "\n## Strategy\n";
+const CODEACT_CAPABILITIES_HEADING: &str = "\n## Available capabilities (background status)\n";
+const PRIOR_KNOWLEDGE_HEADING: &str = "\n\n## Prior Knowledge (from completed threads)\n";
+const ACTIVE_SKILLS_HEADING: &str = "\n\n## Active Skills\n";
+const MISSING_SKILLS_PREFIX: &str =
+    "\n\nThe user explicitly requested slash skill(s) that are not installed or were not found:";
 
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
@@ -187,7 +194,7 @@ fn build_codeact_system_prompt_inner(
 }
 
 pub fn is_codeact_system_prompt(content: &str) -> bool {
-    content.starts_with(CODEACT_SYSTEM_PROMPT_MARKER) || content.starts_with(CODEACT_PREAMBLE)
+    content.starts_with(CODEACT_SYSTEM_PROMPT_MARKER) || is_legacy_codeact_system_prompt(content)
 }
 
 pub fn refresh_codeact_system_prompt(existing_content: &str, system_prompt: &str) -> String {
@@ -195,10 +202,7 @@ pub fn refresh_codeact_system_prompt(existing_content: &str, system_prompt: &str
         return system_prompt.to_string();
     }
 
-    let suffix = existing_content
-        .rfind(CODEACT_POSTAMBLE)
-        .map(|idx| &existing_content[idx + CODEACT_POSTAMBLE.len()..])
-        .unwrap_or_default();
+    let suffix = codeact_system_prompt_suffix(existing_content).unwrap_or_default();
 
     if suffix.is_empty() {
         system_prompt.to_string()
@@ -233,6 +237,33 @@ pub fn upsert_codeact_system_prompt(
 
     messages.insert(0, ThreadMessage::system(system_prompt));
     true
+}
+
+fn is_legacy_codeact_system_prompt(content: &str) -> bool {
+    content.starts_with(CODEACT_LEGACY_OPENING)
+        && content.contains("```repl")
+        && (content.contains(CODEACT_STRATEGY_HEADING)
+            || content.contains(CODEACT_CAPABILITIES_HEADING))
+}
+
+fn codeact_system_prompt_suffix(existing_content: &str) -> Option<&str> {
+    let append_markers = [
+        PRIOR_KNOWLEDGE_HEADING,
+        ACTIVE_SKILLS_HEADING,
+        MISSING_SKILLS_PREFIX,
+    ];
+
+    let suffix_start = append_markers
+        .iter()
+        .filter_map(|marker| existing_content.find(marker))
+        .min()
+        .or_else(|| {
+            existing_content
+                .rfind(CODEACT_POSTAMBLE)
+                .map(|idx| idx + CODEACT_POSTAMBLE.len())
+        })?;
+
+    existing_content.get(suffix_start..)
 }
 
 const fn capability_status_label(status: CapabilityStatus) -> &'static str {
@@ -528,5 +559,49 @@ mod tests {
         assert!(refreshed.contains("## Prior Knowledge (from completed threads)"));
         assert!(refreshed.contains("GitHub API Skill"));
         assert!(refreshed.contains("slash skill(s) that are not installed"));
+    }
+
+    #[test]
+    fn upsert_replaces_legacy_codeact_prompt_revisions() {
+        let legacy_prompt = format!(
+            "{CODEACT_LEGACY_OPENING}\n\nLegacy prompt body.\n\n```repl\nprint('hi')\n```\n{CODEACT_STRATEGY_HEADING}\nLegacy strategy text.\n"
+        );
+        let new_prompt = build_codeact_system_prompt_with_docs(&[], &[], &[], None);
+        let mut messages = vec![
+            ThreadMessage::system(legacy_prompt),
+            ThreadMessage::user("resume me"),
+        ];
+
+        assert!(upsert_codeact_system_prompt(
+            &mut messages,
+            new_prompt.clone()
+        ));
+        assert_eq!(messages[0].content, new_prompt);
+    }
+
+    #[test]
+    fn refresh_preserves_appends_for_legacy_prompt_revisions() {
+        let legacy_prompt = format!(
+            "{CODEACT_LEGACY_OPENING}\n\nLegacy prompt body.\n\n```repl\nprint('hi')\n```\n{CODEACT_STRATEGY_HEADING}\nLegacy strategy text.\n{PRIOR_KNOWLEDGE_HEADING}\n### [LESSON] Use http\n\n## Active Skills\n\n<skill name=\"github\" version=\"1\">\nGitHub API Skill\n</skill>\n\nThe user explicitly requested slash skill(s) that are not installed or were not found: /missing."
+        );
+        let new_prompt = build_codeact_system_prompt_with_docs(
+            &[],
+            &[CapabilitySummary {
+                name: "slack".into(),
+                display_name: None,
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: None,
+                routing_hint: None,
+            }],
+            &[],
+            None,
+        );
+
+        let refreshed = refresh_codeact_system_prompt(&legacy_prompt, &new_prompt);
+        assert!(refreshed.starts_with(&new_prompt));
+        assert!(refreshed.contains("## Prior Knowledge (from completed threads)"));
+        assert!(refreshed.contains("GitHub API Skill"));
+        assert!(refreshed.contains("/missing"));
     }
 }
