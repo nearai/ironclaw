@@ -163,7 +163,7 @@ impl Default for ThreadConfig {
         Self {
             // Under the code-only contract, a well-posed turn FINALs in 1–3
             // iterations. Grinding past ~10 means the LLM is spinning.
-            max_iterations: 10,
+            max_iterations: 20,
             max_duration: None,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
