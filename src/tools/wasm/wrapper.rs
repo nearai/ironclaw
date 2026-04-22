@@ -233,11 +233,8 @@ impl StoreData {
 
             // Check path patterns if any are specified
             if !cred.path_patterns.is_empty() {
-                use crate::secrets::path_matches_prefix;
-                let url_path = url::Url::parse(url)
-                    .ok()
-                    .map(|u| u.path().to_string())
-                    .unwrap_or_default();
+                use crate::secrets::{extract_url_path_for_matching, path_matches_prefix};
+                let url_path = extract_url_path_for_matching(url);
                 let path_match = cred
                     .path_patterns
                     .iter()

@@ -24,7 +24,8 @@ use secrecy::SecretString;
 
 use ironclaw::context::JobContext;
 use ironclaw::secrets::{
-    CreateSecretParams, CredentialMapping, InMemorySecretsStore, SecretsCrypto, SecretsStore,
+    CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore, SecretsCrypto,
+    SecretsStore,
 };
 use ironclaw::tools::builtin::HttpTool;
 use ironclaw::tools::wasm::SharedCredentialRegistry;
@@ -779,6 +780,88 @@ async fn test_credentialed_host_allows_non_auth_headers() {
     }
     // Any other outcome (Ok, ExternalService, Timeout, Sandbox) is fine —
     // the test only asserts that the auth-rejection branch did not fire.
+}
+
+#[tokio::test]
+async fn test_path_scoped_credential_strips_headers_on_non_matching_path() {
+    // Regression for Firat's round-3 finding: host-level header blocking and
+    // path-level injection are asymmetric by design — a host with any
+    // registered credential strips LLM-supplied auth headers on every path,
+    // but injection only fires on paths that match `path_patterns`. The net
+    // effect on a non-matching path is that the request goes out
+    // unauthenticated. This test locks that in so future refactors to either
+    // side (stripping OR injection) can't silently break the combined
+    // behavior.
+    //
+    // We can't assert "no Authorization header on the outbound wire" without
+    // a live spy server, but we CAN assert the branch behavior: a request to
+    // a non-matching path with an LLM-supplied `Authorization` header must
+    // be rejected (NotAuthorized) because the strip branch is host-scoped.
+    let registry = Arc::new(SharedCredentialRegistry::new());
+    registry.add_mappings(vec![CredentialMapping {
+        secret_name: "api_v1_write_token".to_string(),
+        location: CredentialLocation::AuthorizationBearer,
+        host_patterns: vec!["api.github.com".to_string()],
+        path_patterns: vec!["/api/v1/write".to_string()],
+        optional: false,
+    }]);
+    let tool = http_tool_with_credentials(registry, Arc::new(test_secrets_store()));
+    let ctx = JobContext::new("Test", "path-scoped auth gap");
+
+    // Request to the NON-matching path /api/v1/read with LLM-supplied auth.
+    // Host has a registered credential mapping, so the header-block path
+    // must fire regardless of whether the SPECIFIC path matches.
+    let params = serde_json::json!({
+        "method": "GET",
+        "url": "https://api.github.com/api/v1/read",
+        "headers": [{ "name": "Authorization", "value": "Bearer llm_supplied" }],
+    });
+    let err = tool
+        .execute(params, &ctx)
+        .await
+        .expect_err("LLM-supplied Authorization header must be blocked on credentialed host even when the specific path has no injectable credential");
+    assert!(
+        matches!(err, ToolError::NotAuthorized(_)),
+        "expected NotAuthorized on non-matching path for credentialed host, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_path_scoped_credential_wrong_path_is_segment_boundary_rejected() {
+    // Caller-level regression for `/api/v1-malicious` vs path_pattern
+    // `/api/v1`. A segment-boundary bug in `path_matches_prefix` would make
+    // the prefix match and inject the v1 credential on the malicious-suffix
+    // path. Verified end-to-end via `execute()` so the whole pipeline is
+    // exercised: URL parse → find_for_url → path_matches_prefix → inject.
+    //
+    // Assertion shape: request to /api/v1-malicious with an LLM-supplied
+    // auth header is still rejected (host-scoped strip) — but the test's
+    // real value is that it fails loudly if anyone ever loosens the prefix
+    // check and starts injecting on suffix-attack paths.
+    let registry = Arc::new(SharedCredentialRegistry::new());
+    registry.add_mappings(vec![CredentialMapping {
+        secret_name: "v1_token".to_string(),
+        location: CredentialLocation::AuthorizationBearer,
+        host_patterns: vec!["api.github.com".to_string()],
+        path_patterns: vec!["/api/v1".to_string()],
+        optional: false,
+    }]);
+    let tool = http_tool_with_credentials(registry, Arc::new(test_secrets_store()));
+    let ctx = JobContext::new("Test", "segment boundary via execute");
+
+    let params = serde_json::json!({
+        "method": "GET",
+        "url": "https://api.github.com/api/v1-malicious",
+        "headers": [{ "name": "Authorization", "value": "Bearer llm_supplied" }],
+    });
+    let err = tool
+        .execute(params, &ctx)
+        .await
+        .expect_err("LLM-supplied Authorization must be blocked on credentialed host");
+    assert!(
+        matches!(err, ToolError::NotAuthorized(_)),
+        "expected NotAuthorized for v1-malicious; got {err:?}"
+    );
 }
 
 #[tokio::test]

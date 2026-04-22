@@ -204,6 +204,22 @@ impl CapabilitiesFile {
             }
         }
 
+        // Validate credential path_patterns using the same rules as skills
+        // (leading slash, no literal `..` segments, no `?`/`#`). Emit as
+        // warnings so a bad WASM manifest doesn't block other tools from
+        // loading; the effect is that the malformed pattern will never match.
+        if let Some(http) = &self.http {
+            for mapping in http.credentials.values() {
+                for pattern in &mapping.path_patterns {
+                    for err in
+                        ironclaw_skills::validate_path_pattern(&mapping.secret_name, pattern)
+                    {
+                        tracing::warn!(tool = name, "capabilities validation: {}", err);
+                    }
+                }
+            }
+        }
+
         // Manual auth (no OAuth) checks
         if let Some(auth) = &self.auth
             && auth.oauth.is_none()

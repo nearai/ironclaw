@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use crate::sandbox::proxy::allowlist::DomainAllowlist;
-use crate::secrets::{CredentialLocation, CredentialMapping, host_matches_pattern};
+use crate::secrets::{CredentialLocation, CredentialMapping};
 
 /// A network request to be evaluated.
 #[derive(Debug, Clone)]
@@ -105,13 +105,13 @@ impl DefaultPolicyDecider {
         }
     }
 
-    /// Find credential mapping for a host (supports glob patterns like `*.example.com`).
-    fn find_credential(&self, host: &str) -> Option<&CredentialMapping> {
-        self.credential_mappings.iter().find(|m| {
-            m.host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(host, pattern))
-        })
+    /// Find the first credential mapping that matches both `host` and `path`.
+    /// Honors `path_patterns` so a mapping scoped to `/api/v1/write` does not
+    /// inject on `/api/v1/read` when the sandbox proxy forwards the request.
+    fn find_credential(&self, host: &str, path: &str) -> Option<&CredentialMapping> {
+        self.credential_mappings
+            .iter()
+            .find(|m| m.matches(host, path))
     }
 }
 
@@ -128,7 +128,7 @@ impl NetworkPolicyDecider for DefaultPolicyDecider {
         }
 
         // Check if we need to inject credentials
-        if let Some(mapping) = self.find_credential(&request.host) {
+        if let Some(mapping) = self.find_credential(&request.host, &request.path) {
             return NetworkDecision::AllowWithCredentials {
                 secret_name: mapping.secret_name.clone(),
                 location: mapping.location.clone(),
@@ -239,6 +239,40 @@ mod tests {
             }
             _ => panic!("Expected AllowWithCredentials"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_proxy_honors_path_patterns() {
+        // Regression: sandbox proxy `find_credential` used to match host only,
+        // so a write-scoped credential leaked onto read endpoints.
+        let allowlist = DomainAllowlist::new(&["api.example.com".to_string()]);
+        let credentials = vec![CredentialMapping {
+            secret_name: "WRITE_TOKEN".to_string(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1/write".to_string()],
+            optional: false,
+        }];
+        let decider = DefaultPolicyDecider::new(allowlist, credentials);
+
+        let write_req =
+            NetworkRequest::from_url("POST", "https://api.example.com/api/v1/write").unwrap();
+        let write_decision = decider.decide(&write_req).await;
+        assert!(
+            matches!(
+                write_decision,
+                NetworkDecision::AllowWithCredentials { ref secret_name, .. } if secret_name == "WRITE_TOKEN"
+            ),
+            "write path must inject; got {write_decision:?}"
+        );
+
+        let read_req =
+            NetworkRequest::from_url("GET", "https://api.example.com/api/v1/read").unwrap();
+        let read_decision = decider.decide(&read_req).await;
+        assert!(
+            matches!(read_decision, NetworkDecision::Allow),
+            "read path must NOT inject when credential is path-scoped to write; got {read_decision:?}"
+        );
     }
 
     #[tokio::test]

@@ -295,8 +295,17 @@ impl CredentialMapping {
 /// After the prefix, the path must end or continue with `/` or `?`. A `..`
 /// that appears as a complete path segment is rejected; `..` inside a
 /// segment (e.g. `/api/..config`) is a legitimate literal path character.
+///
+/// Percent-encoded dot sequences (`%2e`, `%2E`) are rejected outright:
+/// `url::Url::parse` preserves percent-encoding, but downstream servers
+/// (IIS, Tomcat, some reverse proxies) may decode `%2e%2e` to `..` before
+/// routing. Refusing to match when any `%2e` appears keeps the predicate
+/// aligned with the effective path the server will see.
 pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     if path.split('/').any(|seg| seg == "..") {
+        return false;
+    }
+    if contains_percent_encoded_dot(path) {
         return false;
     }
     let path = path.strip_suffix('/').unwrap_or(path);
@@ -307,6 +316,42 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     if path.len() > prefix.len() && path.starts_with(prefix) {
         let next_char = path.as_bytes()[prefix.len()];
         return next_char == b'/' || next_char == b'?';
+    }
+    false
+}
+
+/// Extract the path component of a URL for credential path-pattern matching.
+///
+/// Used by both WASM wrappers (`tools/wasm/wrapper.rs` and
+/// `channels/wasm/wrapper.rs`) to feed `path_matches_prefix`. On parse
+/// failure, returns an empty string and logs at debug level — an empty
+/// string cannot match any non-empty prefix, so path-scoped credentials
+/// fail closed (safe) rather than silently injecting on malformed URLs.
+pub(crate) fn extract_url_path_for_matching(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => parsed.path().to_string(),
+        Err(err) => {
+            tracing::debug!(
+                url = %url,
+                error = %err,
+                "URL parse failed during path-scoped credential check; skipping injection"
+            );
+            String::new()
+        }
+    }
+}
+
+fn contains_percent_encoded_dot(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'%'
+            && (bytes[i + 1] == b'2')
+            && (bytes[i + 2] == b'e' || bytes[i + 2] == b'E')
+        {
+            return true;
+        }
+        i += 1;
     }
     false
 }
@@ -609,6 +654,21 @@ mod tests {
         assert!(!path_matches_prefix("/a/../b", "/a"));
         assert!(path_matches_prefix("/api/..config", "/api"));
         assert!(path_matches_prefix("/api/version2..beta", "/api"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_percent_encoded_dot() {
+        use super::path_matches_prefix;
+        // Lowercase %2e%2e — classic IIS/Tomcat path-traversal smuggling
+        assert!(!path_matches_prefix("/api/v1/%2e%2e/admin", "/api/v1"));
+        // Mixed case — some decoders are case-insensitive
+        assert!(!path_matches_prefix("/api/v1/%2E%2E/admin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2e%2E/admin", "/api/v1"));
+        // Single %2e as a segment-dot variant
+        assert!(!path_matches_prefix("/api/v1/%2e/admin", "/api/v1"));
+        // Embedded in a segment — still rejected; the presence of %2e is a
+        // strong signal the caller is trying to bypass normalization.
+        assert!(!path_matches_prefix("/api/v1/foo%2ebar", "/api/v1"));
     }
 
     #[test]

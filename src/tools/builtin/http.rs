@@ -1527,6 +1527,50 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_path_from_params_valid() {
+        let params = serde_json::json!({"url": "https://api.example.com/v1/users"});
+        assert_eq!(extract_path_from_params(&params), Some("/v1/users".into()));
+    }
+
+    #[test]
+    fn test_extract_path_from_params_missing_url() {
+        let params = serde_json::json!({"method": "GET"});
+        assert_eq!(extract_path_from_params(&params), None);
+    }
+
+    #[test]
+    fn test_extract_path_from_params_strips_query_and_fragment() {
+        // Url::parse().path() returns just the path; query/fragment live on
+        // separate accessors. This locks that behavior in so the auth
+        // pre-flight and credential lookup agree on the effective path.
+        let with_query = serde_json::json!({"url": "https://host/api/v1?page=1"});
+        assert_eq!(extract_path_from_params(&with_query), Some("/api/v1".into()));
+
+        let with_fragment = serde_json::json!({"url": "https://host/api/v1#frag"});
+        assert_eq!(
+            extract_path_from_params(&with_fragment),
+            Some("/api/v1".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_path_from_params_root_when_no_path() {
+        // `https://host` parses to path "/", so callers get a defined value
+        // rather than needing a `.unwrap_or("/")` fallback. This test locks
+        // that in — if it ever returns `None` for `https://host`, the auth
+        // pre-flight `.unwrap_or_else(|| "/".to_string())` would still work,
+        // but it'd be a subtle behavior change.
+        let params = serde_json::json!({"url": "https://host"});
+        assert_eq!(extract_path_from_params(&params), Some("/".into()));
+    }
+
+    #[test]
+    fn test_extract_path_from_params_malformed_url() {
+        let params = serde_json::json!({"url": "not a url"});
+        assert_eq!(extract_path_from_params(&params), None);
+    }
+
+    #[test]
     fn test_requires_approval_with_stringified_http_params() {
         use crate::tools::wasm::SharedCredentialRegistry;
 
