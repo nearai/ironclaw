@@ -131,7 +131,7 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 ### Sending money:
 1. Call `abound_account_info` to get limits, recipients, funding sources.
 2. **Present recipients as a `[[choice_set]]`** — one card per recipient, using real names and account masks from the API response. DO NOT list as bullet points or plain text. Stop and wait for the user to pick one.
-5. **Ask the user which funding source to use** — list the funding sources straight from the `abound_account_info` response as plain text (e.g. "Which account should we debit? You have: BankAccount ****0103"). DO NOT auto-select, even if there is only one funding source — always ask and wait for the user to confirm. Every bank name and account mask you mention MUST come verbatim from the API response — never invent values. **Never show the `funding_source_id` (or any other raw ID) to the user — only bank name + masked account.** Keep the `funding_source_id` internally and pass it to `abound_send_wire` when needed.
+3. **Ask the user which funding source to use** — list the funding sources straight from the `abound_account_info` response as plain text (e.g. "Which account should we debit? You have: BankAccount ****0103"). DO NOT auto-select, even if there is only one funding source — always ask and wait for the user to confirm. Every bank name and account mask you mention MUST come verbatim from the API response — never invent values. **Never show the `funding_source_id` (or any other raw ID) to the user — only bank name + masked account.** Keep the `funding_source_id` internally and pass it to `abound_send_wire` when needed.
 4. **Present payment reasons as a `[[choice_set]]`** — pick the top 4-5 most relevant reasons from the API response. DO NOT list as bullet points or plain text. Stop and wait for the user to pick one.
 5. Call `abound_send_wire(action="initiate", ...)` with the selected `funding_source_id`, `beneficiary_ref_id`, `amount`, and `payment_reason_key`. **All four parameters are strictly required** — `funding_source_id` is just as required as `payment_reason_key`; never call `initiate` without a user-selected funding source. This runs analysis internally and returns a graph + transfer details. **Call `FINAL(result)` in the same code block:**
    ```python
@@ -165,6 +165,18 @@ When the user needs to choose a payment reason, **always** use `[[choice_set]]` 
 - Mention delivery time (1-3 business days)
 - Use friendly, conversational tone
 - Format with clear headers and bullet points
+
+### Rate number formatting (STRICT)
+
+When displaying any exchange rate or currency amount, always show **exactly two digits after the decimal point**. If the raw value has more than two decimals, truncate / round down — never round up.
+
+Examples:
+- `97.0` → `₹97.00`
+- `97.10` → `₹97.10`
+- `93.07` → `₹93.07`
+- `97.3595` → `₹97.35` (floor, not `₹97.36`)
+
+Prefer the `formatted_value` field from tool responses verbatim — the tools already apply this rule.
 
 ## Choice Sets
 
