@@ -93,16 +93,11 @@ services:
 
   t3n-mcp-sidecar:
     profiles: ["app"]
-    # Pre-built in CI and pushed to GHCR.
-    # Local dev: `make rebuild` builds the image locally (requires GITHUB_TOKEN with
-    # read:packages on Terminal-3/trinity in your env).
-    # Production / VPS: set `image:` only (no build) and pull the pre-built image.
-    #   Log in once: echo $GHCR_TOKEN | docker login ghcr.io -u <user> --password-stdin
-    build:
-      context: .
-      dockerfile: docker/t3n-mcp-sidecar.Dockerfile
-      secrets:
-        - npm_github_token
+    # Image is built in CI (build-sidecar.yml) and pushed to GHCR whenever
+    # docker/t3n-mcp-sidecar.Dockerfile or docker/t3n-mcp-bridge.mjs changes on staging.
+    # The npm package (@terminal-3/t3n-mcp) must be published first via the manual
+    # npm-package-release workflow in trinity before rebuilding this image.
+    # To build locally instead: use `make build-sidecar` (requires NPM_GITHUB_TOKEN).
     image: ghcr.io/terminal-3/t3n-mcp-sidecar:latest
     restart: unless-stopped
     environment:
@@ -122,6 +117,3 @@ volumes:
   bastionclaw_data:
   t3n_mcp_socket:
 
-secrets:
-  npm_github_token:
-    environment: NPM_GITHUB_TOKEN

@@ -31,7 +31,7 @@ export DOCKER_GID
 COMPOSE := docker compose --profile app
 SERVICE := bastionclaw
 
-.PHONY: up build rebuild down wipe restart logs shell status help
+.PHONY: up build rebuild build-sidecar pull-sidecar down wipe restart logs shell status help
 
 ## Start the full stack (detached). Builds images if they don't exist yet.
 up:
@@ -46,6 +46,25 @@ build:
 ## Build images then restart the stack — use this after code changes.
 rebuild: build
 	$(COMPOSE) up -d
+
+## Build the t3n-mcp-sidecar image locally (requires NPM_GITHUB_TOKEN env var).
+## Only needed when you want to test sidecar changes before they are published and
+## pushed to GHCR by CI. Normal workflow: publish t3n-mcp via npm-package-release
+## workflow in trinity, then use `make pull-sidecar` instead.
+build-sidecar:
+	@test -n "$(NPM_GITHUB_TOKEN)" || { echo "ERROR: NPM_GITHUB_TOKEN is not set"; exit 1; }
+	DOCKER_BUILDKIT=1 docker build \
+		--secret id=npm_github_token,env=NPM_GITHUB_TOKEN \
+		-f docker/t3n-mcp-sidecar.Dockerfile \
+		-t ghcr.io/terminal-3/t3n-mcp-sidecar:latest \
+		.
+
+## Pull the latest t3n-mcp-sidecar image from GHCR and restart the container.
+## Use this after CI has published a new image (i.e. after merging to staging
+## and the npm-package-release workflow has run in trinity).
+pull-sidecar:
+	docker pull ghcr.io/terminal-3/t3n-mcp-sidecar:latest
+	$(COMPOSE) up -d t3n-mcp-sidecar
 
 ## Stop containers and remove them. Volumes are preserved (data survives).
 down:
