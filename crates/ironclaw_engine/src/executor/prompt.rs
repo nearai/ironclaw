@@ -11,7 +11,9 @@
 use std::sync::Arc;
 
 use crate::traits::store::Store;
-use crate::types::capability::ActionDef;
+use crate::types::capability::{
+    ActionDef, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind,
+};
 use crate::types::project::ProjectId;
 
 /// Runtime platform metadata injected into system prompts for self-awareness.
@@ -102,6 +104,7 @@ const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
 /// mission to evolve the system prompt at runtime.
 pub async fn build_codeact_system_prompt(
     actions: &[ActionDef],
+    capabilities: &[CapabilitySummary],
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
     platform: Option<&PlatformInfo>,
@@ -111,7 +114,7 @@ pub async fn build_codeact_system_prompt(
     } else {
         None
     };
-    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(actions, capabilities, overlay.as_deref(), platform)
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -121,16 +124,18 @@ pub async fn build_codeact_system_prompt(
 /// Store query.
 pub fn build_codeact_system_prompt_with_docs(
     actions: &[ActionDef],
+    capabilities: &[CapabilitySummary],
     system_docs: &[crate::types::memory::MemoryDoc],
     platform: Option<&PlatformInfo>,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(actions, capabilities, overlay.as_deref(), platform)
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
 fn build_codeact_system_prompt_inner(
     actions: &[ActionDef],
+    capabilities: &[CapabilitySummary],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
@@ -163,8 +168,53 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
+    if !capabilities.is_empty() {
+        prompt.push_str("\n## Available capabilities (background status)\n\n");
+        for capability in capabilities {
+            prompt.push_str(&format!(
+                "- `{}` [{}] — {}",
+                capability.name,
+                capability_kind_label(capability.kind),
+                capability_status_label(capability.status)
+            ));
+            if let Some(display_name) = &capability.display_name
+                && display_name != &capability.name
+            {
+                prompt.push_str(&format!(" ({display_name})"));
+            }
+            if let Some(routing_hint) = &capability.routing_hint {
+                prompt.push_str(&format!(". {routing_hint}"));
+            }
+            if let Some(description) = &capability.description {
+                prompt.push_str(&format!(". {description}"));
+            }
+            prompt.push('\n');
+        }
+    }
+
     prompt.push_str(CODEACT_POSTAMBLE);
     prompt
+}
+
+const fn capability_status_label(status: CapabilityStatus) -> &'static str {
+    match status {
+        CapabilityStatus::Ready => "ready",
+        CapabilityStatus::ReadyScoped => "ready_scoped",
+        CapabilityStatus::NeedsAuth => "needs_auth",
+        CapabilityStatus::NeedsSetup => "needs_setup",
+        CapabilityStatus::Inactive => "inactive",
+        CapabilityStatus::Latent => "latent",
+        CapabilityStatus::Error => "error",
+        CapabilityStatus::AvailableNotInstalled => "available_not_installed",
+    }
+}
+
+const fn capability_kind_label(kind: CapabilitySummaryKind) -> &'static str {
+    match kind {
+        CapabilitySummaryKind::Channel => "channel",
+        CapabilitySummaryKind::Provider => "provider",
+        CapabilitySummaryKind::Runtime => "runtime",
+    }
 }
 
 /// Load the prompt overlay from the Store, if one exists for this project.
@@ -199,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
@@ -223,9 +273,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
         assert!(prompt.contains("Learned Rules"));
         assert!(prompt.contains("Never call web_fetch"));
     }
@@ -251,9 +306,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
 
         let snowman_count = prompt.chars().filter(|c| *c == '\u{2603}').count();
         assert_eq!(snowman_count, MAX_PROMPT_OVERLAY_CHARS);
@@ -278,9 +338,14 @@ mod tests {
         };
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
-        let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
-                .await;
+        let prompt = build_codeact_system_prompt(
+            &[],
+            &[],
+            Some(&(store as Arc<dyn Store>)),
+            project_id,
+            None,
+        )
+        .await;
         assert!(!prompt.contains("Should not appear"));
         assert!(!prompt.contains("Learned Rules"));
     }
@@ -297,7 +362,8 @@ mod tests {
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), Some(&info))
+                .await;
         assert!(prompt.contains("IronClaw"));
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("nearai"));
@@ -311,7 +377,41 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_platform_info_has_no_platform_section() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+            build_codeact_system_prompt(&[], &[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(!prompt.contains("## Platform"));
+    }
+
+    #[test]
+    fn prompt_with_capabilities_includes_background_statuses() {
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[],
+            &[
+                CapabilitySummary {
+                    name: "telegram".into(),
+                    display_name: Some("Telegram".into()),
+                    kind: crate::types::capability::CapabilitySummaryKind::Channel,
+                    status: CapabilityStatus::ReadyScoped,
+                    description: Some("Telegram notifications".into()),
+                    routing_hint: Some("Usable through message".into()),
+                },
+                CapabilitySummary {
+                    name: "slack".into(),
+                    display_name: None,
+                    kind: crate::types::capability::CapabilitySummaryKind::Provider,
+                    status: CapabilityStatus::NeedsAuth,
+                    description: Some("Slack workspace integration".into()),
+                    routing_hint: None,
+                },
+            ],
+            &[],
+            None,
+        );
+
+        assert!(prompt.contains("## Available capabilities (background status)"));
+        assert!(prompt.contains("`telegram` [channel]"));
+        assert!(prompt.contains("ready_scoped"));
+        assert!(prompt.contains("Usable through message"));
+        assert!(prompt.contains("`slack` [provider]"));
+        assert!(prompt.contains("needs_auth"));
     }
 }
