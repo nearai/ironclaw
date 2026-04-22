@@ -344,7 +344,7 @@ fi
 if [ -n "$DISPATCH_DIFF" ]; then
     DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \
         | grep -E 'state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.' \
-        | grep -vE '// dispatch-exempt:|// safety:|^\+\+\+' \
+        | grep -vE '// dispatch-exempt:|// safety:|:\+\+\+ ' \
         | head -5 || true)
     if [ -n "$DISPATCH_HITS" ]; then
         warn "DISPATCH" "Handler directly touches state.{store,workspace,extension_manager,skill_registry,session_manager}. Route through ToolDispatcher::dispatch() instead. See .claude/rules/tools.md."
@@ -374,7 +374,7 @@ if [ -n "$WEB_IDENTITY_DIFF" ]; then
     WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
     WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
         | grep -E '\bCredentialName\b' \
-        | grep -vE '// web-identity-exempt:|// safety:|^\+\+\+' \
+        | grep -vE '// web-identity-exempt:|// safety:|:\+\+\+ ' \
         | head -5 || true)
     if [ -n "$WEB_IDENTITY_HITS" ]; then
         warn "CREDNAME" "\`CredentialName\` referenced in src/channels/web/** — web code takes \`ExtensionName\`; credential identity stays backend-side. Push the mapping into bridge::auth_manager or annotate with '// web-identity-exempt: <reason>'."
@@ -406,7 +406,7 @@ fi
 #       which is intentionally out of scope.
 PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
     | grep -E '(\bsse\.(broadcast|broadcast_for_user)|^[^:]*:\+[[:space:]]*\.broadcast_for_user)\(' \
-    | grep -vE '// projection-exempt: [^,]+,|// safety:|^\+\+\+' \
+    | grep -vE '// projection-exempt: [^,]+,|// safety:|:\+\+\+ ' \
     | head -5 || true)
 if [ -n "$PROJECTION_HITS" ]; then
     warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
