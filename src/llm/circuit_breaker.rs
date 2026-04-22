@@ -292,6 +292,42 @@ impl LlmProvider for CircuitBreakerProvider {
         }
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        self.check_allowed().await?;
+        match self.inner.complete_stream(request, on_chunk).await {
+            Ok(resp) => {
+                self.record_success().await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.check_allowed().await?;
+        match self.inner.complete_with_tools_stream(request, on_chunk).await {
+            Ok(resp) => {
+                self.record_success().await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.inner.list_models().await
     }

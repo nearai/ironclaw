@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+mod openai_compat_stream;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -316,7 +317,22 @@ fn create_openai_compat_from_registry(
 
     let adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone());
-    Ok(Arc::new(adapter))
+    let extra_headers_vec: Vec<(String, String)> = config
+        .extra_headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let unsupported: std::collections::HashSet<String> =
+        config.unsupported_params.iter().cloned().collect();
+    let streaming = openai_compat_stream::OpenAiCompatStreamingProvider::new(
+        Arc::new(adapter),
+        api_key,
+        config.base_url.clone(),
+        config.model.clone(),
+        extra_headers_vec,
+        unsupported,
+    );
+    Ok(Arc::new(streaming))
 }
 
 fn create_anthropic_from_registry(

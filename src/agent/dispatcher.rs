@@ -625,6 +625,28 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         let llm_call_start = std::time::Instant::now();
+
+        // Wire up real-time token streaming to the channel layer.
+        {
+            let (chunk_tx, mut chunk_rx) =
+                tokio::sync::mpsc::unbounded_channel::<String>();
+            let channels = Arc::clone(&self.agent.channels);
+            let channel_name = self.message.channel.clone();
+            let metadata = self.message.metadata.clone();
+            tokio::spawn(async move {
+                while let Some(chunk) = chunk_rx.recv().await {
+                    let _ = channels
+                        .send_status(
+                            &channel_name,
+                            crate::channels::StatusUpdate::StreamChunk(chunk),
+                            &metadata,
+                        )
+                        .await;
+                }
+            });
+            reason_ctx.chunk_sender = Some(chunk_tx);
+        }
+
         let output = match reasoning.respond_with_tools(reason_ctx).await {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
