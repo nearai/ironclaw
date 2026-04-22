@@ -156,6 +156,11 @@ pub struct ThreadConfig {
     pub depth: u32,
     /// Maximum recursion depth for rlm_query() sub-calls.
     pub max_depth: u32,
+    /// Whether CodeAct should expose the host-backed Pythonic shim layer
+    /// (`read_text`, `read_json`, `http_request`, etc.). Raw canonical
+    /// actions remain available either way.
+    #[serde(default = "default_codeact_host_shims")]
+    pub codeact_host_shims: bool,
 }
 
 impl Default for ThreadConfig {
@@ -175,12 +180,17 @@ impl Default for ThreadConfig {
             compaction_threshold: 0.85,
             depth: 0,
             max_depth: 1,
+            codeact_host_shims: true,
         }
     }
 }
 
 fn default_max_action_requirement_nudges() -> u32 {
     2
+}
+
+fn default_codeact_host_shims() -> bool {
+    true
 }
 
 /// Provenance for a skill that was active during thread execution.

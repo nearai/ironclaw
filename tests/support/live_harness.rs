@@ -467,6 +467,7 @@ pub struct LiveTestHarnessBuilder {
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
     allow_local_tools: Option<bool>,
+    codeact_host_shims: Option<bool>,
     skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
@@ -495,6 +496,7 @@ impl LiveTestHarnessBuilder {
             engine_v2: None,
             auto_approve_tools: None,
             allow_local_tools: None,
+            codeact_host_shims: None,
             skills_dir: None,
             channel_name: None,
             seeded_secret_names: Vec::new(),
@@ -573,6 +575,12 @@ impl LiveTestHarnessBuilder {
     /// developer usually runs with local tools disabled.
     pub fn with_allow_local_tools(mut self, enabled: bool) -> Self {
         self.allow_local_tools = Some(enabled);
+        self
+    }
+
+    /// Override whether CodeAct exposes the host-backed shim layer.
+    pub fn with_codeact_host_shims(mut self, enabled: bool) -> Self {
+        self.codeact_host_shims = Some(enabled);
         self
     }
 
@@ -656,15 +664,19 @@ impl LiveTestHarnessBuilder {
         if let Some(allow) = self.allow_local_tools {
             config.agent.allow_local_tools = allow;
         }
+        if let Some(enabled) = self.codeact_host_shims {
+            config.agent.codeact_host_shims = enabled;
+        }
         if let Some(ref dir) = self.skills_dir {
             config.skills.enabled = true;
             config.skills.local_dir = dir.clone();
         }
 
         eprintln!(
-            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}, skills_dir={}",
+            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, codeact_host_shims={}, auto_approve={}, skills_dir={}",
             config.agent.engine_v2,
             config.agent.allow_local_tools,
+            config.agent.codeact_host_shims,
             config.agent.auto_approve_tools,
             config.skills.local_dir.display(),
         );
@@ -751,6 +763,9 @@ impl LiveTestHarnessBuilder {
         if let Some(allow) = self.allow_local_tools {
             rig_builder = rig_builder.with_allow_local_tools(allow);
         }
+        if let Some(enabled) = self.codeact_host_shims {
+            rig_builder = rig_builder.with_codeact_host_shims(enabled);
+        }
         if let Some(interceptor) = http_interceptor {
             rig_builder = rig_builder.with_http_interceptor(interceptor);
         }
@@ -808,6 +823,9 @@ impl LiveTestHarnessBuilder {
             .with_auto_approve_tools(true);
         if let Some(allow) = self.allow_local_tools {
             rig_builder = rig_builder.with_allow_local_tools(allow);
+        }
+        if let Some(enabled) = self.codeact_host_shims {
+            rig_builder = rig_builder.with_codeact_host_shims(enabled);
         }
         if let Some(dir) = self.skills_dir.clone() {
             rig_builder = rig_builder.with_skills_dir(dir);

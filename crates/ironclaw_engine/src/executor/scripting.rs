@@ -445,7 +445,9 @@ pub async fn execute_code_with_skills(
         known_actions.insert(name.clone());
     }
 
-    register_host_shim_names(&mut known_actions);
+    if thread.config.codeact_host_shims {
+        register_host_shim_names(&mut known_actions);
+    }
 
     // Parse and compile (wrap in catch_unwind — Monty 0.0.x can panic)
     let runner = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -660,20 +662,21 @@ pub async fn execute_code_with_skills(
                     continue;
                 }
 
-                if let Some(immediate_shim) = maybe_execute_immediate_shim(
-                    &action_name,
-                    &params,
-                    thread,
-                    effects,
-                    leases,
-                    policy,
-                    context,
-                    capability_policies,
-                    &str_call_id,
-                    &mut action_results,
-                    &mut events,
-                )
-                .await
+                if thread.config.codeact_host_shims
+                    && let Some(immediate_shim) = maybe_execute_immediate_shim(
+                        &action_name,
+                        &params,
+                        thread,
+                        effects,
+                        leases,
+                        policy,
+                        context,
+                        capability_policies,
+                        &str_call_id,
+                        &mut action_results,
+                        &mut events,
+                    )
+                    .await
                 {
                     match immediate_shim {
                         ImmediateShimOutcome::Ready(ext_result) => {
@@ -728,43 +731,47 @@ pub async fn execute_code_with_skills(
                     }
                 }
 
-                let shim_dispatch = match build_shim_dispatch(&action_name, &params) {
-                    Ok(dispatch) => dispatch,
-                    Err(ext_result) => {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            call.resume(ext_result, PrintWriter::Collect(&mut stdout))
-                        })) {
-                            Ok(Ok(p)) => progress = p,
-                            Ok(Err(e)) => {
-                                stdout.push_str(&format!("\nError: {e}"));
-                                return Ok(CodeExecutionResult {
-                                    return_value: serde_json::Value::Null,
-                                    stdout,
-                                    action_results,
-                                    events,
-                                    need_approval: None,
-                                    recursive_tokens,
-                                    final_answer,
-                                    failure: Some(classify_runtime_error(&e.to_string())),
-                                });
+                let shim_dispatch = if thread.config.codeact_host_shims {
+                    match build_shim_dispatch(&action_name, &params) {
+                        Ok(dispatch) => dispatch,
+                        Err(ext_result) => {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                            })) {
+                                Ok(Ok(p)) => progress = p,
+                                Ok(Err(e)) => {
+                                    stdout.push_str(&format!("\nError: {e}"));
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout,
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(classify_runtime_error(&e.to_string())),
+                                    });
+                                }
+                                Err(_) => {
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout: format!(
+                                            "{stdout}\nVmPanic: Monty VM panicked during shim resume"
+                                        ),
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(CodeExecutionFailure::VmPanic),
+                                    });
+                                }
                             }
-                            Err(_) => {
-                                return Ok(CodeExecutionResult {
-                                    return_value: serde_json::Value::Null,
-                                    stdout: format!(
-                                        "{stdout}\nVmPanic: Monty VM panicked during shim resume"
-                                    ),
-                                    action_results,
-                                    events,
-                                    need_approval: None,
-                                    recursive_tokens,
-                                    final_answer,
-                                    failure: Some(CodeExecutionFailure::VmPanic),
-                                });
-                            }
+                            continue;
                         }
-                        continue;
                     }
+                } else {
+                    None
                 };
                 let dispatch_action_name = shim_dispatch
                     .as_ref()
@@ -2352,6 +2359,7 @@ async fn handle_rlm_query(
         max_duration: parent_thread.config.max_duration,
         depth: current_depth + 1,
         max_depth,
+        codeact_host_shims: parent_thread.config.codeact_host_shims,
         ..crate::types::thread::ThreadConfig::default()
     };
 
@@ -3152,6 +3160,25 @@ FINAL("should-not-run")
         assert!(
             effects.recorded_calls().is_empty(),
             "http should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_config_can_disable_host_shim_registration() {
+        let mut thread = make_test_thread();
+        thread.config.codeact_host_shims = false;
+        let effects = Arc::new(MockEffects::new(vec![test_action("read_file")], vec![]));
+
+        let code = r#"
+FINAL(str("read_text" in globals()) + "|" + str("read_file" in globals()))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("False|True"));
+        assert!(
+            effects.recorded_calls().is_empty(),
+            "no tool calls expected"
         );
     }
 

@@ -27,6 +27,7 @@ print(search, page, memories)
 
 This is much faster than calling tools sequentially. Use `asyncio.gather()` whenever tools don't depend on each other's results.
 
+<!-- HOST_SHIMS_START -->
 ## Preferred host-backed shims
 
 For common file, HTTP, and shell tasks, prefer these Pythonic shims first:
@@ -54,6 +55,7 @@ await write_json("package.json", cfg)
 ```
 
 Use the raw tools directly when you need capabilities the shims do not expose yet, such as partial file reads (`offset`/`limit`), binary/download-specific HTTP options like `save_to`, or other tool-specific parameters.
+<!-- HOST_SHIMS_END -->
 
 ## Special functions
 
