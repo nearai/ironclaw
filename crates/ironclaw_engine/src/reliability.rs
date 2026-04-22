@@ -156,19 +156,15 @@ impl ReliabilityTracker {
             // Keep each entry short — never exceed ~120 chars — to bound the
             // system-prompt bloat. `last_error` is truncated to the first
             // line and 80 chars.
-            let err_hint = metrics
-                .last_error
-                .as_deref()
-                .map(|e| {
-                    let first_line = e.lines().next().unwrap_or("").trim();
-                    let truncated: String = first_line.chars().take(80).collect();
-                    if !truncated.is_empty() {
-                        format!(" (last error: {truncated})")
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default();
+            let err_hint = metrics.last_error.as_deref().map_or_else(String::new, |e| {
+                let first_line = e.lines().next().unwrap_or("").trim();
+                let truncated: String = first_line.chars().take(80).collect();
+                if !truncated.is_empty() {
+                    format!(" (last error: {truncated})")
+                } else {
+                    String::new()
+                }
+            });
             lines.push(format!(
                 "- `{name}` — success rate {:.0}% over {} calls{}",
                 metrics.success_rate * 100.0,
