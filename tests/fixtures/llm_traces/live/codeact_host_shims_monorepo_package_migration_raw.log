@@ -1,0 +1,62 @@
+# Live Test Session: codeact_host_shims_monorepo_package_migration_raw
+# Mode: Live
+# LLM calls: 5, Input tokens: 103452, Output tokens: 658
+# Wall time: 34.9s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Under the monorepo root "/tmp/ironclaw_live_codeact_shims/monorepo_package_migration", every package has a sub-directory at `packages/<name>/package.json`. For each package, ensure that the `scripts` object contains an entry `lint: eslint .` (add it if missing, do not overwrite an existing lint entry). Preserve every other existing script and all other top-level fields like `name` and `private`. Write each updated package.json back as pretty JSON. Then re-read every saved package.json to build a summary. For each package, sort its script keys alphabetically and join them with `,`. Join all packages sorted by package name with `;`. Call FINAL exactly with `summary=<summary>` — for example `admin:build,lint;app:lint,test;docs:lint,preview`. IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, write_json, read_text, write_text, list_entries, or find_files. Use canonical host tools directly from Python. The canonical read_file tool returns a dict whose `content` field contains numbered text in a format like `     1│ {...}`; strip everything through the `│` separator before JSON parsing. You can discover package directories with the canonical `list_dir` tool; its output is a dict with an `entries` list where directories end with `/`.
+────────────────────────────────────────────────────
+summary=admin:build,lint;app:lint,test;docs:lint,preview
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19992 in / 45 out tokens
+  ● list_dir(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ list_dir(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ○ Calling LLM...
+  ○ Step complete — 20097 in / 152 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ○ Calling LLM...
+  ○ Step complete — 20642 in / 279 out tokens
+  ● write_file({
+  "name": "@demo/admin",
+  "private": true,
+  "s...)
+  ✓ write_file({
+  "name": "@demo/admin",
+  "private": true,
+  "s...)
+  ● write_file({
+  "name": "@demo/app",
+  "private": true,
+  "scr...)
+  ✓ write_file({
+  "name": "@demo/app",
+  "private": true,
+  "scr...)
+  ● write_file({
+  "name": "@demo/docs",
+  "private": true,
+  "sc...)
+  ✓ write_file({
+  "name": "@demo/docs",
+  "private": true,
+  "sc...)
+  ○ Calling LLM...
+  ○ Step complete — 21067 in / 152 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/monorepo_package_...)
+  ○ Calling LLM...
+  ○ Step complete — 21654 in / 30 out tokens
+  … Done

@@ -1,0 +1,23 @@
+{
+  "model_name": "live-codeact_host_shims_monorepo_package_migration_shim",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Use a Python CodeAct script, not plain prose. Under the monorepo root \"/tmp/ironclaw_live_codeact_shims/monorepo_package_migration\", every package has a sub-directory at `packages/<name>/package.json`. For each package, ensure that the `scripts` object contains an entry `lint: eslint .` (add it if missing, do not overwrite an existing lint entry). Preserve every other existing script and all other top-level fields like `name` and `private`. Write each updated package.json back as pretty JSON. Then re-read every saved package.json to build a summary. For each package, sort its script keys alphabetically and join them with `,`. Join all packages sorted by package name with `;`. Call FINAL exactly with `summary=<summary>` — for example `admin:build,lint;app:lint,test;docs:lint,preview`. IMPORTANT: this is the SHIM variant, so prefer `await read_json(path)` and `await write_json(path, value)` for each package.json, and `await list_entries(path)` to discover package directories. All three helpers are async, so always use `await`. They are thin facades over the canonical host tools and keep the same approval/policy behavior."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Use a Python CodeAct script, not plain prose. Under the monorepo root \"/tmp/iron",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "text",
+        "content": "```repl\nimport json\n\nroot = \"/tmp/ironclaw_live_codeact_shims/monorepo_package_migration\"\npackages_dir = root + \"/packages\"\n\nentries = await list_entries(packages_dir, recursive=False, max_depth=1)\n\npackage_names = []\nfor entry in entries:\n    if \"/\" not in entry and entry not in (\".\", \"..\"):\n        package_names.append(entry)\n\npackage_names = sorted(package_names)\n\nfor pkg in package_names:\n    path = f\"{packages_dir}/{pkg}/package.json\"\n    data = await read_json(path)\n    scripts = data.get(\"scripts\")\n    if not isinstance(scripts, dict):\n        scripts = {}\n    if \"lint\" not in scripts:\n        scripts[\"lint\"] = \"eslint .\"\n        data[\"scripts\"] = scripts\n        await write_json(path, data)\n\nsummary_parts = []\nfor pkg in package_names:\n    path = f\"{packages_dir}/{pkg}/package.json\"\n    data = await read_json(path)\n    scripts = data.get(\"scripts\")\n    if not isinstance(scripts, dict):\n        scripts = {}\n    script_keys = sorted(scripts.keys())\n    summary_parts.append(f\"{pkg}:{','.join(script_keys)}\")\n\nsummary = \";\".join(summary_parts)\nFINAL(f\"summary={summary}\")\n```",
+        "input_tokens": 20071,
+        "output_tokens": 268
+      }
+    }
+  ]
+}
