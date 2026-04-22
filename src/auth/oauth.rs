@@ -44,9 +44,22 @@ pub use crate::llm::oauth_helpers::{
 /// from `tool_activate`/`tool_auth` output before surfacing it to the client.
 /// Keeping the helper in one place ensures the v1/v2 invariants stay symmetric.
 pub(crate) fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
-    url.map(str::trim)
-        .filter(|u| u.starts_with("https://"))
-        .map(ToOwned::to_owned)
+    url.map(str::trim).and_then(|u| {
+        if u.chars().any(char::is_control) {
+            return None;
+        }
+        if urlencoding::decode(u)
+            .ok()
+            .is_some_and(|decoded| decoded.chars().any(char::is_control))
+        {
+            return None;
+        }
+        url::Url::parse(u)
+            .ok()
+            .filter(|parsed| parsed.scheme().eq_ignore_ascii_case("https"))
+            .filter(|parsed| parsed.has_host())
+            .map(|parsed| parsed.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -78,6 +91,25 @@ mod sanitize_tests {
             Some("https://example.com/auth".to_string())
         );
     }
+
+    #[test]
+    fn allows_mixed_case_https_scheme() {
+        assert_eq!(
+            sanitize_auth_url(Some("HTTPS://example.com/auth")),
+            Some("https://example.com/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_control_character_urls() {
+        assert!(sanitize_auth_url(Some("https://")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/\nattack")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/\rattack")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/%0d%0aattack")).is_none());
+        assert!(
+            sanitize_auth_url(Some("https://example.com/?next=%0D%0ALocation:%20evil")).is_none()
+        );
+    }
 }
 
 /// Truncate `body` to at most `max_bytes` UTF-8 bytes, walking back to the
@@ -93,6 +125,32 @@ fn truncate_at_char_boundary(body: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}...", &body[..end])
+}
+
+/// Read an OAuth error response body for inclusion in a log / error
+/// message, truncated to `max_bytes` at a UTF-8 char boundary.
+///
+/// Two hazards rolled into one helper so every `!status.is_success()`
+/// site in this module composes an error message the same way:
+///
+/// 1. **Leak risk.** OAuth error responses can echo request details,
+///    partial token material, or unbounded vendor-specific blobs.
+///    Surfacing the raw body into an error string leaks that into
+///    logs, SSE events, and panic output.
+/// 2. **Read failures.** `response.text().await` can fail on network
+///    resets, encoding issues, or header/body mismatches. We swallow
+///    those and fall back to an empty string — the HTTP status code
+///    is already in the caller's outer `format!`, so it's still
+///    actionable without the body. Raising the read failure instead
+///    would obscure the actual provider error with a secondary I/O
+///    error. This is the `// silent-ok` case per
+///    `.claude/rules/error-handling.md`.
+async fn consume_oauth_error_body(response: reqwest::Response, max_bytes: usize) -> String {
+    // silent-ok: upstream error body may be unreadable (network reset,
+    // bad encoding); the caller's format! already includes status,
+    // which is the actionable part.
+    let body = response.text().await.unwrap_or_default();
+    truncate_at_char_boundary(&body, max_bytes)
 }
 
 /// Response from the OAuth token exchange.
@@ -319,6 +377,7 @@ pub async fn exchange_oauth_code_with_params(
     }
 
     let token_response = request
+        .header(reqwest::header::ACCEPT, "application/json")
         .form(&token_params)
         .send()
         .await
@@ -326,58 +385,25 @@ pub async fn exchange_oauth_code_with_params(
 
     if !token_response.status().is_success() {
         let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        // Truncate the upstream body before bubbling it into our error
-        // string. OAuth error responses can echo partial token material,
-        // request details, or unbounded vendor messages — surfacing the
-        // raw body verbatim is both a leak risk and a log-bloat risk.
-        let truncated = truncate_at_char_boundary(&body, 500);
+        let truncated = consume_oauth_error_body(token_response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange failed: {} - {}",
             status, truncated
         )));
     }
 
-    let token_data: serde_json::Value = token_response
-        .json()
+    let content_type = token_response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = token_response
+        .text()
         .await
-        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse token response: {}", e)))?;
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to read token response: {}", e)))?;
 
-    let access_token = token_data
-        .get(access_token_field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            // Log only the field names present, not values (which may contain tokens)
-            let fields: Vec<&str> = token_data
-                .as_object()
-                .map(|o| o.keys().map(|k| k.as_str()).collect())
-                .unwrap_or_default();
-            OAuthCallbackError::Io(format!(
-                "No '{}' field in token response (fields present: {:?})",
-                access_token_field, fields
-            ))
-        })?
-        .to_string();
-
-    let refresh_token = token_data
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
-
-    Ok(OAuthTokenResponse {
-        access_token,
-        refresh_token,
-        expires_in,
-        token_type: token_data
-            .get("token_type")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        scope: token_data
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-    })
+    oauth_token_response_from_body(&body, access_token_field, content_type.as_deref())
 }
 
 /// Exchange an OAuth authorization code for tokens, with optional RFC 8707 `resource` parameter.
@@ -525,8 +551,7 @@ pub async fn validate_oauth_token(
         Ok(())
     } else {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        let truncated = truncate_at_char_boundary(&body, 200);
+        let truncated = consume_oauth_error_body(response, 200).await;
         Err(OAuthCallbackError::Io(format!(
             "Token validation failed: HTTP {} (expected {}): {}",
             status, validation.success_status, truncated
@@ -880,6 +905,56 @@ pub struct ProxyRefreshTokenRequest<'a> {
     pub provider: Option<&'a str>,
 }
 
+/// Max sane length for an OAuth bearer token. Real-world tokens across
+/// Google, GitHub, Notion, Slack, Anthropic, etc. are well under 4 KiB
+/// including JWT variants with generous headers/payloads. Anything
+/// bigger is almost certainly an HTML page or error blob that the
+/// parser extracted as a "token" value — reject it before it gets
+/// stored in the secrets store and sent as a `Bearer` header.
+const MAX_ACCESS_TOKEN_LEN: usize = 4096;
+
+/// Reject access-token values that look like scraped garbage. A real
+/// OAuth access token is a compact opaque string (or JWT) — no
+/// whitespace, no HTML/URL brackets, no nulls, bounded length. The
+/// form-encoded parser is permissive enough that a random
+/// `<input name="access_token" value="<!-- empty -->">` extract
+/// would slip through without these checks.
+fn validate_access_token(token: &str, access_token_field: &str) -> Result<(), OAuthCallbackError> {
+    if token.is_empty() {
+        return Err(OAuthCallbackError::Io(format!(
+            "Token response '{}' field is empty",
+            access_token_field
+        )));
+    }
+    if token.len() > MAX_ACCESS_TOKEN_LEN {
+        return Err(OAuthCallbackError::Io(format!(
+            "Token response '{}' field is implausibly long ({} bytes > {} byte cap) — likely an error page misparsed as a token",
+            access_token_field,
+            token.len(),
+            MAX_ACCESS_TOKEN_LEN
+        )));
+    }
+    let mut bad_chars: Vec<char> = Vec::new();
+    for c in token.chars() {
+        // Whitespace, control chars, angle brackets, and NULs have no
+        // place in an OAuth bearer token. If any appears, the "token"
+        // came from a misparse (HTML / plain-text error page).
+        if c.is_whitespace() || c.is_control() || c == '<' || c == '>' {
+            bad_chars.push(c);
+            if bad_chars.len() >= 3 {
+                break;
+            }
+        }
+    }
+    if !bad_chars.is_empty() {
+        return Err(OAuthCallbackError::Io(format!(
+            "Token response '{}' field contains invalid characters — likely an HTML/error-page body misparsed as a token",
+            access_token_field
+        )));
+    }
+    Ok(())
+}
+
 fn oauth_token_response_from_json(
     token_data: serde_json::Value,
     access_token_field: &str,
@@ -893,11 +968,12 @@ fn oauth_token_response_from_json(
                 .map(|o| o.keys().map(|k| k.as_str()).collect())
                 .unwrap_or_default();
             OAuthCallbackError::Io(format!(
-                "No '{}' field in proxy response (fields present: {:?})",
+                "No '{}' field in token response (fields present: {:?})",
                 access_token_field, fields
             ))
         })?
         .to_string();
+    validate_access_token(&access_token, access_token_field)?;
 
     let refresh_token = token_data
         .get("refresh_token")
@@ -918,6 +994,96 @@ fn oauth_token_response_from_json(
             .and_then(|v| v.as_str())
             .map(String::from),
     })
+}
+
+fn oauth_token_response_from_form_encoded(
+    body: &str,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let token_data: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    let access_token = token_data
+        .get(access_token_field)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            let fields: Vec<&str> = token_data.keys().map(|k| k.as_str()).collect();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in token response (fields present: {:?})",
+                access_token_field, fields
+            ))
+        })?
+        .to_string();
+    validate_access_token(&access_token, access_token_field)?;
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token: token_data.get("refresh_token").cloned(),
+        expires_in: token_data
+            .get("expires_in")
+            .and_then(|value| value.parse::<u64>().ok()),
+        token_type: token_data.get("token_type").cloned(),
+        scope: token_data.get("scope").cloned(),
+    })
+}
+
+/// Classify a response `Content-Type` header value for OAuth token
+/// response dispatch. Anything we don't recognise is `Unknown` — the
+/// caller falls back to JSON-only, which is the RFC 6749 §5.1 default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenResponseFormat {
+    Json,
+    FormUrlencoded,
+    Unknown,
+}
+
+fn classify_token_content_type(content_type: Option<&str>) -> TokenResponseFormat {
+    let Some(raw) = content_type else {
+        return TokenResponseFormat::Unknown;
+    };
+    // `Content-Type` can carry parameters like `; charset=UTF-8`; only
+    // the media-type prefix matters for dispatch.
+    let media = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match media.as_str() {
+        "application/json" => TokenResponseFormat::Json,
+        "application/x-www-form-urlencoded" => TokenResponseFormat::FormUrlencoded,
+        _ => TokenResponseFormat::Unknown,
+    }
+}
+
+fn oauth_token_response_from_body(
+    body: &str,
+    access_token_field: &str,
+    content_type: Option<&str>,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    // Dispatch is content-type-first: the spec (RFC 6749 §5.1) says
+    // JSON, GitHub historically sends form-urlencoded, and we should
+    // never silently try the form parser on an unknown body — that's
+    // the finding reviewer flagged ("HTML error page misparsed as a
+    // token"). For unknown / missing content types we default to JSON
+    // and surface a clear error on failure, instead of falling through
+    // to the permissive form parser.
+    match classify_token_content_type(content_type) {
+        TokenResponseFormat::FormUrlencoded => {
+            oauth_token_response_from_form_encoded(body, access_token_field)
+        }
+        TokenResponseFormat::Json | TokenResponseFormat::Unknown => {
+            let token_data: serde_json::Value =
+                serde_json::from_str(body).map_err(|json_error| {
+                    OAuthCallbackError::Io(format!(
+                        "Failed to parse token response as JSON ({json_error}); \
+                         if the provider replies with form-encoded data it MUST set \
+                         Content-Type: application/x-www-form-urlencoded."
+                    ))
+                })?;
+            oauth_token_response_from_json(token_data, access_token_field)
+        }
+    }
 }
 
 /// Exchange an OAuth authorization code via the platform's token exchange proxy.
@@ -973,10 +1139,10 @@ pub async fn exchange_via_proxy(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let truncated = consume_oauth_error_body(response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token exchange proxy failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
@@ -1035,10 +1201,10 @@ pub async fn refresh_token_via_proxy(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let truncated = consume_oauth_error_body(response, 500).await;
         return Err(OAuthCallbackError::Io(format!(
             "Token refresh proxy failed: {} - {}",
-            status, body
+            status, truncated
         )));
     }
 
@@ -1334,6 +1500,159 @@ mod tests {
         );
 
         server.shutdown().await;
+    }
+
+    #[test]
+    fn test_github_form_encoded_token_response_parses() {
+        let token_data = super::oauth_token_response_from_form_encoded(
+            "access_token=github-access-token&token_type=bearer&scope=repo%20workflow",
+            "access_token",
+        )
+        .expect("GitHub-style form-encoded token response should parse");
+
+        assert_eq!(token_data.access_token, "github-access-token");
+        assert_eq!(token_data.token_type.as_deref(), Some("bearer"));
+        assert_eq!(token_data.scope.as_deref(), Some("repo workflow"));
+    }
+
+    /// Regression: the token-response dispatcher must NOT silently fall
+    /// through to the permissive form-encoded parser when the upstream
+    /// returned an HTML error page (or any non-form Content-Type). The
+    /// pre-fix code tried JSON first, then form-encoded — and
+    /// `url::form_urlencoded::parse` happily accepts any string, so a
+    /// response like `<input name="access_token" value="">` or a plain
+    /// error body containing `access_token=...` substring was silently
+    /// stored as a token and later sent as a `Bearer` header.
+    /// Helper: extract the error message from a token-response result
+    /// without requiring `OAuthTokenResponse: Debug` (the type
+    /// deliberately doesn't derive `Debug` to avoid leaking token
+    /// material into panic output).
+    fn expect_token_error(
+        result: Result<super::OAuthTokenResponse, super::OAuthCallbackError>,
+        what: &str,
+    ) -> String {
+        match result {
+            Ok(_) => panic!("{what}: expected error, got Ok"),
+            Err(super::OAuthCallbackError::Io(m)) => m,
+            Err(other) => panic!("{what}: unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_html_error_page_is_rejected_without_form_content_type() {
+        let body = "<html><body><h1>502 Bad Gateway</h1>\
+                    <p>Token server is down</p>\
+                    <input name=\"access_token\" value=\"abc\"/></body></html>";
+        let msg = expect_token_error(
+            super::oauth_token_response_from_body(body, "access_token", None),
+            "HTML body without form content-type must NOT parse as a token",
+        );
+        assert!(
+            msg.contains("Failed to parse token response as JSON"),
+            "must surface the JSON parse error + a form-encoded hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_plaintext_body_with_token_substring_is_rejected_without_form_content_type() {
+        // Looks scrape-able to the form-encoded parser
+        // (access_token=... appears inline) but Content-Type is absent,
+        // so the dispatcher must not reach the form parser.
+        let body = "Rate limit exceeded for access_token=leaked-value.";
+        let _ = expect_token_error(
+            super::oauth_token_response_from_body(body, "access_token", None),
+            "plaintext body w/ substring but no form content-type must error",
+        );
+    }
+
+    #[test]
+    fn test_html_body_with_explicit_form_content_type_still_rejected_by_validator() {
+        // A hostile / misconfigured provider could send HTML with a
+        // `Content-Type: application/x-www-form-urlencoded` header. The
+        // form parser would then happily extract a string with `<` in
+        // it — defense-in-depth: `validate_access_token` rejects it.
+        let body = "access_token=<html>garbage</html>&token_type=bearer";
+        let msg = expect_token_error(
+            super::oauth_token_response_from_body(
+                body,
+                "access_token",
+                Some("application/x-www-form-urlencoded"),
+            ),
+            "HTML-ish value must be rejected by the validator",
+        );
+        assert!(
+            msg.contains("invalid characters"),
+            "expected validator rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_github_form_response_parses_when_content_type_set() {
+        let body = "access_token=gho_github-access-token&token_type=bearer&scope=repo%20workflow";
+        let token_data = super::oauth_token_response_from_body(
+            body,
+            "access_token",
+            Some("application/x-www-form-urlencoded; charset=utf-8"),
+        )
+        .expect("GitHub-style response with correct content-type still parses");
+        assert_eq!(token_data.access_token, "gho_github-access-token");
+        assert_eq!(token_data.token_type.as_deref(), Some("bearer"));
+        assert_eq!(token_data.scope.as_deref(), Some("repo workflow"));
+    }
+
+    #[test]
+    fn test_json_response_parses_when_content_type_missing() {
+        // Most real providers send `Content-Type: application/json`,
+        // but some (or network layers) may strip it. JSON is the RFC
+        // 6749 §5.1 default, so we still try to parse JSON when the
+        // header is absent — just not form-encoded.
+        let body = r#"{"access_token":"jwt-token","token_type":"Bearer","expires_in":3600}"#;
+        let token_data = super::oauth_token_response_from_body(body, "access_token", None)
+            .expect("JSON body with no content-type defaults to JSON parse");
+        assert_eq!(token_data.access_token, "jwt-token");
+        assert_eq!(token_data.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn test_oversized_token_value_is_rejected() {
+        let mut body = String::from("{\"access_token\":\"");
+        body.push_str(&"A".repeat(super::MAX_ACCESS_TOKEN_LEN + 1));
+        body.push_str("\",\"token_type\":\"Bearer\"}");
+        let msg = expect_token_error(
+            super::oauth_token_response_from_body(&body, "access_token", Some("application/json")),
+            "implausibly long token must be rejected",
+        );
+        assert!(msg.contains("implausibly long"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_whitespace_in_token_is_rejected() {
+        let body = r#"{"access_token":"some token with spaces","token_type":"Bearer"}"#;
+        let _ = expect_token_error(
+            super::oauth_token_response_from_body(body, "access_token", Some("application/json")),
+            "tokens must not contain whitespace",
+        );
+    }
+
+    #[test]
+    fn test_classify_content_type_ignores_charset_and_case() {
+        use super::{TokenResponseFormat, classify_token_content_type};
+        assert_eq!(
+            classify_token_content_type(Some("Application/JSON; charset=UTF-8")),
+            TokenResponseFormat::Json
+        );
+        assert_eq!(
+            classify_token_content_type(Some("application/x-www-form-urlencoded")),
+            TokenResponseFormat::FormUrlencoded
+        );
+        assert_eq!(
+            classify_token_content_type(Some("text/html")),
+            TokenResponseFormat::Unknown
+        );
+        assert_eq!(
+            classify_token_content_type(None),
+            TokenResponseFormat::Unknown
+        );
     }
 
     #[tokio::test]
