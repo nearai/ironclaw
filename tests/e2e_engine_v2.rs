@@ -169,6 +169,42 @@ mod engine_v2_tests {
     /// Verifies that EffectBridgeAdapter dispatches tool calls and results
     /// flow back through the engine thread.
     #[tokio::test]
+    async fn v2_test_rig_can_enable_codeact_host_result_objects() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace = LlmTrace::single_turn(
+            "codeact-host-result-objects",
+            "check codeact host result objects",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "```repl\nproc = await run(\"printf hi\")\nproc.check_returncode()\nFINAL(str(proc.ok) + \"|\" + proc.stdout + \"|\" + str(proc.duration_ms >= 0))\n```".to_string(),
+                    input_tokens: 72,
+                    output_tokens: 20,
+                },
+                expected_tool_results: Vec::new(),
+            }],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_allow_local_tools(true)
+            .with_codeact_host_shims(true)
+            .with_codeact_host_result_objects(true)
+            .with_trace(trace)
+            .build()
+            .await;
+        rig.send_message("check codeact host result objects").await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            responses[0].content.contains("True|hi|True")
+                || responses[0].content.contains("True|hi|"),
+            "unexpected response: {:?}",
+            responses[0]
+        );
+        rig.shutdown();
+    }
+
+    #[tokio::test]
     async fn v2_single_tool_call() {
         let _guard = engine_v2_test_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/single_tool_echo.json")).unwrap();
