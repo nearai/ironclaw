@@ -13,6 +13,7 @@ pub mod builtin;
 mod coercion;
 pub mod dispatch;
 pub mod execute;
+mod external_registrar;
 pub mod mcp;
 pub mod permissions;
 pub mod rate_limiter;
@@ -33,6 +34,7 @@ pub use builder::{
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub(crate) use coercion::prepare_tool_params;
+pub use external_registrar::ExternalToolRegistrar;
 pub use rate_limiter::RateLimiter;
 pub use registry::{ToolRegistry, is_protected_tool_name};
 pub use tool::{
