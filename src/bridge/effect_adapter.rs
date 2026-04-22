@@ -365,10 +365,9 @@ impl EffectBridgeAdapter {
         // aliases must bridge the two conventions before dispatch — otherwise
         // `routine_delete(name="Daily Check")` arrives at `mission_complete`
         // as `{"name":"Daily Check"}` and fails UUID parsing.
-        if let Some(alias) = routine_alias.as_mut()
-            && let Err(e) = resolve_mission_identity(alias, mgr, context).await
-        {
-            return Some(Err(e));
+        // Allow the unresolved alias to flow into the normal mission handling
+        if let Some(alias) = routine_alias.as_mut() {
+            let _ = resolve_mission_identity(alias, mgr, context).await;
         }
 
         let (effective_action, effective_params, post_create_update) =
@@ -405,7 +404,7 @@ impl EffectBridgeAdapter {
                 .map(ironclaw_engine::MissionId)
                 .map_err(|e| EngineError::Effect {
                     reason: format!(
-                        "invalid mission id {id_str:?}: {e}. Expected a v4 UUID \
+                        "invalid mission id {id_str:?}: {e}. Expected a UUID \
                          (8-4-4-4-12 hex digits); call `mission_list()` to look \
                          up the id of an existing mission."
                     ),
