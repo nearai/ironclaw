@@ -305,9 +305,13 @@ impl ConversationManager {
                 }
 
                 // Spawn new foreground thread with conversation history.
+                // `goal` holds the full message (the orchestrator feeds it as
+                // the initial user turn); `title` is the short sidebar label.
+                let title = crate::types::thread::Thread::derive_title_from_message(content);
                 self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
+                        title,
                         ThreadType::Foreground,
                         project_id,
                         thread_config,
@@ -385,7 +389,7 @@ impl ConversationManager {
                 ));
                 conv.untrack_thread(thread_id);
             }
-            ThreadOutcome::Failed { error } => {
+            ThreadOutcome::Failed { error, .. } => {
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
                     format!("Thread failed: {error}"),

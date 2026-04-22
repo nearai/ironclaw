@@ -15,7 +15,11 @@ use ironclaw_engine::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::llm::{ChatMessage, LlmProvider, Role, ToolCall, sanitize_tool_messages};
+use crate::llm::{
+    ChatMessage, LlmProvider, Role, ToolCall, clean_response, sanitize_tool_messages,
+};
+
+const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
 
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
@@ -130,12 +134,11 @@ impl LlmBackend for LlmBridgeAdapter {
         let llm_response = if config.force_text {
             LlmResponse::Text(response.content)
         } else {
-            let code = extract_code_block(&response.content)
-                .unwrap_or_else(|| response.content.trim().to_string());
-            LlmResponse::Code {
-                code,
-                content: Some(response.content),
-            }
+            // Clean provider-flattened `<thinking>` / `<final>` markers before
+            // extracting a fenced code block. Code-only contract: never emit
+            // `ActionCalls` — tools are called from inside the Python script.
+            let cleaned_text = clean_response(&response.content);
+            text_response_from_cleaned_text(cleaned_text)
         };
 
         Ok(LlmOutput {
@@ -215,15 +218,163 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
 /// "find the first closing ```" logic mis-terminated on the nested fence
 /// and truncated the script.
 fn extract_code_block(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    for marker in ["```repl\n", "```python\n", "```py\n", "```\n"] {
-        if let Some(rest) = trimmed.strip_prefix(marker)
-            && let Some(body) = rest.strip_suffix("```")
-        {
-            return Some(body.trim_end().to_string());
+    let mut all_code = Vec::new();
+
+    // Try specific markers first, then bare backticks
+    for marker in ["```repl", "```python", "```py", "```"] {
+        let mut search_from = 0;
+        while let Some(start) = text[search_from..].find(marker) {
+            let abs_start = search_from + start;
+            let after_marker = abs_start + marker.len();
+
+            // For bare ```, skip if it's actually ```someotherlang
+            if marker == "```" && text[after_marker..].starts_with(|c: char| c.is_alphabetic()) {
+                let lang: String = text[after_marker..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if !["repl", "python", "py"].contains(&lang.as_str()) {
+                    search_from = after_marker;
+                    continue;
+                }
+            }
+
+            // Skip to next line after the marker
+            let code_start = text[after_marker..]
+                .find('\n')
+                .map(|i| after_marker + i + 1)
+                .unwrap_or(after_marker);
+
+            // Find closing ```
+            if let Some(end) = text[code_start..].find("```") {
+                let code = text[code_start..code_start + end].trim();
+                if !code.is_empty() {
+                    // For bare ``` blocks (no explicit language tag) only
+                    // accept content that actually looks like Python. Without
+                    // this guard, the agent's example markdown blocks
+                    // (lists, tables, plain prose) get misclassified as code
+                    // and explode in the Monty parser with SyntaxError —
+                    // which the LLM then has to recover from.
+                    if marker == "```" && !looks_like_python(code) {
+                        search_from = code_start + end + 3;
+                        continue;
+                    }
+                    all_code.push(code.to_string());
+                }
+                search_from = code_start + end + 3;
+            } else {
+                break;
+            }
+        }
+
+        // If we found code with a specific marker, use it (don't fall through to bare)
+        if !all_code.is_empty() {
+            break;
         }
     }
-    None
+
+    if all_code.is_empty() {
+        return None;
+    }
+
+    Some(all_code.join("\n\n"))
+}
+
+fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    match extract_code_block(&cleaned_text) {
+        Some(code) => LlmResponse::Code {
+            code,
+            content: Some(cleaned_text),
+        },
+        None if cleaned_text.trim().is_empty() => {
+            LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string())
+        }
+        None => LlmResponse::Text(cleaned_text),
+    }
+}
+
+/// Heuristic check that a bare ``` block contains Python rather than
+/// markdown / prose / a different language.
+///
+/// Accepts: assignments (`x =`), function calls (`name(`), Python keywords
+/// (`import`, `from`, `def`, `class`, `if`, `for`, `while`, `return`,
+/// `print`, `FINAL`, `try`, `with`, `pass`, `raise`, `yield`, `lambda`),
+/// or comments (`#`).
+///
+/// Rejects: lines starting with `-`, `*`, `|`, `>`, `:`, digits followed by
+/// `.` (markdown lists, tables, blockquotes, headings, numbered lists),
+/// bare prose, etc.
+/// Returns true when `line` contains an identifier-style function call
+/// (an identifier or attribute path immediately followed by `(`).
+///
+/// Avoids the false positives `trimmed.contains('(')` produced for markdown
+/// links like `[text](url)` and prose like "See (docs)" — neither has an
+/// alphanumeric/underscore character directly before the `(`.
+fn has_identifier_call(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' && i > 0 {
+            let prev = bytes[i - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn looks_like_python(code: &str) -> bool {
+    const PY_KEYWORDS: &[&str] = &[
+        "import", "from", "def", "class", "if", "for", "while", "return", "print", "FINAL", "try",
+        "with", "pass", "raise", "yield", "lambda", "elif", "else", "async", "await", "global",
+        "nonlocal", "assert", "break", "continue", "del", "not", "and", "or", "is", "in",
+    ];
+
+    // Check the first few non-empty lines — at least one must look Python-y.
+    for line in code.lines().take(5) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Comments are valid Python.
+        if trimmed.starts_with('#') {
+            return true;
+        }
+        // Markdown markers are NOT Python.
+        if trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('>')
+        {
+            return false;
+        }
+        // Markdown numbered list "1. foo" is NOT Python (a Python statement
+        // starting with a literal int is `123` followed by an operator, not
+        // `123. text`).
+        if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ") {
+            return false;
+        }
+        // Function call: an identifier (or attribute path) followed by `(`,
+        // e.g. `foo(...)`, `obj.method(...)`. We require the `(` to be
+        // preceded by an identifier char so markdown links like `[text](url)`
+        // and prose like "See (docs)" don't get classified as Python.
+        if has_identifier_call(trimmed) {
+            return true;
+        }
+        // Assignment: `name = ...` (but not `==` comparisons in prose).
+        if trimmed.contains('=') {
+            return true;
+        }
+        // First word matches a Python keyword.
+        let first_word: String = trimmed
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if PY_KEYWORDS.contains(&first_word.as_str()) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -379,6 +530,205 @@ mod tests {
         assert_eq!(sent[2].content, "result payload");
         assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
+
+    struct FlattenedToolCallProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FlattenedToolCallProvider {
+        fn model_name(&self) -> &str {
+            "flattened-tool-call-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            unreachable!("test only uses complete_with_tools")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some(self.content.clone()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_recovers_flattened_bracket_tool_calls() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "Now let me list your installed extensions and start Pi:\n\n[Called tool `shell` with arguments: {\"command\":\"pi list 2>&1\",\"timeout\":10,\"workdir\":\".\"}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::ActionCalls { calls, content } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].action_name, "shell");
+                assert_eq!(calls[0].parameters["command"], "pi list 2>&1");
+                assert_eq!(
+                    content.as_deref(),
+                    Some("Now let me list your installed extensions and start Pi:")
+                );
+            }
+            other => panic!("expected recovered action call, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_strips_flattened_bracket_markers_from_text() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "Let me check.\n[Called tool `unknown_tool` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, "Let me check.");
+            }
+            other => panic!("expected sanitized text response, got {other:?}"),
+        }
+    }
+
+    struct FlattenedPlainTextProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FlattenedPlainTextProvider {
+        fn model_name(&self) -> &str {
+            "flattened-plain-text-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            Ok(crate::llm::CompletionResponse {
+                content: self.content.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("test only uses plain completion")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_strips_flattened_bracket_markers_from_text() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
+            content: "Let me check.\n[Called tool `shell` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, "Let me check.");
+            }
+            other => panic!("expected sanitized text response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_falls_back_when_cleaned_text_is_empty() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
+            content: "[Called tool `unknown_tool` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[test_action("shell")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, EMPTY_CLEANED_RESPONSE_FALLBACK);
+            }
+            other => panic!("expected fallback text response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_falls_back_when_cleaned_text_is_empty() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
+            content: "[Called tool `shell` with arguments: {}]".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do it")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => {
+                assert_eq!(text, EMPTY_CLEANED_RESPONSE_FALLBACK);
+            }
+            other => panic!("expected fallback text response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -758,11 +1108,7 @@ And also check the token price:\n\
         let adapter = LlmBridgeAdapter::new(provider, None);
 
         let output = adapter
-            .complete(
-                &[ThreadMessage::user("hi")],
-                &[],
-                &LlmCallConfig::default(),
-            )
+            .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
             .await
             .unwrap();
 

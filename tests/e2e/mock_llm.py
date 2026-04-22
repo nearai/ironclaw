@@ -15,7 +15,7 @@ from aiohttp import web
 
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
-    (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
+    (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
         re.compile(r"Tool `gmail` returned:.*Quarterly update", re.IGNORECASE | re.DOTALL),
@@ -786,6 +786,32 @@ def match_response(messages: list[dict]) -> str:
                 "I need an avatar image for the video meeting. "
                 "Send me an image, or say \"generate\" and I'll create one for you."
             )
+    # Nudge recovery: when the engine sends a "you expressed intent but
+    # didn't call a tool" nudge, check whether the conversation has
+    # portfolio/wallet context from an earlier user message and return a
+    # portfolio-relevant response so the nudge pattern (which matches
+    # before the portfolio patterns in CANNED_RESPONSES) doesn't swallow
+    # the domain context.
+    _nudge_re = re.compile(
+        r"You said you would perform an action|You expressed intent",
+        re.IGNORECASE,
+    )
+    if _nudge_re.search(content):
+        for msg in messages:
+            if msg.get("role") == "user":
+                msg_text = _message_text(msg)
+                if re.search(r"portfolio|defi|rebalance|yield.*positions", msg_text, re.IGNORECASE):
+                    return (
+                        "I'll analyze your DeFi portfolio. The portfolio skill is active and I can scan "
+                        "your wallet addresses across chains to discover positions, check yields, and "
+                        "suggest rebalancing opportunities."
+                    )
+                if re.search(r"0x[a-fA-F0-9]{40}", msg_text, re.IGNORECASE):
+                    return (
+                        "I found your wallet address. Let me scan your portfolio across all supported "
+                        "chains to discover DeFi positions and classify them against known protocols."
+                    )
+
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
@@ -901,6 +927,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     for pattern, tool_name, args_fn in TOOL_CALL_PATTERNS:
         m = pattern.search(content)
         if m:
+            # Don't re-dispatch a tool that already ran this turn: the
+            # agentic loop calls the mock LLM again after each tool
+            # result, and the "last user content" (which is what we
+            # pattern-match against) hasn't changed. A real LLM would
+            # see the tool result and respond with text — we mirror that
+            # by falling through to the match_response text path when a
+            # matching call is already sitting in the tool_results
+            # buffer.
+            if any(tr["name"] == tool_name for tr in recent_tool_results):
+                return None
             return _normalize_tool_calls(tool_name, args_fn(m))
     return None
 

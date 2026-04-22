@@ -1,0 +1,40 @@
+---
+source: tests/e2e_engine_v2.rs
+assertion_line: 580
+---
+response_count: 1
+has_final_response: true
+tool_calls: []
+events:
+  - kind: thinking
+    message: processing...
+  - kind: thinking
+    message: calling llm...
+  - kind: status
+    message: done
+  - kind: other
+    variant: Other
+event_kind_counts:
+  Other: 1
+  Status: 1
+  Thinking: 2
+llm_call_count: 0
+safety_warning_count: 0
+engine_threads:
+  - final_state: Failed
+    step_count: 0
+    message_roles:
+      - System
+      - User
+    event_kinds:
+      - MessageAdded
+      - StateChanged
+      - StepStarted
+      - StateChanged
+    issues:
+      - severity: error
+        category: thread_failure
+      - severity: warning
+        category: no_response
+      - severity: error
+        category: llm_error

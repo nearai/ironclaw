@@ -1,0 +1,62 @@
+---
+source: tests/e2e_engine_v2.rs
+assertion_line: 528
+---
+response_count: 1
+has_final_response: true
+tool_calls:
+  - name: __codeact__
+    success: false
+events:
+  - kind: thinking
+    message: processing...
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 150 in / 15 out tokens
+  - kind: tool_started
+    name: __codeact__
+  - kind: tool_completed
+    name: __codeact__
+    success: false
+    error: "codeact execution failed: syntaxerror: t"
+  - kind: thinking
+    message: calling llm...
+  - kind: status
+    message: done
+  - kind: other
+    variant: Other
+event_kind_counts:
+  Other: 1
+  Status: 1
+  Thinking: 4
+  ToolCompleted: 1
+  ToolStarted: 1
+llm_call_count: 1
+safety_warning_count: 0
+engine_threads:
+  - final_state: Failed
+    step_count: 1
+    message_roles:
+      - System
+      - User
+    event_kinds:
+      - MessageAdded
+      - StateChanged
+      - StepStarted
+      - StepCompleted
+      - ActionFailed
+      - CodeExecutionFailed
+      - StepStarted
+      - StateChanged
+    issues:
+      - severity: error
+        category: thread_failure
+      - severity: warning
+        category: no_response
+      - severity: warning
+        category: tool_error
+      - severity: warning
+        category: code_syntax_error
+      - severity: error
+        category: llm_error

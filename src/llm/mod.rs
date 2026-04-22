@@ -63,6 +63,7 @@ pub use provider::{
     LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
+pub(crate) use reasoning::clean_response;
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
     ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,

@@ -15,6 +15,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use url::Url;
 
 pub use crate::auth::providers::{
     OAuthCredentials, builtin_client_id_override_env, builtin_credentials,
@@ -113,11 +114,31 @@ pub struct OAuthUrlResult {
     pub state: String,
 }
 
+/// Errors returned while constructing an OAuth authorization URL.
+///
+/// The only currently-modeled variant is `MalformedConfig`, returned when the
+/// provided `authorization_url` cannot be parsed by the `url` crate. That
+/// indicates a misconfigured descriptor / capabilities entry; the caller
+/// should surface it to the operator rather than attempting to "fix up" the
+/// URL through string concatenation, which is what gemini-code-assist flagged
+/// on #2746 as a security-posture issue.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum OAuthUrlError {
+    /// The `authorization_url` could not be parsed as a valid URL.
+    #[error("Malformed OAuth authorization URL: {0}")]
+    MalformedConfig(String),
+}
+
 /// Build an OAuth 2.0 authorization URL with optional PKCE and CSRF state.
 ///
 /// Returns an `OAuthUrlResult` containing the authorization URL, optional PKCE
 /// code verifier, and a random `state` parameter for CSRF protection. The caller
 /// must validate the `state` value in the callback before exchanging the code.
+///
+/// Returns `Err(OAuthUrlError::MalformedConfig)` if `authorization_url` cannot
+/// be parsed. We deliberately do not try to normalize a malformed URL through
+/// manual string concatenation — rejecting a bad config is the only secure
+/// response (see gemini-code-assist review on #2746).
 pub fn build_oauth_url(
     authorization_url: &str,
     client_id: &str,
@@ -125,7 +146,7 @@ pub fn build_oauth_url(
     scopes: &[String],
     use_pkce: bool,
     extra_params: &HashMap<String, String>,
-) -> OAuthUrlResult {
+) -> Result<OAuthUrlResult, OAuthUrlError> {
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
@@ -146,42 +167,76 @@ pub fn build_oauth_url(
     rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
-    // Build authorization URL
-    let mut auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
+    // Build the authorization URL via the `url` crate so query-string encoding
+    // goes through a single well-tested code path. This replaces a hand-rolled
+    // `format!` + `urlencoding::encode` loop that had a history of truncating
+    // the last character of the final query parameter on some platforms
+    // (nearai/ironclaw#2391: `access_type=offline` was being received by
+    // Google as `access_type=offlin`). A `Url::parse` failure here means the
+    // descriptor/capabilities config is malformed; we reject rather than
+    // concat-normalize (gemini-code-assist review on #2746) so a bad config
+    // cannot silently produce a half-formed URL.
+    let auth_url = build_oauth_authorization_url_string(
         authorization_url,
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(&state),
-    );
+        client_id,
+        redirect_uri,
+        &state,
+        scopes,
+        code_challenge.as_deref(),
+        extra_params,
+    )?;
 
-    if !scopes.is_empty() {
-        auth_url.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&scopes.join(" "))
-        ));
-    }
-
-    if let Some(ref challenge) = code_challenge {
-        auth_url.push_str(&format!(
-            "&code_challenge={}&code_challenge_method=S256",
-            challenge
-        ));
-    }
-
-    for (key, value) in extra_params {
-        auth_url.push_str(&format!(
-            "&{}={}",
-            urlencoding::encode(key),
-            urlencoding::encode(value)
-        ));
-    }
-
-    OAuthUrlResult {
+    Ok(OAuthUrlResult {
         url: auth_url,
         code_verifier,
         state,
+    })
+}
+
+/// Append OAuth authorization-request query parameters to `authorization_url`.
+///
+/// Uses `url::Url::parse_with_params`-style encoding via `query_pairs_mut()`
+/// so every value is percent-encoded exactly once with the standard
+/// `application/x-www-form-urlencoded` rules. Any non-URL characters in
+/// `scopes`, `extra_params`, `state`, etc. are encoded safely.
+///
+/// Returns `Err(OAuthUrlError::MalformedConfig)` if `authorization_url` cannot
+/// be parsed as a URL. We deliberately do not fall back to a manual
+/// string-concat path: a malformed authorization URL is a config error that
+/// the operator should see, not something the agent should try to paper over
+/// (gemini-code-assist review on #2746).
+fn build_oauth_authorization_url_string(
+    authorization_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    scopes: &[String],
+    code_challenge: Option<&str>,
+    extra_params: &HashMap<String, String>,
+) -> Result<String, OAuthUrlError> {
+    let mut url = Url::parse(authorization_url).map_err(|e| {
+        OAuthUrlError::MalformedConfig(format!(
+            "could not parse authorization URL {authorization_url:?}: {e}"
+        ))
+    })?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("client_id", client_id);
+        qp.append_pair("response_type", "code");
+        qp.append_pair("redirect_uri", redirect_uri);
+        qp.append_pair("state", state);
+        if !scopes.is_empty() {
+            qp.append_pair("scope", &scopes.join(" "));
+        }
+        if let Some(challenge) = code_challenge {
+            qp.append_pair("code_challenge", challenge);
+            qp.append_pair("code_challenge_method", "S256");
+        }
+        for (key, value) in extra_params {
+            qp.append_pair(key, value);
+        }
     }
+    Ok(url.into())
 }
 
 /// Exchange an OAuth authorization code for tokens.
@@ -1553,7 +1608,8 @@ mod tests {
             &["openid".to_string(), "email".to_string()],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(
             result
@@ -1563,7 +1619,9 @@ mod tests {
         assert!(result.url.contains("client_id=my-client-id"));
         assert!(result.url.contains("response_type=code"));
         assert!(result.url.contains("redirect_uri="));
-        assert!(result.url.contains("scope=openid%20email"));
+        // `url` crate uses `application/x-www-form-urlencoded` encoding for
+        // query parameters, which encodes spaces as `+`.
+        assert!(result.url.contains("scope=openid+email"));
         assert!(result.url.contains("state="));
         assert!(result.code_verifier.is_none());
         assert!(!result.state.is_empty());
@@ -1582,7 +1640,8 @@ mod tests {
             &[],
             true,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(result.url.contains("code_challenge="));
         assert!(result.url.contains("code_challenge_method=S256"));
@@ -1608,10 +1667,231 @@ mod tests {
             &["read".to_string()],
             false,
             &extra,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         assert!(result.url.contains("access_type=offline"));
         assert!(result.url.contains("prompt=consent"));
+    }
+
+    /// Regression test for nearai/ironclaw#2391: Google OAuth was receiving
+    /// `access_type=offlin` instead of `access_type=offline`, breaking the
+    /// offline-token flow required for any Google Workspace tool (Calendar,
+    /// Gmail, Drive, Docs, Sheets, Slides). The bug was reproducibly seen by
+    /// end users but not caught by tests that only used `.contains()`, since
+    /// `"access_type=offlin"` is a prefix of `"access_type=offline"` when the
+    /// URL ended elsewhere. We now parse the URL and compare each query
+    /// parameter value *exactly*.
+    #[test]
+    fn test_build_oauth_url_preserves_access_type_offline_exactly() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+
+        let result = build_oauth_url(
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "test-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1:9876/callback",
+            &["https://www.googleapis.com/auth/calendar.events".to_string()],
+            false,
+            &extra,
+        )
+        .expect("well-formed authorization URL");
+
+        let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "access_type must be exactly 'offline' (7 chars), not a truncated value; \
+             got {:?} in URL {}",
+            params.get("access_type"),
+            result.url,
+        );
+        assert_eq!(
+            params.get("prompt").map(String::as_str),
+            Some("consent"),
+            "prompt must be exactly 'consent', not a truncated value"
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("test-client-id.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:9876/callback")
+        );
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("https://www.googleapis.com/auth/calendar.events")
+        );
+    }
+
+    /// Regression test for nearai/ironclaw#2391: exercise the full set of
+    /// Google-style extra params (all six Google WASM tools share this
+    /// shape) and verify every value survives URL encoding intact.
+    ///
+    /// A single `HashMap` instance's iteration order is stable — reusing the
+    /// same map in a loop would not actually exercise different orderings
+    /// (Copilot review on #2746). We therefore rebuild `extra` on every
+    /// iteration so the randomized default hasher produces a fresh seed per
+    /// map, *and* explicitly drive every key-insertion permutation so each
+    /// param lands last at least once regardless of hasher behavior.
+    #[test]
+    fn test_build_oauth_url_extra_params_preserve_all_chars_across_hash_orderings() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::build_oauth_url;
+
+        let entries: [(&str, &str); 3] = [
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("include_granted_scopes", "true"),
+        ];
+
+        // Every permutation of insertion order (3! = 6), plus a few
+        // fresh-map iterations per permutation so the randomized hasher
+        // also contributes variation.
+        let permutations: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+
+        let mut case = 0usize;
+        for perm in &permutations {
+            for _ in 0..3 {
+                let mut extra: HashMap<String, String> = HashMap::new();
+                for &idx in perm {
+                    let (k, v) = entries[idx];
+                    extra.insert(k.to_string(), v.to_string());
+                }
+
+                let result = build_oauth_url(
+                    "https://accounts.google.com/o/oauth2/v2/auth",
+                    "client-id",
+                    "http://127.0.0.1:9876/callback",
+                    &["https://www.googleapis.com/auth/gmail.modify".to_string()],
+                    false,
+                    &extra,
+                )
+                .expect("well-formed authorization URL");
+
+                let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+                let params: std::collections::HashMap<_, _> =
+                    parsed.query_pairs().into_owned().collect();
+
+                for (k, v) in entries {
+                    assert_eq!(
+                        params.get(k).map(String::as_str),
+                        Some(v),
+                        "case {case} (perm {perm:?}): {k} truncated to {:?} in {}",
+                        params.get(k),
+                        result.url,
+                    );
+                }
+                case += 1;
+            }
+        }
+    }
+
+    /// Regression test for nearai/ironclaw#2391: exercise the full CLI
+    /// `ironclaw tool auth google-calendar` code path end-to-end. Loads the
+    /// actual shipped capabilities JSON, parses it via
+    /// `CapabilitiesFile::from_json`, then calls `build_oauth_url` with the
+    /// exact `extra_params` the CLI would pass — the same call site as
+    /// `cli/tool.rs::auth_tool_oauth`. Per `.claude/rules/testing.md`
+    /// "Test Through the Caller, Not Just the Helper": a unit test on
+    /// `build_oauth_url` alone can miss a bug in the pipeline from
+    /// capabilities-JSON parsing to URL construction.
+    #[test]
+    fn test_google_calendar_capabilities_produce_correct_oauth_url() {
+        use crate::auth::oauth::build_oauth_url;
+        use crate::tools::wasm::CapabilitiesFile;
+
+        // Pinned snapshot of the production google-calendar capabilities.
+        // Keep this byte-identical to tools-src/google-calendar/
+        // google-calendar-tool.capabilities.json for the relevant fields.
+        let caps_json = r#"{
+            "version": "0.2.0",
+            "description": "Google Calendar test fixture",
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [
+                        "https://www.googleapis.com/auth/calendar.events"
+                    ],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(caps_json)
+            .expect("google-calendar capabilities parse must succeed");
+        let oauth = caps
+            .auth
+            .as_ref()
+            .expect("auth section present")
+            .oauth
+            .as_ref()
+            .expect("oauth section present");
+
+        // Sanity: the parsed extra_params haven't been mutated at load time.
+        assert_eq!(
+            oauth.extra_params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "CapabilitiesFile::from_json must preserve access_type=offline \
+             intact; got {:?}",
+            oauth.extra_params.get("access_type"),
+        );
+
+        let result = build_oauth_url(
+            &oauth.authorization_url,
+            "test-client.apps.googleusercontent.com",
+            "http://127.0.0.1:9876/callback",
+            &oauth.scopes,
+            oauth.use_pkce,
+            &oauth.extra_params,
+        )
+        .expect("well-formed authorization URL");
+
+        let parsed = url::Url::parse(&result.url).expect("auth url must be valid");
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline"),
+            "end-to-end: google-calendar must send access_type=offline to \
+             Google, not a truncated value. Full URL: {}",
+            result.url
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("https://www.googleapis.com/auth/calendar.events")
+        );
     }
 
     #[test]
@@ -1627,7 +1907,8 @@ mod tests {
             &[],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
         let result2 = build_oauth_url(
             "https://auth.example.com/authorize",
             "client",
@@ -1635,10 +1916,37 @@ mod tests {
             &[],
             false,
             &HashMap::new(),
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // State should be different each time (random)
         assert_ne!(result1.state, result2.state);
+    }
+
+    /// Malformed `authorization_url` values must be rejected with
+    /// `OAuthUrlError::MalformedConfig`, not silently normalized through
+    /// string concatenation (gemini-code-assist review on #2746).
+    #[test]
+    fn test_build_oauth_url_rejects_malformed_authorization_url() {
+        use std::collections::HashMap;
+
+        use crate::auth::oauth::{OAuthUrlError, build_oauth_url};
+
+        let err = build_oauth_url(
+            "not a url",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .err()
+        .expect("malformed authorization URL must be rejected");
+
+        assert!(
+            matches!(err, OAuthUrlError::MalformedConfig(_)),
+            "expected MalformedConfig, got {err:?}",
+        );
     }
 
     #[test]
@@ -1916,7 +2224,8 @@ mod tests {
             &["read".to_string()],
             true,
             &extra,
-        );
+        )
+        .expect("well-formed authorization URL");
 
         // The resource parameter should be URL-encoded in the auth URL
         assert!(
