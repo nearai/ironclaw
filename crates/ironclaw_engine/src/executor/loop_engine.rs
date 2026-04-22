@@ -18,7 +18,7 @@ use crate::traits::llm::LlmBackend;
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::ThreadMessage;
-use crate::types::step::Step;
+use crate::types::step::{Step, StepId};
 use crate::types::thread::{Thread, ThreadState};
 
 const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
@@ -217,16 +217,37 @@ impl ExecutionLoop {
         {
             // Fetch active leases (needed for action list)
             let active_leases = self.leases.active_for_thread(self.thread.id).await;
-            let actions = match self.effects.available_actions(&active_leases).await {
+            let prompt_context = crate::executor::thread_context::thread_execution_context(
+                &self.thread,
+                StepId::new(),
+                None,
+            );
+            let actions = match self
+                .effects
+                .available_actions(&active_leases, &prompt_context)
+                .await
+            {
                 Ok(a) => a,
                 Err(e) => {
                     debug!(thread_id = %self.thread.id, "failed to load actions for system prompt: {e}");
                     Vec::new()
                 }
             };
+            let capabilities = match self
+                .effects
+                .available_capabilities(&active_leases, &prompt_context)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!(thread_id = %self.thread.id, "failed to load capabilities for system prompt: {e}");
+                    Vec::new()
+                }
+            };
             // Build prompt using pre-fetched docs (no extra Store query)
             let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
                 &actions,
+                &capabilities,
                 &system_docs,
                 self.platform_info.as_ref(),
             );
@@ -412,7 +433,10 @@ mod tests {
     use crate::runtime::messaging::ThreadSignal;
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
+    use crate::types::capability::{
+        ActionDef, CapabilityLease, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind,
+        EffectType, GrantedActions,
+    };
     use crate::types::project::ProjectId;
     use crate::types::step::LlmResponse;
     use crate::types::step::{ActionResult, TokenUsage};
@@ -501,8 +525,17 @@ mod tests {
         async fn available_actions(
             &self,
             _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 
@@ -595,6 +628,116 @@ mod tests {
         assert!(exec.thread.state.is_terminal() || exec.thread.state == ThreadState::Completed);
         assert_eq!(exec.thread.step_count, 1);
         assert!(exec.thread.total_tokens_used > 0);
+    }
+
+    #[tokio::test]
+    async fn system_prompt_includes_capability_background() {
+        struct CapturingLlm {
+            seen_messages: Mutex<Vec<Vec<ThreadMessage>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmBackend for CapturingLlm {
+            async fn complete(
+                &self,
+                messages: &[ThreadMessage],
+                _actions: &[ActionDef],
+                _config: &LlmCallConfig,
+            ) -> Result<LlmOutput, EngineError> {
+                self.seen_messages.lock().unwrap().push(messages.to_vec());
+                Ok(text_response("done"))
+            }
+
+            fn model_name(&self) -> &str {
+                "capturing"
+            }
+        }
+
+        struct CapabilityEffects;
+
+        #[async_trait::async_trait]
+        impl EffectExecutor for CapabilityEffects {
+            async fn execute_action(
+                &self,
+                _action_name: &str,
+                _parameters: serde_json::Value,
+                _lease: &CapabilityLease,
+                _context: &ThreadExecutionContext,
+            ) -> Result<ActionResult, EngineError> {
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })
+            }
+
+            async fn available_actions(
+                &self,
+                _leases: &[CapabilityLease],
+                _context: &ThreadExecutionContext,
+            ) -> Result<Vec<ActionDef>, EngineError> {
+                Ok(vec![test_action()])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ThreadExecutionContext,
+            ) -> Result<Vec<CapabilitySummary>, EngineError> {
+                Ok(vec![CapabilitySummary {
+                    name: "telegram".into(),
+                    display_name: Some("Telegram".into()),
+                    kind: CapabilitySummaryKind::Channel,
+                    status: CapabilityStatus::ReadyScoped,
+                    description: Some("Telegram notifications".into()),
+                    routing_hint: Some("Usable through message".into()),
+                }])
+            }
+        }
+
+        let project_id = ProjectId::new();
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_id,
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let tid = thread.id;
+
+        let llm = Arc::new(CapturingLlm {
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(CapabilityEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        leases
+            .grant(tid, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
+
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm.clone(),
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+        );
+
+        let outcome = exec.run().await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done"));
+
+        let seen = llm.seen_messages.lock().unwrap();
+        let system_prompt = &seen[0][0].content;
+        assert!(system_prompt.contains("## Available capabilities (background status)"));
+        assert!(system_prompt.contains("`telegram`"));
+        assert!(system_prompt.contains("ready_scoped"));
+        assert!(system_prompt.contains("Usable through message"));
     }
 
     #[tokio::test]

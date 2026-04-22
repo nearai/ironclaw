@@ -63,4 +63,3 @@ allow-git = [
     "https://github.com/pydantic/monty.git",
     "https://github.com/astral-sh/ruff.git",
 ]
-
