@@ -4,6 +4,8 @@
 //! route through the engine instead of the existing agentic loop. All
 //! existing behavior is unchanged when the flag is off.
 
+mod action_projector;
+mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;

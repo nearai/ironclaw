@@ -201,6 +201,16 @@ mod tests {
                 expected: SurfaceAssignment::capabilities_only(),
             },
             Case {
+                name: "error extension direct action",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::Error,
+                    invocation_mode: InvocationMode::Direct,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::neither(),
+            },
+            Case {
                 name: "latent provider action",
                 subject: SurfacePolicyInput {
                     kind: SurfaceSubjectKind::LatentProviderAction,

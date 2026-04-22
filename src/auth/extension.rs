@@ -17,7 +17,9 @@ use crate::auth::{
     upsert_auth_descriptor,
 };
 use crate::extensions::naming::canonicalize_extension_name;
-use crate::extensions::{ConfigureResult, ExtensionError};
+use crate::extensions::{
+    ConfigureResult, ExtensionError, InstalledExtension, LatentProviderAction,
+};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
@@ -517,6 +519,33 @@ impl AuthManager {
                 parameters_schema: action.parameters_schema,
             })
             .collect()
+    }
+
+    /// Thin bridge accessor for capability projection inventory.
+    pub(crate) async fn list_capability_extensions(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<InstalledExtension>, ExtensionError> {
+        let Some(ext_mgr) = self.extension_manager.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        ext_mgr.list(None, true, user_id).await
+    }
+
+    /// Thin bridge accessor for user-scoped latent provider projection.
+    pub(crate) async fn latent_provider_actions(&self, user_id: &str) -> Vec<LatentProviderAction> {
+        let Some(ext_mgr) = self.extension_manager.as_ref() else {
+            return Vec::new();
+        };
+
+        ext_mgr.latent_provider_actions(user_id).await
+    }
+
+    /// Thin bridge accessor for routed channel capability hints.
+    pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
+        let ext_mgr = self.extension_manager.as_ref()?;
+        ext_mgr.notification_target_for_channel(name).await
     }
 
     pub async fn execute_latent_extension_action(
