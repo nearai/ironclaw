@@ -125,7 +125,7 @@ will use browser OAuth. Otherwise it falls back to prompting for a PAT.
 Ask your agent to create a test issue in one of your public repositories, and check if the issue was created successfully.
 
 <Tip>
-Ask your agent to read the [GitHub Markdown Guidelines](https://github.com/adam-p/markdown-here/wiki/markdown-cheatsheet) and remember then when creating issues and comments, it can make the formatting much nicer!
+Ask your agent to read the [GitHub Markdown Guidelines](https://github.com/adam-p/markdown-here/wiki/markdown-cheatsheet) and remember them when creating issues and comments, it can make the formatting much nicer!
 </Tip>
 
 </Step>

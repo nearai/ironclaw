@@ -1792,6 +1792,21 @@ async def _stream_truncated_tool_call(
     return resp
 
 
+def _is_google_token_url(url: str) -> bool:
+    """Whether an OAuth `token_url` points at Google.
+
+    Used to gate the `AUTH_LIVE_GOOGLE_*` live-token override so
+    non-Google providers (GitHub, Notion, MCP) cannot accidentally
+    receive Google tokens during auth-live-seeded canary runs. The
+    earlier `not code.startswith("mock_mcp_code")` gate only ruled out
+    the MCP code-prefix convention, not GitHub/Notion flows.
+    """
+    if not url:
+        return False
+    lowered = url.lower()
+    return "googleapis.com" in lowered or "accounts.google.com" in lowered
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -1818,10 +1833,14 @@ async def oauth_exchange(request: web.Request) -> web.Response:
             return web.json_response({"error": "missing_resource"}, status=400)
 
     # When real provider tokens are available (auth-live-seeded canary),
-    # return them instead of mock tokens so the extension gets real credentials.
+    # return them instead of mock tokens so the extension gets real
+    # credentials. Gate strictly on the Google token_url host: the
+    # previous `not mcp_code` gate also matched GitHub and Notion
+    # exchanges, which would have shipped Google tokens to the wrong
+    # extension and masked real provider-specific failures.
     live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
     live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
-    if live_access and not code.startswith("mock_mcp_code"):
+    if live_access and _is_google_token_url(data.get("token_url", "")):
         resp = {
             access_token_field: live_access,
             "expires_in": 3600,
@@ -1853,9 +1872,13 @@ async def oauth_refresh(request: web.Request) -> web.Response:
     provider = data.get("provider", "")
 
     # When real provider tokens are available (auth-live-seeded canary),
-    # return them for non-MCP refreshes instead of validating mock client_id.
+    # return them for Google refreshes instead of validating mock
+    # client_id. Gate strictly on the Google token_url host: the
+    # previous `not mcp:` gate still matched GitHub and Notion
+    # refreshes, which would have returned Google tokens for the wrong
+    # provider and hidden refresh-path bugs.
     live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
-    if live_access and not provider.startswith("mcp:"):
+    if live_access and _is_google_token_url(data.get("token_url", "")):
         live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
         resp = {
             "access_token": live_access,
