@@ -891,8 +891,8 @@ pub async fn execute_code_with_skills(
                 // up to the orchestrator. Resuming the VM would raise a
                 // `RuntimeError: execution paused by gate ...` inside Python,
                 // which the LLM then tries to "fix" by rewriting the same
-                // call with different parameters (the bug captured in
-                // ironclaw-trace.jsonl: 5 retries before max_consecutive_errors).
+                // call with different parameters (observed: 5 retries before
+                // max_consecutive_errors).
                 if let Some(outcome) = pending_gate {
                     return Ok(CodeExecutionResult {
                         return_value: serde_json::Value::Null,
