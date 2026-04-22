@@ -538,8 +538,16 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         invited_by: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
+        // BEGIN IMMEDIATE serializes concurrent demote/remove transactions
+        // against the same workspace by acquiring the writer lock up-front.
+        // The local-libSQL WAL mode (plus `busy_timeout`) would also catch
+        // the race via `SQLITE_BUSY_SNAPSHOT` when the second writer tries
+        // to upgrade its stale snapshot, but remote/Hrana libSQL relaxes
+        // those semantics — BEGIN IMMEDIATE gives a deterministic guarantee
+        // across both modes. The postgres sibling uses `FOR UPDATE` on the
+        // workspace row for the same reason; see `pg_check_not_last_owner`.
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let ws_id = workspace_id.to_string();
@@ -592,8 +600,9 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         user_id: &str,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
+        // See `update_member_role_checked` for the reason this is IMMEDIATE.
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let ws_id = workspace_id.to_string();

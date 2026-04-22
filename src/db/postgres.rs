@@ -1550,11 +1550,24 @@ fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
 ///
 /// Returns `Some(current_role)` if the member exists, `None` if not found.
 /// Returns `Err(Constraint)` if the user is the last owner.
+///
+/// Takes a row-level lock on the workspace for the duration of the caller's
+/// transaction (`FOR UPDATE` on `workspaces.id`). This serializes concurrent
+/// demote/remove operations against the same workspace so two transactions
+/// cannot both observe `owner_count > 1` and both proceed, leaving the
+/// workspace owner-less. Under the default `READ COMMITTED` isolation the
+/// bare `SELECT COUNT` would race.
 async fn pg_check_not_last_owner(
     tx: &tokio_postgres::Transaction<'_>,
     workspace_id: &Uuid,
     user_id: &str,
 ) -> Result<Option<String>, DatabaseError> {
+    tx.execute(
+        "SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE",
+        &[workspace_id],
+    )
+    .await?;
+
     let current_role: Option<String> = tx
         .query_opt(
             "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
