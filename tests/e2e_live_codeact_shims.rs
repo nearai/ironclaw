@@ -822,6 +822,95 @@ mod tests {
         }
     }
 
+    fn setup_cargo_toml_rust_version_sync(variant: Variant) -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT).join(format!("cargo_toml_rust_version_sync_{}", variant.label()));
+        reset_dir(&dir);
+
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/alpha\", \"crates/beta\", \"crates/gamma\"]\nresolver = \"2\"\n",
+        )
+        .expect("seed root Cargo.toml");
+
+        let crates_dir = dir.join("crates");
+        for (name, content) in [
+            (
+                "alpha",
+                "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n",
+            ),
+            (
+                "beta",
+                "[package]\nname = \"beta\"\nversion = \"0.2.0\"\nedition = \"2021\"\nrust-version = \"1.80\"\n\n[dependencies]\nanyhow = \"1\"\n",
+            ),
+            (
+                "gamma",
+                "[package]\nname = \"gamma\"\nversion = \"0.3.0\"\nedition = \"2021\"\nrust-version = \"1.85\"\n\n[dependencies]\ntokio = { version = \"1\", features = [\"rt\"] }\n",
+            ),
+        ] {
+            let crate_dir = crates_dir.join(name);
+            fs::create_dir_all(&crate_dir).expect("failed to create crate dir");
+            fs::write(crate_dir.join("Cargo.toml"), content)
+                .unwrap_or_else(|e| panic!("seed {name}/Cargo.toml: {e}"));
+        }
+
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    fn assert_cargo_toml_rust_version_sync(root: &str) {
+        let crates_dir = Path::new(root).join("crates");
+        for (name, version, dep_key) in [
+            ("alpha", "0.1.0", "serde"),
+            ("beta", "0.2.0", "anyhow"),
+            ("gamma", "0.3.0", "tokio"),
+        ] {
+            let path = crates_dir.join(name).join("Cargo.toml");
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing {name}/Cargo.toml: {e}"));
+            assert_eq!(
+                content.matches("rust-version = \"1.85\"").count(),
+                1,
+                "expected exactly one rust-version line in {name}/Cargo.toml, got: {content:?}"
+            );
+            let value: toml::Value = toml::from_str(&content)
+                .unwrap_or_else(|e| panic!("invalid TOML in {name}/Cargo.toml: {e}\n{content}"));
+            let package = value
+                .get("package")
+                .and_then(|v| v.as_table())
+                .unwrap_or_else(|| panic!("missing [package] in {name}/Cargo.toml"));
+            assert_eq!(
+                package.get("name").and_then(|v| v.as_str()),
+                Some(name),
+                "expected package.name to be preserved in {name}/Cargo.toml"
+            );
+            assert_eq!(
+                package.get("version").and_then(|v| v.as_str()),
+                Some(version),
+                "expected package.version to be preserved in {name}/Cargo.toml"
+            );
+            assert_eq!(
+                package.get("edition").and_then(|v| v.as_str()),
+                Some("2021"),
+                "expected package.edition to be preserved in {name}/Cargo.toml"
+            );
+            assert_eq!(
+                package.get("rust-version").and_then(|v| v.as_str()),
+                Some("1.85"),
+                "expected package.rust-version to be set in {name}/Cargo.toml"
+            );
+            let dependencies = value
+                .get("dependencies")
+                .and_then(|v| v.as_table())
+                .unwrap_or_else(|| panic!("missing [dependencies] in {name}/Cargo.toml"));
+            assert!(
+                dependencies.contains_key(dep_key),
+                "expected dependency `{dep_key}` to be preserved in {name}/Cargo.toml"
+            );
+        }
+    }
+
     fn read_json_prompt(path: &str, variant: Variant) -> String {
         match variant {
             Variant::Raw => format!(
@@ -943,6 +1032,21 @@ mod tests {
             ),
             Variant::Shim => format!(
                 "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await find_files('**/*.yml', path=...)`, `await read_text(path)`, and `await write_text(path, content)`. The text shims return and accept raw file content directly with no line-number framing. All shims are async, so always use `await`. Derive each file's basename by splitting its returned path on '/'."
+            ),
+        }
+    }
+
+    fn cargo_toml_rust_version_sync_prompt(root: &str, variant: Variant) -> String {
+        let crates_root = Path::new(root).join("crates");
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. Under the directory {root:?}, every member crate lives at `crates/<name>/Cargo.toml`. For each member Cargo.toml under {crates_root:?}, ensure the `[package]` section contains exactly one line `rust-version = \"1.85\"`. If the file already has a `rust-version = ...` line in `[package]`, replace its value with `\"1.85\"`. If it is missing, insert `rust-version = \"1.85\"` immediately after the `edition = \"2021\"` line. Preserve every other line exactly, including dependencies and blank lines. After writing, re-read every member Cargo.toml and verify it now contains exactly one `rust-version = \"1.85\"` line. Then call FINAL exactly with `done=alpha,beta,gamma`."
+        );
+        match variant {
+            Variant::Raw => format!(
+                "{preamble} IMPORTANT: this is the RAW variant, so do not use helper shims like find_files, read_text, or write_text. Use canonical host tools directly from Python. Use the canonical `glob` tool to discover member Cargo.toml files. It returns paths relative to the search root, so prefix each returned path with the absolute crates root {crates_root:?} before calling `read_file` or `write_file`. The canonical read_file tool returns a dict whose `content` field contains numbered text like `     1│ <text>`; strip everything through the `│` separator before editing. Avoid importing external parsers; do this as line-oriented text editing."
+            ),
+            Variant::Shim => format!(
+                "{preamble} IMPORTANT: this is the SHIM variant, so prefer `await find_files('**/Cargo.toml', path={crates_root:?})`, `await read_text(path)`, and `await write_text(path, content)`. `find_files` returns paths relative to the search root, so prefix each returned path with the absolute crates root before reading or writing. The text shims return and accept raw text directly with no line-number framing. All shims are async, so always use `await`."
             ),
         }
     }
@@ -1400,5 +1504,36 @@ mod tests {
         );
         assert_exact_suffix(&shim.response, "updated=", "ci.yml,deploy.yml");
         assert_yaml_workflow_update(&shim_root);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_cargo_toml_rust_version_sync_raw_vs_shim() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_pair("cargo_toml_rust_version_sync") {
+            return;
+        }
+
+        let (_cleanup_raw, raw_root) = setup_cargo_toml_rust_version_sync(Variant::Raw);
+        let raw = run_variant_tolerant(
+            "cargo_toml_rust_version_sync",
+            Variant::Raw,
+            cargo_toml_rust_version_sync_prompt(&raw_root, Variant::Raw),
+        )
+        .await;
+
+        let (_cleanup_shim, shim_root) = setup_cargo_toml_rust_version_sync(Variant::Shim);
+        let shim = run_variant_tolerant(
+            "cargo_toml_rust_version_sync",
+            Variant::Shim,
+            cargo_toml_rust_version_sync_prompt(&shim_root, Variant::Shim),
+        )
+        .await;
+
+        print_pair_report(&raw, &shim);
+        assert_exact_suffix(&raw.response, "done=", "alpha,beta,gamma");
+        assert_cargo_toml_rust_version_sync(&raw_root);
+        assert_exact_suffix(&shim.response, "done=", "alpha,beta,gamma");
+        assert_cargo_toml_rust_version_sync(&shim_root);
     }
 }
