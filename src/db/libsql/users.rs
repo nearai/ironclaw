@@ -689,7 +689,9 @@ impl UserStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        // Insert user
+        // Insert user. Preserve the typed `libsql::Error` when returning so
+        // the web layer can classify UNIQUE-constraint violations on
+        // `users.email` into a 409 Conflict response.
         if let Err(e) = conn
             .execute(
                 r#"
@@ -718,7 +720,7 @@ impl UserStore for LibSqlBackend {
                      connection will be dropped (not pooled), so no dirty state leaks"
                 );
             }
-            return Err(DatabaseError::Query(e.to_string()));
+            return Err(DatabaseError::LibSql(e));
         }
 
         // Insert token

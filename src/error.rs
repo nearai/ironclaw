@@ -110,6 +110,108 @@ pub enum DatabaseError {
     LibSql(#[from] libsql::Error),
 }
 
+// SQLite extended result codes for constraint violations.
+// See https://sqlite.org/rescode.html#extrc — these are stable.
+#[cfg(feature = "libsql")]
+const LIBSQL_CONSTRAINT_CHECK: i32 = 275;
+#[cfg(feature = "libsql")]
+const LIBSQL_CONSTRAINT_FOREIGNKEY: i32 = 787;
+#[cfg(feature = "libsql")]
+const LIBSQL_CONSTRAINT_NOTNULL: i32 = 1299;
+#[cfg(feature = "libsql")]
+const LIBSQL_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+#[cfg(feature = "libsql")]
+const LIBSQL_CONSTRAINT_UNIQUE: i32 = 2067;
+
+#[cfg(feature = "libsql")]
+fn libsql_code_matches(err: &libsql::Error, target: i32) -> bool {
+    match err {
+        libsql::Error::SqliteFailure(code, _) => *code == target,
+        libsql::Error::RemoteSqliteFailure(_, extended, _) => *extended == target,
+        _ => false,
+    }
+}
+
+impl DatabaseError {
+    /// Whether this error represents a UNIQUE constraint violation.
+    ///
+    /// Recognized from `SqlState::UNIQUE_VIOLATION` (PostgreSQL 23505) and
+    /// SQLite extended codes SQLITE_CONSTRAINT_UNIQUE (2067) and
+    /// SQLITE_CONSTRAINT_PRIMARYKEY (1555). The web layer maps this to
+    /// 409 Conflict so clients can distinguish a duplicate-key failure from
+    /// a retryable server error.
+    pub fn is_unique_violation(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if let DatabaseError::Postgres(pg) = self
+            && pg
+                .code()
+                .is_some_and(|c| *c == tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+        {
+            return true;
+        }
+        #[cfg(feature = "libsql")]
+        if let DatabaseError::LibSql(ls) = self {
+            return libsql_code_matches(ls, LIBSQL_CONSTRAINT_UNIQUE)
+                || libsql_code_matches(ls, LIBSQL_CONSTRAINT_PRIMARYKEY);
+        }
+        false
+    }
+
+    /// Whether this error represents a FOREIGN KEY constraint violation.
+    /// Mapped to 422 Unprocessable Entity at the web layer.
+    pub fn is_foreign_key_violation(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if let DatabaseError::Postgres(pg) = self
+            && pg
+                .code()
+                .is_some_and(|c| *c == tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION)
+        {
+            return true;
+        }
+        #[cfg(feature = "libsql")]
+        if let DatabaseError::LibSql(ls) = self {
+            return libsql_code_matches(ls, LIBSQL_CONSTRAINT_FOREIGNKEY);
+        }
+        false
+    }
+
+    /// Whether this error represents a CHECK constraint violation.
+    /// Mapped to 422 Unprocessable Entity at the web layer.
+    pub fn is_check_violation(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if let DatabaseError::Postgres(pg) = self
+            && pg
+                .code()
+                .is_some_and(|c| *c == tokio_postgres::error::SqlState::CHECK_VIOLATION)
+        {
+            return true;
+        }
+        #[cfg(feature = "libsql")]
+        if let DatabaseError::LibSql(ls) = self {
+            return libsql_code_matches(ls, LIBSQL_CONSTRAINT_CHECK);
+        }
+        false
+    }
+
+    /// Whether this error represents a NOT NULL constraint violation.
+    /// Mapped to 400 Bad Request at the web layer.
+    pub fn is_not_null_violation(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if let DatabaseError::Postgres(pg) = self
+            && pg
+                .code()
+                .is_some_and(|c| *c == tokio_postgres::error::SqlState::NOT_NULL_VIOLATION)
+        {
+            return true;
+        }
+        #[cfg(feature = "libsql")]
+        if let DatabaseError::LibSql(ls) = self {
+            return libsql_code_matches(ls, LIBSQL_CONSTRAINT_NOTNULL);
+        }
+        false
+    }
+}
+
 /// Channel-related errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -661,6 +763,89 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn non_db_error_variants_are_not_constraint_violations() {
+        let cases = [
+            DatabaseError::Pool("conn failed".into()),
+            DatabaseError::Query("syntax error".into()),
+            DatabaseError::NotFound {
+                entity: "user".into(),
+                id: "1".into(),
+            },
+            DatabaseError::Migration("bad migration".into()),
+            DatabaseError::Serialization("json error".into()),
+        ];
+        for err in cases {
+            assert!(!err.is_unique_violation(), "unique: {err}");
+            assert!(!err.is_foreign_key_violation(), "fk: {err}");
+            assert!(!err.is_check_violation(), "check: {err}");
+            assert!(!err.is_not_null_violation(), "notnull: {err}");
+        }
+    }
+
+    #[test]
+    fn application_constraint_is_not_a_specific_violation() {
+        // Constraint is an application-level error (e.g. last-owner guard).
+        // The specific predicates only match actual DB-reported codes — the
+        // web layer handles Constraint separately as a generic 409.
+        let err = DatabaseError::Constraint("last owner may not be demoted".into());
+        assert!(!err.is_unique_violation());
+        assert!(!err.is_foreign_key_violation());
+        assert!(!err.is_check_violation());
+        assert!(!err.is_not_null_violation());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn libsql_sqlite_failure_classifies_by_extended_code() {
+        let unique = DatabaseError::LibSql(libsql::Error::SqliteFailure(
+            LIBSQL_CONSTRAINT_UNIQUE,
+            "UNIQUE constraint failed".into(),
+        ));
+        assert!(unique.is_unique_violation());
+        assert!(!unique.is_foreign_key_violation());
+
+        let primary_key = DatabaseError::LibSql(libsql::Error::SqliteFailure(
+            LIBSQL_CONSTRAINT_PRIMARYKEY,
+            "PRIMARY KEY constraint failed".into(),
+        ));
+        assert!(primary_key.is_unique_violation());
+
+        let fk = DatabaseError::LibSql(libsql::Error::SqliteFailure(
+            LIBSQL_CONSTRAINT_FOREIGNKEY,
+            "FOREIGN KEY constraint failed".into(),
+        ));
+        assert!(fk.is_foreign_key_violation());
+        assert!(!fk.is_unique_violation());
+
+        let check = DatabaseError::LibSql(libsql::Error::SqliteFailure(
+            LIBSQL_CONSTRAINT_CHECK,
+            "CHECK constraint failed".into(),
+        ));
+        assert!(check.is_check_violation());
+
+        let notnull = DatabaseError::LibSql(libsql::Error::SqliteFailure(
+            LIBSQL_CONSTRAINT_NOTNULL,
+            "NOT NULL constraint failed".into(),
+        ));
+        assert!(notnull.is_not_null_violation());
+
+        // Remote variant carries extended code in the second tuple position.
+        let remote_unique = DatabaseError::LibSql(libsql::Error::RemoteSqliteFailure(
+            19,
+            LIBSQL_CONSTRAINT_UNIQUE,
+            "UNIQUE violation from remote".into(),
+        ));
+        assert!(remote_unique.is_unique_violation());
+
+        // Non-constraint SQLite errors should not match any predicate.
+        let busy = DatabaseError::LibSql(libsql::Error::SqliteFailure(5, "SQLITE_BUSY".into()));
+        assert!(!busy.is_unique_violation());
+        assert!(!busy.is_foreign_key_violation());
+        assert!(!busy.is_check_violation());
+        assert!(!busy.is_not_null_violation());
     }
 
     #[test]

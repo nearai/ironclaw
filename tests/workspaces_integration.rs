@@ -713,3 +713,46 @@ async fn responses_api_fetch_uses_workspace_scope_for_workspace_threads() {
         .unwrap();
     assert_eq!(outsider_resp.status(), 404);
 }
+
+// Regression: creating a workspace with a slug that already exists used to
+// surface a generic 500 via `internal_db_error`, which clients could not
+// distinguish from retryable server failures. A UNIQUE-constraint violation
+// must now return 409 Conflict.
+#[tokio::test]
+async fn workspaces_create_returns_409_on_duplicate_slug() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "First",
+            "slug": "dup-slug",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let duplicate = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "Second",
+            "slug": "dup-slug",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate.status(),
+        409,
+        "duplicate slug must surface as 409 Conflict, not 500"
+    );
+}

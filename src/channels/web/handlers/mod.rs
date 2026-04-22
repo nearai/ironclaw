@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod engine;
+pub mod errors;
 pub mod jobs;
 pub mod llm;
 pub mod memory;

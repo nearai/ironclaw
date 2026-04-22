@@ -11,6 +11,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
+use crate::channels::web::handlers::errors::{db_error_to_status, internal_db_error};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::db::{Database, WorkspaceMembership, WorkspaceRecord};
@@ -207,14 +208,6 @@ fn workspace_info(workspace: WorkspaceRecord, role: String) -> WorkspaceInfo {
     }
 }
 
-fn internal_db_error(e: impl std::fmt::Display) -> (StatusCode, String) {
-    tracing::error!("Workspace database error: {e}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Internal database error".to_string(),
-    )
-}
-
 pub async fn workspaces_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -254,7 +247,7 @@ pub async fn workspaces_create_handler(
     let workspace = store
         .create_workspace(name, slug, &body.description, &user.user_id, &body.settings)
         .await
-        .map_err(internal_db_error)?;
+        .map_err(db_error_to_status)?;
 
     Ok(Json(workspace_info(
         workspace,

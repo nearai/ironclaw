@@ -1738,6 +1738,61 @@ mod admin_tool_policy {
                 .unwrap();
         assert_eq!(body["created_by"], "admin-user");
     }
+
+    // Regression: creating a second user with an email already in the users
+    // table used to return 500 because the handler fell through fragile
+    // substring matching ("unique"/"duplicate"/"already exists") that did not
+    // cover every backend's error shape. A UNIQUE-constraint violation must
+    // now surface as 409 Conflict so clients can distinguish validation
+    // conflicts from retryable server errors.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_user_creation_returns_409_on_duplicate_email() {
+        let (db, _dir) = test_db().await;
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let app = Router::new()
+            .route("/api/admin/users", post(users_create_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(MultiAuthState::multi(tokens)),
+                auth_middleware,
+            ))
+            .with_state(build_state(Some(db), None));
+
+        let make_request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/users")
+                .header("Authorization", "Bearer tok-admin")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "display_name": "Duplicate",
+                        "email": "dup@example.com"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(make_request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let duplicate = app.oneshot(make_request()).await.unwrap();
+        assert_eq!(
+            duplicate.status(),
+            StatusCode::CONFLICT,
+            "duplicate email must surface as 409 Conflict, not 500"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

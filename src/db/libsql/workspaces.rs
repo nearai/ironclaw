@@ -92,6 +92,9 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         let id = Uuid::new_v4();
         let now = fmt_ts(&Utc::now());
         let result: Result<WorkspaceRecord, DatabaseError> = async {
+            // Preserve the typed `libsql::Error` via `?` (not a stringified
+            // `Query` wrap) so the web layer can classify UNIQUE-constraint
+            // violations on `workspaces.slug` into a 409 Conflict response.
             conn.execute(
                 r#"
                 INSERT INTO workspaces (id, name, slug, description, status, created_at, updated_at, created_by, settings)
@@ -107,8 +110,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
                     settings.to_string()
                 ],
             )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .await?;
 
             conn.execute(
                 r#"
@@ -117,8 +119,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
                 "#,
                 params![id.to_string(), created_by, now.as_str()],
             )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .await?;
 
             let ts = super::parse_timestamp(&now)
                 .map_err(DatabaseError::Serialization)?;

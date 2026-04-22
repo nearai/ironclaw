@@ -12,6 +12,7 @@ use rand::rngs::OsRng;
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
+use crate::channels::web::handlers::errors::db_error_to_status;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{
     AdminUsageEntry, AdminUsageStatsResponse, AdminUsageSummaryJobs, AdminUsageSummaryResponse,
@@ -165,22 +166,13 @@ pub async fn users_create_handler(
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
     let token_prefix = crate::channels::web::auth::token_prefix(&plaintext_token);
 
-    // Create user and initial token atomically — if either fails, both roll back.
+    // Create user and initial token atomically. If the email is already taken,
+    // `db_error_to_status` classifies the UNIQUE-constraint violation as a
+    // 409 Conflict so clients can distinguish it from a retryable 5xx.
     let _token_record = store
         .create_user_with_token(&user_record, "initial", &token_hash, token_prefix, None)
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            let lower = msg.to_ascii_lowercase();
-            if lower.contains("unique")
-                || lower.contains("duplicate")
-                || lower.contains("already exists")
-            {
-                (StatusCode::CONFLICT, msg)
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, msg)
-            }
-        })?;
+        .map_err(db_error_to_status)?;
 
     Ok(Json(AdminUserCreateResponse {
         id: user_record.id,
