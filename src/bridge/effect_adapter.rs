@@ -1553,7 +1553,7 @@ impl EffectExecutor for EffectBridgeAdapter {
                     }
                     // Defensive: apply the same v1-isolation filters we run
                     // on v1 tools. If a future engine capability registers
-                    // an action under a v1-denylisted name (`create_job`,
+                    // an action under a v1-denylisted name (`build_software`,
                     // `tool_auth`, ...), the v1 filters above would have
                     // hidden it — the engine path must not become a
                     // silent bypass.
@@ -1886,13 +1886,69 @@ struct RoutineMissionAlias {
     post_create_update: Option<ironclaw_engine::MissionUpdate>,
 }
 
-/// Translate a `routine_*` action call into mission_* parameters. Returns
-/// `None` if `action_name` is not a routine alias.
+/// Translate a v1-only action call (`routine_*`, `create_job`, `cancel_job`)
+/// into mission_* parameters. Returns `None` if `action_name` is not a v1
+/// alias. Kept under the historical name `routine_to_mission_alias` for
+/// backwards compatibility with downstream tests; covers routines *and*
+/// jobs.
 fn routine_to_mission_alias(
     action_name: &str,
     params: &serde_json::Value,
 ) -> Option<RoutineMissionAlias> {
     match action_name {
+        // `create_job { title, description, ... }` → mission_create. V1 job
+        // executes immediately inside a sandbox container; aliasing to a
+        // mission spawns a thread under the mission manager. Sandbox-specific
+        // params (wait, project_dir, credentials, mcp_servers, mode) are
+        // silently dropped — they have no equivalent in the mission model.
+        // The LLM can call `mission_fire` separately to trigger execution.
+        "create_job" | "create-job" => {
+            let name = params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("untitled job")
+                .to_string();
+            let goal = params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mission_params = serde_json::json!({
+                "name": name,
+                "goal": goal,
+                "cadence": "manual",
+            });
+            Some(RoutineMissionAlias {
+                mission_action: "mission_create",
+                mission_params,
+                post_create_update: None,
+            })
+        }
+
+        // `cancel_job { job_id }` → mission_complete { id }. Pass the id
+        // through under `id` because that's the field the mission_complete
+        // handler reads (`effect_adapter.rs` ~line 697); if it doesn't
+        // resolve as a mission id, the orchestrator returns a normal
+        // not-found error. Accept either `job_id` or already-renamed
+        // `mission_id` / `id` from the caller.
+        "cancel_job" | "cancel-job" => {
+            let id = params
+                .get("job_id")
+                .or_else(|| params.get("mission_id"))
+                .or_else(|| params.get("id"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let mission_params = serde_json::json!({
+                "id": id,
+            });
+            Some(RoutineMissionAlias {
+                mission_action: "mission_complete",
+                mission_params,
+                post_create_update: None,
+            })
+        }
+
         "routine_create" => {
             let name = params
                 .get("name")
@@ -2261,22 +2317,15 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
 }
 
 fn is_v1_only_tool(name: &str) -> bool {
-    // routine_* tools are surfaced in v2 too, but are intercepted by
-    // `handle_mission_call`'s routine alias path *before* this check fires —
-    // they get translated into mission_* dispatches via the existing
-    // mission manager rather than the v1 routine engine. The original v1
-    // routine tools remain registered for the v1 engine, but in v2 the
-    // alias path means the LLM-facing routine_create/list/update/etc.
-    // calls always go through missions.
-    matches!(
-        name,
-        "create_job"
-            | "create-job"
-            | "cancel_job"
-            | "cancel-job"
-            | "build_software"
-            | "build-software"
-    )
+    // routine_*, create_job, and cancel_job are all surfaced in v2 too, but
+    // are intercepted by `handle_mission_call`'s alias path *before* this
+    // check fires — they get translated into mission_* dispatches via the
+    // existing mission manager rather than the v1 routine/job engines. The
+    // original v1 tools remain registered for the v1 engine, but in v2 the
+    // alias path means the LLM-facing routine_*/create_job/cancel_job calls
+    // always go through missions. Only `build_software` remains genuinely
+    // v1-only (sandboxed build pipeline with no mission equivalent).
+    matches!(name, "build_software" | "build-software")
 }
 
 /// Auth management tools from v1 that are now kernel-internal in v2.
@@ -3823,6 +3872,42 @@ mod tests {
                 ),
             }
         }
+
+        /// Caller-level: the `create_job` alias path must also be rejected
+        /// when the goal is immediate — same protection as routine_create
+        /// and mission_create. Regression for #2800 PR-C: ensures the new
+        /// create_job → mission_create alias doesn't sneak past the
+        /// immediate-foreground guard.
+        #[tokio::test]
+        async fn execute_action_rejects_create_job_alias_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Send me the weather right now");
+
+            let result = adapter
+                .execute_action(
+                    "create_job",
+                    serde_json::json!({
+                        "title": "Weather update",
+                        "description": "Send the current weather forecast",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message via create_job alias, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     create_job alias, got: {other:?}"
+                ),
+            }
+        }
     }
 
     // ── extract_credential_name tests ──────────────────────────
@@ -3888,10 +3973,15 @@ mod tests {
     }
 
     #[test]
-    fn job_and_build_tools_remain_v1_only() {
-        assert!(is_v1_only_tool("create_job"));
-        assert!(is_v1_only_tool("cancel_job"));
+    fn only_build_software_remains_v1_only() {
+        // create_job and cancel_job now alias through handle_mission_call.
+        // Only build_software is genuinely v1-only.
         assert!(is_v1_only_tool("build_software"));
+        assert!(is_v1_only_tool("build-software"));
+        assert!(!is_v1_only_tool("create_job"));
+        assert!(!is_v1_only_tool("create-job"));
+        assert!(!is_v1_only_tool("cancel_job"));
+        assert!(!is_v1_only_tool("cancel-job"));
     }
 
     #[test]
@@ -3901,6 +3991,90 @@ mod tests {
         assert!(!is_v1_only_tool("mission_fire"));
         assert!(!is_v1_only_tool("http"));
         assert!(!is_v1_only_tool("web_search"));
+    }
+
+    /// `create_job { title, description }` should translate to a
+    /// `mission_create` call with title mapped to name, description mapped
+    /// to goal, and a manual cadence. Sandbox-specific params are dropped.
+    #[test]
+    fn create_job_alias_maps_to_mission_create_with_manual_cadence() {
+        let params = serde_json::json!({
+            "title": "Build landing page",
+            "description": "Implement the marketing landing page with hero + CTA.",
+            "wait": false,
+            "project_dir": "/home/user/.ironclaw/projects/site",
+            "credentials": {"github_token": "GITHUB_TOKEN"},
+        });
+        let alias = routine_to_mission_alias("create_job", &params)
+            .expect("create_job should produce an alias");
+        assert_eq!(alias.mission_action, "mission_create");
+        assert!(
+            alias.post_create_update.is_none(),
+            "create_job alias should not attach MissionUpdate"
+        );
+        let mp = alias.mission_params.as_object().expect("params object");
+        assert_eq!(
+            mp.get("name").and_then(|v| v.as_str()),
+            Some("Build landing page")
+        );
+        assert_eq!(
+            mp.get("goal").and_then(|v| v.as_str()),
+            Some("Implement the marketing landing page with hero + CTA.")
+        );
+        assert_eq!(mp.get("cadence").and_then(|v| v.as_str()), Some("manual"));
+        // Sandbox-specific params are dropped from the mission params.
+        assert!(mp.get("wait").is_none());
+        assert!(mp.get("project_dir").is_none());
+        assert!(mp.get("credentials").is_none());
+    }
+
+    /// Hyphen variant (`create-job`) should produce the same alias. This
+    /// matches the hyphen/underscore handling elsewhere in the registry.
+    #[test]
+    fn create_job_alias_accepts_hyphen_variant() {
+        let params = serde_json::json!({"title": "t", "description": "d"});
+        let alias = routine_to_mission_alias("create-job", &params)
+            .expect("create-job should produce an alias");
+        assert_eq!(alias.mission_action, "mission_create");
+    }
+
+    /// `create_job` with empty/missing title should fall back to
+    /// "untitled job" so mission_create doesn't reject on empty name.
+    #[test]
+    fn create_job_alias_falls_back_to_untitled_on_missing_title() {
+        let params = serde_json::json!({"description": "just the description"});
+        let alias = routine_to_mission_alias("create_job", &params)
+            .expect("create_job should produce an alias even without title");
+        let mp = alias.mission_params.as_object().expect("params object");
+        assert_eq!(
+            mp.get("name").and_then(|v| v.as_str()),
+            Some("untitled job")
+        );
+    }
+
+    /// `cancel_job { job_id }` should translate to `mission_complete` with
+    /// the id carried through under `id` — the field name the
+    /// `mission_complete` handler reads.
+    #[test]
+    fn cancel_job_alias_maps_to_mission_complete() {
+        let params = serde_json::json!({"job_id": "abc-123"});
+        let alias = routine_to_mission_alias("cancel_job", &params)
+            .expect("cancel_job should produce an alias");
+        assert_eq!(alias.mission_action, "mission_complete");
+        let mp = alias.mission_params.as_object().expect("params object");
+        assert_eq!(mp.get("id").and_then(|v| v.as_str()), Some("abc-123"));
+    }
+
+    /// `cancel-job` (hyphen) and an already-renamed `mission_id` field
+    /// should both be accepted and both emit the handler-expected `id`
+    /// key.
+    #[test]
+    fn cancel_job_alias_accepts_hyphen_and_mission_id_field() {
+        let params = serde_json::json!({"mission_id": "m-42"});
+        let alias = routine_to_mission_alias("cancel-job", &params)
+            .expect("cancel-job should produce an alias");
+        let mp = alias.mission_params.as_object().expect("params object");
+        assert_eq!(mp.get("id").and_then(|v| v.as_str()), Some("m-42"));
     }
 
     // ── is_v1_auth_tool tests ─────────────────────────────────
@@ -5731,13 +5905,15 @@ Use this skill to set up a Pika meeting.
         let adapter = make_adapter();
         let mut registry = CapabilityRegistry::new();
         // A hypothetical malformed capability that tries to expose v1
-        // tools through the v2 advertising path.
+        // tools through the v2 advertising path. `build_software` is the
+        // only remaining v1-denylisted tool after #2800 PR-C aliased
+        // create_job/cancel_job through to mission_*.
         registry.register(ironclaw_engine::Capability {
             name: "rogue".into(),
             description: "should not surface denylisted v1 names".into(),
             actions: vec![
                 ActionDef {
-                    name: "create_job".into(), // v1-only denylist
+                    name: "build_software".into(), // v1-only denylist
                     description: "forbidden".into(),
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
@@ -5783,8 +5959,8 @@ Use this skill to set up a Pika meeting.
 
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
         assert!(
-            !names.contains(&"create_job"),
-            "create_job is v1-denylisted and must not surface via engine capability: {names:?}"
+            !names.contains(&"build_software"),
+            "build_software is v1-denylisted and must not surface via engine capability: {names:?}"
         );
         assert!(
             !names.contains(&"tool_auth"),
