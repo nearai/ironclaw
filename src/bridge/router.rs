@@ -4162,17 +4162,33 @@ fn format_action_display_name(action_name: &str, params_summary: &Option<String>
 
 /// Interpret a MessageAdded event into a human-readable status message.
 /// Returns `None` for events that don't need UI surfacing.
-fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static str> {
+fn interpret_message_event(
+    role: &str,
+    content_preview: &str,
+    assistant_content_kind: Option<&ironclaw_engine::AssistantContentKind>,
+) -> Option<String> {
     if role == "User" && content_preview.starts_with("[stdout]") {
-        Some("Code executed")
+        Some("Code executed".to_string())
     } else if role == "User" && content_preview.starts_with("[code ") {
-        Some("Code executed (no output)")
+        Some("Code executed (no output)".to_string())
     } else if role == "User"
         && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
     {
-        Some("Code error — retrying...")
+        Some("Code error — retrying...".to_string())
     } else if role == "Assistant" {
-        Some("Executing code...")
+        match assistant_content_kind {
+            Some(ironclaw_engine::AssistantContentKind::InternalReasoning) => None,
+            Some(ironclaw_engine::AssistantContentKind::UserVisibleNarrative) => {
+                Some(content_preview.to_string())
+            }
+            Some(ironclaw_engine::AssistantContentKind::Final) => {
+                // Final assistant responses are surfaced through the main
+                // ThreadOutcome/AppEvent::Response path, so emitting a second
+                // preview-only status event here would be duplicate noise.
+                None
+            }
+            None => Some("Executing code...".to_string()),
+        }
     } else {
         None
     }
@@ -4534,10 +4550,13 @@ async fn forward_event_to_channel(
         EventKind::MessageAdded {
             role,
             content_preview,
+            assistant_content_kind,
         } => {
-            if let Some(text) = interpret_message_event(role, content_preview) {
+            if let Some(text) =
+                interpret_message_event(role, content_preview, assistant_content_kind.as_ref())
+            {
                 let _ = channels
-                    .send_status(channel_name, StatusUpdate::Thinking(text.into()), metadata)
+                    .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
                     .await;
             }
         }
@@ -4640,9 +4659,10 @@ fn thread_event_to_app_events(
         EventKind::MessageAdded {
             role,
             content_preview,
-        } => interpret_message_event(role, content_preview)
+            assistant_content_kind,
+        } => interpret_message_event(role, content_preview, assistant_content_kind.as_ref())
             .map(|text| AppEvent::Thinking {
-                message: text.into(),
+                message: text,
                 thread_id: Some(thread_id.into()),
             })
             .into_iter()
@@ -7108,6 +7128,86 @@ mod tests {
                 && !success
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_skips_internal_reasoning_message_added() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                content_preview: "I should inspect the page before answering.".to_string(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::InternalReasoning,
+                ),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_surfaces_user_visible_narrative_preview() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                content_preview: "Inspecting the page first...".to_string(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::UserVisibleNarrative,
+                ),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(matches!(
+            app_events.as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Inspecting the page first..."
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_final_assistant_message_relies_on_response_stream() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                content_preview: "Here is the answer".to_string(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::Final,
+                ),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_legacy_assistant_message_keeps_execution_status() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                content_preview: "legacy assistant message".to_string(),
+                assistant_content_kind: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(matches!(
+            app_events.as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Executing code..."
+                    && thread_id.as_deref() == Some("thread-123")
         ));
     }
 

@@ -70,7 +70,7 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}...", &s[..end]) // safety: end is validated by is_char_boundary loop above
     }
 }
-use crate::types::step::{StepId, TokenUsage};
+use crate::types::step::{AssistantContent, StepId, TokenUsage};
 use crate::types::thread::{ThreadId, ThreadState};
 
 /// Strongly-typed event identifier.
@@ -105,6 +105,36 @@ impl ThreadEvent {
             thread_id,
             timestamp: Utc::now(),
             kind,
+        }
+    }
+}
+
+/// Lightweight assistant-content semantic used on event previews.
+///
+/// `ThreadMessage.assistant_content` preserves the full typed model on the
+/// message itself. Events only need the visibility/meaning tag, not the full
+/// text payload, so history/replay consumers can avoid re-guessing from a raw
+/// preview string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantContentKind {
+    Final,
+    UserVisibleNarrative,
+    InternalReasoning,
+}
+
+impl AssistantContentKind {
+    pub fn is_user_visible(self) -> bool {
+        matches!(self, Self::Final | Self::UserVisibleNarrative)
+    }
+}
+
+impl From<&AssistantContent> for AssistantContentKind {
+    fn from(value: &AssistantContent) -> Self {
+        match value {
+            AssistantContent::Final(_) => Self::Final,
+            AssistantContent::UserVisibleNarrative(_) => Self::UserVisibleNarrative,
+            AssistantContent::InternalReasoning(_) => Self::InternalReasoning,
         }
     }
 }
@@ -171,6 +201,8 @@ pub enum EventKind {
     MessageAdded {
         role: String,
         content_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_content_kind: Option<AssistantContentKind>,
     },
 
     // ── Thread tree ─────────────────────────────────────────
