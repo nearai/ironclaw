@@ -778,16 +778,29 @@ async fn handle_llm_complete(
                 LlmResponse::Text(text) => {
                     serde_json::json!({"type": "text", "content": text, "usage": usage})
                 }
-                LlmResponse::Code { code, .. } => {
-                    serde_json::json!({"type": "code", "code": code, "usage": usage})
+                LlmResponse::Code {
+                    code,
+                    assistant_content,
+                } => {
+                    serde_json::json!({
+                        "type": "code",
+                        "code": code,
+                        "content": assistant_content.as_ref().map(|content| content.text().to_string()),
+                        "assistant_content": assistant_content,
+                        "usage": usage
+                    })
                 }
-                LlmResponse::ActionCalls { calls, content } => {
+                LlmResponse::ActionCalls {
+                    calls,
+                    assistant_content,
+                } => {
                     // Single source of truth for the Python interchange
                     // shape — must round-trip via `python_json_to_action_calls`.
                     let calls_json = action_calls_to_python_json(&calls);
                     serde_json::json!({
                         "type": "actions",
-                        "content": content,
+                        "content": assistant_content.as_ref().map(|content| content.text().to_string()),
+                        "assistant_content": assistant_content,
                         "calls": calls_json,
                         "usage": usage
                     })
@@ -847,6 +860,17 @@ async fn handle_execute_code_step(
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
+    let started_event = ThreadEvent::new(
+        thread.id,
+        EventKind::CodeExecutionStarted {
+            step_id: exec_ctx.step_id,
+        },
+    );
+    if let Some(tx) = event_tx {
+        let _ = tx.send(started_event.clone());
+    }
+    thread.events.push(started_event);
+
     match Box::pin(execute_code(
         &code,
         thread,
@@ -923,6 +947,28 @@ async fn handle_execute_code_step(
                     let _ = tx.send(instrumentation_event.clone());
                 }
                 thread.events.push(instrumentation_event);
+            } else {
+                // Successful code execution: emit a structured Completed event
+                // so the router/SSE layer does not need to guess status from
+                // transcript preview strings like "[stdout]" or "[code ...".
+                let had_output = !result.stdout.is_empty()
+                    || result.return_value != serde_json::Value::Null
+                    || result.action_results.iter().any(|r| {
+                        let out = r.output.as_str().unwrap_or("");
+                        !out.is_empty()
+                    });
+                let completed_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionCompleted {
+                        step_id: exec_ctx.step_id,
+                        had_output,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(completed_event.clone());
+                }
+                thread.events.push(completed_event);
             }
             thread.updated_at = chrono::Utc::now();
 
@@ -2326,6 +2372,7 @@ fn build_orchestrator_inputs(
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
+                "assistant_content": m.assistant_content,
                 "action_name": m.action_name,
                 "action_call_id": m.action_call_id,
                 "action_calls": calls_json,
@@ -2387,6 +2434,8 @@ struct PythonActionCall {
     name: String,
     call_id: String,
     params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rationale: Option<String>,
 }
 
 impl From<&ActionCall> for PythonActionCall {
@@ -2395,6 +2444,7 @@ impl From<&ActionCall> for PythonActionCall {
             name: c.action_name.clone(),
             call_id: c.id.clone(),
             params: c.parameters.clone(),
+            rationale: c.rationale.clone(),
         }
     }
 }
@@ -2405,6 +2455,7 @@ impl From<PythonActionCall> for ActionCall {
             id: p.call_id,
             action_name: p.name,
             parameters: p.params,
+            rationale: p.rationale,
         }
     }
 }
@@ -2552,12 +2603,18 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             .get("action_calls")
             .filter(|v| !v.is_null())
             .and_then(python_json_to_action_calls);
+        let assistant_content = item
+            .get("assistant_content")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
 
         let message = match role {
             "System" | "system" => ThreadMessage::system(content),
             "Assistant" | "assistant" => {
                 if let Some(calls) = action_calls {
-                    ThreadMessage::assistant_with_actions(Some(content.to_string()), calls)
+                    ThreadMessage::assistant_with_action_content(assistant_content, calls)
+                } else if let Some(assistant_content) = assistant_content {
+                    ThreadMessage::assistant_with_typed_content(assistant_content)
                 } else {
                     ThreadMessage::assistant(content)
                 }
@@ -2721,6 +2778,7 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+    use crate::types::step::AssistantContent;
 
     // ── Orchestrator budget / error mapping ─────────────────────
 
@@ -3750,6 +3808,7 @@ mod tests {
             id: "call_abc123".to_string(),
             action_name: "google_drive_tool".to_string(),
             parameters: serde_json::json!({"query": "expenses"}),
+            rationale: None,
         };
 
         let python_json = serde_json::to_value(PythonActionCall::from(&original))
@@ -3777,11 +3836,13 @@ mod tests {
                 id: "call_1".to_string(),
                 action_name: "notion_notion_search".to_string(),
                 parameters: serde_json::json!({"query": "name"}),
+                rationale: None,
             },
             ActionCall {
                 id: "call_2".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"action": "list"}),
+                rationale: None,
             },
         ];
         let json = action_calls_to_python_json(&calls);
@@ -3807,6 +3868,47 @@ mod tests {
         assert_eq!(parsed[0].parameters, serde_json::json!({"q": "foo"}));
         assert_eq!(parsed[1].action_name, "google_drive_tool");
         assert_eq!(parsed[1].id, "call_abc");
+    }
+
+    #[test]
+    fn json_to_thread_messages_preserves_typed_assistant_content_and_tool_rationale() {
+        let working_messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "I should inspect the page before answering.",
+                "assistant_content": {
+                    "kind": "internal_reasoning",
+                    "text": "I should inspect the page before answering."
+                },
+                "action_calls": [
+                    {
+                        "name": "web_fetch",
+                        "call_id": "call_fetch_1",
+                        "params": {"url": "https://example.com"},
+                        "rationale": "Need the page contents before I can summarize it."
+                    }
+                ]
+            }
+        ]);
+
+        let messages = json_to_thread_messages(&working_messages).expect("must parse");
+        assert_eq!(messages.len(), 1);
+
+        let assistant = &messages[0];
+        assert!(matches!(
+            assistant.assistant_content.as_ref(),
+            Some(AssistantContent::InternalReasoning(text))
+                if text == "I should inspect the page before answering."
+        ));
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant action calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].rationale.as_deref(),
+            Some("Need the page contents before I can summarize it.")
+        );
     }
 
     #[test]
@@ -3987,6 +4089,7 @@ mod tests {
                 id: "call_resume_test".to_string(),
                 action_name: "google_drive_tool".to_string(),
                 parameters: serde_json::json!({"query": "budget"}),
+                rationale: None,
             }],
         );
 
@@ -4029,6 +4132,53 @@ mod tests {
     /// accept both formats — which is fine, but the PythonActionCall
     /// interchange type can then be removed. This test documents the
     /// current contract: canonical names are rejected by the parser.
+    #[test]
+    fn bootstrap_context_round_trips_typed_assistant_content_and_rationale() {
+        let msg = ThreadMessage::assistant_with_action_content(
+            Some(AssistantContent::InternalReasoning(
+                "I should inspect the page before answering.".to_string(),
+            )),
+            vec![ActionCall {
+                id: "call_fetch_1".to_string(),
+                action_name: "web_fetch".to_string(),
+                parameters: serde_json::json!({"url": "https://example.com"}),
+                rationale: Some("Need the page contents before I can summarize it.".to_string()),
+            }],
+        );
+
+        let calls_json = msg
+            .action_calls
+            .as_ref()
+            .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+        let serialized = serde_json::json!([{
+            "role": "Assistant",
+            "content": msg.content,
+            "assistant_content": msg.assistant_content,
+            "action_name": msg.action_name,
+            "action_call_id": msg.action_call_id,
+            "action_calls": calls_json,
+        }]);
+
+        let parsed = json_to_thread_messages(&serialized).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+
+        let assistant = &parsed[0];
+        assert!(matches!(
+            assistant.assistant_content.as_ref(),
+            Some(AssistantContent::InternalReasoning(text))
+                if text == "I should inspect the page before answering."
+        ));
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant action calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].rationale.as_deref(),
+            Some("Need the page contents before I can summarize it.")
+        );
+    }
+
     #[test]
     fn canonical_action_call_field_names_do_not_round_trip() {
         let serialized_with_canonical_names = serde_json::json!([{
@@ -4512,6 +4662,109 @@ FINAL(batch_error_count)
     // ── CodeExecutionFailed event emission (caller test) ────────
 
     #[tokio::test]
+    async fn execute_code_step_emits_started_and_completed_events_with_output_flag() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution success instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let args = &[
+            json_to_monty(&serde_json::json!("print('hello from code')")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        assert!(
+            thread
+                .events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::CodeExecutionStarted { .. })),
+            "expected CodeExecutionStarted event"
+        );
+        assert!(
+            thread.events.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::CodeExecutionCompleted {
+                    had_output: true,
+                    ..
+                }
+            )),
+            "expected CodeExecutionCompleted event with had_output=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_code_step_marks_completed_without_output() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution no-output instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let args = &[
+            json_to_monty(&serde_json::json!("x = 1")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        assert!(
+            thread.events.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::CodeExecutionCompleted {
+                    had_output: false,
+                    ..
+                }
+            )),
+            "expected CodeExecutionCompleted event with had_output=false"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_code_step_emits_code_execution_failed_event() {
         let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
             captured: tokio::sync::Mutex::new(Vec::new()),
@@ -4547,6 +4800,14 @@ FINAL(batch_error_count)
             Some(&tx),
         )
         .await;
+
+        assert!(
+            thread
+                .events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::CodeExecutionStarted { .. })),
+            "expected CodeExecutionStarted event"
+        );
 
         // Verify CodeExecutionFailed event was emitted on thread.events
         let code_failed_events: Vec<_> = thread

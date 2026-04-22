@@ -4162,19 +4162,46 @@ fn format_action_display_name(action_name: &str, params_summary: &Option<String>
 
 /// Interpret a MessageAdded event into a human-readable status message.
 /// Returns `None` for events that don't need UI surfacing.
-fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static str> {
-    if role == "User" && content_preview.starts_with("[stdout]") {
-        Some("Code executed")
-    } else if role == "User" && content_preview.starts_with("[code ") {
-        Some("Code executed (no output)")
-    } else if role == "User"
-        && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-    {
-        Some("Code error — retrying...")
-    } else if role == "Assistant" {
-        Some("Executing code...")
+///
+/// The only assistant kind that actually surfaces text to the status
+/// stream is `UserVisibleNarrative` — and that text is carried inline on
+/// the event as `narrative`, so the router never has to reach back into
+/// the thread's message list to render it.
+///
+/// User-role code-execution result messages (`[stdout]…`, `[code …]`,
+/// `Traceback`) no longer drive UI status — that surface is owned by the
+/// typed `CodeExecutionStarted`/`CodeExecutionCompleted`/`CodeExecutionFailed`
+/// events emitted by the executor.
+fn interpret_message_event(
+    role: &str,
+    assistant_content_kind: Option<&ironclaw_engine::AssistantContentKind>,
+    narrative: Option<&str>,
+) -> Option<String> {
+    if role == "Assistant" {
+        match assistant_content_kind {
+            Some(ironclaw_engine::AssistantContentKind::InternalReasoning) => None,
+            Some(ironclaw_engine::AssistantContentKind::UserVisibleNarrative) => {
+                narrative.map(|t| t.to_string())
+            }
+            Some(ironclaw_engine::AssistantContentKind::Final) => {
+                // Final assistant responses are surfaced through the main
+                // ThreadOutcome/AppEvent::Response path, so emitting a second
+                // preview-only status event here would be duplicate noise.
+                None
+            }
+            None => Some("Executing code...".to_string()),
+        }
     } else {
         None
+    }
+}
+
+/// Human-readable status text for a `CodeExecutionCompleted` event.
+fn code_execution_completed_status(had_output: bool) -> &'static str {
+    if had_output {
+        "Code executed"
+    } else {
+        "Code executed (no output)"
     }
 }
 
@@ -4533,11 +4560,15 @@ async fn forward_event_to_channel(
         }
         EventKind::MessageAdded {
             role,
-            content_preview,
+            assistant_content_kind,
+            narrative,
+            ..
         } => {
-            if let Some(text) = interpret_message_event(role, content_preview) {
+            if let Some(text) =
+                interpret_message_event(role, assistant_content_kind.as_ref(), narrative.as_deref())
+            {
                 let _ = channels
-                    .send_status(channel_name, StatusUpdate::Thinking(text.into()), metadata)
+                    .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
                     .await;
             }
         }
@@ -4554,6 +4585,33 @@ async fn forward_event_to_channel(
                         skill_names: skill_names.clone(),
                         feedback: Vec::new(),
                     },
+                    metadata,
+                )
+                .await;
+        }
+        EventKind::CodeExecutionStarted { .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking("Executing code...".into()),
+                    metadata,
+                )
+                .await;
+        }
+        EventKind::CodeExecutionCompleted { had_output, .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking(code_execution_completed_status(*had_output).into()),
+                    metadata,
+                )
+                .await;
+        }
+        EventKind::CodeExecutionFailed { .. } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::Thinking("Code error — retrying...".into()),
                     metadata,
                 )
                 .await;
@@ -4664,10 +4722,12 @@ fn thread_event_to_app_events(
         }],
         EventKind::MessageAdded {
             role,
-            content_preview,
-        } => interpret_message_event(role, content_preview)
+            assistant_content_kind,
+            narrative,
+            ..
+        } => interpret_message_event(role, assistant_content_kind.as_ref(), narrative.as_deref())
             .map(|text| AppEvent::Thinking {
-                message: text.into(),
+                message: text,
                 thread_id: Some(thread_id.into()),
             })
             .into_iter()
@@ -4710,6 +4770,14 @@ fn thread_event_to_app_events(
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
+        }],
+        EventKind::CodeExecutionStarted { .. } => vec![AppEvent::Thinking {
+            message: "Executing code...".into(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionCompleted { had_output, .. } => vec![AppEvent::Thinking {
+            message: code_execution_completed_status(*had_output).into(),
+            thread_id: Some(thread_id.into()),
         }],
         _ => vec![],
     }
@@ -7036,11 +7104,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -7107,6 +7177,61 @@ mod tests {
             } if call_id.as_deref() == Some("call-memory-read-1")
                 && duration_ms == &Some(42)
                 && *success
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_event_to_channel_maps_code_execution_lifecycle_events() {
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(RecordingStatusChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let manager = Arc::new(manager);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let step_id = ironclaw_engine::StepId::new();
+
+        let started = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionStarted { step_id },
+        );
+        forward_event_to_channel(&started, &manager, "test", &serde_json::json!({})).await;
+
+        let completed = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: false,
+                duration_ms: 12,
+            },
+        );
+        forward_event_to_channel(&completed, &manager, "test", &serde_json::json!({})).await;
+
+        let failed = ironclaw_engine::ThreadEvent::new(
+            thread_id,
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id,
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "Traceback: boom".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 19,
+            },
+        );
+        forward_event_to_channel(&failed, &manager, "test", &serde_json::json!({})).await;
+
+        let statuses = statuses.lock().await;
+        assert!(matches!(
+            statuses.as_slice(),
+            [
+                StatusUpdate::Thinking(started),
+                StatusUpdate::Thinking(completed),
+                StatusUpdate::Thinking(failed)
+            ] if started == "Executing code..."
+                && completed == "Code executed (no output)"
+                && failed == "Code error — retrying..."
         ));
     }
 
@@ -7243,6 +7368,158 @@ mod tests {
     }
 
     #[test]
+    fn thread_event_to_app_events_maps_code_execution_started_and_completed() {
+        let thread_id = "thread-123";
+        let step_id = ironclaw_engine::StepId::new();
+
+        let started = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionStarted { step_id },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&started, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Executing code..."
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+
+        let completed_with_output = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: true,
+                duration_ms: 25,
+            },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&completed_with_output, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Code executed"
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+
+        let completed_without_output = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionCompleted {
+                step_id,
+                had_output: false,
+                duration_ms: 25,
+            },
+        );
+        assert!(matches!(
+            thread_event_to_app_events(&completed_without_output, thread_id).as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Code executed (no output)"
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_skips_internal_reasoning_message_added() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::InternalReasoning,
+                ),
+                narrative: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_surfaces_user_visible_narrative_preview() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::UserVisibleNarrative,
+                ),
+                narrative: Some("Inspecting the page first...".to_string()),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(matches!(
+            app_events.as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Inspecting the page first..."
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_narrative_without_text_is_suppressed() {
+        // A defensive guard: if a narrative event arrives without inline
+        // text, we suppress it rather than emitting an empty Thinking bubble.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::UserVisibleNarrative,
+                ),
+                narrative: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_final_assistant_message_relies_on_response_stream() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::Final,
+                ),
+                narrative: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_legacy_assistant_message_keeps_execution_status() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: None,
+                narrative: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(matches!(
+            app_events.as_slice(),
+            [AppEvent::Thinking { message, thread_id }]
+                if message == "Executing code..."
+                    && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
     fn resolved_call_id_legacy_fallback_uses_last_unresolved_parallel_call() {
         let mut thread = ironclaw_engine::Thread::new(
             "goal",
@@ -7258,11 +7535,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -7309,11 +7588,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    rationale: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    rationale: None,
                 },
             ],
         ));
@@ -8070,11 +8351,13 @@ mod tests {
                         id: "call-1".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "pwd"}),
+                        rationale: None,
                     },
                     ironclaw_engine::ActionCall {
                         id: "call-2".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "ls"}),
+                        rationale: None,
                     },
                 ],
             ));
@@ -8195,6 +8478,7 @@ mod tests {
                     id: "call-install".to_string(),
                     action_name: "tool_install".to_string(),
                     parameters: serde_json::json!({"name": channel_name}),
+                    rationale: None,
                 }],
             ));
             thread.state = ironclaw_engine::ThreadState::Waiting;

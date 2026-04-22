@@ -86,22 +86,63 @@ impl Step {
 
 // ── LLM response types ─────────────────────────────────────
 
+/// Typed assistant-authored content that is not just a raw ambiguous string.
+///
+/// Issue #2813: engine v2 needs to distinguish final/user-visible/internal
+/// assistant text so adapters and UI layers do not have to guess whether a
+/// string is safe to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
+pub enum AssistantContent {
+    /// Final user-visible answer text.
+    Final(String),
+    /// Non-final but still user-visible assistant narrative.
+    UserVisibleNarrative(String),
+    /// Internal reasoning / planning text that must not be surfaced to end users.
+    InternalReasoning(String),
+}
+
+impl AssistantContent {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Final(text)
+            | Self::UserVisibleNarrative(text)
+            | Self::InternalReasoning(text) => text,
+        }
+    }
+
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Final(text)
+            | Self::UserVisibleNarrative(text)
+            | Self::InternalReasoning(text) => text,
+        }
+    }
+
+    pub fn is_user_visible(&self) -> bool {
+        matches!(self, Self::Final(_) | Self::UserVisibleNarrative(_))
+    }
+}
+
 /// Response from the LLM: text, action calls, or executable code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LlmResponse {
     /// Final text response.
     Text(String),
-    /// One or more action calls (with optional reasoning text).
+    /// One or more action calls plus typed assistant content associated with
+    /// the tool-use step.
     ActionCalls {
         calls: Vec<ActionCall>,
-        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_content: Option<AssistantContent>,
     },
     /// Executable Python code (CodeAct). Tool calls happen as function
     /// calls within the code; the runtime suspends at each one and
     /// delegates to the EffectExecutor.
     Code {
         code: String,
-        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_content: Option<AssistantContent>,
     },
 }
 
@@ -114,6 +155,9 @@ pub struct ActionCall {
     pub action_name: String,
     /// Action parameters as JSON.
     pub parameters: serde_json::Value,
+    /// Optional per-tool rationale separated from the shared assistant content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 /// Result of executing a capability action.

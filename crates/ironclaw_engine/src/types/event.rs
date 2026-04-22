@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
+use crate::types::message::MessageId;
 
 /// Generate a short human-readable summary of tool parameters for display.
 ///
@@ -70,7 +71,7 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}...", &s[..end]) // safety: end is validated by is_char_boundary loop above
     }
 }
-use crate::types::step::{StepId, TokenUsage};
+use crate::types::step::{AssistantContent, StepId, TokenUsage};
 use crate::types::thread::{ThreadId, ThreadState};
 
 /// Strongly-typed event identifier.
@@ -105,6 +106,36 @@ impl ThreadEvent {
             thread_id,
             timestamp: Utc::now(),
             kind,
+        }
+    }
+}
+
+/// Lightweight assistant-content semantic used on event previews.
+///
+/// `ThreadMessage.assistant_content` preserves the full typed model on the
+/// message itself. Events only need the visibility/meaning tag, not the full
+/// text payload, so history/replay consumers can avoid re-guessing from a raw
+/// preview string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantContentKind {
+    Final,
+    UserVisibleNarrative,
+    InternalReasoning,
+}
+
+impl AssistantContentKind {
+    pub fn is_user_visible(self) -> bool {
+        matches!(self, Self::Final | Self::UserVisibleNarrative)
+    }
+}
+
+impl From<&AssistantContent> for AssistantContentKind {
+    fn from(value: &AssistantContent) -> Self {
+        match value {
+            AssistantContent::Final(_) => Self::Final,
+            AssistantContent::UserVisibleNarrative(_) => Self::UserVisibleNarrative,
+            AssistantContent::InternalReasoning(_) => Self::InternalReasoning,
         }
     }
 }
@@ -168,9 +199,25 @@ pub enum EventKind {
     },
 
     // ── Messages ────────────────────────────────────────────
+    /// A message was appended to the thread transcript.
+    ///
+    /// `message_id` lets consumers resolve the full typed payload via
+    /// `Thread::message` when they need more than the event carries inline.
+    ///
+    /// `narrative` is populated **only** for `UserVisibleNarrative` assistant
+    /// content — that's the single kind whose text the gateway status stream
+    /// actually renders. Other kinds (reasoning, final, user, action result)
+    /// are either suppressed at the router, duplicated by the `Response`
+    /// stream, or irrelevant to the status surface, so carrying the full text
+    /// inline for them would just inflate SSE frames without changing what
+    /// the UI shows.
     MessageAdded {
         role: String,
-        content_preview: String,
+        message_id: MessageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_content_kind: Option<AssistantContentKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        narrative: Option<String>,
     },
 
     // ── Thread tree ─────────────────────────────────────────
@@ -218,6 +265,20 @@ pub enum EventKind {
     },
 
     // ── Code execution instrumentation ────────────────────────
+    /// Emitted when a code (REPL) execution attempt starts.
+    CodeExecutionStarted {
+        step_id: StepId,
+    },
+    /// Emitted when a code (REPL) execution attempt completes successfully.
+    CodeExecutionCompleted {
+        step_id: StepId,
+        /// Whether execution produced user-visible output (stdout, return value,
+        /// or non-empty tool/action output summarized back into context).
+        had_output: bool,
+        /// Duration of the code execution attempt in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+    },
     /// Emitted when a code (REPL) execution attempt fails. Enables aggregate
     /// analysis of code execution failure modes to determine whether the
     /// runtime (Monty), the LLM, or tool dispatch is the primary source of

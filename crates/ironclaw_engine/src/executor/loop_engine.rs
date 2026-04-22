@@ -526,8 +526,9 @@ mod tests {
                     id: call_id.into(),
                     action_name: action_name.into(),
                     parameters: serde_json::json!({}),
+                    rationale: None,
                 }],
-                content: None,
+                assistant_content: None,
             },
             usage: TokenUsage {
                 input_tokens: 100,
@@ -790,7 +791,9 @@ mod tests {
         LlmOutput {
             response: LlmResponse::Code {
                 code: code.into(),
-                content: Some(format!("```repl\n{code}\n```")),
+                assistant_content: Some(crate::types::step::AssistantContent::InternalReasoning(
+                    format!("```repl\n{code}\n```"),
+                )),
             },
             usage: TokenUsage {
                 input_tokens: 100,
@@ -1220,8 +1223,9 @@ mod tests {
                         id: "call_nolease_xyz".into(),
                         action_name: "restricted_tool".into(),
                         parameters: serde_json::json!({}),
+                        rationale: None,
                     }],
-                    content: None,
+                    assistant_content: None,
                 },
                 usage: TokenUsage::default(),
             },

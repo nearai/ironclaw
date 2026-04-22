@@ -33,7 +33,9 @@ use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
-use crate::types::step::{ActionResult, CodeExecutionFailure, LlmResponse, TokenUsage};
+use crate::types::step::{
+    ActionResult, AssistantContent, CodeExecutionFailure, LlmResponse, TokenUsage,
+};
 use crate::types::thread::Thread;
 use ironclaw_common::ValidTimezone;
 
@@ -1260,9 +1262,14 @@ async fn handle_llm_query(
             recursive_tokens.output_tokens += output.usage.output_tokens;
             let text = match output.response {
                 LlmResponse::Text(t) => t,
-                LlmResponse::ActionCalls { content, .. } | LlmResponse::Code { content, .. } => {
-                    content.unwrap_or_default()
+                LlmResponse::ActionCalls {
+                    assistant_content, ..
                 }
+                | LlmResponse::Code {
+                    assistant_content, ..
+                } => assistant_content
+                    .map(AssistantContent::into_text)
+                    .unwrap_or_default(),
             };
             ExtFunctionResult::Return(MontyObject::String(text))
         }
@@ -1435,8 +1442,14 @@ async fn handle_llm_query_batched(
                 total_output += output.usage.output_tokens;
                 let text = match output.response {
                     LlmResponse::Text(t) => t,
-                    LlmResponse::ActionCalls { content, .. }
-                    | LlmResponse::Code { content, .. } => content.unwrap_or_default(),
+                    LlmResponse::ActionCalls {
+                        assistant_content, ..
+                    }
+                    | LlmResponse::Code {
+                        assistant_content, ..
+                    } => assistant_content
+                        .map(AssistantContent::into_text)
+                        .unwrap_or_default(),
                 };
                 results.push(MontyObject::String(text));
             }

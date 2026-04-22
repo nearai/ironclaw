@@ -448,8 +448,10 @@ mod tests {
         thread.add_message(ThreadMessage::assistant("calling tool"));
         // Manually construct a message with None call_id
         thread.add_message(ThreadMessage {
+            id: crate::types::message::MessageId::new(),
             role: crate::types::message::MessageRole::ActionResult,
             content: "result".into(),
+            assistant_content: None,
             provenance: crate::types::provenance::Provenance::ToolOutput {
                 action_name: "shell".into(),
             },

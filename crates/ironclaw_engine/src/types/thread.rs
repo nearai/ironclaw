@@ -11,10 +11,11 @@ use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
 use crate::types::error::EngineError;
-use crate::types::event::{EventKind, ThreadEvent};
+use crate::types::event::{AssistantContentKind, EventKind, ThreadEvent};
 use crate::types::memory::DocId;
-use crate::types::message::ThreadMessage;
+use crate::types::message::{MessageId, ThreadMessage};
 use crate::types::project::ProjectId;
+use crate::types::step::AssistantContent;
 
 use super::{OwnerId, default_user_id};
 
@@ -378,18 +379,36 @@ impl Thread {
     }
 
     /// Add a message to this thread's conversation.
+    ///
+    /// Emits a typed `MessageAdded` event. The event carries `message_id`
+    /// so consumers can resolve the full payload via `Thread::message`, and
+    /// only populates inline `narrative` text when the assistant content
+    /// kind is `UserVisibleNarrative` — the only kind the gateway status
+    /// stream actually renders.
     pub fn add_message(&mut self, message: ThreadMessage) {
-        let preview = if message.content.chars().count() > 80 {
-            let p: String = message.content.chars().take(80).collect();
-            format!("{p}...")
-        } else {
-            message.content.clone()
+        let kind = message
+            .assistant_content
+            .as_ref()
+            .map(AssistantContentKind::from);
+        let narrative = match message.assistant_content.as_ref() {
+            Some(AssistantContent::UserVisibleNarrative(text)) => Some(text.clone()),
+            _ => None,
         };
         self.add_event(EventKind::MessageAdded {
             role: format!("{:?}", message.role),
-            content_preview: preview,
+            message_id: message.id,
+            assistant_content_kind: kind,
+            narrative,
         });
         self.messages.push(message);
+    }
+
+    /// Resolve a message by id.
+    ///
+    /// Consumers of `EventKind::MessageAdded` can call this to fetch the
+    /// full typed payload instead of reparsing a truncated preview string.
+    pub fn message(&self, id: MessageId) -> Option<&ThreadMessage> {
+        self.messages.iter().find(|m| m.id == id)
     }
 
     /// Add a message to the internal execution transcript without exposing it
@@ -403,7 +422,9 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::event::AssistantContentKind;
     use crate::types::memory::DocId;
+    use crate::types::step::AssistantContent;
 
     fn make_thread() -> Thread {
         Thread::new(
@@ -546,13 +567,90 @@ mod tests {
     #[test]
     fn add_message_records_event() {
         let mut t = make_thread();
-        t.add_message(ThreadMessage::user("hello"));
+        let msg = ThreadMessage::user("hello");
+        let expected_id = msg.id;
+        t.add_message(msg);
         assert_eq!(t.messages.len(), 1);
         assert_eq!(t.events.len(), 1);
         match &t.events[0].kind {
-            EventKind::MessageAdded { role, .. } => assert_eq!(role, "User"),
+            EventKind::MessageAdded {
+                role,
+                message_id,
+                assistant_content_kind,
+                narrative,
+            } => {
+                assert_eq!(role, "User");
+                assert_eq!(*message_id, expected_id);
+                assert!(assistant_content_kind.is_none());
+                assert!(narrative.is_none());
+            }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn add_assistant_message_records_typed_content_kind() {
+        let mut t = make_thread();
+        let msg = ThreadMessage::assistant_with_typed_content(
+            AssistantContent::UserVisibleNarrative("Inspecting the page first...".to_string()),
+        );
+        let expected_id = msg.id;
+        t.add_message(msg);
+
+        match &t.events[0].kind {
+            EventKind::MessageAdded {
+                role,
+                message_id,
+                assistant_content_kind,
+                narrative,
+            } => {
+                assert_eq!(role, "Assistant");
+                assert_eq!(*message_id, expected_id);
+                assert_eq!(
+                    *assistant_content_kind,
+                    Some(AssistantContentKind::UserVisibleNarrative)
+                );
+                assert_eq!(narrative.as_deref(), Some("Inspecting the page first..."));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_assistant_reasoning_message_omits_narrative() {
+        let mut t = make_thread();
+        let msg = ThreadMessage::assistant_with_typed_content(AssistantContent::InternalReasoning(
+            "Let me think about this step by step...".to_string(),
+        ));
+        let expected_id = msg.id;
+        t.add_message(msg);
+
+        match &t.events[0].kind {
+            EventKind::MessageAdded {
+                message_id,
+                assistant_content_kind,
+                narrative,
+                ..
+            } => {
+                assert_eq!(*message_id, expected_id);
+                assert_eq!(
+                    *assistant_content_kind,
+                    Some(AssistantContentKind::InternalReasoning)
+                );
+                assert!(narrative.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_message_resolves_by_id() {
+        let mut t = make_thread();
+        let msg = ThreadMessage::user("hello");
+        let id = msg.id;
+        t.add_message(msg);
+        let resolved = t.message(id).expect("message present");
+        assert_eq!(resolved.content, "hello");
     }
 
     #[test]

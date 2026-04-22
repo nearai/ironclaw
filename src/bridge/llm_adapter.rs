@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ironclaw_engine::{
-    ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, ThreadMessage,
-    TokenUsage,
+    ActionDef, AssistantContent, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse,
+    ThreadMessage, TokenUsage,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -187,6 +187,7 @@ impl LlmBackend for LlmBridgeAdapter {
                     id: tc.id.clone(),
                     action_name: tc.name.clone(),
                     parameters: tc.arguments.clone(),
+                    rationale: tc.reasoning.clone(),
                 })
                 .collect();
 
@@ -207,7 +208,7 @@ impl LlmBackend for LlmBridgeAdapter {
 
             LlmResponse::ActionCalls {
                 calls,
-                content: response.content.clone(),
+                assistant_content: classify_tool_use_content(response.content.clone()),
             }
         } else {
             let raw_text = response.content.unwrap_or_default();
@@ -221,14 +222,14 @@ impl LlmBackend for LlmBridgeAdapter {
                         id: tc.id.clone(),
                         action_name: tc.name.clone(),
                         parameters: tc.arguments.clone(),
+                        rationale: tc.reasoning.clone(),
                     })
                     .collect();
-                let content = if cleaned_text.trim().is_empty() {
-                    None
-                } else {
-                    Some(cleaned_text)
-                };
-                LlmResponse::ActionCalls { calls, content }
+                let assistant_content = classify_tool_use_content(Some(cleaned_text));
+                LlmResponse::ActionCalls {
+                    calls,
+                    assistant_content,
+                }
             } else {
                 // Detect ```repl or ```python fenced code blocks after stripping
                 // provider-flattened tool markers from visible text.
@@ -408,7 +409,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     id: c.id.clone(),
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
-                    reasoning: None,
+                    reasoning: c.rationale.clone(),
                 })
                 .collect(),
         );
@@ -498,13 +499,24 @@ fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
     match extract_code_block(&cleaned_text) {
         Some(code) => LlmResponse::Code {
             code,
-            content: Some(cleaned_text),
+            assistant_content: Some(AssistantContent::InternalReasoning(cleaned_text)),
         },
         None if cleaned_text.trim().is_empty() => {
             LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string())
         }
         None => LlmResponse::Text(cleaned_text),
     }
+}
+
+fn classify_tool_use_content(content: Option<String>) -> Option<AssistantContent> {
+    content.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(AssistantContent::InternalReasoning(trimmed.to_string()))
+        }
+    })
 }
 
 /// Heuristic check that a bare ``` block contains Python rather than
@@ -599,7 +611,9 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
-    use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
+    use ironclaw_engine::{
+        ActionCall, ActionDef, AssistantContent, EffectType, LlmResponse, ThreadMessage,
+    };
 
     use crate::error::LlmError;
     use crate::llm::ToolCompletionResponse;
@@ -763,6 +777,7 @@ mod tests {
                     id: "call_1".to_string(),
                     action_name: "search".to_string(),
                     parameters: serde_json::json!({"q": "docs"}),
+                    rationale: None,
                 }],
             ),
             ThreadMessage::action_result("call_1", "search", "result payload"),
@@ -829,6 +844,83 @@ mod tests {
         }
     }
 
+    struct ToolReasoningProvider;
+
+    #[async_trait]
+    impl LlmProvider for ToolReasoningProvider {
+        fn model_name(&self) -> &str {
+            "tool-reasoning-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            unreachable!("test only uses complete_with_tools")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("I should inspect the page before answering.".to_string()),
+                tool_calls: vec![crate::llm::ToolCall {
+                    id: "call_fetch_1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: serde_json::json!({"url": "https://example.com"}),
+                    reasoning: Some(
+                        "Need the page contents before I can summarize it.".to_string(),
+                    ),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_classifies_internal_reasoning_and_tool_rationale() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(ToolReasoningProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("summarize this page")],
+                &[test_action("web_fetch")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::ActionCalls {
+                calls,
+                assistant_content,
+            } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].action_name, "web_fetch");
+                assert_eq!(
+                    calls[0].rationale.as_deref(),
+                    Some("Need the page contents before I can summarize it.")
+                );
+                assert!(matches!(
+                    assistant_content,
+                    Some(AssistantContent::InternalReasoning(text))
+                        if text == "I should inspect the page before answering."
+                ));
+            }
+            other => panic!("expected action calls with typed assistant content, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn complete_with_tools_recovers_flattened_bracket_tool_calls() {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
@@ -846,14 +938,18 @@ mod tests {
             .unwrap();
 
         match output.response {
-            LlmResponse::ActionCalls { calls, content } => {
+            LlmResponse::ActionCalls {
+                calls,
+                assistant_content,
+            } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].action_name, "shell");
                 assert_eq!(calls[0].parameters["command"], "pi list 2>&1");
-                assert_eq!(
-                    content.as_deref(),
-                    Some("Now let me list your installed extensions and start Pi:")
-                );
+                assert!(matches!(
+                    assistant_content,
+                    Some(AssistantContent::InternalReasoning(text))
+                        if text == "Now let me list your installed extensions and start Pi:"
+                ));
             }
             other => panic!("expected recovered action call, got {other:?}"),
         }
@@ -1225,16 +1321,19 @@ And also check the token price:\n\
                         id: "call_AAA".into(),
                         action_name: "tool_a".into(),
                         parameters: serde_json::json!({}),
+                        rationale: None,
                     },
                     ActionCall {
                         id: "call_BBB".into(),
                         action_name: "tool_b".into(),
                         parameters: serde_json::json!({}),
+                        rationale: None,
                     },
                     ActionCall {
                         id: "call_CCC".into(),
                         action_name: "tool_c".into(),
                         parameters: serde_json::json!({}),
+                        rationale: None,
                     },
                 ],
             ),
@@ -1487,6 +1586,7 @@ And also check the token price:\n\
                     id: "call-1".into(),
                     action_name: "memory_write".into(),
                     parameters: serde_json::json!({"target": "projects/test/AGENTS.md"}),
+                    rationale: None,
                 }],
             ),
             ThreadMessage::action_result(
