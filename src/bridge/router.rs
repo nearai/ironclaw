@@ -4562,10 +4562,6 @@ async fn forward_event_to_channel(
     }
 }
 
-/// Convert a ThreadEvent to AppEvents for the web gateway SSE stream.
-///
-/// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
-/// so the frontend creates the card then resolves it).
 /// Bridge engine-side `CodeExecutionFailure` to its wire mirror
 /// `CodeExecutionFailureCategory` in `ironclaw_common`.
 ///
@@ -4591,6 +4587,10 @@ fn code_execution_category_to_wire(
     }
 }
 
+/// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
+///
+/// Returns multiple events when needed (e.g., `ToolStarted` + `ToolCompleted`
+/// so the frontend creates the card then resolves it).
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
     thread_id: &str,
@@ -4710,6 +4710,57 @@ fn thread_event_to_app_events(
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
+        }],
+        EventKind::LeaseGranted {
+            lease_id,
+            capability_name,
+        } => vec![AppEvent::LeaseGranted {
+            lease_id: lease_id.to_string(),
+            capability_name: capability_name.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseRevoked { lease_id, reason } => vec![AppEvent::LeaseRevoked {
+            lease_id: lease_id.to_string(),
+            reason: reason.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseExpired { lease_id } => vec![AppEvent::LeaseExpired {
+            lease_id: lease_id.to_string(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementStarted => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Started,
+            prompt_updated: None,
+            patterns_added: None,
+            error: None,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementComplete {
+            prompt_updated,
+            patterns_added,
+        } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Complete,
+            prompt_updated: Some(*prompt_updated),
+            patterns_added: Some(*patterns_added),
+            error: None,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementFailed { error } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Failed,
+            prompt_updated: None,
+            patterns_added: None,
+            error: Some(error.clone()),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+        } => vec![AppEvent::OrchestratorRollback {
+            from_version: *from_version,
+            to_version: *to_version,
+            reason: reason.clone(),
+            thread_id: Some(thread_id.into()),
         }],
         _ => vec![],
     }
@@ -7240,6 +7291,101 @@ mod tests {
         assert_eq!(*duration_ms, 42);
         assert_eq!(code_hash.as_deref(), Some("abc123"));
         assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_granted() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseGranted {
+                lease_id: lease,
+                capability_name: "http_fetch".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-lease");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseGranted {
+            lease_id,
+            capability_name,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseGranted, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(capability_name, "http_fetch");
+        assert_eq!(thread_id.as_deref(), Some("thread-lease"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_complete() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementComplete {
+                prompt_updated: true,
+                patterns_added: 3,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement {
+            phase,
+            prompt_updated,
+            patterns_added,
+            error,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(*phase, ironclaw_common::SelfImprovementPhase::Complete);
+        assert_eq!(*prompt_updated, Some(true));
+        assert_eq!(*patterns_added, Some(3));
+        assert!(
+            error.is_none(),
+            "error should be None on Complete phase, got {error:?}"
+        );
+        assert_eq!(thread_id.as_deref(), Some("thread-improve"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_orchestrator_rollback() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 7,
+                to_version: 6,
+                reason: "health probe failed after upgrade".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-rollback");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::OrchestratorRollback, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(*from_version, 7);
+        assert_eq!(*to_version, 6);
+        assert_eq!(reason, "health probe failed after upgrade");
+        assert_eq!(thread_id.as_deref(), Some("thread-rollback"));
     }
 
     #[test]
