@@ -348,13 +348,29 @@ impl EffectBridgeAdapter {
         params: &serde_json::Value,
         context: &ThreadExecutionContext,
     ) -> Option<Result<ActionResult, EngineError>> {
+        let mgr = self.mission_manager.read().await;
+        let mgr = mgr.as_ref()?;
+
         // Translate routine_* aliases to mission_* before dispatching. The
         // routine schema is richer (kind/schedule/pattern/source/event_type/
         // filters/execution/delivery/advanced) than mission_*; the translator
         // collapses it into mission fields plus a follow-up update for the
         // non-execution guardrails (cooldown, max_concurrent, dedup_window,
         // notify_user, context_paths, description).
-        let routine_alias = routine_to_mission_alias(action_name, params);
+        let mut routine_alias = routine_to_mission_alias(action_name, params);
+
+        // v1 addressed routines by display name (`UNIQUE (user_id, name)` in
+        // the routines table), resolving name → UUID inside each tool via
+        // `get_routine_by_name`. v2 missions use UUID addressing, so routine
+        // aliases must bridge the two conventions before dispatch — otherwise
+        // `routine_delete(name="Daily Check")` arrives at `mission_complete`
+        // as `{"name":"Daily Check"}` and fails UUID parsing.
+        if let Some(alias) = routine_alias.as_mut()
+            && let Err(e) = resolve_mission_identity(alias, mgr, context).await
+        {
+            return Some(Err(e));
+        }
+
         let (effective_action, effective_params, post_create_update) =
             if let Some(alias) = routine_alias.as_ref() {
                 (
@@ -368,11 +384,7 @@ impl EffectBridgeAdapter {
         let action_name = effective_action;
         let params = effective_params.as_ref();
 
-        let mgr = self.mission_manager.read().await;
-        let mgr = mgr.as_ref()?;
-
-        // Accept id, mission_id, name, or positional — fail loudly on empty
-        // so a wrong kwarg name surfaces instead of becoming "invalid uuid: found 0".
+        // Accept id, mission_id, or positional — fail loudly on empty
         fn resolve_mission_id(
             params: &serde_json::Value,
             action: &str,
@@ -380,20 +392,23 @@ impl EffectBridgeAdapter {
             let id_str = params
                 .get("id")
                 .or_else(|| params.get("mission_id"))
-                .or_else(|| params.get("name"))
                 .or_else(|| params.get("_args").and_then(|a| a.get(0)))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| EngineError::Effect {
                     reason: format!(
                         "{action} requires a mission id — pass `id=<uuid>` \
-                         (also accepts `mission_id`, `name`, or positional)"
+                         (also accepts `mission_id` or positional)"
                     ),
                 })?;
             uuid::Uuid::parse_str(id_str)
                 .map(ironclaw_engine::MissionId)
                 .map_err(|e| EngineError::Effect {
-                    reason: format!("invalid mission id {id_str:?}: {e}"),
+                    reason: format!(
+                        "invalid mission id {id_str:?}: {e}. Expected a v4 UUID \
+                         (8-4-4-4-12 hex digits); call `mission_list()` to look \
+                         up the id of an existing mission."
+                    ),
                 })
         }
 
@@ -1858,6 +1873,46 @@ struct RoutineMissionAlias {
     mission_action: &'static str,
     mission_params: serde_json::Value,
     post_create_update: Option<ironclaw_engine::MissionUpdate>,
+}
+
+/// Translate a routine alias's `name` lookup key into a mission `id`.
+/// v1 routine tools did this via `get_routine_by_name` internally; v2
+/// aliases forward `name` unchanged, so without this call
+/// `routine_delete(name="Daily Check")` fails UUID parsing downstream.
+async fn resolve_mission_identity(
+    alias: &mut RoutineMissionAlias,
+    mgr: &ironclaw_engine::MissionManager,
+    context: &ThreadExecutionContext,
+) -> Result<(), EngineError> {
+    // Skip actions that don't take an id — `name` means something else there.
+    if matches!(alias.mission_action, "mission_create" | "mission_list") {
+        return Ok(());
+    }
+
+    let Some(obj) = alias.mission_params.as_object_mut() else {
+        return Ok(());
+    };
+    if obj.contains_key("id") {
+        return Ok(());
+    }
+    let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(str::to_string) else {
+        return Ok(());
+    };
+
+    let missions = mgr
+        .list_missions(context.project_id, &context.user_id)
+        .await?;
+    match missions.iter().find(|m| m.name == name) {
+        Some(m) => {
+            obj.insert("id".into(), serde_json::Value::String(m.id.to_string()));
+            Ok(())
+        }
+        None => Err(EngineError::Effect {
+            reason: format!(
+                "no mission named {name:?}; call `mission_list()` to see available missions"
+            ),
+        }),
+    }
 }
 
 /// Translate a `routine_*` action call into mission_* parameters. Returns
@@ -5510,6 +5565,119 @@ Use this skill to set up a Pika meeting.
         assert!(
             err.contains("invalid mission id") && err.contains("daily-check"),
             "error should quote the offending id value, got: {err}"
+        );
+    }
+
+    /// Regression: `routine_delete(name="X")` must actually complete the
+    /// mission named "X". v1 routine tools resolved name→UUID internally
+    /// via `get_routine_by_name`; v2 aliases forward `name` unchanged, so
+    /// without name-resolution at the alias boundary the call fails with
+    /// "invalid mission id". Drives the full alias → resolve_identity →
+    /// mission_complete path.
+    #[tokio::test]
+    async fn routine_delete_by_name_completes_aliased_mission() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd1"));
+
+        // Create a mission with a known display name.
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "Daily Check",
+                    "goal": "review things",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+
+        // routine_delete(name="Daily Check") → alias → mission_complete.
+        let delete = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_delete should resolve and complete");
+
+        assert!(
+            !delete.is_error,
+            "routine_delete(name=...) must succeed via alias, got: {}",
+            delete.output
+        );
+        assert_eq!(
+            delete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "alias should complete the mission, got: {}",
+            delete.output
+        );
+    }
+
+    /// Regression: `routine_delete(name="unknown")` must surface a clear
+    /// "no mission named ..." error, not a UUID parse failure. Error path
+    /// returns `Err(EngineError)` — the outer dispatcher renders it to the
+    /// LLM as an action-error result.
+    #[tokio::test]
+    async fn routine_delete_by_unknown_name_surfaces_clear_error() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd2"));
+
+        let result = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "ghost routine"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        let err = result.expect_err("unknown name should bubble up as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no mission named") && msg.contains("ghost routine"),
+            "error should name the missing routine, got: {msg}"
+        );
+    }
+
+    /// Regression: `mission_update` has a real `name` param (the new
+    /// display name). When the caller forgets `id` and supplies only
+    /// `name`, we must NOT parse `name` as a UUID alias — that produces
+    /// a misleading "invalid mission id 'new name'" error. The helper
+    /// must surface the canonical "requires a mission id" message.
+    #[tokio::test]
+    async fn mission_update_without_id_does_not_treat_name_as_id_alias() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("upd1"));
+
+        let result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({"name": "renamed mission"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("missing id must surface as is_error=true, not Err");
+
+        assert!(result.is_error, "got: {}", result.output);
+        let err = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err.contains("requires a mission id"),
+            "error must say id is required, not quote the new name value; got: {err}"
+        );
+        assert!(
+            !err.contains("renamed mission"),
+            "error must NOT quote the `name` param (it's not an id alias); got: {err}"
         );
     }
 
