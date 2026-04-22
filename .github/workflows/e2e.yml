@@ -15,7 +15,6 @@ on:
     paths:
       - "src/channels/web/**"
       - "tests/e2e/**"
-  merge_group:
 
 permissions:
   contents: read
