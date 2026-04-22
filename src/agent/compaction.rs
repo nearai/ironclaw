@@ -314,16 +314,16 @@ fn format_turns_for_storage(turns: &[crate::agent::session::Turn]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::session::Thread;
+    use crate::agent::session::{Thread, TurnOutcome};
     use uuid::Uuid;
 
     #[test]
     fn test_format_turns() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("Hello");
-        thread.complete_turn("Hi there");
+        thread.conclude_turn(TurnOutcome::Completed("Hi there".into()));
         thread.start_turn("How are you?");
-        thread.complete_turn("I'm good!");
+        thread.conclude_turn(TurnOutcome::Completed("I'm good!".into()));
 
         let formatted = format_turns_for_storage(&thread.turns);
         assert!(formatted.contains("Turn 1"));
@@ -354,7 +354,7 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
         for i in 0..n {
             thread.start_turn(format!("msg-{}", i));
-            thread.complete_turn(format!("resp-{}", i));
+            thread.conclude_turn(TurnOutcome::Completed(format!("resp-{}", i)));
         }
         thread
     }
@@ -704,7 +704,7 @@ mod tests {
         if let Some(turn) = thread.turns.last_mut() {
             turn.record_tool_call("search", serde_json::json!({"query": "X"}));
         }
-        thread.complete_turn("Found X");
+        thread.conclude_turn(TurnOutcome::Completed("Found X".into()));
 
         let formatted = format_turns_for_storage(&thread.turns);
         assert!(formatted.contains("Turn 1"));

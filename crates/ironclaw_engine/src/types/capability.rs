@@ -30,9 +30,13 @@ pub enum GrantedActions {
 impl GrantedActions {
     /// Check whether a specific action is covered.
     pub fn covers(&self, action_name: &str) -> bool {
+        let hyphenated = action_name.replace('_', "-");
+        let underscored = action_name.replace('-', "_");
         match self {
             GrantedActions::All => true,
-            GrantedActions::Specific(actions) => actions.iter().any(|a| a == action_name),
+            GrantedActions::Specific(actions) => actions.iter().any(|action| {
+                action == action_name || action == &hyphenated || action == &underscored
+            }),
         }
     }
 
@@ -344,5 +348,15 @@ mod tests {
         assert!(lease.covers_action("create_issue"));
         assert!(lease.covers_action("list_prs"));
         assert!(!lease.covers_action("delete_repo"));
+    }
+
+    #[test]
+    fn covers_action_matches_hyphen_underscore_aliases() {
+        let mut lease = make_lease();
+        lease.granted_actions = GrantedActions::Specific(vec!["create_issue".into()]);
+        assert!(lease.covers_action("create-issue"));
+
+        lease.granted_actions = GrantedActions::Specific(vec!["list-prs".into()]);
+        assert!(lease.covers_action("list_prs"));
     }
 }

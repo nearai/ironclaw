@@ -46,7 +46,7 @@ activation:
 
 # Commitment Triage
 
-You have a commitments tracking system in the workspace under `commitments/`. Read `commitments/README.md` for the full schema if you need field details.
+You have a commitments tracking system in the workspace under `projects/commitments/`. Read `projects/commitments/README.md` for the full schema if you need field details.
 
 ## Mode A: Passive signal detection
 
@@ -70,16 +70,16 @@ Treat inbound-message phrasings like these as strong passive signals too:
 - "Email from legal: can you comment on the draft by Thursday?"
 
 **Action:**
-1. Check for duplicates: `memory_search` for key phrases within `commitments/`
+1. Check for duplicates: `memory_search` for key phrases within `projects/commitments/`
 2. If no duplicate, call `memory_write` with:
-   - `target`: `commitments/signals/pending/<slug>.md`
+   - `target`: `projects/commitments/signals/pending/<slug>.md`
    - `append`: false
    - Content: signal frontmatter + description
 3. Only after the `memory_write` succeeds, at a natural pause briefly note:
    "I've tracked a commitment about [topic]."
 
 Do not merely acknowledge or summarize an obligation. This mode is successful
-only if a signal is actually written to `commitments/signals/pending/`.
+only if a signal is actually written to `projects/commitments/signals/pending/`.
 
 Do NOT interrupt the conversation flow. Signal extraction is a side-effect.
 For commitment tracking, use `memory_tree`, `memory_read`, and `memory_write`.
@@ -110,8 +110,8 @@ promoted_to: null
 - `batch`: most obligations — meeting action items, reports to read, tasks with multi-day deadlines
 
 **Signal destinations (set during triage, not initial extraction):**
-- `commitment`: actionable, tracked → promote to `commitments/open/`
-- `parked_idea`: interesting but not now → write to `commitments/parked-ideas/`
+- `commitment`: actionable, tracked → promote to `projects/commitments/open/`
+- `parked_idea`: interesting but not now → write to `projects/commitments/parked-ideas/`
 - `intelligence`: informational, shapes future decisions → write a durable MemoryDoc via `memory_write` to a non-commitments path (e.g. `context/intel/<slug>.md`)
 - `dismissed`: not relevant
 
@@ -136,7 +136,7 @@ Example:
   sheet. Do not only confirm it in prose, and do not reuse Sarah's file.
 
 **Action:**
-1. Skip the signal stage — write directly to `commitments/open/<slug>.md`
+1. Skip the signal stage — write directly to `projects/commitments/open/<slug>.md`
 2. Ask for missing details ONLY if truly ambiguous. Infer reasonable defaults.
 3. Confirm briefly only after the write succeeds: "Tracked: [description], due [date], urgency [level]."
 
@@ -187,19 +187,19 @@ For `agent_can_handle`, note in the commitment body what the agent would do. The
 When the user says they finished something: "done with X", "finished the review", "sent the reply to Sarah".
 
 **Action:**
-1. `memory_tree("commitments/open/", depth=1)` to find the matching commitment
+1. `memory_tree("projects/commitments/open/", depth=1)` to find the matching commitment
 2. `memory_read` the likely match to confirm
-3. Write the updated file (status: resolved, resolved_by: user) to `commitments/resolved/<same-slug>.md`
-4. Overwrite the original with empty content: `memory_write(target="commitments/open/<slug>.md", content="", append=false)`
+3. Write the updated file (status: resolved, resolved_by: user) to `projects/commitments/resolved/<same-slug>.md`
+4. Overwrite the original with empty content: `memory_write(target="projects/commitments/open/<slug>.md", content="", append=false)`
 5. Confirm: "Resolved: [title]."
 
 ## Mode D: Signal promotion (used by triage mission)
 
 When reviewing pending signals (manually via "review signals" or during a triage mission run):
-1. `memory_tree("commitments/signals/pending/", depth=1)` to list signals
+1. `memory_tree("projects/commitments/signals/pending/", depth=1)` to list signals
 2. For each, `memory_read` and route to destination:
-   - Actionable → create commitment in `commitments/open/`, set signal `destination: commitment`
-   - Interesting but not now → write to `commitments/parked-ideas/`, set `destination: parked_idea`
+   - Actionable → create commitment in `projects/commitments/open/`, set signal `destination: commitment`
+   - Interesting but not now → write to `projects/commitments/parked-ideas/`, set `destination: parked_idea`
    - Informational → write a MemoryDoc to `context/intel/`, set `destination: intelligence`
    - Not relevant → move to `signals/expired/`, set `destination: dismissed`
 3. Update the signal's `promoted_to` field for commitment destinations

@@ -1119,6 +1119,7 @@ impl Tool for RoutineCreateTool {
         "Create a new routine (scheduled or event-driven task). \
          Supports cron schedules, event pattern matching, system events, and manual triggers. \
          Use this when the user wants something to happen periodically or reactively. \
+         Do not use this for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. \
          Creation saves the routine, but does not verify that it will execute successfully."
     }
 

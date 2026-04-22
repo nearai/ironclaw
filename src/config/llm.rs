@@ -78,6 +78,141 @@ impl LlmConfig {
         }
     }
 
+    /// Resolve LLM configuration, with NearAI fallback for unusable configs.
+    ///
+    /// This entry point is for the **final** resolve after secrets have been
+    /// hydrated from the encrypted store. If the user-configured backend is
+    /// not usable (missing API key, missing base URL), we fall back to NearAI
+    /// rather than crashing — this prevents the #2514 crash-loop when a user
+    /// activates a provider via the UI without completing all required
+    /// fields.
+    ///
+    /// Do NOT call this during early startup (`Config::build()`) when
+    /// secrets are not yet hydrated — use [`resolve`] instead, otherwise
+    /// the fallback fires spuriously and gets overridden by the later
+    /// re-resolve, spamming operators with misleading error logs.
+    pub(crate) fn resolve_with_fallback(settings: &Settings) -> Result<Self, ConfigError> {
+        match Self::resolve(settings) {
+            Ok(cfg) => {
+                if let Some(reason) = Self::unusable_reason(&cfg, settings) {
+                    tracing::error!(
+                        backend = %cfg.backend,
+                        reason = %reason,
+                        "Configured LLM backend is not usable. Falling back to NearAI default. \
+                         Reconfigure in Settings → Inference → Model Providers."
+                    );
+                    Self::resolve_nearai_fallback(settings, &cfg.backend)
+                } else {
+                    Ok(cfg)
+                }
+            }
+            Err(e) if Self::is_fallback_recoverable(&e) => {
+                tracing::error!(
+                    error = %e,
+                    configured_backend = ?settings.llm_backend,
+                    "Failed to resolve configured LLM backend. Falling back to NearAI default. \
+                     Reconfigure in Settings → Inference → Model Providers."
+                );
+                let attempted = settings
+                    .llm_backend
+                    .clone()
+                    .unwrap_or_else(|| "<unset>".to_string());
+                Self::resolve_nearai_fallback(settings, &attempted)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// If the resolved config's LLM provider is unusable, return a short
+    /// reason string. `None` means the config is fine to use. Returns `None`
+    /// for special backends that don't use the `provider` slot
+    /// (nearai/bedrock/codex/gemini_oauth) — those have their own validation
+    /// inside `resolve_once`.
+    ///
+    /// This check is deliberately narrow: it only flags configurations that
+    /// will certainly fail at runtime. Built-in providers like Anthropic may
+    /// legitimately have an empty `base_url` at config time because the
+    /// downstream rig-core client hardcodes the canonical endpoint.
+    fn unusable_reason(cfg: &Self, settings: &Settings) -> Option<&'static str> {
+        let provider = cfg.provider.as_ref()?;
+
+        let is_custom = settings
+            .llm_custom_providers
+            .iter()
+            .any(|c| c.id == provider.provider_id);
+        let is_ollama = matches!(provider.protocol, ProviderProtocol::Ollama);
+
+        // Custom providers have no hardcoded base URL in the client layer —
+        // an empty `base_url` here means requests will be sent to a bare
+        // path with no host, which always fails.
+        if is_custom && provider.base_url.trim().is_empty() {
+            return Some("missing base URL");
+        }
+
+        // Ollama runs locally and has no API key concept. Every other
+        // provider needs at least one form of authentication.
+        if !is_ollama
+            && provider.api_key.is_none()
+            && provider.oauth_token.is_none()
+            && provider.refresh_token.is_none()
+        {
+            return Some("missing API key");
+        }
+
+        None
+    }
+
+    /// Errors that indicate a fixable user-config problem (as opposed to a
+    /// programming bug or environmental failure). We fall back to NearAI on
+    /// these so the instance can still start.
+    fn is_fallback_recoverable(err: &ConfigError) -> bool {
+        matches!(err, ConfigError::MissingRequired { .. })
+    }
+
+    /// Re-resolve with `llm_backend` forced to `"nearai"`.
+    /// `attempted_backend` is only used for logging so operators can see which
+    /// backend we bailed out of.
+    fn resolve_nearai_fallback(
+        settings: &Settings,
+        attempted_backend: &str,
+    ) -> Result<Self, ConfigError> {
+        let mut fallback = settings.clone();
+        fallback.llm_backend = Some("nearai".to_string());
+        // The previously-selected model was tied to the unusable backend
+        // (e.g. "openai/gpt-4o" for OpenRouter, "kimi-k2-turbo-preview" for
+        // a custom kimi provider). Sending it to NearAI would 404. Clear it
+        // so resolve_model falls through to NearAI's default. The DB sync in
+        // Config::re_resolve_llm_with_secrets deletes the row persistently;
+        // this keeps the in-memory config consistent for the current process.
+        fallback.selected_model = None;
+        let cfg = Self::resolve(&fallback).map_err(|e| {
+            tracing::error!(
+                attempted = %attempted_backend,
+                fallback_error = %e,
+                "NearAI fallback also failed to resolve — surfacing original error"
+            );
+            e
+        })?;
+        tracing::warn!(
+            attempted = %attempted_backend,
+            active = %cfg.backend,
+            active_model = %cfg.nearai.model,
+            "Active LLM backend fell back to NearAI default due to unusable user config"
+        );
+        Ok(cfg)
+    }
+
+    /// Resolve LLM configuration without any fallback behavior.
+    ///
+    /// Returns the config exactly as computed from env/DB/defaults, with no
+    /// safety net for missing credentials. Use this for:
+    /// - Early startup (before secrets are hydrated), so a spurious fallback
+    ///   doesn't fire and get overridden by the later re-resolve.
+    /// - Tests that verify pure resolution mechanics (model/base_url priority
+    ///   chains, alias normalization, etc.).
+    ///
+    /// The top-level `AppBuilder` path calls [`resolve_with_fallback`] after
+    /// hydrating secrets, which handles #2514-style crash-loop prevention.
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let registry = ProviderRegistry::load();
 
@@ -274,7 +409,7 @@ impl LlmConfig {
                 .clone()
                 .or(optional_env("BEDROCK_REGION")?);
             if explicit_region.is_none() {
-                tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
+                tracing::debug!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
             let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
             let model = Self::selected_model_override(settings)
@@ -461,7 +596,7 @@ impl LlmConfig {
         custom: &crate::settings::CustomLlmProviderSettings,
         settings: &Settings,
     ) -> Result<RegistryProviderConfig, ConfigError> {
-        tracing::info!(
+        tracing::debug!(
             id = %custom.id,
             adapter = %custom.adapter,
             base_url = ?custom.base_url,
@@ -2453,5 +2588,280 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings)
             .expect("resolve should succeed for non-NearAI backend without NearAI URL validation");
         assert_eq!(cfg.backend, "openai_compatible");
+    }
+
+    // ── Fallback-to-NearAI tests (issue #2514) ─────────────────────────────
+    //
+    // When the user-configured backend is unusable (missing API key or base
+    // URL), `resolve()` must NOT propagate the incomplete config. It must
+    // fall back to NearAI so the instance can still start and the user can
+    // reach the Web UI to fix their config. Previously, activating Anthropic
+    // without an API key put the instance into a crash loop.
+
+    #[test]
+    fn resolve_falls_back_to_nearai_when_registry_backend_missing_api_key() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+
+        // resolve() would hand back an unusable anthropic config (no key);
+        // resolve_with_fallback() must notice that and fall back to NearAI.
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
+        assert_eq!(
+            cfg.backend, "nearai",
+            "unusable anthropic backend must fall back to NearAI"
+        );
+        assert!(
+            cfg.provider.is_none(),
+            "NearAI fallback should not populate provider slot"
+        );
+    }
+
+    #[test]
+    fn resolve_fallback_clears_stale_selected_model() {
+        // Regression: when the user-configured backend (e.g. openrouter) was
+        // paired with a selected_model tied to that backend (e.g.
+        // "openai/gpt-4o"), fallback used to carry the stale model into the
+        // NearAI config. The runtime would then POST /v1/chat/completions
+        // with `"model": "openai/gpt-4o"` to NearAI, which 404s forever.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_API_KEY");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            // Model a user would pick for openai_compatible/openrouter,
+            // nonsensical to NearAI.
+            selected_model: Some("openai/gpt-4o".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
+        assert_eq!(cfg.backend, "nearai");
+        assert_ne!(
+            cfg.nearai.model, "openai/gpt-4o",
+            "fallback must not carry the pre-fallback selected_model into NearAI config — \
+             got a stale model that would 404 on the first request"
+        );
+        assert_eq!(
+            cfg.nearai.model,
+            crate::llm::DEFAULT_MODEL,
+            "NearAI fallback should use the built-in default model when the pre-fallback \
+             selection is cleared"
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_when_openai_compatible_missing_base_url() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_API_KEY");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            ..Default::default()
+        };
+
+        // openai_compatible has base_url_required=true and no default — this
+        // previously returned Err(MissingRequired), causing main.rs to bail
+        // and the container to crash-loop. resolve() now recovers.
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
+        assert_eq!(cfg.backend, "nearai");
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_when_backend_is_properly_configured() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("GROQ_API_KEY", TEST_API_KEY);
+        }
+
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "groq",
+            "a properly-configured backend must NOT trigger fallback"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("GROQ_API_KEY");
+        }
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_anthropic_oauth_only() {
+        // Anthropic with only an OAuth token (no API key) must still resolve
+        // normally — the oauth_token counts as valid auth.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
+        }
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "anthropic",
+            "anthropic with OAuth token must NOT fall back"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        }
+    }
+
+    #[test]
+    fn resolve_falls_back_when_custom_provider_has_empty_base_url() {
+        // Custom providers have no hardcoded default base URL in the client
+        // layer, so an empty base_url means requests go to a bare path with
+        // no host. unusable_reason must catch this and fall back to NearAI.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("my-broken".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "my-broken".to_string(),
+                name: "My Broken".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: None,
+                default_model: Some("some-model".to_string()),
+                api_key: Some("sk-test".to_string()),
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("resolve should succeed via fallback");
+        assert_eq!(
+            cfg.backend, "nearai",
+            "custom provider with empty base_url must fall back to NearAI"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_ollama_without_api_key() {
+        // Ollama runs locally and has no API key concept — missing api_key
+        // must NOT trigger fallback for built-in ollama.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OLLAMA_BASE_URL");
+            std::env::remove_var("OLLAMA_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "ollama",
+            "ollama without api_key must NOT trigger fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_custom_ollama_with_base_url_no_key() {
+        // Custom ollama provider with a valid base_url and no api_key is
+        // fully usable — the !is_ollama guard in unusable_reason must skip
+        // the api_key check for any ollama-protocol provider.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("my-ollama".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "my-ollama".to_string(),
+                name: "My Ollama".to_string(),
+                adapter: "ollama".to_string(),
+                base_url: Some("http://localhost:11434".to_string()),
+                default_model: Some("llama3".to_string()),
+                api_key: None,
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "my-ollama",
+            "custom ollama provider without api_key must NOT fall back"
+        );
+    }
+
+    #[test]
+    fn resolve_pure_does_not_trigger_fallback_or_log() {
+        // Regression test for the spurious "Falling back to NearAI" log that
+        // fired at early-startup resolve (before secrets were hydrated) and
+        // then got overridden by the later re-resolve. The fix split the
+        // entry points: resolve() is pure, resolve_with_fallback() is the
+        // one that may swap in NearAI. build() calls resolve() so the log
+        // never fires spuriously.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+
+        // Pure resolve keeps the configured backend even when it would be
+        // considered unusable — the caller is responsible for hydrating
+        // secrets and calling resolve_with_fallback afterwards.
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "anthropic",
+            "pure resolve must not auto-fall-back; that is resolve_with_fallback's job"
+        );
     }
 }

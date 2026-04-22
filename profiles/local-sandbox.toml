@@ -1,7 +1,8 @@
 # IronClaw Profile: local-sandbox
 #
 # Solo developer setup with Docker sandbox enabled for secure tool execution.
-# Same as 'local' but tools run inside isolated containers.
+# Same as 'local' but tools run inside isolated containers. Background tasks
+# remain enabled for the personal-assistant experience.
 #
 # Prerequisites:
 #   - Docker daemon running
@@ -19,10 +20,10 @@ enabled = true
 policy = "readonly"
 
 [heartbeat]
-enabled = false
+enabled = true
 
 [routines]
-enabled = false
+enabled = true
 
 [hygiene]
-enabled = false
+enabled = true

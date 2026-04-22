@@ -560,11 +560,19 @@ impl ConversationWidget {
                 }
 
                 let time_str = message.timestamp.format("%H:%M").to_string();
+                let mut content_lines = message.content.lines();
+                let first_line = content_lines.next().unwrap_or("").to_string();
                 lines.push(Line::from(vec![
                     Span::styled("\u{25CF} ".to_string(), self.theme.accent_style()),
-                    Span::styled(message.content.clone(), self.theme.bold_style()),
+                    Span::styled(first_line, self.theme.bold_style()),
                     Span::styled(format!("  {time_str}"), self.theme.dim_style()),
                 ]));
+                for extra in content_lines {
+                    lines.push(Line::from(vec![
+                        Span::raw("  ".to_string()),
+                        Span::styled(extra.to_string(), self.theme.bold_style()),
+                    ]));
+                }
                 lines.push(Line::from(""));
                 lines
             }
@@ -966,6 +974,7 @@ impl ConversationWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
 
     fn buffer_text(buf: &Buffer, area: Rect) -> String {
         let mut lines = Vec::new();
@@ -1007,6 +1016,19 @@ mod tests {
             timestamp: chrono::Utc::now(),
             cost_summary: None,
         }
+    }
+
+    fn user_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::User,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            cost_summary: None,
+        }
+    }
+
+    fn span_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     #[test]
@@ -1109,13 +1131,13 @@ mod tests {
     #[test]
     fn conversation_render_clamps_overlong_tool_lines() {
         let widget = ConversationWidget::new(Theme::dark());
-        let user_message = message(MessageRole::User, "read it");
+        let user_message_msg = message(MessageRole::User, "read it");
         let mut tool = recent_tool(ToolStatus::Success);
         tool.name = "read_file".to_string();
-        tool.started_at = user_message.timestamp + chrono::Duration::milliseconds(1);
+        tool.started_at = user_message_msg.timestamp + chrono::Duration::milliseconds(1);
         tool.detail = Some("a/very/long/path/that/would/otherwise/span/across/the/terminal/and/bleed/into/other/ui".to_string());
 
-        let mut state = state_with_messages(vec![user_message], tool);
+        let mut state = state_with_messages(vec![user_message_msg], tool);
         state.tool_summary_expanded = true;
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -1125,5 +1147,43 @@ mod tests {
         let text = buffer_text(&buf, area);
         assert!(text.contains("..."));
         assert!(!text.contains("bleed/into/other/ui"));
+    }
+
+    #[test]
+    fn user_message_with_newlines_renders_as_multiple_lines() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let lines = widget.render_message_lines(&user_message("hi\nhello\ngoodbye"), 80, true);
+
+        let body: Vec<String> = lines
+            .iter()
+            .map(span_text)
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+
+        assert!(
+            body.iter().any(|l| l.contains("hi")),
+            "missing first line: {body:?}"
+        );
+        assert!(
+            body.iter().any(|l| l.contains("hello")),
+            "missing second line: {body:?}"
+        );
+        assert!(
+            body.iter().any(|l| l.contains("goodbye")),
+            "missing third line: {body:?}"
+        );
+        // The three logical lines must each get their own ratatui Line.
+        let hi_line = body.iter().position(|l| l.contains("hi")).unwrap();
+        let hello_line = body.iter().position(|l| l.contains("hello")).unwrap();
+        let goodbye_line = body.iter().position(|l| l.contains("goodbye")).unwrap();
+        assert!(hi_line < hello_line && hello_line < goodbye_line);
+    }
+
+    #[test]
+    fn single_line_user_message_still_renders() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let lines = widget.render_message_lines(&user_message("just one line"), 80, true);
+        let joined: String = lines.iter().map(span_text).collect::<Vec<_>>().join("|");
+        assert!(joined.contains("just one line"));
     }
 }

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use crate::channels::web::server::{
+use crate::channels::web::platform::state::{
     ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
@@ -58,18 +58,23 @@ fn build_state(
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store,
+        settings_cache: None,
         job_manager: None,
         prompt_queue,
         owner_id: "test".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: None,
         llm_provider: None,
+        llm_reload: None,
+        llm_session_manager: None,
+        config_toml_path: None,
         skill_registry: None,
         skill_catalog: None,
         auth_manager: None,
@@ -81,7 +86,7 @@ fn build_state(
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ActiveConfigSnapshot::default(),
+        active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
@@ -352,7 +357,7 @@ mod workspace_pool {
 #[cfg(feature = "libsql")]
 mod jobs_isolation {
     use super::*;
-    use crate::channels::web::handlers::jobs::{
+    use crate::channels::web::features::jobs::{
         jobs_cancel_handler, jobs_prompt_handler, jobs_restart_handler, jobs_summary_handler,
     };
     // SandboxStore methods are accessed through the Database supertrait.
@@ -560,7 +565,7 @@ mod jobs_isolation {
 #[cfg(feature = "libsql")]
 mod routines_isolation {
     use super::*;
-    use crate::channels::web::handlers::routines::{
+    use crate::channels::web::features::routines::{
         routines_delete_handler, routines_detail_handler, routines_list_handler,
         routines_summary_handler, routines_toggle_handler,
     };
@@ -1260,18 +1265,23 @@ mod admin_tool_policy {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: Some(Arc::new(pool)),
+            multi_tenant_mode: true,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: Some(db),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
             skill_registry: None,
             skill_catalog: None,
             scheduler: None,
@@ -1282,7 +1292,7 @@ mod admin_tool_policy {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
             secrets_store: None,
             db_auth: None,
             pairing_store: None,

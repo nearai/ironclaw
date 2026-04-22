@@ -43,7 +43,10 @@ classify_size() {
   local total
   total=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
     --paginate --jq '
-      [.[] | select(.filename | test("\\.(md|txt|rst|adoc)$") | not) | .changes]
+      [.[]
+        | select(.filename | test("\\.(md|txt|rst|adoc)$") | not)
+        | select(.filename | test("^tests/|_test\\.rs$|_tests\\.rs$|/tests/|\\.test\\.[jt]sx?$|\\.spec\\.[jt]sx?$") | not)
+        | .changes]
       | add // 0
     ')
 

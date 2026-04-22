@@ -29,6 +29,10 @@ pub struct ThreadExecutionContext {
     /// Validated IANA timezone of the user (e.g. "America/New_York").
     /// Used by mission_create to default cron timezone, and exposed to CodeAct scripts.
     pub user_timezone: Option<ValidTimezone>,
+    /// The original goal for the executing thread.
+    /// Host adapters use this to distinguish immediate one-shot foreground
+    /// requests from explicit mission/routine setup.
+    pub thread_goal: Option<String>,
 }
 
 /// Abstraction over capability action execution.

@@ -1,0 +1,64 @@
+id: widget-shape
+description: |
+  Calls `format_widget` on a realistic bull-2024-03-like position set
+  and asserts the locked `portfolio-widget/1` schema is present, the
+  totals are computed, and the top suggestions are capped. This is
+  the shape-stability regression test for the web widget — any
+  change that breaks the format here also breaks the rendered UI.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xBU11000000000000000000000000000000000003"]
+      source: dune-replay
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          kind: yield-floor
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+          # stablecoin yield floor
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    capture:
+      proposals_var: proposals
+
+  - name: format_widget
+    action: format_widget
+    params:
+      positions: $positions
+      proposals: $proposals
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+      generated_at: "2026-04-11T12:00:00Z"
+      project_id: portfolio
+      next_mission_run: "2026-04-11T18:00:00Z"
+    expect:
+      widget_schema_version: portfolio-widget/1
+      widget_positions_min: 5
+      widget_top_suggestions_max: 3
+      widget_has_non_empty_totals: true

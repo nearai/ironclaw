@@ -23,8 +23,13 @@ Both flows drive the agent through chat triggers defined in
 ``mock_llm.py::TOOL_CALL_PATTERNS`` (look for ``customize:`` prefixes).
 """
 
+import asyncio
 import json
+import os
 import re
+import signal
+import socket
+import tempfile
 
 import httpx
 import pytest
@@ -34,6 +39,7 @@ from helpers import (
     SEL,
     auth_headers,
     send_chat_and_wait_for_terminal_message,
+    wait_for_ready,
 )
 
 
@@ -75,12 +81,213 @@ async def _wipe_customizations(base_url: str) -> None:
             )
 
 
+async def _stop_proc(proc, *, timeout: float = 10.0) -> None:
+    async def _drain_pipes() -> None:
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
+    if proc.returncode is not None:
+        await _drain_pipes()
+        return
+    proc.send_signal(signal.SIGINT)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        await _drain_pipes()
+        return
+    except asyncio.TimeoutError:
+        pass
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+        await _drain_pipes()
+        return
+    except asyncio.TimeoutError:
+        pass
+    proc.kill()
+    await proc.wait()
+    await _drain_pipes()
+
+
 @pytest.fixture
 async def clean_customizations(ironclaw_server):
     """Wipe layout/widget files before *and* after each test in this module."""
     await _wipe_customizations(ironclaw_server)
     yield
     await _wipe_customizations(ironclaw_server)
+
+
+@pytest.fixture
+async def single_tenant_gateway_server(ironclaw_binary, mock_llm_server):
+    """Dedicated gateway without a DB so `/style.css` can include custom CSS."""
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-single-tenant-home-")
+    home_dir = home_tmpdir.name
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    reserved = []
+    for _ in range(2):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        reserved.append(sock)
+    gateway_port = reserved[0].getsockname()[1]
+    http_port = reserved[1].getsockname()[1]
+    for sock in reserved:
+        sock.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=info",
+        "RUST_BACKTRACE": "1",
+        "IRONCLAW_OWNER_ID": "e2e-widget-single-tenant",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-widget-single-tenant",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "true",
+        "ROUTINES_ENABLED": "true",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+
+    proc = await asyncio.create_subprocess_exec(
+        ironclaw_binary,
+        "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    try:
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        yield base_url
+    except TimeoutError:
+        stderr_text = ""
+        if proc.stderr:
+            try:
+                stderr_text = (await asyncio.wait_for(proc.stderr.read(8192), timeout=2)).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except asyncio.TimeoutError:
+                pass
+        pytest.fail(f"single-tenant widget server failed to start:\n{stderr_text}")
+    finally:
+        await _stop_proc(proc)
+        home_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def clean_single_tenant_customizations(single_tenant_gateway_server):
+    await _wipe_customizations(single_tenant_gateway_server)
+    yield
+    await _wipe_customizations(single_tenant_gateway_server)
+
+
+@pytest.fixture(scope="session")
+async def multi_tenant_gateway_server(ironclaw_binary, mock_llm_server):
+    """Dedicated gateway with AGENT_MULTI_TENANT=true for multi-tenant isolation tests."""
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-multi-tenant-home-")
+    home_dir = home_tmpdir.name
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-widget-multi-tenant-db-")
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    reserved = []
+    for _ in range(2):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        reserved.append(sock)
+    gateway_port = reserved[0].getsockname()[1]
+    http_port = reserved[1].getsockname()[1]
+    for sock in reserved:
+        sock.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=info",
+        "RUST_BACKTRACE": "1",
+        "IRONCLAW_OWNER_ID": "e2e-widget-multi-tenant",
+        "AGENT_MULTI_TENANT": "true",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-widget-multi-tenant",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": os.path.join(db_tmpdir.name, "multi-tenant.db"),
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "true",
+        "ROUTINES_ENABLED": "true",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+
+    # Forward cargo-llvm-cov env vars so coverage data is captured in CI.
+    cov_prefixes = ("CARGO_LLVM_COV", "LLVM_")
+    cov_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
+    for key, val in os.environ.items():
+        if key.startswith(cov_prefixes) or key in cov_extras:
+            env[key] = val
+
+    proc = await asyncio.create_subprocess_exec(
+        ironclaw_binary,
+        "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    try:
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        yield base_url
+    except TimeoutError:
+        stderr_text = ""
+        if proc.stderr:
+            try:
+                stderr_text = (await asyncio.wait_for(proc.stderr.read(8192), timeout=2)).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except asyncio.TimeoutError:
+                pass
+        pytest.fail(f"multi-tenant widget server failed to start:\n{stderr_text}")
+    finally:
+        await _stop_proc(proc)
+        home_tmpdir.cleanup()
+        db_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def clean_multi_tenant_customizations(multi_tenant_gateway_server):
+    await _wipe_customizations(multi_tenant_gateway_server)
+    yield
+    await _wipe_customizations(multi_tenant_gateway_server)
 
 
 async def _open_authed_page(browser, base_url: str):
@@ -120,78 +327,73 @@ async def _drive_chat_customization(page, prompt: str) -> None:
     assert result["role"] in ("assistant", "system"), result
 
 
-async def test_chat_moves_tab_bar_to_left_panel(
-    page, browser, ironclaw_server, clean_customizations
+async def test_chat_writes_custom_css_without_leaking_multi_tenant_style_bundle(
+    browser, multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
-    """User asks the agent to move the top tab bar into a left side panel.
+    """Chat can write custom.css, but shared `/style.css` must stay base-only.
 
-    The agent writes ``.system/gateway/custom.css`` via ``memory_write``;
-    the gateway appends that file onto ``/style.css`` on the next request,
-    so reloading the page must show the tab bar laid out vertically.
+    The gateway runs with AGENT_MULTI_TENANT=true so `/style.css` is
+    intentionally unauthenticated and must not read one tenant's
+    `.system/gateway/custom.css`, or the CSS would leak to every other user.
+    This test exercises the chat-driven customization write, then verifies
+    the shared stylesheet stays clean on reload.
     """
-    # 1. Drive the customization through chat. The mock LLM matches the
-    #    `customize: move tab bar to left` trigger and emits a memory_write
-    #    tool call targeting `.system/gateway/custom.css`.
-    await _drive_chat_customization(page, "customize: move tab bar to left")
+    base_url = multi_tenant_gateway_server
 
-    # 2. Sanity check: the workspace file actually landed where the gateway
-    #    will look for it. Reading via the API both confirms the write and
-    #    bypasses any client-side caching of the chat tab.
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={"path": ".system/gateway/custom.css"},
-        )
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        # MemoryReadResponse uses a `content` field.
-        assert "tab bar to left side panel" in body.get("content", ""), body
+    # Open an authenticated page against the multi-tenant server.
+    context, page = await _open_authed_page(browser, base_url)
+    try:
+        # 1. Drive the customization through chat. The mock LLM matches the
+        #    `customize: move tab bar to left` trigger and emits a memory_write
+        #    tool call targeting `.system/gateway/custom.css`.
+        await _drive_chat_customization(page, "customize: move tab bar to left")
 
-    # 3. Re-open the gateway in a fresh browser context. The gateway's
-    #    `css_handler` will append the workspace's `custom.css` onto the
-    #    embedded base stylesheet, so the reload picks up the new layout.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+        # 2. Sanity check: the workspace file actually landed where the gateway
+        #    will look for it. Reading via the API both confirms the write and
+        #    bypasses any client-side caching of the chat tab.
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={"path": ".system/gateway/custom.css"},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            # MemoryReadResponse uses a `content` field.
+            assert "tab bar to left side panel" in body.get("content", ""), body
+    finally:
+        await context.close()
+
+    # 3. Re-open the gateway in a fresh browser context. In the multi-tenant
+    #    gateway, `/style.css` is the unauthenticated bootstrap sheet and
+    #    must not include per-user custom.css.
+    context, pg = await _open_authed_page(browser, base_url)
     try:
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
 
-        # 3a. The served stylesheet must contain our overlay. This catches
-        #     regressions in custom.css plumbing even if the browser would
-        #     otherwise lay out the tab bar identically by accident.
+        # 3a. The served stylesheet must *not* contain our overlay in
+        #     multi-tenant mode. The write path above proves the file exists;
+        #     this assertion proves `/style.css` did not leak it.
         async with httpx.AsyncClient(timeout=10) as client:
             css_resp = await client.get(
-                f"{ironclaw_server}/style.css",
+                f"{base_url}/style.css",
                 headers=auth_headers(),
             )
             assert css_resp.status_code == 200
-            assert "tab bar to left side panel" in css_resp.text
-            assert "flex-direction: column" in css_resp.text
+            assert "tab bar to left side panel" not in css_resp.text
 
-        # 3b. The browser must actually render the tab bar vertically. Use
-        #     getComputedStyle so we cover both the rule application *and*
-        #     CSS specificity (the !important override beating the base
-        #     `.tab-bar` rule).
+        # 3b. The browser should still render the default horizontal bar in
+        #     shared mode because the CSS overlay was intentionally withheld.
         flex_direction = await pg.evaluate(
             "() => getComputedStyle(document.querySelector('.tab-bar')).flexDirection"
         )
-        assert flex_direction == "column", (
-            f"Expected tab bar flex-direction=column after customization, "
+        assert flex_direction != "column", (
+            f"Expected shared multi-tenant gateway to keep the default tab bar, "
             f"got {flex_direction!r}"
         )
 
-        # 3c. The tab bar should now span the full viewport height (left
-        #     side panel) instead of sitting as a thin top strip. The exact
-        #     px width depends on viewport math; assert it grew to ~the
-        #     220px we set in custom.css and is taller than it is wide.
-        size = await pg.evaluate(
-            "() => { const r = document.querySelector('.tab-bar').getBoundingClientRect();"
-            "  return { width: r.width, height: r.height }; }"
-        )
-        assert size["width"] >= 200, size
-        assert size["height"] > size["width"], size
-
-        # 3d. The built-in tabs are still present (we only restyled the bar,
-        #     we did not remove anything).
+        # 3c. The built-in tabs are still present after the chat-driven
+        #     memory write. We mutated workspace state, not the live layout.
         for tab_id in ("chat", "memory", "settings"):
             btn = pg.locator(f'.tab-bar button[data-tab="{tab_id}"]')
             assert await btn.count() == 1, f"missing built-in tab {tab_id!r}"
@@ -199,156 +401,88 @@ async def test_chat_moves_tab_bar_to_left_panel(
         await context.close()
 
 
-async def test_chat_adds_skills_viewer_widget_to_top_panel(
-    page, browser, ironclaw_server, clean_customizations
+async def test_chat_adds_skills_viewer_widget_to_workspace_and_widgets_api(
+    browser, multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
-    """User asks the agent to add a Skills widget to the top tab bar.
+    """Chat can install a widget definition without mutating the shared shell.
 
     The agent writes a widget manifest and an ``index.js`` implementation
-    into ``.system/gateway/widgets/skills-viewer/``. On the next reload the
-    gateway resolves the widget, inlines its module script (with a CSP
-    nonce), and the runtime auto-mounts it as a new tab via
-    ``IronClaw.registerWidget({ slot: 'tab', ... })``. The widget then
-    fetches workspace skills from ``/api/skills`` and renders them.
+    into ``.system/gateway/widgets/skills-viewer/``. In the multi-tenant
+    gateway, the authenticated widgets API must surface that workspace state,
+    but the base shell must not auto-inline per-user widgets into every
+    browser load.
     """
-    # 1. One chat turn fans out into *two* parallel ``memory_write`` tool
-    #    calls (manifest + index.js). This intentionally exercises the
-    #    multi-tool-call path of the v2 engine — pinning the test to a
-    #    single call per turn would silently mask regressions in parallel
-    #    dispatch / accumulator handling.
-    await _drive_chat_customization(
-        page, "customize: install skills viewer widget"
-    )
+    base_url = multi_tenant_gateway_server
 
-    # 2. Confirm both files actually landed in the workspace.
-    async with httpx.AsyncClient(timeout=10) as client:
-        manifest_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={
-                "path": ".system/gateway/widgets/skills-viewer/manifest.json",
-            },
-        )
-        assert manifest_resp.status_code == 200, manifest_resp.text
-        manifest_doc = manifest_resp.json()
-        manifest = json.loads(manifest_doc["content"])
-        assert manifest["id"] == "skills-viewer"
-        assert manifest["slot"] == "tab"
-
-        index_resp = await client.get(
-            f"{ironclaw_server}/api/memory/read",
-            headers=auth_headers(),
-            params={
-                "path": ".system/gateway/widgets/skills-viewer/index.js",
-            },
-        )
-        assert index_resp.status_code == 200, index_resp.text
-        assert "registerWidget" in index_resp.json()["content"]
-
-        # 2a. The widgets API should now report the new widget. This is the
-        #     gateway's own discovery path — it walks the workspace dir and
-        #     parses each manifest.json — so it doubles as an integration
-        #     check on the FrontendBundle assembler.
-        widgets_resp = await client.get(
-            f"{ironclaw_server}/api/frontend/widgets",
-            headers=auth_headers(),
-        )
-        assert widgets_resp.status_code == 200, widgets_resp.text
-        widget_ids = {w["id"] for w in widgets_resp.json()}
-        assert "skills-viewer" in widget_ids, widget_ids
-
-    # 3. Reload in a fresh context — the gateway will assemble a new HTML
-    #    bundle that injects the widget JS as a CSP-noncedinline module.
-    context, pg = await _open_authed_page(browser, ironclaw_server)
+    # Open an authenticated page against the multi-tenant server.
+    context, page = await _open_authed_page(browser, base_url)
     try:
-        # 3a. The runtime must have added a tab button for the widget. Use
-        #     a generous timeout because widget mounting happens after the
-        #     ES module loads, which is post-DOMContentLoaded.
-        widget_tab_btn = pg.locator(
-            '.tab-bar button[data-tab="skills-viewer"]'
+        # 1. One chat turn fans out into *two* parallel ``memory_write`` tool
+        #    calls (manifest + index.js). This intentionally exercises the
+        #    multi-tool-call path of the v2 engine — pinning the test to a
+        #    single call per turn would silently mask regressions in parallel
+        #    dispatch / accumulator handling.
+        await _drive_chat_customization(
+            page, "customize: install skills viewer widget"
         )
-        await widget_tab_btn.wait_for(state="visible", timeout=15000)
-        assert (await widget_tab_btn.text_content() or "").strip() == "Skills"
 
-        # 3b. Activate the widget tab and wait for the widget's own root to
-        #     show up. The widget JS sets `data-testid="skills-viewer-root"`
-        #     on the container as its very first action, so this fires
-        #     before the asynchronous /api/skills fetch resolves.
-        await widget_tab_btn.click()
-        root = pg.locator('[data-testid="skills-viewer-root"]')
-        await root.wait_for(state="visible", timeout=10000)
-        title = pg.locator('[data-testid="skills-viewer-title"]')
-        assert (await title.text_content() or "").strip() == "Workspace Skills"
+        # 2. Confirm both files actually landed in the workspace.
+        async with httpx.AsyncClient(timeout=10) as client:
+            manifest_resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={
+                    "path": ".system/gateway/widgets/skills-viewer/manifest.json",
+                },
+            )
+            assert manifest_resp.status_code == 200, manifest_resp.text
+            manifest_doc = manifest_resp.json()
+            manifest = json.loads(manifest_doc["content"])
+            assert manifest["id"] == "skills-viewer"
+            assert manifest["slot"] == "tab"
 
-        # 3c. The list area must resolve into either an empty-state marker
-        #     or one or more skill cards — *not* the loading placeholder
-        #     and *not* the error path. We don't pin the exact set of
-        #     skills because the e2e workspace ships with whatever the
-        #     embedded registry seeds, but we do guarantee the widget
-        #     successfully talked to /api/skills via IronClaw.api.fetch.
-        await pg.wait_for_function(
-            """() => {
-              const root = document.querySelector('[data-testid=\"skills-viewer-root\"]');
-              if (!root) return false;
-              if (root.querySelector('[data-testid=\"skills-viewer-error\"]')) return 'error';
-              if (root.querySelector('[data-testid=\"skills-viewer-empty\"]')) return true;
-              return root.querySelectorAll('[data-testid=\"skills-viewer-card\"]').length > 0;
-            }""",
-            timeout=10000,
-        )
-        # Surface a clearer failure if the widget hit the /api/skills error
-        # branch — this means the auth wrapper or the endpoint regressed.
-        error_count = await pg.locator(
-            '[data-testid="skills-viewer-error"]'
-        ).count()
-        assert error_count == 0, "skills-viewer widget failed to fetch /api/skills"
+            index_resp = await client.get(
+                f"{base_url}/api/memory/read",
+                headers=auth_headers(),
+                params={
+                    "path": ".system/gateway/widgets/skills-viewer/index.js",
+                },
+            )
+            assert index_resp.status_code == 200, index_resp.text
+            assert "registerWidget" in index_resp.json()["content"]
 
-        # 3d. The widget container is mounted *inside* `.tab-content` with
-        #     `data-widget="skills-viewer"`, which is the contract the
-        #     gateway runtime exposes for CSS scoping. Verifying the
-        #     attribute makes sure widgets ride the same isolation path
-        #     even when they don't ship a style.css.
-        widget_root_attr = await pg.evaluate(
-            """() => {
-              const el = document.querySelector('#tab-skills-viewer');
-              return el && el.getAttribute('data-widget');
-            }"""
-        )
-        assert widget_root_attr == "skills-viewer", widget_root_attr
+            # 2a. The widgets API should now report the new widget. This is the
+            #     gateway's own discovery path — it walks the workspace dir and
+            #     parses each manifest.json — so it doubles as an integration
+            #     check on the FrontendBundle assembler.
+            widgets_resp = await client.get(
+                f"{base_url}/api/frontend/widgets",
+                headers=auth_headers(),
+            )
+            assert widgets_resp.status_code == 200, widgets_resp.text
+            widget_ids = {w["id"] for w in widgets_resp.json()}
+            assert "skills-viewer" in widget_ids, widget_ids
+    finally:
+        await context.close()
+
+    # 3. Reload in a fresh context. The shared multi-tenant shell should not
+    #    auto-inject per-user widgets into the base tab bar.
+    context, pg = await _open_authed_page(browser, base_url)
+    try:
+        await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
+        widget_tab_btn = pg.locator('.tab-bar button[data-tab="skills-viewer"]')
+        assert await widget_tab_btn.count() == 0
+        for tab_id in ("chat", "memory", "settings"):
+            btn = pg.locator(f'.tab-bar button[data-tab="{tab_id}"]')
+            assert await btn.count() == 1, f"missing built-in tab {tab_id!r}"
     finally:
         await context.close()
 
 
-async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
+async def test_layout_config_persists_without_mutating_shared_multi_tenant_shell(
     browser, ironclaw_server, clean_customizations
 ):
-    """Regression: layout.json flags must match the real DOM, not a hypothesis.
-
-    Two ``app.js`` selector bugs slid through code review on PR #1725
-    because the layout-config IIFE was written against a hypothetical DOM
-    rather than the one ``static/index.html`` actually ships:
-
-    1. ``tabs.hidden`` used the ``.tab-btn[data-tab="…"]`` selector, which
-       only matched widget-injected buttons (created by ``_addWidgetTab``
-       with ``className = 'tab-btn'``). Built-in tab ``<button>``\\s in
-       ``index.html`` are plain ``<button data-tab="chat">`` etc. with no
-       class, so hiding a built-in like ``"routines"`` silently no-opped.
-    2. ``chat.image_upload === false`` tried to hide ``#image-upload-btn``,
-       which doesn't exist — the real composer uses ``#attach-btn`` (the
-       paperclip) and ``#image-file-input`` (the hidden file input).
-
-    Both bugs share the same root cause: there was no e2e test that
-    actually loaded a customized layout and asked the browser whether the
-    flags took effect. This test is that missing coverage. The next
-    instance of this class of bug — somebody adds a new layout flag,
-    targets the wrong selector, and ships it — should fail this test
-    instead of a user.
-
-    Drives the layout via a direct ``/api/memory/write`` POST rather than
-    through chat: the customization path is independent of the agent
-    loop, and side-stepping chat keeps the test fast and decoupled from
-    the mock LLM's canned-response set.
-    """
+    """Layout writes persist, but the shared shell must not apply them globally."""
     # 1. Write a layout.json that exercises both flags. `tabs.hidden`
     #    targets a *built-in* tab on purpose — the previous bug was that
     #    only widget-provided tabs could be hidden, so testing with a
@@ -372,20 +506,23 @@ async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
             f"status={resp.status_code} body={resp.text!r}"
         )
 
-    # 2. Reload in a fresh context so the gateway re-assembles the HTML
-    #    bundle with `window.__IRONCLAW_LAYOUT__` injected from the new
-    #    layout.json. The IIFE in `app.js` then applies the flags.
+    # 2. The authenticated layout API should reflect the stored config even
+    #    though the shared shell does not auto-apply it.
+    async with httpx.AsyncClient(timeout=10) as client:
+        layout_resp = await client.get(
+            f"{ironclaw_server}/api/frontend/layout",
+            headers=auth_headers(),
+        )
+        assert layout_resp.status_code == 200, layout_resp.text
+        returned_layout = layout_resp.json()
+        assert returned_layout["tabs"]["hidden"] == ["routines"], returned_layout
+        assert returned_layout["chat"]["image_upload"] is False, returned_layout
+
+    # 3. Reload in a fresh context. The shared multi-tenant shell should keep
+    #    its default controls rather than applying one tenant's layout.json.
     context, pg = await _open_authed_page(browser, ironclaw_server)
     try:
-        # Wait for the tab bar to render before probing selectors —
-        # otherwise the layout IIFE may not have run yet on a slow CI
-        # machine and we'd race the assertion.
         await pg.locator(".tab-bar").wait_for(state="visible", timeout=10000)
-
-        # 3. `tabs.hidden: ["routines"]` must hide the built-in routines
-        #    tab. Use `getComputedStyle` rather than reading the inline
-        #    `style` attribute so the assertion survives a future refactor
-        #    that swaps `style.display = 'none'` for a class toggle.
         routines_display = await pg.evaluate(
             """() => {
               const btn = document.querySelector(
@@ -394,14 +531,10 @@ async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
               return btn ? getComputedStyle(btn).display : 'missing';
             }"""
         )
-        assert routines_display == "none", (
-            f"built-in routines tab should be hidden by layout.tabs.hidden, "
+        assert routines_display != "none", (
+            f"shared multi-tenant shell should not hide routines tab globally, "
             f"got display={routines_display!r}"
         )
-
-        # 4. The other built-in tabs must NOT be collateral damage. If a
-        #    future selector change started over-matching, this would
-        #    catch it before users noticed.
         for visible_tab in ("chat", "memory", "settings"):
             display = await pg.evaluate(
                 f"""() => {{
@@ -420,13 +553,6 @@ async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
                 "entirely — index.html structure regressed"
             )
 
-        # 5. `chat.image_upload: false` must hide the visible attach button
-        #    AND disable the underlying file input. Hiding only the button
-        #    would leave a programmatic
-        #    `document.getElementById('image-file-input').click()` path
-        #    open for a widget or extension to bypass the operator's
-        #    intent — the previous bug targeted a non-existent
-        #    `#image-upload-btn` and accomplished neither.
         attach_state = await pg.evaluate(
             """() => {
               const btn = document.getElementById('attach-btn');
@@ -438,54 +564,35 @@ async def test_layout_hidden_built_in_tab_and_image_upload_disabled(
               };
             }"""
         )
-        assert attach_state["attachDisplay"] == "none", (
-            f"#attach-btn should be hidden by chat.image_upload=false, "
+        assert attach_state["attachDisplay"] != "none", (
+            f"shared multi-tenant shell should not hide #attach-btn globally, "
             f"got {attach_state!r}"
         )
         assert attach_state["inputExists"], (
             "#image-file-input must exist in the DOM — index.html structure "
             "regressed"
         )
-        assert attach_state["inputDisabled"] is True, (
-            f"#image-file-input must be disabled by chat.image_upload=false, "
+        assert attach_state["inputDisabled"] is False, (
+            f"shared multi-tenant shell should not disable image-file-input globally, "
             f"got {attach_state!r}"
         )
     finally:
         await context.close()
 
 
-async def test_customized_index_carries_csp_nonce_on_every_inline_script(
-    ironclaw_server, clean_customizations
+async def test_shared_index_keeps_static_csp_when_layout_is_per_user_only(
+    multi_tenant_gateway_server, clean_multi_tenant_customizations
 ):
-    """Regression: customized HTML must ship a per-response CSP nonce.
+    """Shared index should stay static even when per-user layout exists."""
+    base_url = multi_tenant_gateway_server
 
-    The gateway's customization assembly path injects inline ``<script>``
-    blocks (layout JSON + widget modules) into the HTML, which would be
-    blocked by the static CSP unless every script carries a ``nonce=``
-    attribute matching a ``Content-Security-Policy: ...'nonce-…'``
-    header on the response. The mechanism is unit-tested in
-    ``test_stamp_nonce_into_html_*`` (Rust) but there was no e2e proof
-    that the full pipeline — workspace mutation → ``index_handler`` →
-    nonce stamping → response header — actually wires up correctly under
-    a real HTTP request.
-
-    This is the missing test for that pipeline. The reviewer flagged
-    "no CSP nonce verification" as a coverage gap in the
-    ``feat/frontend-extension-system`` audit. Drives the request through
-    ``httpx`` rather than Playwright because we need to read the
-    response headers byte-for-byte (a browser ``EventSource`` /
-    ``fetch`` won't expose all CSP-related headers, and Playwright's
-    ``page.goto`` happens at the JS layer where the nonce has already
-    been validated and consumed by the browser).
-    """
-    # 1. Write a layout that forces the customized HTML path. Branding
-    #    title is enough — `layout_has_customizations` returns true on
-    #    any non-empty title, which routes index_handler through
-    #    `build_frontend_html` and the nonce stamping path.
+    # 1. Write a layout that would force customized HTML in single-tenant
+    #    mode. In the multi-tenant gateway this layout remains per-user
+    #    state only.
     layout = {"branding": {"title": "Acme AI"}}
     async with httpx.AsyncClient(timeout=10) as client:
         write = await client.post(
-            f"{ironclaw_server}/api/memory/write",
+            f"{base_url}/api/memory/write",
             headers=auth_headers(),
             json={
                 "path": ".system/gateway/layout.json",
@@ -498,79 +605,47 @@ async def test_customized_index_carries_csp_nonce_on_every_inline_script(
             f"status={write.status_code} body={write.text!r}"
         )
 
-        # 2. Hit `/` directly. The bootstrap route is unauthenticated,
-        #    so no token is required — but we send one anyway to mirror
-        #    a real browser load (the browser fires the auth screen
-        #    after the HTML lands).
+        # 2. Hit `/` directly. The bootstrap route stays on the static HTML/CSP
+        #    path even though the authenticated layout API now has custom data.
         resp = await client.get(
-            f"{ironclaw_server}/?token={AUTH_TOKEN}",
+            f"{base_url}/?token={AUTH_TOKEN}",
             headers=auth_headers(),
         )
     assert resp.status_code == 200, resp.text
 
-    # 3. Contract A: response carries a per-response CSP header with a
-    #    `'nonce-...'` source in `script-src`. The static CSP layer
-    #    emits a different header (no nonce); a customized response
-    #    must override it.
+    # 3. The authenticated layout API should expose the saved branding config.
+    async with httpx.AsyncClient(timeout=10) as client:
+        layout_resp = await client.get(
+            f"{base_url}/api/frontend/layout",
+            headers=auth_headers(),
+        )
+    assert layout_resp.status_code == 200, layout_resp.text
+    assert layout_resp.json()["branding"]["title"] == "Acme AI"
+
+    # 4. Contract A: shared index keeps the static CSP with no per-response
+    #    nonce because no inline customization bundle was assembled.
     csp = resp.headers.get("content-security-policy")
     assert csp is not None, (
-        f"customized index must emit Content-Security-Policy header; got headers={dict(resp.headers)}"
+        f"index must emit Content-Security-Policy header; got headers={dict(resp.headers)}"
     )
     nonce_match = re.search(r"'nonce-([0-9a-f]+)'", csp)
-    assert nonce_match is not None, (
-        f"CSP must include a 'nonce-...' source in script-src, got: {csp}"
-    )
-    nonce = nonce_match.group(1)
-    # The nonce is generated as 16 random bytes hex-encoded → 32 chars.
-    # Pin the length so a future regression that drops to 8 bytes (or
-    # accidentally truncates) fails here with an actionable diff.
-    assert len(nonce) == 32, (
-        f"CSP nonce must be 32 hex chars (16 random bytes), got {len(nonce)}: {nonce}"
-    )
+    assert nonce_match is None, f"shared static CSP should not include nonce, got: {csp}"
 
     body = resp.text
 
-    # 4. Contract B: every *inline* injected `<script>` block carries the
-    #    same nonce attribute. The base `static/index.html` ships
-    #    several `<script src="...">` tags (i18n bundles, theme-init,
-    #    app.js, marked, DOMPurify) — those are external scripts
-    #    authorized by `script-src 'self' <CDNs>` in the gateway CSP and
-    #    deliberately do NOT carry a nonce. Only the inline blocks that
-    #    `assemble_index` injects (layout JSON island + widget modules)
-    #    need to be nonce-gated. Filtering on the absence of `src=` is
-    #    the cleanest way to separate the two — a future regression
-    #    that drops the nonce off an inline script still fails this
-    #    check, but a baseline `<script src=...>` no longer trips it.
-    #
-    #    Skip the inline branding `<style>` blocks — those don't need a
-    #    nonce because the gateway's CSP allows `'unsafe-inline'` for
-    #    `style-src`. The Rust unit test
-    #    `test_assemble_index_widget_style_has_no_nonce` pins that
-    #    decision; this e2e check covers the request-path side too.
-    expected_attr = f'nonce="{nonce}"'
+    # 5. Contract B: the shared bootstrap page should not contain nonce-bearing
+    #    inline customization scripts. It remains the stock shell.
     all_script_tags = re.findall(r"<script\b[^>]*>", body)
     inline_script_tags = [
         tag for tag in all_script_tags if not re.search(r"\bsrc\s*=", tag)
     ]
-    assert inline_script_tags, (
-        "customized HTML must contain at least one inline <script> tag "
-        "(the layout JSON island injected by assemble_index). If this "
-        "assertion fires, the customization assembly path stopped emitting "
-        "inline scripts entirely. "
-        f"All <script> tags seen: {all_script_tags!r}"
+    assert not inline_script_tags, (
+        "shared multi-tenant index should not inline per-user customization scripts; "
+        f"saw inline tags: {inline_script_tags!r}"
     )
-    for tag in inline_script_tags:
-        assert expected_attr in tag, (
-            f"every inline <script> must carry nonce attribute matching the "
-            f"response CSP nonce {nonce!r}; tag without match: {tag!r}"
-        )
 
-    # 5. Contract C: the placeholder sentinel must be gone — if a
-    #    future regression breaks the substitution (e.g. switches the
-    #    helper to a no-op), the placeholder would still be in the
-    #    body and the browser would reject every script as
-    #    nonce-mismatch. Catching this here gives a clearer
-    #    diagnostic than "blank page in Chrome".
+    # 6. Contract C: the nonce placeholder should never leak into the shared
+    #    static shell.
     assert "__IRONCLAW_CSP_NONCE__" not in body, (
         "NONCE_PLACEHOLDER sentinel must be substituted before serving — "
         "found unmodified placeholder in response body"

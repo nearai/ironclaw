@@ -74,7 +74,8 @@
                         ]
                       },
                       "capabilities/skills",
-                      "capabilities/sandboxed-tools"
+                      "capabilities/sandboxed-tools",
+                      "capabilities/mcp"
                     ]
                   }
                 ]

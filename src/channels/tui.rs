@@ -132,6 +132,7 @@ fn build_tui_incoming_message(
             size_bytes: Some(a.data.len() as u64),
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: a.data,
             duration_secs: None,
@@ -509,7 +510,7 @@ impl Channel for TuiChannel {
             let _ = tx
                 .send(TuiEvent::Response {
                     content: response.content,
-                    thread_id: response.thread_id,
+                    thread_id: response.thread_id.map(String::from),
                 })
                 .await;
         }
@@ -716,7 +717,9 @@ impl Channel for TuiChannel {
             StatusUpdate::SkillActivated { skill_names } => {
                 TuiEvent::SkillActivated { skill_names }
             }
-            StatusUpdate::ImageGenerated { .. } => {
+            StatusUpdate::ImageGenerated { .. }
+            | StatusUpdate::ToolResultFull { .. }
+            | StatusUpdate::TurnMetrics { .. } => {
                 return Ok(());
             }
             StatusUpdate::PlanUpdate {
@@ -756,7 +759,7 @@ impl Channel for TuiChannel {
             let _ = tx
                 .send(TuiEvent::Response {
                     content: response.content,
-                    thread_id: response.thread_id,
+                    thread_id: response.thread_id.map(String::from),
                 })
                 .await;
         }
@@ -831,7 +834,10 @@ mod tests {
             "Europe/Istanbul",
         );
 
-        assert_eq!(msg.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(
+            msg.thread_id.as_ref().map(|t| t.as_str()),
+            Some("thread-123")
+        );
         assert_eq!(msg.channel, "tui");
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.content, "hello");

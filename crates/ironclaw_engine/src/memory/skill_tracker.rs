@@ -230,6 +230,7 @@ mod tests {
             activation: Default::default(),
             source: V2SkillSource::Extracted,
             trust: SkillTrust::Trusted,
+            requires: Default::default(),
             code_snippets: vec![],
             metrics: SkillMetrics {
                 usage_count: 5,
@@ -241,6 +242,8 @@ mod tests {
             revisions: vec![],
             repairs: vec![],
             content_hash: String::new(),
+            bundle_path: None,
+            source_url: None,
         };
 
         let mut doc = MemoryDoc::new(

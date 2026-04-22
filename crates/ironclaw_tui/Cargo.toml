@@ -15,6 +15,7 @@ default = ["clipboard"]
 clipboard = ["dep:arboard", "dep:image"]
 
 [dependencies]
+ironclaw_common = { path = "../ironclaw_common", version = "0.2.0" }
 rat-scrolled = "2.0"
 ratatui = { version = "0.30", features = ["crossterm"] }
 ratatui-textarea = { version = "0.9", features = ["crossterm"] }

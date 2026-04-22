@@ -240,12 +240,11 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
                 ctx.first_block = false;
             }
 
-            Event::Start(Tag::Paragraph) => {
-                if ctx.need_blank_line && !ctx.first_block {
-                    ctx.lines.push(Line::from(""));
-                    ctx.need_blank_line = false;
-                }
+            Event::Start(Tag::Paragraph) if ctx.need_blank_line && !ctx.first_block => {
+                ctx.lines.push(Line::from(""));
+                ctx.need_blank_line = false;
             }
+            Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
                 ctx.flush(max_width, theme);
                 ctx.need_blank_line = true;
@@ -384,12 +383,11 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
                 }
             }
 
-            Event::SoftBreak => {
-                if !ctx.in_code_block {
-                    let style = ctx.top_style();
-                    ctx.segments.push((" ".to_string(), style));
-                }
+            Event::SoftBreak if !ctx.in_code_block => {
+                let style = ctx.top_style();
+                ctx.segments.push((" ".to_string(), style));
             }
+            Event::SoftBreak => {}
             Event::HardBreak => {
                 ctx.flush(max_width, theme);
             }

@@ -79,9 +79,10 @@ mod live_mission_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Live tier: requires LLM API keys (or a recorded trace fixture)
+    #[ignore] // Live tier: requires LLM API keys. Runs in public-smoke lane, not deterministic-replay.
     async fn mission_daily_news_digest_with_followup() {
         init_tracing();
+
         let harness = LiveTestHarnessBuilder::new("mission_daily_news_digest")
             .with_engine_v2(true)
             .with_max_tool_iterations(40)
@@ -97,6 +98,11 @@ mod live_mission_tests {
         // to fail if missions can't reach tools (web fetch / shell / http)
         // available to the agent. The goal asks the mission thread to fetch
         // a real public source and produce a digest from its actual content.
+        //
+        // Note on deterministic replay: This test uses fixture replay which may
+        // encounter UUID mismatches (mission_create generates a new UUID each time,
+        // but the fixture has the originally-recorded UUID). The agent will retry
+        // automatically if mission_fire fails due to "mission not found".
         let setup_prompt = format!(
             "Create a long-running mission for me using the `mission_create` tool. \
              Use exactly these parameters:\n\

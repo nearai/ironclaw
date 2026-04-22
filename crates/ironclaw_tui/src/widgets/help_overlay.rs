@@ -32,6 +32,7 @@ const KEY_SECTIONS: &[KeySection] = &[
         header: "Input",
         bindings: &[
             ("Enter", "Submit message"),
+            ("Shift-Enter", "Insert newline"),
             ("Up / Down", "Input history"),
             ("Ctrl-P / Ctrl-N", "Input history (alt)"),
             ("Ctrl-V", "Paste image from clipboard"),
