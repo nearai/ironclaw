@@ -73,6 +73,17 @@ pub fn parse_finish_job_signal(params: &serde_json::Value) -> Result<FinishJobSi
     Ok(FinishJobSignal { status, summary })
 }
 
+/// Parse a `finish_job` signal from the tool's executed JSON result payload.
+///
+/// Delegates should prefer this over reparsing the model's original arguments so
+/// hook-modified parameters and tool-side normalization remain authoritative.
+pub fn parse_finish_job_signal_from_output(output: &str) -> Result<FinishJobSignal, ToolError> {
+    let parsed: serde_json::Value = serde_json::from_str(output).map_err(|e| {
+        ToolError::ExecutionFailed(format!("finish_job returned non-JSON result payload: {e}"))
+    })?;
+    parse_finish_job_signal(&parsed)
+}
+
 /// Signal job completion or failure.
 ///
 /// The delegate (JobDelegate / ContainerDelegate) intercepts calls to this
@@ -91,8 +102,10 @@ impl Tool for FinishJobTool {
         "Signal that the autonomous job is fully complete or has failed. \
          IMPORTANT: This is the only way to end a job. \
          Do NOT rely on a plain text reply to stop execution. \
-         Call this tool only after all other work is done. \
-         Do NOT call it in the same batch as other tools; call it by itself. \
+         Prefer to call this tool after all other work is done. \
+         If you include it in the same batch as other tools, those tools may run first \
+         and then the job will be finalized. \
+         Emit at most one finish_job call per batch. \
          Use status \"completed\" when all required work is finished, \
          or status \"failed\" when you encounter an unresolvable blocker."
     }

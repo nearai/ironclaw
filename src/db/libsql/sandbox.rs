@@ -426,4 +426,40 @@ impl SandboxStore for LibSqlBackend {
         }
         Ok(events)
     }
+
+    async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<JobEventRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM job_events
+                WHERE job_id = ?1 AND event_type = ?2
+                ORDER BY id DESC
+                LIMIT 1
+                "#,
+                params![job_id.to_string(), event_type],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(JobEventRecord {
+                id: get_i64(&row, 0),
+                job_id: get_text(&row, 1).parse().unwrap_or_default(),
+                event_type: get_text(&row, 2),
+                data: get_json(&row, 3),
+                created_at: get_ts(&row, 4),
+            })),
+            None => Ok(None),
+        }
+    }
 }

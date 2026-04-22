@@ -497,6 +497,16 @@ impl SandboxStore for PgBackend {
     ) -> Result<Vec<JobEventRecord>, DatabaseError> {
         self.store.list_job_events(job_id, limit).await
     }
+
+    async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<JobEventRecord>, DatabaseError> {
+        self.store
+            .get_latest_job_event_by_type(job_id, event_type)
+            .await
+    }
 }
 
 // ==================== RoutineStore ====================

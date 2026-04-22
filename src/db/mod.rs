@@ -590,6 +590,11 @@ pub trait SandboxStore: Send + Sync {
         job_id: Uuid,
         limit: Option<i64>,
     ) -> Result<Vec<JobEventRecord>, DatabaseError>;
+    async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<JobEventRecord>, DatabaseError>;
 }
 
 #[async_trait]

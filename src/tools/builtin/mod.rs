@@ -32,7 +32,10 @@ pub use extension_tools::{
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};
 pub use file_history::{FileHistory, FileUndoTool, SharedFileHistory, shared_file_history};
-pub use finish_job::{FinishJobSignal, FinishJobStatus, FinishJobTool, parse_finish_job_signal};
+pub use finish_job::{
+    FinishJobSignal, FinishJobStatus, FinishJobTool, parse_finish_job_signal,
+    parse_finish_job_signal_from_output,
+};
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
 pub use http::{HttpTool, extract_host_from_params};

@@ -142,8 +142,12 @@ impl TenantScope {
             return Ok(None);
         }
 
-        let events = self.inner.list_job_events(id, Some(20)).await?;
-        Ok(crate::history::latest_job_result_message(&events))
+        Ok(self
+            .inner
+            .get_latest_job_event_by_type(id, "result")
+            .await?
+            .as_ref()
+            .and_then(crate::history::job_result_event_message))
     }
 
     pub async fn update_job_status(
@@ -810,6 +814,16 @@ impl SystemScope {
         self.inner.list_job_events(job_id, limit).await
     }
 
+    pub async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<crate::history::JobEventRecord>, DatabaseError> {
+        self.inner
+            .get_latest_job_event_by_type(job_id, event_type)
+            .await
+    }
+
     // === Job persistence (scheduler, worker) ===
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
@@ -851,8 +865,12 @@ impl SystemScope {
         &self,
         id: Uuid,
     ) -> Result<Option<String>, DatabaseError> {
-        let events = self.inner.list_job_events(id, Some(20)).await?;
-        Ok(crate::history::latest_job_result_message(&events))
+        Ok(self
+            .inner
+            .get_latest_job_event_by_type(id, "result")
+            .await?
+            .as_ref()
+            .and_then(crate::history::job_result_event_message))
     }
 
     // === LLM call recording ===

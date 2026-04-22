@@ -1124,24 +1124,13 @@ pub struct JobEventRecord {
     pub created_at: DateTime<Utc>,
 }
 
-/// Extract the latest human-readable terminal message from persisted job events.
-///
-/// Job workers persist a terminal `"result"` event whose `data.message` carries
-/// the final user-facing summary. Returning the last such message lets callers
-/// recover a durable completion summary without overloading `failure_reason`.
-pub(crate) fn latest_job_result_message(events: &[JobEventRecord]) -> Option<String> {
-    events.iter().rev().find_map(|event| {
-        if event.event_type != "result" {
-            return None;
-        }
-
-        event.data.get("message").and_then(|value| {
-            value
-                .as_str()
-                .map(str::trim)
-                .filter(|message| !message.is_empty())
-                .map(ToOwned::to_owned)
-        })
+pub(crate) fn job_result_event_message(event: &JobEventRecord) -> Option<String> {
+    event.data.get("message").and_then(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(ToOwned::to_owned)
     })
 }
 
@@ -1215,6 +1204,34 @@ impl Store {
                 created_at: r.get("created_at"),
             })
             .collect())
+    }
+
+    pub async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<JobEventRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM job_events
+                WHERE job_id = $1 AND event_type = $2
+                ORDER BY id DESC
+                LIMIT 1
+                "#,
+                &[&job_id, &event_type],
+            )
+            .await?;
+
+        Ok(row.map(|r| JobEventRecord {
+            id: r.get("id"),
+            job_id: r.get("job_id"),
+            event_type: r.get("event_type"),
+            data: r.get("data"),
+            created_at: r.get("created_at"),
+        }))
     }
 
     /// Update the job_mode column for a sandbox job.

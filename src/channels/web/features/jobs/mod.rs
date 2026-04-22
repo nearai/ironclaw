@@ -30,22 +30,13 @@ async fn latest_agent_result_event(
     job_id: Uuid,
 ) -> Option<crate::history::JobEventRecord> {
     store
-        .list_job_events(job_id, Some(20))
+        .get_latest_job_event_by_type(job_id, "result")
         .await
         .ok()?
-        .into_iter()
-        .rev()
-        .find(|event| event.event_type == "result")
 }
 
 fn agent_result_event_message(event: &crate::history::JobEventRecord) -> Option<String> {
-    event.data.get("message").and_then(|value| {
-        value
-            .as_str()
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-            .map(ToOwned::to_owned)
-    })
+    crate::history::job_result_event_message(event)
 }
 
 fn synthesize_agent_job_transitions(

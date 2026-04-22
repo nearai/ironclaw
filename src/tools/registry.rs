@@ -521,15 +521,15 @@ impl ToolRegistry {
             .values()
             .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
             .map(Self::tool_definition)
-            .chain(
-                self.job_only_tools
-                    .read()
-                    .await
-                    .values()
-                    .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
-                    .map(Self::tool_definition),
-            )
             .collect();
+        defs.extend(
+            self.job_only_tools
+                .read()
+                .await
+                .values()
+                .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+                .map(Self::tool_definition),
+        );
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
     }

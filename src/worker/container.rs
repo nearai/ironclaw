@@ -23,7 +23,7 @@ use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
 use crate::tools::ToolRegistry;
-use crate::tools::builtin::{FinishJobStatus, parse_finish_job_signal};
+use crate::tools::builtin::{FinishJobStatus, parse_finish_job_signal_from_output};
 use crate::tools::execute::{execute_job_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::autonomous_recovery::{
@@ -663,7 +663,11 @@ impl LoopDelegate for ContainerDelegate {
             reason_ctx.messages.push(message);
 
             if is_last_finish_job {
-                let signal = parse_finish_job_signal(&tc.arguments).map_err(|e| {
+                let signal = match &result {
+                    Ok(output) => parse_finish_job_signal_from_output(output),
+                    Err(_) => unreachable!("finish_job error path already returned"),
+                }
+                .map_err(|e| {
                     crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
                         name: "finish_job".to_string(),
                         reason: format!(

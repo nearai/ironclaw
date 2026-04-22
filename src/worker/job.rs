@@ -27,7 +27,9 @@ use crate::llm::{
     ResponseMetadata, ToolCall, ToolSelection,
 };
 use crate::tenant::SystemScope;
-use crate::tools::builtin::{FinishJobStatus, parse_finish_job_signal};
+use crate::tools::builtin::{
+    FinishJobSignal, FinishJobStatus, parse_finish_job_signal_from_output,
+};
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
@@ -73,6 +75,22 @@ pub struct Worker {
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
     result: Result<String, Error>,
+}
+
+fn finish_job_signal_from_result(
+    result: &Result<String, Error>,
+) -> Result<Option<FinishJobSignal>, Error> {
+    match result {
+        Ok(output) => parse_finish_job_signal_from_output(output)
+            .map(Some)
+            .map_err(|e| {
+                crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
+                    name: "finish_job".to_string(),
+                    reason: format!("finish_job executed but result could not be interpreted: {e}"),
+                })
+            }),
+        Err(_) => Ok(None),
+    }
 }
 
 impl Worker {
@@ -289,34 +307,35 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         .await;
 
         match result {
-            Ok(Ok(())) => {
-                tracing::info!("Worker for job {} completed successfully", self.job_id);
-                // Only mark completed if still in an active, non-stuck state.
-                let current_state = self
-                    .context_manager()
-                    .get_context(self.job_id)
-                    .await
-                    .map(|ctx| ctx.state);
-                match current_state {
-                    Ok(state) if state.is_terminal() => {}
-                    Ok(JobState::Completed) => {}
-                    Ok(JobState::Stuck) => {
-                        tracing::info!(
-                            "Job {} returned Ok but is Stuck — leaving for self-repair",
-                            self.job_id
-                        );
-                    }
-                    Ok(_) => {
-                        self.mark_completed(Self::DEFAULT_COMPLETION_MESSAGE)
-                            .await?;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            job_id = %self.job_id,
-                            "Failed to get job context, cannot mark as completed: {}", e
-                        );
-                    }
-                }
+            Ok(Ok(LoopOutcome::Response(summary))) => {
+                tracing::info!(
+                    job_id = %self.job_id,
+                    summary = %summary,
+                    "Worker completed successfully"
+                );
+            }
+            Ok(Ok(LoopOutcome::Failure(reason))) => {
+                tracing::error!("Worker for job {} failed: {}", self.job_id, reason);
+                self.mark_failed(&reason).await?;
+            }
+            Ok(Ok(LoopOutcome::MaxIterations)) => {
+                self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
+                    .await?;
+            }
+            Ok(Ok(LoopOutcome::Stopped)) => {
+                tracing::info!("Worker for job {} stopped", self.job_id);
+            }
+            Ok(Ok(LoopOutcome::NeedApproval(_))) => {
+                self.mark_failed(
+                    "Autonomous job execution paused for approval, which is unsupported in worker jobs",
+                )
+                .await?;
+            }
+            Ok(Ok(LoopOutcome::AuthPending(_))) => {
+                self.mark_failed(
+                    "Autonomous job execution paused for authentication, which is unsupported in worker jobs",
+                )
+                .await?;
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
@@ -336,7 +355,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<(), Error> {
+    ) -> Result<LoopOutcome, Error> {
         let max_iterations = self
             .context_manager()
             .get_context(self.job_id)
@@ -405,21 +424,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
         // If we have a plan, execute it.
         if let Some(ref plan) = plan {
             if let Some(outcome) = self.execute_plan(rx, reason_ctx, plan).await? {
-                match outcome {
-                    LoopOutcome::Response(_) => {
-                        // Completion was already handled by finish_job.
-                    }
-                    LoopOutcome::Failure(reason) => {
-                        self.mark_failed(&reason).await?;
-                    }
-                    LoopOutcome::Stopped => {
-                        // Stop signal handled — nothing more to do.
-                    }
-                    LoopOutcome::MaxIterations
-                    | LoopOutcome::NeedApproval(_)
-                    | LoopOutcome::AuthPending(_) => {}
-                }
-                return Ok(());
+                return Ok(outcome);
             }
 
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
@@ -427,7 +432,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
                     || ctx.state == JobState::Stuck
                     || ctx.state == JobState::Completed)
             {
-                return Ok(());
+                return Ok(Self::loop_outcome_from_context(&ctx));
             }
         }
 
@@ -447,26 +452,35 @@ or status \"failed\" when you hit an unresolvable blocker."#,
             max_tool_intent_nudges: 2,
         };
 
-        let outcome = run_agentic_loop(&delegate, reasoning, reason_ctx, &config).await?;
+        run_agentic_loop(&delegate, reasoning, reason_ctx, &config).await
+    }
 
-        match outcome {
-            LoopOutcome::Response(_) => {
-                // Completion was already handled by finish_job.
+    fn loop_outcome_from_context(ctx: &crate::context::JobContext) -> LoopOutcome {
+        let summary = ctx
+            .transitions
+            .last()
+            .and_then(|transition| transition.reason.clone())
+            .unwrap_or_else(|| match ctx.state {
+                JobState::Completed => Self::DEFAULT_COMPLETION_MESSAGE.to_string(),
+                JobState::Failed => format!("Job {} failed", ctx.job_id),
+                JobState::Stuck => format!("Job {} became stuck", ctx.job_id),
+                JobState::Submitted | JobState::Accepted => {
+                    format!("Job {} finished ({})", ctx.job_id, ctx.state)
+                }
+                JobState::Cancelled => "Job was cancelled".to_string(),
+                JobState::Pending | JobState::InProgress => {
+                    format!("Job {} is still active", ctx.job_id)
+                }
+            });
+
+        match ctx.state {
+            JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                LoopOutcome::Response(summary)
             }
-            LoopOutcome::MaxIterations => {
-                self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
-                    .await?;
-            }
-            LoopOutcome::Failure(reason) => {
-                self.mark_failed(&reason).await?;
-            }
-            LoopOutcome::Stopped => {
-                // Stop signal handled — nothing more to do
-            }
-            LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending(_) => {}
+            JobState::Failed | JobState::Stuck => LoopOutcome::Failure(summary),
+            JobState::Cancelled => LoopOutcome::Stopped,
+            JobState::Pending | JobState::InProgress => LoopOutcome::Failure(summary),
         }
-
-        Ok(())
     }
 
     /// Execute multiple tools in parallel using a JoinSet.
@@ -1000,17 +1014,7 @@ or status \"failed\" when you hit an unresolvable blocker."#,
                 .execute_tool(&action.tool_name, &action.parameters)
                 .await;
             let finish_signal = if selection.tool_name == "finish_job" {
-                match &result {
-                    Ok(_) => Some(parse_finish_job_signal(&selection.parameters).map_err(|e| {
-                        crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
-                            name: "finish_job".to_string(),
-                            reason: format!(
-                                "finish_job executed but result could not be interpreted: {e}"
-                            ),
-                        })
-                    })?),
-                    Err(_) => None,
-                }
+                finish_job_signal_from_result(&result)?
             } else {
                 None
             };
@@ -1755,6 +1759,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
+            let finish_signal = if is_last_finish_job {
+                finish_job_signal_from_result(&result)?
+            } else {
+                None
+            };
             if result.is_err() {
                 tool_failure_count += 1;
                 self.worker
@@ -1772,12 +1781,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 .await?;
 
             if is_last_finish_job {
-                let signal = parse_finish_job_signal(&selection.parameters).map_err(|e| {
+                let signal = finish_signal.ok_or_else(|| {
                     crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
                         name: "finish_job".to_string(),
-                        reason: format!(
-                            "finish_job executed but result could not be interpreted: {e}"
-                        ),
+                        reason: "finish_job executed successfully but returned no signal"
+                            .to_string(),
                     })
                 })?;
 

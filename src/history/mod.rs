@@ -13,7 +13,7 @@ mod store;
 pub use analytics::{JobStats, ToolStats};
 #[cfg(feature = "postgres")]
 pub use store::Store;
-pub(crate) use store::latest_job_result_message;
+pub(crate) use store::job_result_event_message;
 pub use store::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SandboxRestartParams, SettingRow,
