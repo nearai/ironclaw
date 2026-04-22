@@ -8,6 +8,7 @@ via TOOL_CALL_PATTERNS.
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -31,6 +32,22 @@ CANNED_RESPONSES = [
             re.IGNORECASE | re.DOTALL,
         ),
         "Mock MCP search completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `gmail` returned:|The gmail tool returned:", re.IGNORECASE | re.DOTALL),
+        "Gmail check completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `google_calendar` returned:", re.IGNORECASE | re.DOTALL),
+        "Calendar check completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `github` returned:", re.IGNORECASE | re.DOTALL),
+        "GitHub issue lookup completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `notion_notion_search` returned:", re.IGNORECASE | re.DOTALL),
+        "Notion search completed successfully.",
     ),
     (re.compile(r"portfolio|defi|rebalance|yield.*positions", re.IGNORECASE),
      "I'll analyze your DeFi portfolio. The portfolio skill is active and I can scan "
@@ -67,6 +84,24 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+
+# Lifecycle canary triggers for write+cleanup flows against real provider APIs.
+GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
+    r"create a github issue in (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+) titled",
+    re.IGNORECASE,
+)
+GMAIL_ROUNDTRIP_TRIGGER = re.compile(
+    r"send an email to (?P<email>\S+@\S+) with subject",
+    re.IGNORECASE,
+)
+GCAL_LIFECYCLE_TRIGGER = re.compile(
+    r"create a google calendar event titled",
+    re.IGNORECASE,
+)
+NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
+    r"search notion for .*, then search again",
+    re.IGNORECASE,
+)
 
 TOOL_CALL_PATTERNS = [
     # Parallel tool calls: return both echo and time in one response
@@ -133,6 +168,33 @@ TOOL_CALL_PATTERNS = [
         re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
         "mock_mcp_mock_search",
         lambda _: {"query": "refresh-check"},
+    ),
+    (
+        re.compile(r"list next calendar event|check calendar next event", re.IGNORECASE),
+        "google_calendar",
+        lambda _: {
+            "action": "list_events",
+            "calendar_id": "primary",
+            "max_results": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"read github issue (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<num>\d+)",
+            re.IGNORECASE,
+        ),
+        "github",
+        lambda m: {
+            "action": "get_issue",
+            "owner": m.group("owner"),
+            "repo": m.group("repo"),
+            "issue_number": int(m.group("num")),
+        },
+    ),
+    (
+        re.compile(r"search notion for (?P<query>.+)", re.IGNORECASE),
+        "notion_notion_search",
+        lambda m: {"query": m.group("query").strip()},
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
@@ -475,6 +537,12 @@ def _new_oauth_state() -> dict:
         "refresh_count": 0,
         "last_exchange": None,
         "last_refresh": None,
+    }
+
+
+def _new_mcp_state() -> dict:
+    return {
+        "requests": [],
     }
 
 
@@ -1061,6 +1129,97 @@ def _conversation_has_tool_name(messages: list[dict], expected_name: str) -> boo
     return False
 
 
+# ── Lifecycle canary helpers ────────────────────────────────────────────────
+#
+# These extract structured data from real provider tool-result JSON so the
+# multi-step lifecycle flows can pass IDs between steps (e.g. the issue
+# number from create_issue feeds into create_issue_comment, the event_id
+# from create_event feeds into delete_event, etc.).
+
+
+def _extract_canary_title(text: str) -> str:
+    """Extract a quoted title like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"titled\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"titled\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_canary_subject(text: str) -> str:
+    """Extract a subject like '[canary] 1713...' from a user prompt."""
+    m = re.search(r"subject\s+'([^']+)'", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"subject\s+\"([^\"]+)\"", text)
+    if m:
+        return m.group(1)
+    return "[canary] lifecycle-test"
+
+
+def _extract_issue_number(content: str) -> int | None:
+    """Extract the issue number from a GitHub create_issue tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "number" in data:
+            return int(data["number"])
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"number"\s*:\s*(\d+)', content)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _extract_gmail_message_id(content: str) -> str | None:
+    """Extract the message id from a Gmail send_message tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return data.get("id") or data.get("message_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_calendar_event_id(content: str) -> str | None:
+    """Extract the event id from a Google Calendar create_event tool result."""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            event = data.get("event", data)
+            return event.get("id") or event.get("event_id")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"id"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _tomorrow_10am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:00 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=0, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tomorrow_1030am_utc() -> str:
+    """Return an RFC3339 timestamp for tomorrow at 10:30 UTC."""
+    from datetime import datetime, timedelta, timezone
+    tomorrow = datetime.now(timezone.utc).replace(
+        hour=10, minute=30, second=0, microsecond=0,
+    ) + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_base(completion_id: str) -> dict:
     return {"id": completion_id, "object": "chat.completion.chunk",
             "created": int(time.time()), "model": "mock-model"}
@@ -1136,6 +1295,194 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
             "text": "Multi-step complete: executed echo then time.",
         }
 
+    # ── Lifecycle canary: GitHub issue create → comment → verify ─────────
+    m = GITHUB_ISSUE_LIFECYCLE_TRIGGER.search(last_user)
+    if m and has_tools:
+        owner = m.group("owner")
+        repo = m.group("repo")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "github",
+                    "arguments": {
+                        "action": "create_issue",
+                        "owner": owner,
+                        "repo": repo,
+                        "title": _extract_canary_title(last_user),
+                        "body": "Automated canary lifecycle test.",
+                        "labels": ["canary"],
+                    },
+                },
+            }
+        if n == 1:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "create_issue_comment",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                            "body": "Canary verification",
+                        },
+                    },
+                }
+        if n == 2:
+            issue_number = _extract_issue_number(tool_results[0].get("content", ""))
+            if issue_number:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "github",
+                        "arguments": {
+                            "action": "get_issue",
+                            "owner": owner,
+                            "repo": repo,
+                            "issue_number": issue_number,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "github issue lifecycle complete. Issue created, commented, and verified.",
+        }
+
+    # ── Lifecycle canary: Gmail send → list → trash ──────────────────────
+    m = GMAIL_ROUNDTRIP_TRIGGER.search(last_user)
+    if m and has_tools:
+        email = m.group("email")
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            subject = _extract_canary_subject(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "send_message",
+                        "to": email,
+                        "subject": subject,
+                        "body": "Canary test",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "list_messages",
+                        "query": "subject:[canary] newer_than:1h",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            message_id = _extract_gmail_message_id(tool_results[0].get("content", ""))
+            if message_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "gmail",
+                        "arguments": {
+                            "action": "trash_message",
+                            "message_id": message_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "gmail roundtrip complete. Message sent, verified, and trashed.",
+        }
+
+    # ── Lifecycle canary: Google Calendar create → list → delete ─────────
+    if GCAL_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            title = _extract_canary_title(last_user)
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "create_event",
+                        "calendar_id": "primary",
+                        "summary": title,
+                        "start_datetime": _tomorrow_10am_utc(),
+                        "end_datetime": _tomorrow_1030am_utc(),
+                        "timezone": "UTC",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "list_events",
+                        "calendar_id": "primary",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if n == 2:
+            event_id = _extract_calendar_event_id(tool_results[0].get("content", ""))
+            if event_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "google_calendar",
+                        "arguments": {
+                            "action": "delete_event",
+                            "calendar_id": "primary",
+                            "event_id": event_id,
+                        },
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "google_calendar lifecycle complete. Event created, verified, and deleted.",
+        }
+
+    # ── Lifecycle canary: Notion search → search again ────────────────────
+    if NOTION_SEARCH_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_tool_results(messages)
+        n = len(tool_results)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "canary",
+                    },
+                },
+            }
+        if n == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "notion_notion_search",
+                    "arguments": {
+                        "query": "test",
+                    },
+                },
+            }
+        return {
+            "type": "text",
+            "text": "notion search lifecycle complete. Both searches executed successfully.",
+        }
+
     return None
 
 
@@ -1201,6 +1548,15 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     # Multi-step chain: must bypass tool-result-summary to issue second tool call
     if special and _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
+    # Lifecycle canary multi-step chains: create → verify → cleanup → summarize
+    for lifecycle_trigger in (
+        GITHUB_ISSUE_LIFECYCLE_TRIGGER,
+        GMAIL_ROUNDTRIP_TRIGGER,
+        GCAL_LIFECYCLE_TRIGGER,
+        NOTION_SEARCH_LIFECYCLE_TRIGGER,
+    ):
+        if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
+            return await _dispatch_special_response(request, cid, stream, special)
 
     # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)
@@ -1436,6 +1792,21 @@ async def _stream_truncated_tool_call(
     return resp
 
 
+def _is_google_token_url(url: str) -> bool:
+    """Whether an OAuth `token_url` points at Google.
+
+    Used to gate the `AUTH_LIVE_GOOGLE_*` live-token override so
+    non-Google providers (GitHub, Notion, MCP) cannot accidentally
+    receive Google tokens during auth-live-seeded canary runs. The
+    earlier `not code.startswith("mock_mcp_code")` gate only ruled out
+    the MCP code-prefix convention, not GitHub/Notion flows.
+    """
+    if not url:
+        return False
+    lowered = url.lower()
+    return "googleapis.com" in lowered or "accounts.google.com" in lowered
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -1453,13 +1824,30 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     code = data.get("code", "")
     access_token_field = data.get("access_token_field", "access_token")
 
-    if code == "mock_mcp_code":
+    if code.startswith("mock_mcp_code"):
         if not data.get("token_url", "").endswith("/oauth/token"):
             return web.json_response({"error": "missing_token_url"}, status=400)
         if not data.get("client_id"):
             return web.json_response({"error": "missing_client_id"}, status=400)
         if not data.get("resource"):
             return web.json_response({"error": "missing_resource"}, status=400)
+
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them instead of mock tokens so the extension gets real
+    # credentials. Gate strictly on the Google token_url host: the
+    # previous `not mcp_code` gate also matched GitHub and Notion
+    # exchanges, which would have shipped Google tokens to the wrong
+    # extension and masked real provider-specific failures.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+    if live_access and _is_google_token_url(data.get("token_url", "")):
+        resp = {
+            access_token_field: live_access,
+            "expires_in": 3600,
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
 
     return web.json_response({
         access_token_field: f"mock-token-{code}",
@@ -1482,6 +1870,26 @@ async def oauth_refresh(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid_gateway_auth"}, status=401)
 
     provider = data.get("provider", "")
+
+    # When real provider tokens are available (auth-live-seeded canary),
+    # return them for Google refreshes instead of validating mock
+    # client_id. Gate strictly on the Google token_url host: the
+    # previous `not mcp:` gate still matched GitHub and Notion
+    # refreshes, which would have returned Google tokens for the wrong
+    # provider and hidden refresh-path bugs.
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    if live_access and _is_google_token_url(data.get("token_url", "")):
+        live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+        resp = {
+            "access_token": live_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "mock-scope",
+        }
+        if live_refresh:
+            resp["refresh_token"] = live_refresh
+        return web.json_response(resp)
+
     if provider.startswith("mcp:"):
         if data.get("client_id") != "mock-mcp-client-id":
             return web.json_response({"error": "invalid_mcp_client_id"}, status=400)
@@ -1512,6 +1920,15 @@ async def oauth_state_handler(request: web.Request) -> web.Response:
 
 async def oauth_reset(request: web.Request) -> web.Response:
     request.app["oauth_state"] = _new_oauth_state()
+    return web.json_response({"ok": True})
+
+
+async def mcp_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["mcp_state"])
+
+
+async def mcp_reset(request: web.Request) -> web.Response:
+    request.app["mcp_state"] = _new_mcp_state()
     return web.json_response({"ok": True})
 
 
@@ -1564,6 +1981,10 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
     body = await request.json()
     method = body.get("method", "")
     req_id = body.get("id")
+    request.app["mcp_state"]["requests"].append({
+        "method": method,
+        "authorization": request.headers.get("Authorization"),
+    })
 
     if method == "initialize":
         return web.json_response({
@@ -1679,6 +2100,7 @@ def main():
     args = parser.parse_args()
     app = web.Application()
     app["oauth_state"] = _new_oauth_state()
+    app["mcp_state"] = _new_mcp_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -1688,6 +2110,8 @@ def main():
     app.router.add_post("/oauth/refresh", oauth_refresh)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
+    app.router.add_get("/__mock/mcp/state", mcp_state_handler)
+    app.router.add_post("/__mock/mcp/reset", mcp_reset)
 
     async def set_github_api_url(request: web.Request) -> web.Response:
         global _github_api_url
@@ -1720,8 +2144,8 @@ def main():
         site = web.TCPSite(runner, "127.0.0.1", args.port)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        app["port"] = port  # used by MCP handlers
         print(f"MOCK_LLM_PORT={port}", flush=True)
+        app["port"] = port  # used by MCP handlers
         await asyncio.Event().wait()
 
     asyncio.run(start())

@@ -64,7 +64,13 @@ pub async fn create_client_from_config(
     match server.effective_transport() {
         EffectiveTransport::Stdio { command, args, env } => {
             let transport = process_manager
-                .spawn_stdio(validated_name.as_str(), command, args.to_vec(), env.clone())
+                .spawn_stdio(
+                    user_id,
+                    validated_name.as_str(),
+                    command,
+                    args.to_vec(),
+                    env.clone(),
+                )
                 .await
                 .map_err(|e| McpFactoryError::StdioSpawn {
                     name: server_name.clone(),
@@ -127,7 +133,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
-                    .with_session_manager(Arc::clone(session_manager)),
+                    .with_session_manager(Arc::clone(session_manager), user_id),
             );
             Ok(McpClient::new_with_transport(
                 validated_name.as_str(),
@@ -400,7 +406,9 @@ mod tests {
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
         // Use the normalised server name (hyphens → underscores) that the factory applies.
         let normalised_name = McpServerName::new("session_test").expect("valid");
-        session_manager.get_or_create(&normalised_name, &url).await;
+        session_manager
+            .get_or_create("test-user", &normalised_name, &url)
+            .await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;
@@ -417,8 +425,11 @@ mod tests {
             .await
             .expect("request should succeed");
 
-        // Verify the session manager captured the session ID from the response.
-        let captured = session_manager.get_session_id(&normalised_name).await;
+        // Verify the session manager captured the session ID from the response
+        // under the same `(user_id, server_name)` key the transport wrote with.
+        let captured = session_manager
+            .get_session_id("test-user", &normalised_name)
+            .await;
         assert_eq!(
             captured.as_deref(),
             Some(SESSION_ID),

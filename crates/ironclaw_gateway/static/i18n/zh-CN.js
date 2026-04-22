@@ -28,6 +28,7 @@ I18n.register('zh-CN', {
   'restart.progressTitle': '正在重启 IronClaw',
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
+  'restart.closeTooltip': '关闭',
   
   // 主题
   'theme.tooltipDark': '主题：深色（点击切换浅色）',
@@ -101,6 +102,7 @@ I18n.register('zh-CN', {
   'status.reconnecting': '重新连接中...',
   'status.teeVerified': 'TEE 已验证',
   'status.restart': '重启',
+  'status.restartTooltip': '优雅地重启进程',
   'status.active': '已激活',
   'status.installed': '已安装',
   'status.awaitingPairing': '等待配对',
@@ -456,6 +458,10 @@ I18n.register('zh-CN', {
   'config.builtin': '内置',
   'config.useProvider': '使用',
   'config.configureProvider': '配置',
+  'config.notConfigured': '未配置',
+  'config.configureToUse': '请先配置 API 密钥后再使用此提供商。',
+  'config.baseUrlRequired': '需要配置基础 URL，请先配置此提供商。',
+  'config.modelRequired': '使用此提供商前需要配置模型。',
   'config.providerConfigured': '提供商 "{name}" 已配置（重启后生效）',
   'config.currentModel': '模型：{model}',
   'config.providerName': '显示名称',
