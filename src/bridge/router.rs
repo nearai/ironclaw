@@ -3639,8 +3639,10 @@ async fn handle_with_engine_inner(
 
     // Detect execution intent and configure obligation accordingly
     let thread_config = {
-        let mut cfg = ThreadConfig::default();
-        cfg.codeact_host_shims = agent.config().codeact_host_shims;
+        let mut cfg = ThreadConfig {
+            codeact_host_shims: agent.config().codeact_host_shims,
+            ..ThreadConfig::default()
+        };
         if crate::llm::user_signals_execution_intent(content) {
             cfg.require_action_attempt = true;
         }

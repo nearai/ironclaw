@@ -191,8 +191,8 @@ fn strip_host_shim_section(preamble: &str) -> String {
     let end = end_marker + END.len();
 
     let mut out = String::with_capacity(preamble.len());
-    out.push_str(&preamble[..start]);
-    out.push_str(&preamble[end..]);
+    out.push_str(preamble.get(..start).unwrap_or_default());
+    out.push_str(preamble.get(end..).unwrap_or_default());
     out
 }
 

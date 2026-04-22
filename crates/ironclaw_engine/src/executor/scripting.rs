@@ -1242,6 +1242,8 @@ fn register_host_shim_names(known_actions: &mut std::collections::HashSet<String
     }
     if available.contains("list_dir") {
         known_actions.insert("list_entries".into());
+    }
+    if available.contains("read_file") && available.contains("list_dir") {
         known_actions.insert("exists".into());
     }
     if available.contains("glob") {
@@ -1291,20 +1293,20 @@ fn build_shim_dispatch(
         })),
         "list_entries" => {
             let mut map = serde_json::Map::new();
-            if let Some(path) = optional_param(params, "path", 0) {
-                if !path.is_null() {
-                    map.insert("path".into(), path.clone());
-                }
+            if let Some(path) = optional_param(params, "path", 0)
+                && !path.is_null()
+            {
+                map.insert("path".into(), path.clone());
             }
-            if let Some(recursive) = optional_param(params, "recursive", 1) {
-                if !recursive.is_null() {
-                    map.insert("recursive".into(), recursive.clone());
-                }
+            if let Some(recursive) = optional_param(params, "recursive", 1)
+                && !recursive.is_null()
+            {
+                map.insert("recursive".into(), recursive.clone());
             }
-            if let Some(max_depth) = optional_param(params, "max_depth", 2) {
-                if !max_depth.is_null() {
-                    map.insert("max_depth".into(), max_depth.clone());
-                }
+            if let Some(max_depth) = optional_param(params, "max_depth", 2)
+                && !max_depth.is_null()
+            {
+                map.insert("max_depth".into(), max_depth.clone());
             }
             Ok(Some(ShimDispatch {
                 action_name: "list_dir".into(),
@@ -1323,15 +1325,15 @@ fn build_shim_dispatch(
                     "find_files",
                 )?),
             );
-            if let Some(path) = optional_param(params, "path", 1) {
-                if !path.is_null() {
-                    map.insert("path".into(), path.clone());
-                }
+            if let Some(path) = optional_param(params, "path", 1)
+                && !path.is_null()
+            {
+                map.insert("path".into(), path.clone());
             }
-            if let Some(max_results) = optional_param(params, "max_results", 2) {
-                if !max_results.is_null() {
-                    map.insert("max_results".into(), max_results.clone());
-                }
+            if let Some(max_results) = optional_param(params, "max_results", 2)
+                && !max_results.is_null()
+            {
+                map.insert("max_results".into(), max_results.clone());
             }
             Ok(Some(ShimDispatch {
                 action_name: "glob".into(),
@@ -1355,15 +1357,15 @@ fn build_shim_dispatch(
                 "command".into(),
                 serde_json::Value::String(required_string_param(params, "command", 0, "run")?),
             );
-            if let Some(timeout) = optional_param(params, "timeout", 1) {
-                if !timeout.is_null() {
-                    map.insert("timeout".into(), timeout.clone());
-                }
+            if let Some(timeout) = optional_param(params, "timeout", 1)
+                && !timeout.is_null()
+            {
+                map.insert("timeout".into(), timeout.clone());
             }
-            if let Some(workdir) = optional_param(params, "workdir", 2) {
-                if !workdir.is_null() {
-                    map.insert("workdir".into(), workdir.clone());
-                }
+            if let Some(workdir) = optional_param(params, "workdir", 2)
+                && !workdir.is_null()
+            {
+                map.insert("workdir".into(), workdir.clone());
             }
             Ok(Some(ShimDispatch {
                 action_name: "shell".into(),
@@ -1541,10 +1543,28 @@ fn adapt_list_entries_output(output: &serde_json::Value) -> serde_json::Value {
 fn normalize_list_entry(raw: &str) -> String {
     let trimmed = raw.trim_end();
     let without_size = match trimmed.rfind(" (") {
-        Some(idx) if trimmed.ends_with(')') => &trimmed[..idx],
+        Some(idx) if trimmed.ends_with(')') => {
+            let suffix = trimmed.get(idx + 2..trimmed.len() - 1).unwrap_or_default();
+            if is_list_entry_size_suffix(suffix) {
+                trimmed.get(..idx).unwrap_or(trimmed)
+            } else {
+                trimmed
+            }
+        }
         _ => trimmed,
     };
     without_size.trim_end_matches('/').to_string()
+}
+
+fn is_list_entry_size_suffix(raw: &str) -> bool {
+    ["GB", "MB", "KB", "B"].iter().any(|unit| {
+        raw.strip_suffix(unit).is_some_and(|number| {
+            let number = number.trim();
+            !number.is_empty()
+                && number.chars().any(|ch| ch.is_ascii_digit())
+                && number.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        })
+    })
 }
 
 fn adapt_read_text_output(output: &serde_json::Value) -> serde_json::Value {
@@ -1835,28 +1855,38 @@ async fn execute_canonical_action_now(
                     gate_name,
                     action_name,
                     call_id,
+                    parameters,
                     resume_kind,
-                    ..
+                    resume_output,
+                    paused_lease,
                 }) => {
                     let _ = leases.refund_use(lease.id).await;
+                    let parameters = *parameters;
                     events.push(EventKind::ApprovalRequested {
-                        action_name,
-                        call_id,
-                        parameters: Some(params),
+                        action_name: action_name.clone(),
+                        call_id: call_id.clone(),
+                        parameters: Some(parameters.clone()),
                         description: None,
-                        allow_always: match *resume_kind {
+                        allow_always: match resume_kind.as_ref() {
                             crate::gate::ResumeKind::Approval { allow_always } => {
-                                Some(allow_always)
+                                Some(*allow_always)
                             }
                             _ => None,
                         },
                         gate_name: Some(gate_name.clone()),
                         params_summary,
                     });
-                    ImmediateActionOutcome::Error(ExtFunctionResult::Error(MontyException::new(
-                        ExcType::RuntimeError,
-                        Some(format!("execution paused by gate '{gate_name}'")),
-                    )))
+                    ImmediateActionOutcome::GatePaused(
+                        crate::runtime::messaging::ThreadOutcome::GatePaused {
+                            gate_name,
+                            action_name,
+                            call_id,
+                            parameters,
+                            resume_kind: *resume_kind,
+                            resume_output: resume_output.map(|output| *output),
+                            paused_lease,
+                        },
+                    )
                 }
                 Err(e) => {
                     events.push(EventKind::ActionFailed {
@@ -1986,20 +2016,9 @@ async fn maybe_execute_immediate_shim(
                 )));
             }
 
-            let target = std::path::Path::new(path);
-            let parent = target
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| ".".into());
-            let leaf = target
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string());
-
             match execute_canonical_action_now(
-                "list_dir",
-                serde_json::json!({"path": parent}),
+                "read_file",
+                serde_json::json!({"path": path, "offset": 1, "limit": 1}),
                 thread,
                 effects,
                 leases,
@@ -2012,23 +2031,9 @@ async fn maybe_execute_immediate_shim(
             )
             .await
             {
-                ImmediateActionOutcome::Output(output) => {
-                    let exists = output
-                        .get("entries")
-                        .and_then(|v| v.as_array())
-                        .map(|entries| {
-                            entries.iter().any(|entry| {
-                                entry.as_str().is_some_and(|entry| {
-                                    let normalized = entry.split(" (").next().unwrap_or(entry);
-                                    normalized == leaf || normalized == format!("{leaf}/")
-                                })
-                            })
-                        })
-                        .unwrap_or(false);
-                    Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
-                        MontyObject::Bool(exists),
-                    )))
-                }
+                ImmediateActionOutcome::Output(_) => Some(ImmediateShimOutcome::Ready(
+                    ExtFunctionResult::Return(MontyObject::Bool(true)),
+                )),
                 ImmediateActionOutcome::Error(ext_result) => {
                     let lowered = match &ext_result {
                         ExtFunctionResult::Error(err) => err.to_string().to_ascii_lowercase(),
@@ -2038,6 +2043,45 @@ async fn maybe_execute_immediate_shim(
                         Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
                             MontyObject::Bool(false),
                         )))
+                    } else if lowered.contains("is a directory") || lowered.contains("directory") {
+                        match execute_canonical_action_now(
+                            "list_dir",
+                            serde_json::json!({"path": path}),
+                            thread,
+                            effects,
+                            leases,
+                            policy,
+                            context,
+                            capability_policies,
+                            call_id,
+                            action_results,
+                            events,
+                        )
+                        .await
+                        {
+                            ImmediateActionOutcome::Output(_) => Some(ImmediateShimOutcome::Ready(
+                                ExtFunctionResult::Return(MontyObject::Bool(true)),
+                            )),
+                            ImmediateActionOutcome::Error(ext_result) => {
+                                let lowered = match &ext_result {
+                                    ExtFunctionResult::Error(err) => {
+                                        err.to_string().to_ascii_lowercase()
+                                    }
+                                    _ => String::new(),
+                                };
+                                if lowered.contains("no such file") || lowered.contains("not found")
+                                {
+                                    Some(ImmediateShimOutcome::Ready(ExtFunctionResult::Return(
+                                        MontyObject::Bool(false),
+                                    )))
+                                } else {
+                                    Some(ImmediateShimOutcome::Ready(ext_result))
+                                }
+                            }
+                            ImmediateActionOutcome::GatePaused(outcome) => {
+                                Some(ImmediateShimOutcome::GatePaused(outcome))
+                            }
+                        }
                     } else {
                         Some(ImmediateShimOutcome::Ready(ext_result))
                     }
@@ -3281,22 +3325,132 @@ FINAL(str(result["ok"]) + "|" + str(result["bytes_written"]))
     }
 
     #[tokio::test]
-    async fn shim_exists_uses_list_dir_and_returns_true_for_directory_entries() {
+    async fn shim_append_text_propagates_execution_gate_pause() {
         let thread = make_test_thread();
         let effects = Arc::new(MockEffects::new(
-            vec![test_action("list_dir")],
+            vec![test_action("read_file"), test_action("write_file")],
+            vec![Err(EngineError::GatePaused {
+                gate_name: "approval".into(),
+                action_name: "read_file".into(),
+                call_id: "append:read".into(),
+                parameters: Box::new(serde_json::json!({"path": "notes.txt", "offset": 1})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Approval { allow_always: true }),
+                resume_output: None,
+                paused_lease: None,
+            })],
+        ));
+
+        let code = r#"
+await append_text("notes.txt", "\nbeta")
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert!(result.final_answer.is_none());
+        match result.need_approval.as_ref() {
+            Some(crate::runtime::messaging::ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "read_file");
+                assert_eq!(call_id, "append:read");
+                assert_eq!(
+                    parameters,
+                    &serde_json::json!({"path": "notes.txt", "offset": 1})
+                );
+                assert!(matches!(
+                    resume_kind,
+                    crate::gate::ResumeKind::Approval { allow_always: true }
+                ));
+            }
+            other => panic!("expected GatePaused approval outcome, got {other:?}"),
+        }
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            EventKind::ApprovalRequested {
+                action_name,
+                call_id,
+                gate_name: Some(gate_name),
+                ..
+            } if action_name == "read_file" && call_id == "append:read" && gate_name == "approval"
+        )));
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "notes.txt", "offset": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_exists_uses_read_file_probe_for_files() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("list_dir")],
             vec![Ok(ActionResult {
                 call_id: String::new(),
-                action_name: "list_dir".into(),
+                action_name: "read_file".into(),
                 output: serde_json::json!({
-                    "path": ".",
-                    "entries": ["src/", "Cargo.toml (12B)"],
-                    "count": 2,
-                    "truncated": false
+                    "content": "     1│ [package]",
+                    "total_lines": 1,
+                    "lines_shown": 1,
+                    "truncated_by_default": false,
+                    "path": "Cargo.toml"
                 }),
                 is_error: false,
                 duration: Duration::from_millis(1),
             })],
+        ));
+
+        let code = r#"
+value = await exists("Cargo.toml")
+FINAL(str(value))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(result.final_answer.as_deref(), Some("True"));
+        assert_eq!(result.action_results.len(), 1);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "Cargo.toml", "offset": 1, "limit": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn shim_exists_falls_back_to_list_dir_for_directories() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("read_file"), test_action("list_dir")],
+            vec![
+                Err(EngineError::Effect {
+                    reason: "Cannot access file: Is a directory (os error 21)".into(),
+                }),
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "list_dir".into(),
+                    output: serde_json::json!({
+                        "path": "src",
+                        "entries": ["lib.rs", "main.rs"],
+                        "count": 2,
+                        "truncated": false
+                    }),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                }),
+            ],
         ));
 
         let code = r#"
@@ -3307,13 +3461,21 @@ FINAL(str(value))
         let result = run_code(code, effects.clone(), &thread).await.unwrap();
         assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("True"));
-        assert_eq!(result.action_results.len(), 1);
-        assert_eq!(result.action_results[0].action_name, "list_dir");
+        assert_eq!(result.action_results.len(), 2);
+        assert_eq!(result.action_results[0].action_name, "read_file");
+        assert!(result.action_results[0].is_error);
+        assert_eq!(result.action_results[1].action_name, "list_dir");
+        assert!(!result.action_results[1].is_error);
 
         let calls = effects.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "list_dir");
-        assert_eq!(calls[0].1, serde_json::json!({"path": "."}));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "read_file");
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"path": "src", "offset": 1, "limit": 1})
+        );
+        assert_eq!(calls[1].0, "list_dir");
+        assert_eq!(calls[1].1, serde_json::json!({"path": "src"}));
     }
 
     #[tokio::test]
@@ -3429,6 +3591,44 @@ FINAL(",".join(entries))
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "list_dir");
         assert_eq!(calls[0].1, serde_json::json!({"path": "src"}));
+    }
+
+    #[tokio::test]
+    async fn shim_list_entries_preserves_parenthetical_filenames() {
+        let thread = make_test_thread();
+        let effects = Arc::new(MockEffects::new(
+            vec![test_action("list_dir")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "list_dir".into(),
+                output: serde_json::json!({
+                    "path": "docs",
+                    "entries": ["Report (Final)", "archive (2024)", "main.rs (1.0KB)"],
+                    "count": 3,
+                    "truncated": false
+                }),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+
+        let code = r#"
+entries = await list_entries("docs")
+FINAL(",".join(entries))
+"#;
+
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("Report (Final),archive (2024),main.rs"),
+            "list_entries should only strip real size suffixes, not legitimate parenthetical names"
+        );
+
+        let calls = effects.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "list_dir");
+        assert_eq!(calls[0].1, serde_json::json!({"path": "docs"}));
     }
 
     #[tokio::test]
