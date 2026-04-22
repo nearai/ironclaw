@@ -167,7 +167,7 @@ def signals_execution_intent(text):
         "cancel it", "cancel that", "cancel this", "cancel the ",
         "please run ", "please execute ", "please fetch ",
         "please send ", "please deploy ",
-        "please stop ", "please pause ", "please cancel ",
+        "please stop ", "please pause ", "please cancel ", "please halt ",
     ]
     if any(phrase in lower for phrase in EXEC_PHRASES):
         return True
@@ -176,7 +176,8 @@ def signals_execution_intent(text):
     # "stop pinging", "stop", "pause", "cancel" are unambiguous commands
     # that don't match the "verb + pronoun/article" pattern above.
     # Checking startswith avoids false positives like "I can't stop".
-    trimmed = lower.strip()
+    # Strip trailing punctuation so "Stop." and "cancel!" still match.
+    trimmed = lower.strip().rstrip(".,!?;:")
     IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt "]
     BARE_COMMANDS = ["stop", "pause", "cancel", "halt"]
     if trimmed in BARE_COMMANDS:

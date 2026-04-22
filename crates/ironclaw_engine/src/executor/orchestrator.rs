@@ -3233,6 +3233,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn signals_execution_intent_please_halt() {
+        // "please halt" must be detected like "please stop/pause/cancel"
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please halt the mission")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop_with_punctuation() {
+        // Bare commands with trailing punctuation must still match
+        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging.")"#
+        ));
+    }
+
     // ── Skill activation: smart-quote / autocorrect resilience ───
     //
     // Regression for the ceo-setup non-activation report. iOS / macOS / most
