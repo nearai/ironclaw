@@ -1826,6 +1826,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     mission_manager_inner =
         mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
+    // Register the engine-v2 mission tool family now that the manager
+    // exists. Tools constructed here capture `Arc::clone(&mission_manager)`
+    // directly; the call also fills `ToolRegistry::mission_slot` so any
+    // downstream integration tool registered through the plugin seam
+    // (see `ExternalToolRegistrar`) sees the same manager.
+    agent
+        .tools()
+        .register_mission_tools(Arc::clone(&mission_manager), project_id)
+        .await;
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }

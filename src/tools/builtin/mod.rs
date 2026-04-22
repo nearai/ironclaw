@@ -12,6 +12,7 @@ mod job;
 mod json;
 pub mod memory;
 mod message;
+pub mod mission;
 pub mod path_utils;
 mod plan;
 mod restart;
@@ -41,6 +42,10 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use mission::{
+    MissionCreateTool, MissionDeleteTool, MissionFireTool, MissionListTool, MissionPauseTool,
+    MissionResumeTool, MissionUpdateTool,
+};
 pub use plan::PlanUpdateTool;
 pub use restart::RestartTool;
 pub use routine::{

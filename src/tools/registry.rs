@@ -109,6 +109,14 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "plan_update",
     // Permission tools
     "tool_permission_set",
+    // Mission tools (engine v2)
+    "mission_create",
+    "mission_list",
+    "mission_update",
+    "mission_delete",
+    "mission_fire",
+    "mission_pause",
+    "mission_resume",
     // Aliases (web_fetch is an alias for http in some contexts)
     "web_fetch",
 ];
@@ -120,6 +128,26 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 pub fn is_protected_tool_name(name: &str) -> bool {
     PROTECTED_TOOL_NAMES.contains(&name)
 }
+
+/// Shared slot for deferred mission-manager injection.
+///
+/// The `MissionManager` is constructed inside the engine's init path
+/// (bridge/router.rs), which runs well after `ToolRegistry` is built in
+/// `AppBuilder::init_tools`. Any tool that needs to create or fire a
+/// mission (the engine-v2 `mission_*` built-ins, downstream integration
+/// tools like abound's `abound_send_wire` wait-action) takes an
+/// `Arc<MissionSlot>` at construction time and reads through it at
+/// execute time. The slot is empty until the engine fills it via
+/// [`ToolRegistry::set_mission_slot`], at which point every tool that
+/// holds the `Arc` sees the manager.
+pub type MissionSlot = Arc<
+    tokio::sync::RwLock<
+        Option<(
+            Arc<ironclaw_engine::MissionManager>,
+            ironclaw_engine::ProjectId,
+        )>,
+    >,
+>;
 
 /// Registry of available tools.
 pub struct ToolRegistry {
@@ -143,6 +171,10 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Deferred-injection slot for the engine's `MissionManager`. See
+    /// [`MissionSlot`] for the lifetime contract. Shared by `Arc::clone`
+    /// into every tool that needs mission access.
+    pub(crate) mission_slot: MissionSlot,
 }
 
 impl ToolRegistry {
@@ -172,6 +204,7 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            mission_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -236,6 +269,64 @@ impl ToolRegistry {
 
     pub fn role_lookup(&self) -> Option<&Arc<dyn UserStore>> {
         self.role_lookup.as_ref()
+    }
+
+    /// Borrow the shared mission slot. Downstream tools that need to
+    /// create or fire missions should `Arc::clone` the returned value
+    /// and read through it at execute time; see [`MissionSlot`].
+    pub fn mission_slot(&self) -> &MissionSlot {
+        &self.mission_slot
+    }
+
+    /// Populate the shared mission slot. Called by the engine bootstrap
+    /// after `MissionManager` is constructed. Every tool that holds an
+    /// `Arc<MissionSlot>` sees the manager immediately after this
+    /// returns.
+    pub async fn set_mission_slot(
+        &self,
+        manager: Arc<ironclaw_engine::MissionManager>,
+        project_id: ironclaw_engine::ProjectId,
+    ) {
+        let mut guard = self.mission_slot.write().await;
+        *guard = Some((manager, project_id));
+    }
+
+    /// Register the engine-v2 `mission_*` tool family. Takes an
+    /// `Arc<MissionManager>` directly because each tool binds its own
+    /// immutable `Arc`; the shared [`MissionSlot`] is reserved for
+    /// tools whose registration happens before the manager exists
+    /// (typically downstream integration tools plugged in through
+    /// [`crate::tools::ExternalToolRegistrar`]).
+    ///
+    /// Also populates the shared mission slot so those
+    /// downstream tools see the manager after this call.
+    pub async fn register_mission_tools(
+        &self,
+        manager: Arc<ironclaw_engine::MissionManager>,
+        project_id: ironclaw_engine::ProjectId,
+    ) {
+        use crate::tools::builtin::{
+            MissionCreateTool, MissionDeleteTool, MissionFireTool, MissionListTool,
+            MissionPauseTool, MissionResumeTool, MissionUpdateTool,
+        };
+        self.register_sync(Arc::new(MissionCreateTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionListTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionFireTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionPauseTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionResumeTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionDeleteTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionUpdateTool::new(Arc::clone(&manager))));
+        tracing::debug!("Registered 7 mission management tools");
+
+        // Fill the shared slot so downstream tools (e.g. integrations
+        // that use the plugin seam) see the manager.
+        self.set_mission_slot(manager, project_id).await;
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
