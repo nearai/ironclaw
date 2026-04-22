@@ -38,13 +38,20 @@ impl CapabilityProjector {
 
         let latent_actions = auth_manager.latent_provider_actions(&context.user_id).await;
         let mut channel_routes = HashMap::new();
-        for extension in &extensions {
-            if is_channel_extension_kind(extension.kind)
-                && let Some(target) = auth_manager
-                    .notification_target_for_channel(&extension.name)
-                    .await
-            {
-                channel_routes.insert(extension.name.clone(), target);
+        let channel_route_lookups = extensions
+            .iter()
+            .filter(|extension| is_channel_extension_kind(extension.kind))
+            .map(|extension| {
+                let name = extension.name.clone();
+                async {
+                    let target = auth_manager.notification_target_for_channel(&name).await;
+                    (name, target)
+                }
+            });
+
+        for (name, target) in futures::future::join_all(channel_route_lookups).await {
+            if let Some(target) = target {
+                channel_routes.insert(name, target);
             }
         }
 

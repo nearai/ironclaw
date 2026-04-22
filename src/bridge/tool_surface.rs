@@ -95,10 +95,7 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
 }
 
 const fn is_direct_ready(status: CapabilityStatus) -> bool {
-    matches!(
-        status,
-        CapabilityStatus::Ready | CapabilityStatus::ReadyScoped
-    )
+    matches!(status, CapabilityStatus::Ready)
 }
 
 const fn fallback_assignment(status: CapabilityStatus) -> SurfaceAssignment {
@@ -205,6 +202,17 @@ mod tests {
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
+            },
+            Case {
+                name: "ready-scoped extension direct action is not callable",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::ReadyScoped,
+                    invocation_mode: InvocationMode::Direct,
+                    approval_gated: false,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::neither(),
             },
             Case {
                 name: "latent provider action",

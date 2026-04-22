@@ -1505,7 +1505,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
     ) -> Result<Vec<CapabilitySummary>, EngineError> {
-        let auth_manager = self.auth_manager.read().await;
+        let auth_manager = self.auth_manager.read().await.clone();
         CapabilityProjector::project(auth_manager.as_deref(), leases, context).await
     }
 }
