@@ -1013,18 +1013,20 @@ or status \"failed\" when you hit an unresolvable blocker."#,
             let result = self
                 .execute_tool(&action.tool_name, &action.parameters)
                 .await;
-            let finish_signal = if selection.tool_name == "finish_job" {
-                finish_job_signal_from_result(&result)?
+            let finish_signal_result = if selection.tool_name == "finish_job" {
+                finish_job_signal_from_result(&result)
             } else {
-                None
+                Ok(None)
             };
+
+            self.process_tool_result_job(reason_ctx, &selection, result)
+                .await?;
+
+            let finish_signal = finish_signal_result?;
             let finish_outcome = finish_signal.clone().map(|signal| match signal.status {
                 FinishJobStatus::Completed => LoopOutcome::Response(signal.summary),
                 FinishJobStatus::Failed => LoopOutcome::Failure(signal.summary),
             });
-
-            self.process_tool_result_job(reason_ctx, &selection, result)
-                .await?;
 
             if let Some(outcome) = finish_outcome {
                 if let Some(signal) = finish_signal.as_ref()
@@ -1760,29 +1762,34 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
-            let finish_signal = if is_last_finish_job {
-                finish_job_signal_from_result(&result)?
+            let finish_signal_result = if is_last_finish_job {
+                finish_job_signal_from_result(&result)
             } else {
-                None
+                Ok(None)
             };
-            if result.is_err() {
-                tool_failure_count += 1;
-                self.worker
-                    .process_tool_result_job(reason_ctx, &selection, result)
-                    .await?;
-                reason_ctx.last_tool_batch_all_failed =
-                    total_tools > 0 && tool_failure_count == total_tools;
-                if is_last_finish_job {
-                    return Ok(None);
+
+            match result {
+                Err(err) => {
+                    tool_failure_count += 1;
+                    self.worker
+                        .process_tool_result_job(reason_ctx, &selection, Err(err))
+                        .await?;
+                    reason_ctx.last_tool_batch_all_failed =
+                        total_tools > 0 && tool_failure_count == total_tools;
+                    if is_last_finish_job {
+                        return Ok(None);
+                    }
+                    continue;
                 }
-                continue;
+                Ok(output) => {
+                    self.worker
+                        .process_tool_result_job(reason_ctx, &selection, Ok(output))
+                        .await?;
+                }
             }
-            self.worker
-                .process_tool_result_job(reason_ctx, &selection, result)
-                .await?;
 
             if is_last_finish_job {
-                let signal = finish_signal.ok_or_else(|| {
+                let signal = finish_signal_result?.ok_or_else(|| {
                     crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
                         name: "finish_job".to_string(),
                         reason: "finish_job executed successfully but returned no signal"
