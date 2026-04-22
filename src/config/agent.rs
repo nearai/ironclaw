@@ -47,6 +47,9 @@ pub struct AgentConfig {
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
+    /// Enable the Pythonic CodeAct host-shim layer (`read_text`, `read_json`, etc.).
+    /// Raw canonical tools remain available either way.
+    pub codeact_host_shims: bool,
 }
 
 impl AgentConfig {
@@ -75,6 +78,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            codeact_host_shims: true,
         }
     }
 
@@ -157,6 +161,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            codeact_host_shims: parse_bool_env("CODEACT_HOST_SHIMS", true)?,
         })
     }
 }
@@ -179,5 +184,24 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_codeact_host_shims_env_override_can_disable() {
+        let _guard = crate::config::helpers::lock_env();
+        let settings = Settings::default();
+        let original = std::env::var("CODEACT_HOST_SHIMS").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("CODEACT_HOST_SHIMS", "false") };
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("CODEACT_HOST_SHIMS", value);
+            } else {
+                std::env::remove_var("CODEACT_HOST_SHIMS");
+            }
+        };
+        assert!(!config.codeact_host_shims);
     }
 }

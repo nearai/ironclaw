@@ -76,6 +76,16 @@ Phase 1 / 2 add a small ergonomic shim layer for common workflows:
 
 These shims do **not** create new privileges. The canonical underlying action remains the trust boundary for leases, approvals, policy checks, logging, and effect execution. Raw tool functions remain available as escape hatches for advanced cases.
 
+### Rollout / gating
+
+Host shims are now gated at three layers:
+
+- agent config/env: `CODEACT_HOST_SHIMS=true|false`
+- per-thread runtime config: `ThreadConfig.codeact_host_shims`
+- test/live harness overrides: `with_codeact_host_shims(...)`
+
+When disabled, the shim names are removed from CodeAct name lookup and from the built-in CodeAct prompt guidance. Canonical raw tools remain available.
+
 ## Upgrade Changelog
 
 | Date | Pin | Notable changes |

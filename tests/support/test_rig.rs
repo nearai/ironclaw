@@ -665,6 +665,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     allow_local_tools: Option<bool>,
+    codeact_host_shims: Option<bool>,
     enable_skills: bool,
     skills_dir: Option<std::path::PathBuf>,
     enable_routines: bool,
@@ -694,6 +695,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             allow_local_tools: None,
+            codeact_host_shims: None,
             enable_skills: false,
             skills_dir: None,
             enable_routines: false,
@@ -849,6 +851,12 @@ impl TestRigBuilder {
         self
     }
 
+    /// Override whether CodeAct exposes the host-backed shim layer.
+    pub fn with_codeact_host_shims(mut self, enable: bool) -> Self {
+        self.codeact_host_shims = Some(enable);
+        self
+    }
+
     /// Enable skill discovery and registration for this test rig.
     pub fn with_skills(mut self) -> Self {
         self.enable_skills = true;
@@ -924,6 +932,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             allow_local_tools,
+            codeact_host_shims,
             enable_skills,
             skills_dir,
             enable_routines,
@@ -999,6 +1008,9 @@ impl TestRigBuilder {
         }
         if let Some(v) = allow_local_tools {
             config.agent.allow_local_tools = v;
+        }
+        if let Some(v) = codeact_host_shims {
+            config.agent.codeact_host_shims = v;
         }
 
         // 2b. Selectively seed `secrets` rows from the source DB if the
@@ -1097,6 +1109,9 @@ impl TestRigBuilder {
             if let Some(v) = allow_local_tools {
                 components.config.agent.allow_local_tools = v;
             }
+            if let Some(v) = codeact_host_shims {
+                components.config.agent.codeact_host_shims = v;
+            }
             // engine_v2: honour the builder's explicit override if set.
             if engine_v2 {
                 components.config.agent.engine_v2 = true;
@@ -1104,6 +1119,7 @@ impl TestRigBuilder {
         } else {
             components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
             components.config.agent.allow_local_tools = allow_local_tools.unwrap_or(true);
+            components.config.agent.codeact_host_shims = codeact_host_shims.unwrap_or(true);
             components.config.agent.engine_v2 = engine_v2;
         }
 

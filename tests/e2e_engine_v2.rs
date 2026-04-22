@@ -115,6 +115,56 @@ mod engine_v2_tests {
         rig.shutdown();
     }
 
+    #[tokio::test]
+    async fn v2_test_rig_can_toggle_codeact_host_shims() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace = LlmTrace::single_turn(
+            "codeact-host-shim-toggle",
+            "check codeact host shims",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "```repl\nFINAL(str(\"read_text\" in globals()) + \"|\" + str(\"read_file\" in globals()))\n```".to_string(),
+                    input_tokens: 64,
+                    output_tokens: 12,
+                },
+                expected_tool_results: Vec::new(),
+            }],
+        );
+
+        let disabled_rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_allow_local_tools(true)
+            .with_codeact_host_shims(false)
+            .with_trace(trace.clone())
+            .build()
+            .await;
+        disabled_rig.send_message("check codeact host shims").await;
+        let disabled_responses = disabled_rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            disabled_responses[0].content.contains("False|True"),
+            "unexpected disabled response: {:?}",
+            disabled_responses[0]
+        );
+        disabled_rig.shutdown();
+
+        let enabled_rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_allow_local_tools(true)
+            .with_codeact_host_shims(true)
+            .with_trace(trace)
+            .build()
+            .await;
+        enabled_rig.send_message("check codeact host shims").await;
+        let enabled_responses = enabled_rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            enabled_responses[0].content.contains("True|True"),
+            "unexpected enabled response: {:?}",
+            enabled_responses[0]
+        );
+        enabled_rig.shutdown();
+    }
+
     /// Single tool call: echo tool → tool result → text response.
     /// Verifies that EffectBridgeAdapter dispatches tool calls and results
     /// flow back through the engine thread.

@@ -2279,6 +2279,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                codeact_host_shims: true,
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),

@@ -348,6 +348,16 @@ Introduce a temporary feature gate if needed so we can A/B test safely. Options:
 
 The goal is not permanent user-facing complexity. It is controlled evaluation while the API stabilizes.
 
+### Implemented gating (2026-04-22)
+
+The branch now has all three control points:
+
+- agent config/env: `CODEACT_HOST_SHIMS=true|false`
+- per-thread runtime config: `ThreadConfig.codeact_host_shims`
+- harness overrides: `TestRigBuilder::with_codeact_host_shims(...)` and `LiveTestHarnessBuilder::with_codeact_host_shims(...)`
+
+Current default stays **enabled** to preserve the branch's existing behavior, but tests and targeted rollouts can now disable shims cleanly without changing canonical tool availability.
+
 ## Testing strategy
 
 ### 1. Runtime correctness tests
