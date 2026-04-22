@@ -118,14 +118,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Mod+K: focus chat input or memory search
+  // Mod+K: toggle command palette
   if (mod && e.key === 'k') {
     e.preventDefault();
-    if (currentTab === 'memory') {
-      document.getElementById('memory-search').focus();
-    } else {
-      document.getElementById('chat-input').focus();
-    }
+    if (_paletteOpen) closeCommandPalette();
+    else openCommandPalette();
     return;
   }
 
@@ -145,6 +142,10 @@ document.addEventListener('keydown', (e) => {
 
   // Escape: close modals, autocomplete, job detail, or blur input
   if (e.key === 'Escape') {
+    if (_paletteOpen) {
+      closeCommandPalette();
+      return;
+    }
     const acEl = document.getElementById('slash-autocomplete');
     if (acEl && acEl.style.display !== 'none') {
       hideSlashAutocomplete();

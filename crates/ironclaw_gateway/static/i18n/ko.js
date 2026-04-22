@@ -891,4 +891,11 @@ I18n.register('ko', {
 
   // 기술 (추가)
   'skills.viewOnClawHub': 'ClawHub에서 보기',
+
+  // 명령 팔레트
+  'palette.placeholder': '스레드, 명령, 탭 검색...',
+  'palette.noResults': '결과를 찾을 수 없습니다',
+  'palette.navigate': '탐색',
+  'palette.open': '열기',
+  'palette.close': '닫기',
 });
