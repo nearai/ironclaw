@@ -42,7 +42,7 @@ pub use types::capability::{
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{AssistantContentKind, EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
-pub use types::message::{MessageRole, ThreadMessage};
+pub use types::message::{MessageId, MessageRole, ThreadMessage};
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};
 pub use types::project::{Project, ProjectId, ProjectMetric};
 pub use types::provenance::Provenance;

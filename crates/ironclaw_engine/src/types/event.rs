@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
+use crate::types::message::MessageId;
 
 /// Generate a short human-readable summary of tool parameters for display.
 ///
@@ -198,11 +199,25 @@ pub enum EventKind {
     },
 
     // ── Messages ────────────────────────────────────────────
+    /// A message was appended to the thread transcript.
+    ///
+    /// `message_id` lets consumers resolve the full typed payload via
+    /// `Thread::message` when they need more than the event carries inline.
+    ///
+    /// `narrative` is populated **only** for `UserVisibleNarrative` assistant
+    /// content — that's the single kind whose text the gateway status stream
+    /// actually renders. Other kinds (reasoning, final, user, action result)
+    /// are either suppressed at the router, duplicated by the `Response`
+    /// stream, or irrelevant to the status surface, so carrying the full text
+    /// inline for them would just inflate SSE frames without changing what
+    /// the UI shows.
     MessageAdded {
         role: String,
-        content_preview: String,
+        message_id: MessageId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_content_kind: Option<AssistantContentKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        narrative: Option<String>,
     },
 
     // ── Thread tree ─────────────────────────────────────────
