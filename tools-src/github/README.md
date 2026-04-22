@@ -24,6 +24,18 @@ search, branches, file reads and writes, releases, and workflows.
    ironclaw secret set github_token YOUR_TOKEN
    ```
 
+For webhook delivery, you can either store the HMAC secret in IronClaw secrets:
+
+```
+ironclaw secret set github_webhook_secret YOUR_WEBHOOK_SECRET
+```
+
+or provide it via environment:
+
+```bash
+export GITHUB_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
+```
+
 ## Usage Examples
 
 ### Get Repository Info

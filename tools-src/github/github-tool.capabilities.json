@@ -43,6 +43,7 @@
   "capabilities": {
     "webhook": {
       "hmac_secret_name": "github_webhook_secret",
+      "hmac_secret_env_var": "GITHUB_WEBHOOK_SECRET",
       "hmac_signature_header": "x-hub-signature-256",
       "hmac_prefix": "sha256="
     },
