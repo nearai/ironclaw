@@ -702,7 +702,7 @@ impl EffectBridgeAdapter {
                 Err(e) => Err(e),
             },
             "mission_complete" => match resolve_mission_id(params, "mission_complete") {
-                Ok(id) => match mgr.complete_mission(id).await {
+                Ok(id) => match mgr.complete_mission(id, &context.user_id).await {
                     Ok(()) => Ok(serde_json::json!({"status": "completed"})),
                     Err(e) => Err(e),
                 },

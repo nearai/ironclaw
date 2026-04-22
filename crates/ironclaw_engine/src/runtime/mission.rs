@@ -572,7 +572,25 @@ impl MissionManager {
     }
 
     /// Mark a mission as completed.
-    pub async fn complete_mission(&self, id: MissionId) -> Result<(), EngineError> {
+    pub async fn complete_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
+        let mission = self
+            .store
+            .load_mission(id)
+            .await?
+            .ok_or_else(|| EngineError::Store {
+                reason: format!("mission {id} not found"),
+            })?;
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {id}"),
+            });
+        }
         self.store
             .update_mission_status(id, MissionStatus::Completed)
             .await?;
@@ -3556,7 +3574,7 @@ mod tests {
 
         // Drive the mission into a terminal state via complete_mission and
         // confirm resume is still rejected.
-        mgr.complete_mission(id).await.unwrap();
+        mgr.complete_mission(id, "alice").await.unwrap();
         let err = mgr
             .resume_mission(id, "alice")
             .await
@@ -3589,7 +3607,7 @@ mod tests {
             .await
             .unwrap();
 
-        mgr.complete_mission(id).await.unwrap();
+        mgr.complete_mission(id, "test-user").await.unwrap();
 
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.status, MissionStatus::Completed);
@@ -3656,7 +3674,7 @@ mod tests {
             .unwrap();
 
         // Complete the mission so it becomes terminal
-        mgr.complete_mission(id).await.unwrap();
+        mgr.complete_mission(id, "test-user").await.unwrap();
 
         let result = mgr.fire_mission(id, "test-user", None).await.unwrap();
         assert!(
@@ -4762,6 +4780,46 @@ mod tests {
         assert!(tid.is_some());
     }
 
+    // Regression: `complete_mission` previously took only `id`, letting any
+    // caller complete any mission if they knew its UUID (IDOR). It now
+    // mirrors pause/resume/fire and enforces ownership.
+    #[tokio::test]
+    async fn complete_mission_ownership_check() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let alice_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "alice-only",
+                "private goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let bob_attempt = mgr.complete_mission(alice_id, "bob").await;
+        assert!(
+            matches!(bob_attempt, Err(EngineError::AccessDenied { .. })),
+            "bob must not complete alice's mission; got {:?}",
+            bob_attempt
+        );
+
+        let mission = mgr.get_mission(alice_id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.status,
+            MissionStatus::Active,
+            "failed auth must not mutate status"
+        );
+
+        mgr.complete_mission(alice_id, "alice").await.unwrap();
+        let mission = mgr.get_mission(alice_id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Completed);
+    }
+
     #[tokio::test]
     async fn fire_on_system_event_scoped_to_user() {
         let store = Arc::new(TestStore::new());
@@ -5439,7 +5497,7 @@ mod tests {
             "regex cache should hold the compiled pattern after first match"
         );
 
-        mgr.complete_mission(id).await.unwrap();
+        mgr.complete_mission(id, "alice").await.unwrap();
         assert!(
             !mgr.event_regex_cache.read().await.contains_key(&id),
             "complete_mission must evict the cached compiled regex"
@@ -6903,7 +6961,7 @@ mod tests {
             .unwrap();
         mgr.fire_mission(id_b, "alice", None).await.unwrap();
         assert!(mgr.last_fire_attempt.read().await.contains_key(&id_b));
-        mgr.complete_mission(id_b).await.unwrap();
+        mgr.complete_mission(id_b, "alice").await.unwrap();
         assert!(
             !mgr.last_fire_attempt.read().await.contains_key(&id_b),
             "complete_mission must drop the cooldown entry"
