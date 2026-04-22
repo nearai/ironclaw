@@ -664,6 +664,7 @@ pub struct TestRigBuilder {
     max_tool_iterations: usize,
     injection_check: bool,
     auto_approve_tools: Option<bool>,
+    allow_local_tools: Option<bool>,
     enable_skills: bool,
     skills_dir: Option<std::path::PathBuf>,
     enable_routines: bool,
@@ -692,6 +693,7 @@ impl TestRigBuilder {
             max_tool_iterations: 10,
             injection_check: false,
             auto_approve_tools: Some(true),
+            allow_local_tools: None,
             enable_skills: false,
             skills_dir: None,
             enable_routines: false,
@@ -838,6 +840,15 @@ impl TestRigBuilder {
         self
     }
 
+    /// Override whether local filesystem/shell dev tools are registered.
+    ///
+    /// Useful for live-harness tests that mirror a real user config but still
+    /// need explicit local file/shell access for a narrow scenario.
+    pub fn with_allow_local_tools(mut self, enable: bool) -> Self {
+        self.allow_local_tools = Some(enable);
+        self
+    }
+
     /// Enable skill discovery and registration for this test rig.
     pub fn with_skills(mut self) -> Self {
         self.enable_skills = true;
@@ -912,6 +923,7 @@ impl TestRigBuilder {
             max_tool_iterations,
             injection_check,
             auto_approve_tools,
+            allow_local_tools,
             enable_skills,
             skills_dir,
             enable_routines,
@@ -984,6 +996,9 @@ impl TestRigBuilder {
         config.skills.enabled = enable_skills;
         if let Some(v) = auto_approve_tools {
             config.agent.auto_approve_tools = v;
+        }
+        if let Some(v) = allow_local_tools {
+            config.agent.allow_local_tools = v;
         }
 
         // 2b. Selectively seed `secrets` rows from the source DB if the
@@ -1079,14 +1094,16 @@ impl TestRigBuilder {
             if let Some(v) = auto_approve_tools {
                 components.config.agent.auto_approve_tools = v;
             }
-            // allow_local_tools comes from the provided config.
+            if let Some(v) = allow_local_tools {
+                components.config.agent.allow_local_tools = v;
+            }
             // engine_v2: honour the builder's explicit override if set.
             if engine_v2 {
                 components.config.agent.engine_v2 = true;
             }
         } else {
             components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
-            components.config.agent.allow_local_tools = true;
+            components.config.agent.allow_local_tools = allow_local_tools.unwrap_or(true);
             components.config.agent.engine_v2 = engine_v2;
         }
 

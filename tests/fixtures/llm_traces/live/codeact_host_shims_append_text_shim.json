@@ -1,0 +1,23 @@
+{
+  "model_name": "live-codeact_host_shims_append_text_shim",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Use a Python CodeAct script, not plain prose. Append the text `beta` to the file at \"/tmp/ironclaw_live_codeact_shims/append_text/notes.txt\", then read the file back and call FINAL exactly with `text=alphabeta`. The existing file already contains exactly `alpha`. IMPORTANT: this is the SHIM variant, so prefer append_text(path, text) and read_text(path) unless they fail. `append_text` concatenates raw text directly, so pass plain `beta` here."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Use a Python CodeAct script, not plain prose. Append the text `beta` to the file",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "text",
+        "content": "```repl\nawait append_text(\"/tmp/ironclaw_live_codeact_shims/append_text/notes.txt\", \"beta\")\ntext = await read_text(\"/tmp/ironclaw_live_codeact_shims/append_text/notes.txt\")\nFINAL(f\"text={text}\")\n```",
+        "input_tokens": 19792,
+        "output_tokens": 62
+      }
+    }
+  ]
+}

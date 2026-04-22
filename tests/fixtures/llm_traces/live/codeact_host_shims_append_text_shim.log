@@ -1,0 +1,22 @@
+# Live Test Session: codeact_host_shims_append_text_shim
+# Mode: Live
+# LLM calls: 1, Input tokens: 19792, Output tokens: 62
+# Wall time: 3.8s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Append the text `beta` to the file at "/tmp/ironclaw_live_codeact_shims/append_text/notes.txt", then read the file back and call FINAL exactly with `text=alphabeta`. The existing file already contains exactly `alpha`. IMPORTANT: this is the SHIM variant, so prefer append_text(path, text) and read_text(path) unless they fail. `append_text` concatenates raw text directly, so pass plain `beta` here.
+────────────────────────────────────────────────────
+text=alphabeta
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19792 in / 62 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/append_text/notes...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/append_text/notes...)
+  ● write_file(alphabeta)
+  ✓ write_file(alphabeta)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/append_text/notes...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/append_text/notes...)
+  … Done

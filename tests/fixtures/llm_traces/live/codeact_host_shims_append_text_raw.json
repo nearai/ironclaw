@@ -1,0 +1,23 @@
+{
+  "model_name": "live-codeact_host_shims_append_text_raw",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Use a Python CodeAct script, not plain prose. Append the text `beta` to the file at \"/tmp/ironclaw_live_codeact_shims/append_text/notes.txt\", then read the file back and call FINAL exactly with `text=alphabeta`. The existing file already contains exactly `alpha`. IMPORTANT: this is the RAW variant, so do not use helper shims like append_text or read_text. Use canonical host tools directly from Python, preserve the existing `alpha` text, and remember that read_file returns a dict whose `content` field contains numbered text in a format like `     1│ alpha`; strip everything through the `│` separator before joining or rewriting the text."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Use a Python CodeAct script, not plain prose. Append the text `beta` to the file",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "text",
+        "content": "```repl\nimport re\n\npath = \"/tmp/ironclaw_live_codeact_shims/append_text/notes.txt\"\n\nbefore = await read_file(path=path, offset=1, limit=20)\nnumbered = before[\"content\"]\nlines = numbered.splitlines()\nplain = []\nfor line in lines:\n    idx = line.find(\"│\")\n    if idx != -1:\n        plain.append(line[idx+1:].lstrip())\n    else:\n        plain.append(line)\nexisting = \"\".join(plain)\n\nupdated = existing + \"beta\"\nawait write_file(path=path, content=updated)\n\nafter = await read_file(path=path, offset=1, limit=20)\nnumbered2 = after[\"content\"]\nlines2 = numbered2.splitlines()\nplain2 = []\nfor line in lines2:\n    idx = line.find(\"│\")\n    if idx != -1:\n        plain2.append(line[idx+1:].lstrip())\n    else:\n        plain2.append(line)\nfinal_text = \"\".join(plain2)\n\nFINAL(f\"text={final_text}\")\n```",
+        "input_tokens": 19907,
+        "output_tokens": 224
+      }
+    }
+  ]
+}
