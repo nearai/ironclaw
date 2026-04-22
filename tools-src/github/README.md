@@ -16,8 +16,29 @@ search, branches, file reads and writes, releases, and workflows.
 
 ## Setup
 
+Preferred: configure GitHub OAuth app credentials for browser auth:
+
+1. Create a GitHub OAuth app at <https://github.com/settings/apps>
+2. Set the callback URL to your IronClaw OAuth callback URL
+3. Export:
+
+   ```bash
+   export GITHUB_OAUTH_CLIENT_ID=...
+   export GITHUB_OAUTH_CLIENT_SECRET=...
+   ```
+
+4. Run:
+
+   ```bash
+   ironclaw tool auth github
+   ```
+
+IronClaw will open the browser OAuth flow and store the resulting `github_token`.
+
+Fallback: use a Personal Access Token if you do not want to run an OAuth app:
+
 1. Create a GitHub Personal Access Token at <https://github.com/settings/tokens>
-2. Required scopes: `repo`, `workflow`, `read:org`
+2. Recommended scopes: `repo`, `workflow`, `read:org`
 3. Store the token:
 
    ```

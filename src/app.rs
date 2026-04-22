@@ -708,6 +708,12 @@ impl AppBuilder {
     > {
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
+        // `McpSessionManager::new()` hardcodes the 1800s idle timeout
+        // (see `src/tools/mcp/session.rs`). There is no session-count
+        // cap yet — if that's needed for a large deployment, add a
+        // `max_sessions` field to the manager and a real knob here;
+        // a prior `MCP_MAX_SESSIONS` env var was wired in but never
+        // reached the struct and has been removed.
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
 
@@ -788,7 +794,6 @@ impl AppBuilder {
         let mcp_servers_future = {
             let secrets_store = self.secrets_store.clone();
             let db = self.db.clone();
-            let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
@@ -810,7 +815,6 @@ impl AppBuilder {
                         for server in enabled {
                             let mcp_sm = Arc::clone(&mcp_sm);
                             let secrets = secrets_store.clone();
-                            let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
                             let owner_id = owner_id.clone();
 
@@ -841,29 +845,18 @@ impl AppBuilder {
                                 match client.list_tools().await {
                                     Ok(mcp_tools) => {
                                         let tool_count = mcp_tools.len();
-                                        match client.create_tools().await {
-                                            Ok(tool_impls) => {
-                                                for tool in tool_impls {
-                                                    tools.register(tool).await;
-                                                }
-                                                tracing::debug!(
-                                                    "Loaded {} tools from MCP server '{}'",
-                                                    tool_count,
-                                                    server_name
-                                                );
-                                                return Some((
-                                                    server_name,
-                                                    Arc::new(client),
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to create tools from MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                            }
-                                        }
+                                        tracing::debug!(
+                                            "Connected to MCP server '{}' ({} tools); \
+                                             deferring wrapper registration until manager init",
+                                            server_name,
+                                            tool_count
+                                        );
+                                        // Tool wrappers need an `Arc<McpClientStore>` so
+                                        // dispatch can resolve the caller's client per user
+                                        // at execute time. The store is owned by the
+                                        // ExtensionManager, which isn't built yet — defer
+                                        // registration to `manager.inject_mcp_client` below.
+                                        return Some((server_name, Arc::new(client)));
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
@@ -1021,7 +1014,35 @@ impl AppBuilder {
                     "Injecting startup MCP clients into extension manager"
                 );
                 for (name, client) in startup_mcp_clients {
-                    manager.inject_mcp_client(name, client).await;
+                    // `name` here is the raw config row's `server.name`
+                    // captured before `create_client_from_config()`
+                    // normalized hyphens to underscores. The client
+                    // itself, the generated wrappers, and the session /
+                    // process managers all use the NORMALIZED name.
+                    // Using the raw `name` here would insert the client
+                    // into `McpClientStore` under `"my-mcp-server"`
+                    // while the wrappers look up `"my_mcp_server"` at
+                    // dispatch, silently failing every call with
+                    // "MCP server '…' is not active for this user"
+                    // until manual reactivation. Source the name from
+                    // the client's canonical field to guarantee the
+                    // insert key matches the dispatch-time lookup key.
+                    let normalized_name = client.server_name().to_string();
+                    let registered = manager
+                        .inject_mcp_client(normalized_name.clone(), &self.config.owner_id, client)
+                        .await;
+                    if name != normalized_name {
+                        tracing::debug!(
+                            raw_name = %name,
+                            normalized = %normalized_name,
+                            "Startup MCP server name normalized (hyphens -> underscores) for client-store injection"
+                        );
+                    }
+                    tracing::debug!(
+                        server = %normalized_name,
+                        count = registered.len(),
+                        "Registered tools for startup MCP server"
+                    );
                 }
             }
 
