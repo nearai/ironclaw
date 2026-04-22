@@ -1506,17 +1506,19 @@ async fn submit_pending_auth_credential(
 
 /// Share the capability registry with both the effect adapter (for LLM
 /// system-prompt advertisement) and the v1 `ToolRegistry` (for discovery
-/// tools). On a tool/capability name collision — e.g. a user-installed
-/// WASM or MCP tool whose name matches a v2 capability action — the
-/// colliding tool is unregistered and the wiring proceeds. Capability
-/// wins because `handle_mission_call` intercepts by name regardless of
-/// tool registration, so leaving the tool in place would produce a
-/// split-brain between discovery (tool) and execution (capability).
+/// tools). Tools whose names collide with a capability action are
+/// unregistered; capability wins because `handle_mission_call` intercepts
+/// by name regardless of tool state. Wire `ToolRegistry` first so
+/// concurrent `register()` calls immediately see the shadow check.
 async fn wire_capability_registry(
     effect_adapter: &EffectBridgeAdapter,
     tools: &crate::tools::ToolRegistry,
     capabilities: Arc<CapabilityRegistry>,
 ) {
+    tools
+        .set_capability_registry(Arc::clone(&capabilities))
+        .await;
+
     let mut colliding_tool_names = Vec::new();
     for tool_name in tools.all_registered_names().await {
         if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n)).is_some()
@@ -1535,10 +1537,7 @@ async fn wire_capability_registry(
         );
     }
 
-    effect_adapter
-        .set_capability_registry(Arc::clone(&capabilities))
-        .await;
-    tools.set_capability_registry(capabilities).await;
+    effect_adapter.set_capability_registry(capabilities).await;
 }
 
 /// Get or initialize the engine state using the agent's dependencies.
