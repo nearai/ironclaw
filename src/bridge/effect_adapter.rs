@@ -364,9 +364,11 @@ impl EffectBridgeAdapter {
         // aliases must bridge the two conventions before dispatch — otherwise
         // `routine_delete(name="Daily Check")` arrives at `mission_complete`
         // as `{"name":"Daily Check"}` and fails UUID parsing.
-        // Allow the unresolved alias to flow into the normal mission handling
+        // Surface name-lookup errors; Ok covers both resolved and no-op cases.
         if let Some(alias) = routine_alias.as_mut() {
-            let _ = resolve_mission_identity(alias, &mgr, context).await;
+            if let Err(e) = resolve_mission_identity(alias, &mgr, context).await {
+                return Some(Err(e));
+            }
         }
 
         let (effective_action, effective_params, post_create_update) =
