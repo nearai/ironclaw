@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::Datelike;
 use reqwest::Client;
 use serde_json::json;
 
@@ -20,6 +21,15 @@ use super::validate_currency_code;
 
 const MASSIVE_BASE: &str = "https://api.massive.com/v2/aggs/ticker";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Format a rate/amount number per the user-facing display rule:
+/// always two decimals, truncated (rounded down) — `97.3595` → `"97.35"`,
+/// `97.0` → `"97.00"`, `97.10` → `"97.10"`.
+/// Callers prepend the currency symbol (₹, $, etc.) themselves.
+pub(crate) fn format_rate(value: f64) -> String {
+    let truncated = (value * 100.0).floor() / 100.0;
+    format!("{truncated:.2}")
+}
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -411,7 +421,12 @@ impl Tool for ForexHistoricalDataTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch historical OHLCV forex data for a currency pair from the Massive API."
+        "Fetch historical OHLCV forex data for a currency pair from the Massive API. \
+         PRESENTATION RULES (STRICT): NEVER render the result as a markdown table. \
+         Always use a bulleted list, one bullet per bar. By default, show only `date`, \
+         `weekday`, and `close` (e.g. `- 2026-04-15 (Wed): ₹93.39`). Include other \
+         OHLC fields ONLY if the user explicitly asked for them. Always use the \
+         `weekday` field from the response — never compute the day-of-week yourself."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -432,10 +447,10 @@ impl Tool for ForexHistoricalDataTool {
                 },
                 "end_date": {
                     "type": "string",
-                    "description": "End date in YYYY-MM-DD format (defaults to today)"
+                    "description": "End date in YYYY-MM-DD format. REQUIRED — call the `time` tool first to get today's date and pass it here."
                 }
             },
-            "required": ["from_currency", "to_currency", "start_date"]
+            "required": ["from_currency", "to_currency", "start_date", "end_date"]
         })
     }
 
@@ -448,10 +463,7 @@ impl Tool for ForexHistoricalDataTool {
         let from = validate_currency_code(require_str(&params, "from_currency")?)?;
         let to = validate_currency_code(require_str(&params, "to_currency")?)?;
         let start_date = validate_date(require_str(&params, "start_date")?)?;
-        let end_date = match params.get("end_date").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => validate_date(s)?,
-            _ => chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        };
+        let end_date = validate_date(require_str(&params, "end_date")?)?;
 
         let pair = format!("{from}{to}");
         let url = format!(
@@ -485,8 +497,12 @@ impl Tool for ForexHistoricalDataTool {
         let bars_json: Vec<serde_json::Value> = bars
             .iter()
             .map(|b| {
+                let weekday = chrono::NaiveDate::parse_from_str(&b.date, "%Y-%m-%d")
+                    .map(|d| d.weekday().to_string())
+                    .unwrap_or_default();
                 json!({
                     "date": b.date,
+                    "weekday": weekday,
                     "open": b.open,
                     "high": b.high,
                     "low": b.low,
@@ -639,6 +655,7 @@ pub async fn run_transfer_analysis(
         .collect();
 
     let could_save = amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
+    let could_save_str = could_save.map(|s| format!("₹{}", format_rate(s)));
 
     let action_verb = if recommend == "now" {
         "Transfer now"
@@ -646,10 +663,11 @@ pub async fn run_transfer_analysis(
         "Wait — hold off"
     };
     let mut message = format!(
-        "{action_verb}. USD/INR is at {current_rate:.4}; target {:.4}. \
+        "{action_verb}. USD/INR is at ₹{}; target ₹{}. \
          Regime: {vb} volatility, RSI {} ({rb}), DXY {dxy_dir}. \
          Hit-rate for this regime: {:.1}%.",
-        (target_rate * 10000.0).round() / 10000.0,
+        format_rate(current_rate),
+        format_rate(target_rate),
         rsi_rounded
             .map(|r| format!("{r}"))
             .unwrap_or_else(|| "N/A".into()),
@@ -660,7 +678,8 @@ pub async fn run_transfer_analysis(
             && save > 0.0
         {
             message.push_str(&format!(
-                " If you wait, you could get ₹{save:.2} more on your transfer."
+                " If you wait, you could get ₹{} more on your transfer.",
+                format_rate(save)
             ));
         }
     }
@@ -685,6 +704,7 @@ pub async fn run_transfer_analysis(
             "hit_rate_pct": (hr * 10.0).round() / 10.0,
             "recommend": recommend,
             "could_save": could_save,
+            "could_save_str": could_save_str,
         }
     }))
 }
@@ -862,8 +882,10 @@ impl Tool for ValidateTransferTargetTool {
         };
 
         let message = format!(
-            "USD/INR is at {current_rate:.4}. Hitting {target_rate_input:.4} needs a \
+            "USD/INR is at ₹{}. Hitting ₹{} needs a \
              {:.4}% move ({horizon_note}).",
+            format_rate(current_rate),
+            format_rate(target_rate_input),
             (required_move * 100.0 * 10000.0).round() / 10000.0,
         );
 
@@ -1004,6 +1026,22 @@ mod tests {
         assert!(validate_currency_code("USD/../../admin").is_err());
         assert!(validate_currency_code("AB").is_err());
         assert!(validate_currency_code("").is_err());
+    }
+
+    #[test]
+    fn test_format_rate() {
+        // Always 2 decimals
+        assert_eq!(format_rate(97.0), "97.00");
+        assert_eq!(format_rate(0.0), "0.00");
+        assert_eq!(format_rate(97.10), "97.10");
+        assert_eq!(format_rate(97.20), "97.20");
+        // More than 2 decimals → floor (round down), never up
+        assert_eq!(format_rate(97.3595), "97.35");
+        assert_eq!(format_rate(97.3999), "97.39");
+        assert_eq!(format_rate(97.3501), "97.35");
+        // Regular 2-decimal values pass through
+        assert_eq!(format_rate(97.15), "97.15");
+        assert_eq!(format_rate(93.07), "93.07");
     }
 
     #[test]

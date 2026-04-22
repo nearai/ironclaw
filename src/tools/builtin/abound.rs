@@ -17,7 +17,28 @@ use crate::tools::tool::{
     RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
-use super::forex::run_transfer_analysis;
+use super::forex::{format_rate, run_transfer_analysis};
+
+/// Rewrite `formatted_value` fields on exchange-rate entries using `format_rate(value)`,
+/// so downstream consumers (LLM, UI) see rates in the user-facing display format
+/// (`97` instead of `97.00`, `97.35` instead of `97.3595`).
+fn normalize_exchange_rate_response(mut result: serde_json::Value) -> serde_json::Value {
+    let Some(data) = result
+        .get_mut("body")
+        .and_then(|b| b.get_mut("data"))
+        .and_then(|d| d.as_object_mut())
+    else {
+        return result;
+    };
+    for key in ["current_exchange_rate", "effective_exchange_rate"] {
+        if let Some(entry) = data.get_mut(key).and_then(|e| e.as_object_mut()) {
+            if let Some(value) = entry.get("value").and_then(|v| v.as_f64()) {
+                entry.insert("formatted_value".into(), json!(format_rate(value)));
+            }
+        }
+    }
+    result
+}
 use super::validate_currency_code;
 
 
@@ -318,6 +339,7 @@ impl Tool for AboundExchangeRateTool {
         let to = validate_currency_code(require_str(&params, "to_currency")?)?;
         let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
         let result = abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
+        let result = normalize_exchange_rate_response(result);
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
@@ -587,9 +609,11 @@ impl Tool for AboundSendWireTool {
                 return Ok(ToolOutput::text(
                     format!(
                         "Hourly rate monitoring set up (mission {mission_id}). \
-                         Will check USD/INR against {threshold} every hour for 24 hours. \
+                         Will check USD/INR against ₹{} every hour for 24 hours. \
                          You'll get a notification when the target is reached, or a status \
-                         update after 24 hours. Current rate: {current_rate:.4}."
+                         update after 24 hours. Current rate: ₹{}.",
+                        format_rate(threshold),
+                        format_rate(current_rate),
                     ),
                     start.elapsed(),
                 ));
@@ -656,6 +680,28 @@ impl Tool for AboundSendWireTool {
             .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::InvalidParameters("amount must be a number".into()))?;
         let payment_reason_key = require_str(&params, "payment_reason_key")?;
+
+        let mut missing = Vec::new();
+        if funding_source_id.trim().is_empty() {
+            missing.push("funding_source_id");
+        }
+        if beneficiary_ref_id.trim().is_empty() {
+            missing.push("beneficiary_ref_id");
+        }
+        if payment_reason_key.trim().is_empty() {
+            missing.push("payment_reason_key");
+        }
+        if amount <= 0.0 {
+            missing.push("amount (must be > 0)");
+        }
+        if !missing.is_empty() {
+            return Err(ToolError::InvalidParameters(format!(
+                "Cannot initiate wire transfer — the following parameters are missing or invalid: {}. \
+                 Use abound_account_info to look up the correct values, and ask the user to pick a \
+                 funding source, beneficiary, and payment reason via choice_set before retrying.",
+                missing.join(", ")
+            )));
+        }
 
         let analysis = run_transfer_analysis(
             &self.client,
@@ -998,4 +1044,34 @@ mod tests {
         assert!(validate_currency_code("").is_err());
     }
 
+    #[test]
+    fn test_normalize_exchange_rate_response_rewrites_formatted_value() {
+        let input = json!({
+            "status": 200,
+            "body": {
+                "status": "success",
+                "data": {
+                    "current_exchange_rate": {"value": 92.85, "formatted_value": "92.85"},
+                    "effective_exchange_rate": {"value": 97.0, "formatted_value": "97.00"},
+                }
+            }
+        });
+        let out = normalize_exchange_rate_response(input);
+        // Always 2 decimals — 97.0 stays as "97.00", 92.85 as "92.85"
+        assert_eq!(
+            out["body"]["data"]["effective_exchange_rate"]["formatted_value"],
+            json!("97.00")
+        );
+        assert_eq!(
+            out["body"]["data"]["current_exchange_rate"]["formatted_value"],
+            json!("92.85")
+        );
+    }
+
+    #[test]
+    fn test_normalize_exchange_rate_response_noop_on_unexpected_shape() {
+        let input = json!({"status": 200, "body": "some error string"});
+        let out = normalize_exchange_rate_response(input.clone());
+        assert_eq!(out, input);
+    }
 }

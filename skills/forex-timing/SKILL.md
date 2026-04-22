@@ -49,6 +49,17 @@ credentials:
 
 Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python code or use the `repl` tool — the math is handled by the tools.
 
+## ⚠️ HARD FORMATTING RULE (read before answering)
+
+**NEVER output a markdown table for any forex data. Zero exceptions.** No pipe characters `|`, no header-separator rows, no grid layouts — not for historical bars, not for horizons, not for OHLC comparisons, not for weekly summaries, not even when the user asks "can I see it in a table?". Always use a **bulleted or numbered list**, one bullet per row. Example format for multi-column data:
+
+```
+- 2026-04-15 (Wed) — close ₹93.39, high ₹93.47
+- 2026-04-16 (Thu) — close ₹93.05, high ₹93.40
+```
+
+If you catch yourself about to emit `|`-separated cells, stop and rewrite as a list. This rule overrides the LLM default toward tabular rendering.
+
 ## Available Tools
 
 - **`analyze_transfer`** — Recommend whether to transfer USD→INR now or wait. Uses volatility regime, RSI(14), and DXY momentum. Returns a message, hit rate, target rate, and 3-day projection cone. Param: `amount` (optional, USD).
@@ -58,7 +69,7 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
   - `action='send'` (with `transfer_token`): executes the wire.
   - `action='wait'` (with `transfer_token`): creates an hourly rate monitoring mission that alerts when the target rate is reached.
   Do NOT call `analyze_transfer` separately — it's built into phase 1.
-- **`forex_historical_data`** — Fetch OHLCV bars for any currency pair. Params: `from_currency`, `to_currency`, `start_date`, `end_date` (optional).
+- **`forex_historical_data`** — Fetch OHLCV bars for any currency pair. Params: `from_currency`, `to_currency`, `start_date`, `end_date` (all required). **Always call the `time` tool first** to resolve today's date before invoking `forex_historical_data`, and pass concrete `start_date` / `end_date` values (YYYY-MM-DD) derived from that result — never guess.
 
 ## When to Use
 
@@ -69,7 +80,7 @@ Use the built-in forex tools for USD/INR transfer analysis. Do NOT write Python 
 - User wants to send/transfer/wire money → call `abound_send_wire` (NOT `analyze_transfer`)
 - User says "send now" / confirms after seeing analysis → call `abound_send_wire(transfer_token=<token>, action="send")`
 - User says "wait" / declines → call `abound_send_wire(transfer_token=<token>, action="wait")` — this automatically creates an hourly rate monitoring mission using the target rate from the analysis. Present the tool's response message to the user.
-- User asks for historical data or charts → call `forex_historical_data`
+- User asks for historical data or charts → call `time` first, then `forex_historical_data` with explicit `start_date` and `end_date`
 
 ## Presenting Results
 
@@ -87,8 +98,14 @@ Both `analyze_transfer` and `validate_transfer_target` return `{"message": "..."
 
 ### For `validate_transfer_target`:
 - Show the required move percentage
-- Present the horizon table (which horizons have reasonable probability)
+- Present the horizons as a **bulleted list** (one bullet per horizon with its probability) — do NOT render them as a markdown table
 - Highlight the recommended horizon if one exists
+
+### For `forex_historical_data`:
+- **See the hard formatting rule at the top of this skill — no tables, ever.**
+- **Default presentation: date + close only.** One bullet per bar, e.g. `- 2026-04-15 (Wed): ₹93.39`. Use the `weekday` field returned by the tool — never compute the day-of-week yourself, LLMs get it wrong.
+- Only show additional OHLC fields (open / high / low) when the user **explicitly asks** for them (e.g. "show me open and close", "what was the daily range?"). When multiple fields are shown, still use a bullet list: `- 2026-04-15 (Wed) — close ₹93.39, high ₹93.47`. NOT a table.
+- Volume is almost never useful in chat — omit unless asked.
 
 ## Missions & Recurring Monitoring
 
