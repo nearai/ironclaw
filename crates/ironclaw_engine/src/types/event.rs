@@ -45,10 +45,15 @@ pub fn summarize_params(action_name: &str, params: &serde_json::Value) -> Option
             .and_then(|v| v.as_str())
             .map(|c| truncate(c, 40)),
         _ => {
-            // Generic: show first string value
+            // Generic: show the first string value whose key is not
+            // sensitive-looking. The fallback previously returned the
+            // first string unconditionally, which for MCP / unknown
+            // tools could surface `token`, `api_key`, `password`, etc.
+            // into debug-panel SSE and `ActionExecuted` events.
             if let Some(obj) = params.as_object() {
-                obj.values()
-                    .find_map(|v| v.as_str())
+                obj.iter()
+                    .filter(|(k, _)| !is_sensitive_param_key(k))
+                    .find_map(|(_, v)| v.as_str())
                     .map(|s| truncate(s, 50))
             } else {
                 None
@@ -56,6 +61,34 @@ pub fn summarize_params(action_name: &str, params: &serde_json::Value) -> Option
         }
     };
     summary.filter(|s| !s.is_empty())
+}
+
+/// Returns `true` if a parameter key name looks like it carries a
+/// secret. Used by [`summarize_params`] to skip the generic fallback on
+/// keys whose values should not appear in debug surfaces.
+///
+/// The engine crate can't consult the host's `Tool::sensitive_params()`
+/// (that trait lives in the main `ironclaw` crate), so this denylist is
+/// a best-effort defense for unknown/MCP tools. Known tools get
+/// per-tool extraction (url/query/command/etc.) above and never hit
+/// this path.
+fn is_sensitive_param_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "auth",
+        "credential",
+        "bearer",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || lower == "key"
+        || lower.ends_with("_key")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -265,8 +298,36 @@ pub enum EventKind {
 
 #[cfg(test)]
 mod tests {
-    use super::EventKind;
+    use super::{EventKind, summarize_params};
     use crate::types::step::StepId;
+
+    #[test]
+    fn summarize_params_generic_fallback_skips_sensitive_keys() {
+        // Regression: PR #2850 — the generic fallback previously returned
+        // `obj.values().find_map(..)`, which surfaced tokens/api keys from
+        // MCP tools into `ActionExecuted` events + debug-panel SSE.
+        let params = serde_json::json!({
+            "api_key": "sk-very-secret-value",
+            "endpoint": "https://example.com/rpc",
+        });
+        let summary = summarize_params("unknown_mcp_tool", &params);
+        assert_eq!(summary.as_deref(), Some("https://example.com/rpc"));
+        assert!(
+            !summary.as_deref().unwrap_or("").contains("sk-very-secret"),
+            "sensitive value leaked into params_summary"
+        );
+    }
+
+    #[test]
+    fn summarize_params_generic_fallback_returns_none_when_only_sensitive_keys() {
+        let params = serde_json::json!({
+            "token": "abc",
+            "password": "p@ss",
+            "Authorization": "Bearer xyz",
+            "refresh_key": "rk",
+        });
+        assert_eq!(summarize_params("unknown_mcp_tool", &params), None);
+    }
 
     #[test]
     fn action_failed_defaults_missing_duration_ms_when_deserializing_legacy_payload() {

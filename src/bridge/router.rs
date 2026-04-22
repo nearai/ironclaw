@@ -3759,7 +3759,18 @@ async fn await_thread_outcome(
                     Ok(ref evt) if evt.thread_id == thread_id => {
                         forward_event_to_channel(evt, channels, channel_name, metadata).await;
                         if let Some(sse) = sse {
+                            // Mirror the `send_status` gate: verbose-only
+                            // events (e.g. `CodeExecuted`, `Warning`) are
+                            // only useful when a debug subscriber is
+                            // actually listening. Skipping here avoids
+                            // flooding the shared SSE broadcast buffer
+                            // and the per-event clone cost for normal
+                            // (non-debug) browser tabs.
+                            let skip_verbose = !sse.has_verbose_receivers();
                             for app_event in thread_event_to_app_events(evt, &tid_str) {
+                                if skip_verbose && app_event.is_verbose_only() {
+                                    continue;
+                                }
                                 sse.broadcast_for_user(&message.user_id, app_event);
                             }
                         }

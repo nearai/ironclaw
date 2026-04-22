@@ -329,6 +329,13 @@ pub fn spawn_warning_bridge(
                     if entry.level != "WARN" && entry.level != "ERROR" {
                         continue;
                     }
+                    // `AppEvent::Warning` is verbose-only: if no debug
+                    // subscriber is connected there is nobody to deliver
+                    // to, and broadcasting would just pressure the
+                    // shared SSE buffer for non-debug clients.
+                    if !sse.has_verbose_receivers() {
+                        continue;
+                    }
                     let event = AppEvent::Warning {
                         source: entry.target,
                         message: entry.message,

@@ -814,6 +814,12 @@ async fn handle_execute_code_step(
             // summary is too lossy for diagnostics. Kept separate from
             // CodeExecutionFailed (which carries the failure classifier) and
             // the per-action events already broadcast above.
+            //
+            // Cap code and stdout at `CODE_EXECUTED_MAX_CHARS` each before
+            // emission so a step that prints a large blob cannot bloat
+            // persisted thread events or flood the SSE broadcast buffer.
+            // Same cap as `scripting::OUTPUT_TRUNCATE_LEN` (8_000).
+            const CODE_EXECUTED_MAX_CHARS: usize = 8_000;
             let return_value = match &result.return_value {
                 serde_json::Value::Null => None,
                 other => Some(other.clone()),
@@ -822,8 +828,8 @@ async fn handle_execute_code_step(
                 thread.id,
                 EventKind::CodeExecuted {
                     step_id: exec_ctx.step_id,
-                    code: code.clone(),
-                    stdout: result.stdout.clone(),
+                    code: tail_chars(&code, CODE_EXECUTED_MAX_CHARS),
+                    stdout: tail_chars(&result.stdout, CODE_EXECUTED_MAX_CHARS),
                     return_value,
                     duration_ms: code_start.elapsed().as_millis() as u64,
                 },
