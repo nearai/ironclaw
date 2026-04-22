@@ -107,10 +107,9 @@ const fn fallback_assignment(status: CapabilityStatus) -> SurfaceAssignment {
         | CapabilityStatus::NeedsSetup
         | CapabilityStatus::Inactive
         | CapabilityStatus::Latent
+        | CapabilityStatus::Error
         | CapabilityStatus::AvailableNotInstalled => SurfaceAssignment::capabilities_only(),
-        CapabilityStatus::Ready | CapabilityStatus::ReadyScoped | CapabilityStatus::Error => {
-            SurfaceAssignment::neither()
-        }
+        CapabilityStatus::Ready | CapabilityStatus::ReadyScoped => SurfaceAssignment::neither(),
     }
 }
 
@@ -190,6 +189,17 @@ mod tests {
                 subject: SurfacePolicyInput {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::Inactive,
+                    invocation_mode: InvocationMode::Direct,
+                    approval_gated: false,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::capabilities_only(),
+            },
+            Case {
+                name: "error extension direct action",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::Error,
                     invocation_mode: InvocationMode::Direct,
                     approval_gated: false,
                     leased_and_callable: false,

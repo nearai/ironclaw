@@ -4,7 +4,7 @@
 //! trait. The main crate implements it by wrapping `ToolRegistry` and
 //! `SafetyLayer` — the engine itself has no knowledge of specific tools.
 
-use crate::types::capability::{ActionDef, CapabilityLease};
+use crate::types::capability::{ActionDef, CapabilityLease, CapabilitySummary};
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::step::{ActionResult, StepId};
@@ -65,5 +65,13 @@ pub trait EffectExecutor: Send + Sync {
     async fn available_actions(
         &self,
         leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError>;
+
+    /// List capability background summaries given the current runtime state.
+    async fn available_capabilities(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<Vec<CapabilitySummary>, EngineError>;
 }

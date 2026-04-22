@@ -5826,7 +5826,16 @@ pub(crate) mod test_support {
             async fn available_actions(
                 &self,
                 _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
                 Ok(vec![])
             }
         }
@@ -7523,7 +7532,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -7663,7 +7682,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -8988,7 +9017,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }

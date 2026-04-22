@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::memory::RetrievalEngine;
-use crate::traits::effect::EffectExecutor;
+use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::types::capability::{ActionDef, CapabilityLease};
 use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
@@ -26,12 +26,13 @@ pub async fn build_step_context(
     leases: &[CapabilityLease],
     effects: &Arc<dyn EffectExecutor>,
     retrieval: Option<&RetrievalEngine>,
+    context: &ThreadExecutionContext,
     project_id: ProjectId,
     user_id: &str,
     goal: &str,
 ) -> Result<(Vec<ThreadMessage>, Vec<ActionDef>), EngineError> {
     // Fetch actions and memory docs in parallel — they are independent.
-    let actions_fut = effects.available_actions(leases);
+    let actions_fut = effects.available_actions(leases, context);
     let docs_fut = async {
         if let Some(engine) = retrieval {
             engine
@@ -130,7 +131,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -161,6 +171,17 @@ mod tests {
             &[],
             &effects,
             Some(&retrieval),
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: project,
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("search the web".into()),
+            },
             project,
             "test-user",
             "search the web",
@@ -191,6 +212,17 @@ mod tests {
             &[],
             &effects,
             None,
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: ProjectId::new(),
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("hello".into()),
+            },
             ProjectId::new(),
             "test-user",
             "hello",
@@ -217,6 +249,17 @@ mod tests {
             &[],
             &effects,
             Some(&retrieval),
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: project,
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("hello".into()),
+            },
             project,
             "test-user",
             "hello",
