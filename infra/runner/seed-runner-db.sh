@@ -40,6 +40,11 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "ERROR: sqlite3 not found in PATH (needed to checkpoint WAL before copy)" >&2
+    exit 1
+fi
+
 SERVE_DIR="$(mktemp -d -t ironclaw-seed-XXXXXX)"
 TUNNEL_LOG="$(mktemp -t ironclaw-seed-tunnel-XXXXXX)"
 
@@ -55,6 +60,21 @@ cleanup() {
     exit "${exit_code}"
 }
 trap cleanup EXIT INT TERM
+
+# libSQL runs in WAL mode (see `src/db/libsql/mod.rs` —
+# `PRAGMA journal_mode=WAL`), so recent committed writes may live in
+# `ironclaw.db-wal` rather than in the main `ironclaw.db` file. A
+# naive `cp` of just the main file would silently drop those writes —
+# meaning the runner could boot with a stale OAuth access / refresh
+# token even though the local DB looks current.
+#
+# Run `PRAGMA wal_checkpoint(TRUNCATE)` first so every committed page
+# is flushed into the main file and the WAL is emptied. Safe whether
+# or not a writer is currently open: SQLite's checkpoint API is
+# multi-writer aware. On an idle DB this is ~10 ms; on a busy DB it
+# blocks briefly until a quiet window.
+echo "[seed] Checkpointing WAL into ${DB_PATH}"
+sqlite3 "${DB_PATH}" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
 
 cp "${DB_PATH}" "${SERVE_DIR}/ironclaw.db"
 chmod 600 "${SERVE_DIR}/ironclaw.db"
