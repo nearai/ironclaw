@@ -253,11 +253,19 @@ pub enum EventKind {
     Unknown,
 }
 
+/// Byte cap for the `output_preview` field on `ActionExecuted` events. Sized
+/// for the SSE frame: small enough to keep the live-stream cheap, large enough
+/// to let the UI show the first screenful of a typical tool response. Non-string
+/// JSON outputs are serialized to compact form first, so this is an upper bound
+/// on the *serialized* preview, not on the underlying JSON structure.
+pub const OUTPUT_PREVIEW_MAX_BYTES: usize = 500;
+
 /// Build a truncated preview string from a tool output JSON value.
 ///
-/// Returns `None` for null/empty outputs. Truncates to `max_len` chars
-/// at a char boundary (never splits a multi-byte character).
-/// A `max_len` of 500 is recommended for SSE event previews.
+/// Returns `None` for null/empty outputs. Non-string JSON values are rendered
+/// via compact `serde_json` `Display` (not pretty-printed). `max_len` is
+/// measured in **bytes**; truncation backs off to the nearest UTF-8 char
+/// boundary so a multi-byte character is never split.
 pub fn truncate_output_preview(value: &serde_json::Value, max_len: usize) -> Option<String> {
     if value.is_null() {
         return None;
@@ -277,7 +285,7 @@ pub fn truncate_output_preview(value: &serde_json::Value, max_len: usize) -> Opt
         while !s.is_char_boundary(end) && end > 0 {
             end -= 1;
         }
-        let mut truncated = s[..end].to_string();
+        let mut truncated = s[..end].to_string(); // safety: end is validated by is_char_boundary loop above
         truncated.push_str("...");
         Some(truncated)
     }

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -258,9 +259,16 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
-            response.headers().get("retry-after"),
-        ));
+        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
+        // header was actually present on the response — `None` otherwise, so
+        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
+        // schedule instead of the 60s default `parse_retry_after` applies to
+        // missing headers. The 60s floor for 429 (rate limit) is re-added
+        // explicitly at the 429 call site below via `.or(Some(...))`.
+        let retry_after_header: Option<Duration> = response
+            .headers()
+            .get("retry-after")
+            .map(crate::llm::retry::parse_retry_after_value);
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -293,9 +301,12 @@ impl NearAiChatProvider {
             }
 
             if status_code == 429 {
+                // Preserve existing rate-limit behavior: fall back to a 60s
+                // default when the server omits Retry-After. Long sleeps are
+                // appropriate for rate-limit backpressure.
                 return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header,
+                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
                 });
             }
 
@@ -322,6 +333,29 @@ impl NearAiChatProvider {
                     let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
                     return Err(LlmError::ContextLengthExceeded { used, limit });
                 }
+            }
+
+            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
+            // so the retry layer backs off, the circuit breaker counts a
+            // transient failure, and the channel boundary produces a user-safe
+            // message. HTTP 500 is the most important case for the #2546
+            // traceback-leak report: upstream application errors frequently
+            // return 500 with a Python traceback in the body. 502/503/504 are
+            // the proxy-layer variants. The `status` field preserves the
+            // specific code for operators; the body is logged at debug and
+            // never carried on the error.
+            if matches!(status_code, 500..=599) {
+                tracing::debug!(
+                    provider = "nearai_chat",
+                    status = status_code,
+                    body_preview = crate::agent::truncate_for_preview(&response_text, 512).as_str(),
+                    "NEAR AI Chat upstream 5xx response"
+                );
+                return Err(LlmError::BadGateway {
+                    provider: "nearai_chat".to_string(),
+                    status: status_code,
+                    retry_after: retry_after_header,
+                });
             }
 
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
@@ -1014,7 +1048,13 @@ impl From<ChatMessage> for ChatCompletionMessage {
         } else if !msg.content_parts.is_empty() {
             // Build multimodal content array: text + image parts
             let mut parts = vec![crate::llm::ContentPart::Text { text: msg.content }];
-            parts.extend(msg.content_parts);
+            parts.extend(msg.content_parts.into_iter().map(|part| match part {
+                crate::llm::ContentPart::ImageUrl { mut image_url } => {
+                    image_url.detail = Some(image_url.normalized_openai_detail());
+                    crate::llm::ContentPart::ImageUrl { image_url }
+                }
+                other => other,
+            }));
             Some(MessageContent::Parts(parts))
         } else {
             Some(MessageContent::Text(msg.content))
@@ -1230,6 +1270,47 @@ mod tests {
             chat_msg.content.as_ref().and_then(|c| c.as_text()),
             Some("Hello")
         );
+    }
+
+    #[test]
+    fn test_message_conversion_defaults_missing_image_detail_to_auto() {
+        let msg = ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/jpeg;base64,Zm9v".to_string(),
+                    detail: None,
+                },
+            }],
+        );
+        let chat_msg: ChatCompletionMessage = msg.into();
+
+        let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,Zm9v"
+        );
+        assert_eq!(content[1]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn test_message_conversion_preserves_explicit_image_detail() {
+        for expected in ["low", "high"] {
+            let msg = ChatMessage::user_with_parts(
+                "describe this",
+                vec![crate::llm::ContentPart::ImageUrl {
+                    image_url: crate::llm::ImageUrl {
+                        url: format!("https://example.com/{expected}.png"),
+                        detail: Some(expected.to_string()),
+                    },
+                }],
+            );
+            let chat_msg: ChatCompletionMessage = msg.into();
+            let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+            assert_eq!(content[1]["image_url"]["detail"], expected);
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod tests {
     use ironclaw::cli::{PairingCommand, run_pairing_command_with_store};
     use ironclaw::db::libsql::LibSqlBackend;
     use ironclaw::db::{Database, UserRecord};
-    use ironclaw::ownership::{OwnerId, OwnershipCache};
+    use ironclaw::ownership::{OwnershipCache, UserId, UserRole};
     use ironclaw::pairing::PairingStore;
 
     async fn setup_db() -> (Arc<dyn Database>, tempfile::TempDir) {
@@ -50,7 +50,7 @@ mod tests {
         let (db, _dir) = setup_db_with_user("owner_1").await;
         let store = make_store(Arc::clone(&db));
         let channel = "telegram";
-        let owner_id = OwnerId::from("owner_1");
+        let owner_id = UserId::from_trusted("owner_1".into(), UserRole::Regular);
 
         // 1. Unknown user sends first message -> upsert creates request
         let r1 = store
@@ -88,7 +88,7 @@ mod tests {
         // 5. User identity now resolves
         let identity = store.resolve_identity(channel, "user_12345").await.unwrap();
         assert!(identity.is_some());
-        assert_eq!(identity.unwrap().owner_id.as_str(), "owner_1");
+        assert_eq!(identity.unwrap().as_str(), "owner_1");
 
         // 6. Pending list is empty
         let pending_after = store.list_pending(channel).await.unwrap();
@@ -99,7 +99,7 @@ mod tests {
     async fn test_pairing_flow_cli_approve() {
         let (db, _dir) = setup_db_with_user("owner_cli").await;
         let store = make_store(Arc::clone(&db));
-        let owner_id = OwnerId::from("owner_cli");
+        let owner_id = UserId::from_trusted("owner_cli".into(), UserRole::Regular);
 
         store
             .upsert_request("telegram", "user_999", None)
@@ -130,7 +130,7 @@ mod tests {
     async fn test_pairing_reject_invalid_code() {
         let (db, _dir) = setup_db_with_user("owner_reject").await;
         let store = make_store(Arc::clone(&db));
-        let owner_id = OwnerId::from("owner_reject");
+        let owner_id = UserId::from_trusted("owner_reject".into(), UserRole::Regular);
 
         store
             .upsert_request("telegram", "user_1", None)
@@ -156,7 +156,7 @@ mod tests {
     async fn test_pairing_multiple_channels_isolated() {
         let (db, _dir) = setup_db_with_user("owner_multi").await;
         let store = make_store(Arc::clone(&db));
-        let owner_id = OwnerId::from("owner_multi");
+        let owner_id = UserId::from_trusted("owner_multi".into(), UserRole::Regular);
 
         let r_telegram = store
             .upsert_request("telegram", "user_a", None)
@@ -205,7 +205,7 @@ mod tests {
     async fn test_pairing_store_normalizes_channel_keys_for_cache_and_db() {
         let (db, _dir) = setup_db_with_user("owner_case").await;
         let store = make_store(Arc::clone(&db));
-        let owner_id = OwnerId::from("owner_case");
+        let owner_id = UserId::from_trusted("owner_case".into(), UserRole::Regular);
 
         let req = store
             .upsert_request("TeleGram", "user_case", None)
@@ -229,7 +229,7 @@ mod tests {
             .unwrap()
             .expect("identity should resolve on normalized cache key");
 
-        assert_eq!(first.owner_id.as_str(), "owner_case");
-        assert_eq!(second.owner_id.as_str(), "owner_case");
+        assert_eq!(first.as_str(), "owner_case");
+        assert_eq!(second.as_str(), "owner_case");
     }
 }

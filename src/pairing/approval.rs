@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::channels::wasm::WasmChannel;
+use crate::channels::wasm::{
+    RUNTIME_CONFIG_KEY_OWNER_ID, RUNTIME_CONFIG_KEY_TUNNEL_URL, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
+    WasmChannel,
+};
 use crate::extensions::ExtensionError;
 use crate::pairing::ExternalId;
 
@@ -112,14 +115,14 @@ pub(crate) fn build_runtime_config_updates(
 
     if let Some(tunnel_url) = tunnel_url {
         config_updates.insert(
-            "tunnel_url".to_string(),
+            RUNTIME_CONFIG_KEY_TUNNEL_URL.to_string(),
             serde_json::Value::String(tunnel_url.to_string()),
         );
     }
 
     if let Some(secret) = webhook_secret {
         config_updates.insert(
-            "webhook_secret".to_string(),
+            RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
             serde_json::Value::String(secret.to_string()),
         );
     }
@@ -129,7 +132,7 @@ pub(crate) fn build_runtime_config_updates(
             .parse::<i64>()
             .map(serde_json::Value::from)
             .unwrap_or_else(|_| serde_json::Value::String(owner_actor_id.to_string()));
-        config_updates.insert("owner_id".to_string(), owner_id_value);
+        config_updates.insert(RUNTIME_CONFIG_KEY_OWNER_ID.to_string(), owner_id_value);
     }
 
     config_updates
@@ -157,26 +160,24 @@ async fn persist_numeric_owner_id(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalDeps, propagate_approval};
+    use super::{ApprovalDeps, build_runtime_config_updates, propagate_approval};
     use crate::channels::wasm::{
         ChannelCapabilitiesFile, WasmChannel, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        is_reserved_runtime_config_key,
     };
     use crate::pairing::{ExternalId, PairingStore};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn telegram_wasm_path() -> PathBuf {
+    fn telegram_wasm_path() -> Option<PathBuf> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = [
             manifest_dir
                 .join("channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm"),
             manifest_dir.join("channels-src/telegram/telegram.wasm"),
         ];
-        candidates
-            .into_iter()
-            .find(|path| path.exists())
-            .unwrap_or_else(|| panic!("telegram wasm fixture not found"))
+        candidates.into_iter().find(|path| path.exists())
     }
 
     fn telegram_capabilities_path() -> PathBuf {
@@ -186,8 +187,37 @@ mod tests {
         path
     }
 
-    #[tokio::test]
+    #[test]
+    fn runtime_config_updates_only_emit_reserved_host_keys() {
+        let updates = build_runtime_config_updates(
+            Some("https://example.test"),
+            Some("webhook-secret"),
+            Some("12345"),
+        );
+
+        assert_eq!(updates.len(), 3);
+        for key in updates.keys() {
+            assert!(
+                is_reserved_runtime_config_key(key),
+                "runtime config key {key} must be blocked from secret_config_mappings"
+            );
+        }
+    }
+
+    // `#[tokio::test]` without a `flavor` argument uses the current-thread
+    // runtime, so holding `ENV_MUTEX` across awaits here cannot deadlock
+    // other tasks — there are none scheduled concurrently on this
+    // runtime. The serialization guarantee against sibling tests
+    // reading `IRONCLAW_TEST_TELEGRAM_API_BASE_URL` is worth the lint
+    // suppression.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore] // requires prebuilt telegram WASM binary (not checked in, *.wasm is gitignored)
+    #[allow(clippy::await_holding_lock)]
     async fn propagate_approval_restores_runtime_state_when_on_start_fails() {
+        // Hold ENV_MUTEX for the duration so the runtime-env overlay mutation
+        // here cannot race with other tests reading IRONCLAW_TEST_TELEGRAM_API_BASE_URL
+        // (e.g. extensions::manager::tests::test_telegram_token_colon_preserved_in_validation_url).
+        let _env_lock = crate::config::helpers::lock_env();
         let original =
             crate::config::helpers::env_or_override("IRONCLAW_TEST_TELEGRAM_API_BASE_URL");
         crate::config::helpers::set_runtime_env(
@@ -195,10 +225,18 @@ mod tests {
             "http://127.0.0.1:1",
         );
 
+        let Some(telegram_wasm_path) = telegram_wasm_path() else {
+            crate::config::helpers::set_runtime_env(
+                "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+                original.as_deref().unwrap_or(""),
+            );
+            return;
+        };
+
         let runtime = Arc::new(
             WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime"),
         );
-        let wasm_bytes = std::fs::read(telegram_wasm_path()).expect("read telegram wasm");
+        let wasm_bytes = std::fs::read(telegram_wasm_path).expect("read telegram wasm");
         let prepared = runtime
             .prepare(
                 "telegram",

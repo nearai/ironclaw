@@ -1,0 +1,21 @@
+{
+  "id": "lido",
+  "name": "Lido (stETH / wstETH)",
+  "category": "staking",
+  "match_protocol_ids": ["lido", "lido_steth", "lido-steth", "steth", "wsteth"],
+  "chains": ["ethereum"],
+  "contract_addrs_by_chain": {
+    "ethereum": [
+      "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+      "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
+    ]
+  },
+  "base_risk_score": 2,
+  "liquidity_tier": "minutes",
+  "withdrawal_delay_seconds": 86400,
+  "yield_field": "staking_apy",
+  "audits": ["Quantstamp", "MixBytes", "StateMind", "Sigma Prime"],
+  "tvl_floor_usd": 10000000000,
+  "oracle_deps": ["Lido oracle committee"],
+  "notes": "Liquid staking on Ethereum. Withdrawals via the unstETH queue can take days; stETH→ETH swap on a DEX is faster but slippage applies."
+}

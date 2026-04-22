@@ -1,0 +1,121 @@
+.pf-card {
+  padding: 16px;
+  font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.pf-loading,
+.pf-empty,
+.pf-error {
+  padding: 24px;
+  text-align: center;
+  color: #666;
+}
+
+.pf-error {
+  color: #c33;
+}
+
+.pf-totals {
+  display: flex;
+  gap: 24px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.pf-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #888;
+  letter-spacing: 0.5px;
+}
+
+.pf-big {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.pf-positions {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+}
+
+.pf-positions th,
+.pf-positions td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  text-align: left;
+}
+
+.pf-positions th {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #888;
+  font-weight: 600;
+}
+
+.pf-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pf-suggestions,
+.pf-pending {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px 0;
+}
+
+.pf-suggestions li,
+.pf-pending li {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.pf-chip {
+  display: inline-block;
+  padding: 2px 6px;
+  background: rgba(0, 120, 255, 0.1);
+  border-radius: 3px;
+  font-size: 11px;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pf-footer {
+  font-size: 11px;
+  color: #888;
+  margin: 0;
+}
+
+h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  color: #888;
+  letter-spacing: 0.5px;
+  margin: 16px 0 8px 0;
+}
+
+.pf-share-btn {
+  margin-left: auto;
+  padding: 6px 14px;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  border-radius: 6px;
+  background: rgba(74, 222, 128, 0.1);
+  color: #4ade80;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.pf-share-btn:hover {
+  background: rgba(74, 222, 128, 0.2);
+  border-color: rgba(74, 222, 128, 0.5);
+}

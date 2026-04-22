@@ -1065,6 +1065,22 @@ impl WasmToolWrapper {
             .call_execute(&mut store, &request)
             .map_err(|e| classify_trap_error(e, limits))?;
 
+        // Log fuel consumption for diagnostics
+        if self.runtime.config().fuel_config.enabled
+            && let Ok(remaining) = store.get_fuel()
+        {
+            let consumed = limits.fuel.saturating_sub(remaining);
+            let pct = (consumed as f64 / limits.fuel as f64) * 100.0;
+            tracing::debug!(
+                tool = %self.prepared.name,
+                fuel_consumed = consumed,
+                fuel_remaining = remaining,
+                fuel_limit = limits.fuel,
+                fuel_pct = format!("{pct:.1}%"),
+                "WASM fuel consumption"
+            );
+        }
+
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
 
@@ -1868,6 +1884,10 @@ mod tests {
 
         async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
             self.inner.exists(user_id, name).await
+        }
+
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            self.inner.any_exist().await
         }
 
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {

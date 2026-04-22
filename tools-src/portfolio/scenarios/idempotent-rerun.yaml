@@ -1,0 +1,23 @@
+id: idempotent-rerun
+description: |
+  Two back-to-back scan calls against the same fixture address must
+  produce byte-identical responses. This is the tool-side half of the
+  mission's idempotency invariant: if the scan is deterministic the
+  skill can safely compare state-hashes and skip writing a duplicate
+  suggestion.
+steps:
+  - name: first-scan
+    action: scan
+    params:
+      addresses: ["0x1111111111111111111111111111111111111111"]
+      source: fixture
+    expect:
+      positions_len: 1
+
+  - name: second-scan
+    action: scan
+    params:
+      addresses: ["0x1111111111111111111111111111111111111111"]
+      source: fixture
+    expect:
+      equal_to_step: first-scan

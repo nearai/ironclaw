@@ -1,0 +1,10 @@
+{
+  "id": "rhea-lp",
+  "name": "Rhea (Ref Finance)",
+  "category": "dex-lp",
+  "match_protocol_ids": ["rhea-lp"],
+  "base_risk_score": 2,
+  "liquidity_tier": "instant",
+  "withdrawal_delay_seconds": 0,
+  "yield_field": "pool_apy"
+}

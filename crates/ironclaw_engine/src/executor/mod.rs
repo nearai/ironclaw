@@ -5,7 +5,6 @@
 //! - [`context`] — context building for LLM calls
 //! - [`intent`] — tool intent nudge detection
 
-pub mod compaction;
 pub mod context;
 pub mod loop_engine;
 pub mod orchestrator;

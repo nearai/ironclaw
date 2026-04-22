@@ -29,7 +29,7 @@ activation:
 
 # Idea Parking
 
-Manage ideas that are interesting but not yet actionable. Parked ideas live in `commitments/parked-ideas/` and are periodically resurfaced by the digest.
+Manage ideas that are interesting but not yet actionable. Parked ideas live in `projects/commitments/parked-ideas/` and are periodically resurfaced by the digest.
 
 ## Parking an idea
 
@@ -39,14 +39,14 @@ This skill is only successful if the parked idea is actually persisted.
 Do not just acknowledge or summarize an idea.
 
 Execution order is mandatory:
-1. Call `memory_write` for `commitments/parked-ideas/<slug>.md`
+1. Call `memory_write` for `projects/commitments/parked-ideas/<slug>.md`
 2. Only then confirm what was parked
 
 Never say an idea was "parked", "saved for later", or "resurfaced later"
 unless the corresponding `memory_write` succeeded.
 
 **Action:**
-1. Write to `commitments/parked-ideas/<slug>.md`:
+1. Write to `projects/commitments/parked-ideas/<slug>.md`:
 
 ```
 ---
@@ -70,7 +70,7 @@ tags: [<relevant tags>]
 User says: "show parked ideas" or "what's on the backburner?"
 
 **Action:**
-1. `memory_tree("commitments/parked-ideas/", depth=1)` — list all files (skip README.md)
+1. `memory_tree("projects/commitments/parked-ideas/", depth=1)` — list all files (skip README.md)
 2. `memory_read` each to get title and relevance
 3. Display a brief list:
    ```
@@ -85,7 +85,7 @@ User says: "activate the comparison video idea" or "let's do the WASM performanc
 
 **Action:**
 1. Find the matching parked idea
-2. Create a commitment in `commitments/open/` based on the idea content
+2. Create a commitment in `projects/commitments/open/` based on the idea content
 3. Overwrite the parked idea file with empty content
 4. Confirm: "Promoted to active commitment: <title>."
 

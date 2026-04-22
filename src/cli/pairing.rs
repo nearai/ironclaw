@@ -42,9 +42,12 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
 
     // Ensure owner user row exists before approval (FK on channel_identities.owner_id).
     // Best-effort: don't block CLI if the upsert fails (e.g. read-only replica).
+    // The CLI identity is the deployment owner — persist the "owner" role so
+    // a reload via `UserRole::from_db_role` stays `UserRole::Owner` rather
+    // than being silently downgraded to `Admin`.
     db.get_or_create_user(crate::db::UserRecord {
         id: config.owner_id.clone(),
-        role: "admin".to_string(),
+        role: crate::ownership::UserRole::Owner.as_db_role().to_string(),
         display_name: "Owner".to_string(),
         status: "active".to_string(),
         email: None,
@@ -59,7 +62,11 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
 
     let cache = std::sync::Arc::new(crate::ownership::OwnershipCache::new());
     let store = crate::pairing::PairingStore::new(db, cache);
-    let owner_id = crate::ownership::OwnerId::from(config.owner_id.clone());
+    // CLI operates as the deployment owner (from config).
+    let owner_id = crate::ownership::UserId::from_trusted(
+        config.owner_id.clone(),
+        crate::ownership::UserRole::Owner,
+    );
 
     run_pairing_command_with_store(&store, &owner_id, cmd).await
 }
@@ -67,7 +74,7 @@ pub async fn run_pairing_command(cmd: PairingCommand) -> Result<(), anyhow::Erro
 /// Run pairing CLI command with a given store (for testing).
 pub async fn run_pairing_command_with_store(
     store: &crate::pairing::PairingStore,
-    owner_id: &crate::ownership::OwnerId,
+    owner_id: &crate::ownership::UserId,
     cmd: PairingCommand,
 ) -> Result<(), anyhow::Error> {
     match cmd {
@@ -126,7 +133,7 @@ async fn run_approve(
     store: &crate::pairing::PairingStore,
     channel: &str,
     code: &str,
-    owner_id: &crate::ownership::OwnerId,
+    owner_id: &crate::ownership::UserId,
 ) -> Result<(), anyhow::Error> {
     let _ = store
         .approve(channel, code, owner_id)

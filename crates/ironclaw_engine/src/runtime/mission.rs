@@ -163,6 +163,8 @@ pub struct MissionManager {
     rate_limit: FireRateLimit,
     /// Optional budget gate consulted before each fire.
     budget_gate: Option<Arc<dyn BudgetGate>>,
+    /// Conversation insights extraction interval (every N completed threads).
+    insights_interval: u32,
 }
 
 /// Minimum gap between successive `fire_mission` attempts for the same
@@ -187,6 +189,7 @@ impl MissionManager {
             user_fire_log: RwLock::new(HashMap::new()),
             rate_limit: FireRateLimit::default(),
             budget_gate: None,
+            insights_interval: 5,
         }
     }
 
@@ -223,6 +226,13 @@ impl MissionManager {
     /// Override the per-user fire-rate limit. Defaults to 100 fires/hour.
     pub fn with_rate_limit(mut self, limit: FireRateLimit) -> Self {
         self.rate_limit = limit;
+        self
+    }
+
+    /// Override the conversation insights extraction interval.
+    /// Every N completed threads, insights are extracted from conversations.
+    pub fn with_insights_interval(mut self, interval: u32) -> Self {
+        self.insights_interval = interval.max(1);
         self
     }
 
@@ -498,12 +508,13 @@ impl MissionManager {
         Ok(())
     }
 
-    /// Resume a paused mission.
+    /// Resume a paused or failed mission.
     ///
     /// Shared missions can only be managed by shared owners (system user).
-    /// Only `Paused` missions can be resumed — `Completed` and `Failed` are
-    /// terminal states and must not be resurrected by a stray resume call,
-    /// so anything else is rejected with a `Store` error.
+    /// `Paused` missions resume normally, and `Failed` missions may be
+    /// explicitly resumed after the caller fixes the underlying problem.
+    /// `Completed` remains terminal, so anything else is rejected with a
+    /// `Store` error.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
         let mut mission = self
             .store
@@ -523,10 +534,13 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        if mission.status != MissionStatus::Paused {
+        if !matches!(
+            mission.status,
+            MissionStatus::Paused | MissionStatus::Failed
+        ) {
             return Err(EngineError::Store {
                 reason: format!(
-                    "mission {id} is in state {:?}, only Paused missions can be resumed",
+                    "mission {id} is in state {:?}, only Paused or Failed missions can be resumed",
                     mission.status
                 ),
             });
@@ -601,36 +615,45 @@ impl MissionManager {
             });
         }
 
-        // Terminal missions can't fire — except completed event-driven missions,
-        // which should spawn a new thread for each new event.
+        // Event-driven missions that completed one thread can still fire on
+        // new events — each event is a fresh investigation. Only truly failed
+        // missions (or completed non-event-driven missions) are blocked.
         if mission.is_terminal() {
-            let is_event_driven = matches!(
-                mission.cadence,
-                MissionCadence::OnSystemEvent { .. }
-                    | MissionCadence::OnEvent { .. }
-                    | MissionCadence::Webhook { .. }
-            );
-            if !(mission.status == MissionStatus::Completed && is_event_driven) {
+            let allow = mission.status == MissionStatus::Completed && mission.is_event_driven();
+            if !allow {
                 debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
                 return Ok(None);
             }
         }
 
-        // Reset daily thread counter if the last fire was on a previous UTC day.
-        // The comment on `threads_today` says "reset daily by the cron ticker"
-        // but no such reset existed — the counter only ever incremented,
-        // permanently exhausting the budget after `max_threads_per_day` fires.
-        if mission.max_threads_per_day > 0 && mission.threads_today > 0 {
-            let today = chrono::Utc::now().date_naive();
-            let last_fire_day = mission
-                .last_fire_at
-                .map(|dt| dt.date_naive())
-                .unwrap_or(today);
-            if last_fire_day < today {
+        // Daily reset: if `last_fire_at` is on a previous UTC day, the counter
+        // is stale — reset it so the mission gets a fresh daily budget. The UTC
+        // boundary is deliberate: a mission capped at 5/day for a user in a late
+        // timezone only resets around mid-afternoon local time, which is
+        // acceptable for learning-mission cadence.
+        //
+        // Best-effort persist: a transient store failure must not prevent the
+        // mission from firing — the in-memory reset is sufficient for this call,
+        // and the next successful fire will persist the counter naturally.
+        if mission.threads_today > 0 {
+            let stale = match mission.last_fire_at {
+                Some(last) => last.date_naive() < chrono::Utc::now().date_naive(),
+                None => true,
+            };
+            if stale {
+                debug!(
+                    mission_id = %id,
+                    old_threads_today = mission.threads_today,
+                    "resetting threads_today — new UTC day"
+                );
                 mission.threads_today = 0;
-                // Best-effort persist; if it fails we still proceed with the
-                // reset value for this call — next fire will retry.
-                let _ = self.store.save_mission(&mission).await;
+                if let Err(e) = self.store.save_mission(&mission).await {
+                    debug!(
+                        mission_id = %id,
+                        error = %e,
+                        "failed to persist daily reset; proceeding with in-memory reset"
+                    );
+                }
             }
         }
 
@@ -735,11 +758,14 @@ impl MissionManager {
         let meta_prompt =
             build_meta_prompt(&mission, &project_docs, &trigger_payload, &context_blocks);
 
-        // Spawn thread with meta-prompt as initial user message
+        // Spawn thread with meta-prompt as initial user message.
+        // `title = mission.name` so the sidebar shows the short label
+        // instead of the multi-paragraph meta-prompt (which is `goal`).
         let thread_id = self
             .thread_manager
-            .spawn_thread(
+            .spawn_thread_with_title(
                 &meta_prompt,
+                Some(mission.name.clone()),
                 ThreadType::Mission,
                 mission.project_id,
                 ThreadConfig::default(),
@@ -961,19 +987,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
-                // Completed event-driven missions still fire on new events —
-                // each event is a fresh investigation, not a continuation.
-                Some(m)
-                    if m.status == MissionStatus::Completed
-                        && matches!(
-                            m.cadence,
-                            MissionCadence::OnSystemEvent { .. }
-                                | MissionCadence::OnEvent { .. }
-                                | MissionCadence::Webhook { .. }
-                        ) =>
-                {
-                    m
-                }
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation. Only Failed missions are truly dead.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1044,6 +1060,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1104,6 +1123,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1156,8 +1178,8 @@ impl MissionManager {
         const SKILL_EXTRACTION_MIN_STEPS: usize = 5;
         /// Minimum distinct action executions for skill extraction.
         const SKILL_EXTRACTION_MIN_ACTIONS: usize = 3;
-        /// Completed thread interval for conversation insights.
-        const CONVERSATION_INSIGHTS_INTERVAL: u32 = 5;
+
+        let insights_interval = mgr.insights_interval;
 
         tokio::spawn(async move {
             // Track completed thread count per conversation for insights trigger.
@@ -1325,7 +1347,7 @@ impl MissionManager {
                             let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
                             *count += 1;
 
-                            if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
+                            if (*count).is_multiple_of(insights_interval) {
                                 // Collect recent thread goals for context
                                 let thread_goals: Vec<String> = match mgr
                                     .store
@@ -1335,7 +1357,7 @@ impl MissionManager {
                                     Ok(threads) => threads
                                         .iter()
                                         .rev()
-                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .take(insights_interval as usize)
                                         .map(|t| t.goal.clone())
                                         .collect(),
                                     Err(_) => vec![thread.goal.clone()],
@@ -2246,12 +2268,24 @@ async fn process_mission_outcome_and_notify(
             }
         }
         ThreadOutcome::Completed { response: None } => {}
-        ThreadOutcome::Failed { error } => {
+        ThreadOutcome::Failed { error, .. } => {
+            // A terminal thread failure means the mission did not merely
+            // produce a disappointing result — the execution itself crashed.
+            // Leave a durable failed status so cron/event schedulers stop
+            // re-firing the same broken mission until the user explicitly
+            // resumes it after fixing the underlying problem.
+            mission.status = MissionStatus::Failed;
             mission.approach_history.push(format!("FAILED: {error}"));
             notify_response = Some(format!("Mission failed: {error}"));
             is_error = true;
         }
         ThreadOutcome::MaxIterations => {
+            // MaxIterations is also terminal for the just-fired mission run:
+            // without a failed lifecycle transition the scheduler will treat
+            // the mission as still Active and keep spawning fresh threads on
+            // every due tick, which is the runaway-loop behavior reported in
+            // #2736.
+            mission.status = MissionStatus::Failed;
             mission
                 .approach_history
                 .push("Hit max iterations without completing".into());
@@ -2543,6 +2577,7 @@ async fn dispatch_protected_write(
         current_call_id: None,
         source_channel: None,
         user_timezone: None,
+        thread_goal: None,
     };
 
     effects
@@ -3175,6 +3210,8 @@ mod tests {
             revisions: vec![],
             repairs: vec![],
             content_hash: "sha256:test".to_string(),
+            bundle_path: None,
+            source_url: None,
         };
 
         let mut doc = MemoryDoc::new(
@@ -3492,9 +3529,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_mission_rejects_terminal_states() {
-        // Regression: resume_mission must not resurrect Completed/Failed
-        // missions. Only Paused → Active is permitted.
+    async fn resume_mission_rejects_non_resumable_states() {
+        // Regression: resume_mission must not silently succeed for states
+        // that are not explicitly recoverable.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
@@ -3511,7 +3548,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Active → resume must fail (only Paused is resumable).
+        // Active → resume must fail (only Paused/Failed are resumable).
         let err = mgr
             .resume_mission(id, "alice")
             .await
@@ -3806,6 +3843,125 @@ mod tests {
             mission.status,
             MissionStatus::Completed,
             "mission should be completed when goal is achieved"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_outcome_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "GitHub Poller",
+                "Poll the GitHub API and summarize updates",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::Failed {
+                error: "github api returned 404".into(),
+                debug_detail: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("github api returned 404")),
+            "failure should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "failed missions must not keep spawning new threads until resumed"
+        );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a failed cron mission should re-arm its schedule"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_some(),
+            "explicit resume should make failed missions fireable again"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_iterations_marks_mission_failed_and_blocks_refire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Long Runner",
+                "Keep checking the endpoint until it succeeds",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        process_mission_outcome(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            ThreadId::new(),
+            &ThreadOutcome::MaxIterations,
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Failed);
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|entry| entry.contains("max iterations")),
+            "max-iterations outcome should be recorded in approach_history"
+        );
+
+        let refire = mgr.fire_mission(id, "test-user", None).await.unwrap();
+        assert!(
+            refire.is_none(),
+            "max-iterations missions must not keep spawning new threads until resumed"
+        );
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resuming a max-iterations cron mission should re-arm its schedule"
         );
     }
 
@@ -4150,6 +4306,7 @@ mod tests {
                         allow_always: false,
                     }),
                     resume_output: None,
+                    paused_lease: None,
                 });
             }
             Ok(ActionResult {
@@ -5325,6 +5482,7 @@ mod tests {
             synthetic_thread_id,
             &ThreadOutcome::Failed {
                 error: "container exited 137".into(),
+                debug_detail: None,
             },
             mgr.notification_tx_for_test(),
             None,
@@ -7027,5 +7185,181 @@ mod tests {
             "tick must fire a high-frequency cron after a successful fire — \
              cooldown must not throttle the success path, got spawned={spawned:?}"
         );
+    }
+
+    /// Helper: find the expected-behavior learning mission in the store.
+    fn find_expected_behavior_mission(missions: &[Mission]) -> &Mission {
+        missions
+            .iter()
+            .find(|m| m.metadata.get("expected_behavior").is_some())
+            .expect("expected-behavior mission should exist")
+    }
+
+    /// Regression: completed event-driven missions must still fire on new
+    /// system events. Previously, `fire_on_system_event` only allowed
+    /// `MissionStatus::Active` and `fire_mission` rejected all terminal
+    /// missions, so a learning mission that completed its first thread
+    /// would never fire again — producing the "no self-improvement missions
+    /// are configured" error in the `/expected` UI.
+    #[tokio::test]
+    async fn completed_event_driven_mission_can_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap learning missions for the user
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and mark it Completed (simulates
+        // the outcome watcher setting "Goal achieved: yes" after the first
+        // successful thread).
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut completed = eb.clone();
+        completed.status = MissionStatus::Completed;
+        store.save_mission(&completed).await.unwrap();
+
+        // Verify the mission is now Completed
+        let loaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, MissionStatus::Completed);
+
+        // Fire a system event — this should still spawn a thread despite the
+        // mission being Completed, because it's event-driven.
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+            "goal": "test goal",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "completed event-driven mission must still fire on new system events"
+        );
+    }
+
+    /// Regression: a Failed event-driven mission must NOT fire — only
+    /// Completed ones get the event-driven exception.
+    #[tokio::test]
+    async fn failed_event_driven_mission_cannot_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Mark the expected-behavior mission as Failed
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut failed = eb.clone();
+        failed.status = MissionStatus::Failed;
+        store.save_mission(&failed).await.unwrap();
+
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            spawned.is_empty(),
+            "failed event-driven mission must NOT fire"
+        );
+    }
+
+    /// Regression: `threads_today` resets when `last_fire_at` is on a
+    /// previous UTC day, preventing permanent daily budget exhaustion.
+    #[tokio::test]
+    async fn threads_today_resets_on_new_day() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and exhaust its daily budget
+        // with a stale last_fire_at from yesterday.
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+
+        let mut stale = eb.clone();
+        stale.threads_today = stale.max_threads_per_day;
+        stale.last_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(25));
+        // Clear cooldown so it doesn't block the fire
+        stale.cooldown_secs = 0;
+        store.save_mission(&stale).await.unwrap();
+
+        // Should succeed because the daily counter resets
+        let payload = serde_json::json!({
+            "expected_behavior": "test daily reset",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "mission should fire after threads_today reset on new UTC day"
+        );
+
+        // Verify the counter was persisted as reset
+        let reloaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        // threads_today should be 1 (0 after reset + 1 for the new fire)
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today should be 1 after reset + new fire"
+        );
+    }
+
+    /// Regression: `is_event_driven` correctly classifies cadence variants.
+    #[test]
+    fn is_event_driven_classification() {
+        let mut m = Mission::new(
+            ProjectId::new(),
+            "user1",
+            "test",
+            "goal",
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "test".into(),
+                filters: Default::default(),
+            },
+        );
+        assert!(m.is_event_driven(), "OnSystemEvent should be event-driven");
+
+        m.cadence = MissionCadence::OnEvent {
+            event_pattern: "test".into(),
+            channel: None,
+        };
+        assert!(m.is_event_driven(), "OnEvent should be event-driven");
+
+        m.cadence = MissionCadence::Webhook {
+            path: "/test".into(),
+            secret: None,
+        };
+        assert!(m.is_event_driven(), "Webhook should be event-driven");
+
+        m.cadence = MissionCadence::Cron {
+            expression: "0 * * * *".into(),
+            timezone: None,
+        };
+        assert!(!m.is_event_driven(), "Cron should NOT be event-driven");
+
+        m.cadence = MissionCadence::Manual;
+        assert!(!m.is_event_driven(), "Manual should NOT be event-driven");
     }
 }

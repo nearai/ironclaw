@@ -46,15 +46,23 @@ def _forward_coverage_env(env: dict):
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     """Send signal and wait for process to exit."""
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +337,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        history = await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate, not response text)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Reply "yes" to approve — goes through SubmissionParser as ApprovalResponse
         await api_post(
@@ -376,10 +382,8 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        # Wait for the approval prompt
-        await _wait_for_response(
-            base, thread_id, timeout=60, expect_substring="requires approval",
-        )
+        # Wait for the approval prompt (delivered via pending_gate)
+        await _wait_for_approval(base, thread_id, timeout=60)
 
         # Deny
         await api_post(
@@ -428,9 +432,7 @@ class TestV2EngineApprovalFlow:
             timeout=30,
         )
 
-        await _wait_for_response(
-            base, thread_id_1, timeout=60, expect_substring="requires approval",
-        )
+        await _wait_for_approval(base, thread_id_1, timeout=60)
 
         await api_post(
             base, "/api/chat/send",
@@ -534,10 +536,22 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
     home_dir = _RESTART_HOME_TMPDIR.name
     os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    gateway_port = sock.getsockname()[1]
-    sock.close()
+    # Allocate a free gateway port AND a free HTTP channel port. The
+    # HTTP channel (`webhook_server`) binds at startup and defaults to
+    # `127.0.0.1:8080`; without explicit `HTTP_HOST`/`HTTP_PORT`, this
+    # fixture would race every other e2e server (and anything else on
+    # 8080) and the ironclaw binary would exit with "Address already
+    # in use". The sibling `v2_approval_server` fixture at the top of
+    # this file already allocates both — mirror that.
+    socks = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+    gateway_port = socks[0].getsockname()[1]
+    http_port = socks[1].getsockname()[1]
+    for s in socks:
+        s.close()
 
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -552,6 +566,8 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
         "GATEWAY_USER_ID": "e2e-v2-restart-tester",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
@@ -570,6 +586,28 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
 
     base_url = f"http://127.0.0.1:{gateway_port}"
     proc = None
+    # Drain child stdout/stderr into the background. With
+    # `RUST_LOG=ironclaw=debug` startup output exceeds the default
+    # 64 KiB pipe buffer; without a drainer the child blocks on its
+    # next write, `/api/health` never responds, and the fixture times
+    # out with a confusing "server not ready" that is actually
+    # back-pressure on our own pipes. Mirror the last 32 KiB of stderr
+    # so a genuine startup failure (bind error, panic) surfaces in the
+    # timeout message instead of being silently swallowed.
+    drain_tasks: list[asyncio.Task] = []
+    stderr_tail = bytearray()
+
+    async def _drain(stream, mirror):
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                return
+            if mirror is not None:
+                mirror.extend(chunk)
+                if len(mirror) > 32 * 1024:
+                    del mirror[: len(mirror) - 32 * 1024]
 
     async def start():
         nonlocal proc
@@ -580,7 +618,22 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        drain_tasks.append(asyncio.create_task(_drain(proc.stdout, None)))
+        drain_tasks.append(asyncio.create_task(_drain(proc.stderr, stderr_tail)))
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        except TimeoutError:
+            # Snapshot stderr before stop() drains/cancels the readers, then
+            # tear the subprocess and drain tasks down explicitly. Without
+            # this, a startup timeout leaks the child process (and its
+            # ports) because `await start()` runs before the fixture's
+            # try/finally guard.
+            stderr_text = bytes(stderr_tail).decode("utf-8", errors="replace")
+            await stop()
+            raise TimeoutError(
+                f"restartable_v2_server did not become ready at {base_url}/api/health.\n"
+                f"stderr tail:\n{stderr_text}"
+            )
 
     async def stop():
         nonlocal proc
@@ -588,6 +641,17 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+        # Cancel *and* await the drain tasks. Skipping the await leaks
+        # "Task was destroyed but it is pending!" warnings at teardown
+        # and, on restart-style fixtures that call stop() → start(),
+        # builds up zombie readers across cycles.
+        tasks_to_await = list(drain_tasks)
+        drain_tasks.clear()
+        for task in tasks_to_await:
+            if not task.done():
+                task.cancel()
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
 
     await start()
     try:
@@ -611,9 +675,7 @@ async def test_always_approve_survives_restart(restartable_v2_server):
         timeout=30,
     )
 
-    await _wait_for_response(
-        base, thread_id, timeout=60, expect_substring="requires approval",
-    )
+    await _wait_for_approval(base, thread_id, timeout=60)
 
     await api_post(
         base, "/api/chat/send",

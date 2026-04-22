@@ -1,0 +1,171 @@
+/* Routines Tab */
+/* ── Missions ──────────────────────────────────── */
+
+.missions-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.missions-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: 20px;
+}
+
+.missions-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.missions-table th,
+.missions-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+
+.missions-table th {
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: 0.5px;
+}
+
+.missions-table tr:hover td {
+  background: var(--hover-surface);
+}
+
+.mission-row {
+  cursor: pointer;
+}
+
+.mission-detail {
+  padding: 16px 0;
+}
+
+.mission-progress-live {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.mission-progress-idle {
+  color: var(--text-muted);
+}
+
+.mission-thread-progress {
+  border-color: var(--accent);
+}
+
+.thread-message {
+  border-left: 3px solid var(--border);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 0 4px 4px 0;
+  font-size: var(--text-sm);
+}
+
+.thread-msg-role {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.thread-msg-content {
+  overflow-x: auto;
+}
+
+.thread-msg-assistant {
+  border-left-color: var(--accent);
+}
+
+.thread-msg-user {
+  border-left-color: var(--success);
+}
+
+.thread-msg-system {
+  border-left-color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.truncate {
+  max-width: 300px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* Mission created card — inline chat card rendered from the
+   `mission_created` SSE event. Replaces the raw tool-output JSON for the
+   `mission_create` action so the user sees a structured summary. */
+.mission-created-card {
+  align-self: flex-start;
+  max-width: 80%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mission-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.mission-card-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.mission-card-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+
+.mission-card-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.mission-status-created { background: var(--success); color: var(--text-on-accent); }
+.mission-status-created_with_warnings { background: var(--warning); color: var(--text-on-accent); }
+
+.mission-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mission-card-detail {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.mission-detail-label {
+  color: var(--text-secondary);
+  min-width: 60px;
+  font-weight: 500;
+}
+
+.mission-detail-value {
+  color: var(--text);
+  font-family: var(--font-mono);
+}

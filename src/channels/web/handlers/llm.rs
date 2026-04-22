@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State};
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::config::helpers::validate_operator_base_url;
 
 // ---------------------------------------------------------------------------
@@ -143,54 +143,62 @@ fn interpret_chat_response(
     result: Result<reqwest::Response, reqwest::Error>,
 ) -> TestConnectionResponse {
     match result {
-        Ok(r) => {
-            let status = r.status();
-            if status.is_success() {
-                TestConnectionResponse {
-                    ok: true,
-                    message: format!("Connected ({})", status),
-                }
-            } else if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Authentication failed ({})", status),
-                }
-            } else if status == reqwest::StatusCode::BAD_REQUEST
-                || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-            {
-                // 400/422 = server reachable, likely wrong endpoint variant — connectivity OK
-                TestConnectionResponse {
-                    ok: true,
-                    message: format!("Server reachable ({})", status),
-                }
-            } else if status == reqwest::StatusCode::NOT_FOUND {
-                // 404 = /models endpoint not found — server reachable but not OpenAI-compatible
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!(
-                        "Server reachable but /models endpoint not found ({}). \
-                         Check the base URL and adapter type.",
-                        status
-                    ),
-                }
-            } else if status.is_client_error() {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Client error ({})", status),
-                }
-            } else {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Server error ({})", status),
-                }
-            }
-        }
+        Ok(r) => interpret_chat_status(r.status()),
         Err(e) => TestConnectionResponse {
             ok: false,
             message: format!("Connection failed: {e}"),
         },
+    }
+}
+
+/// Pure status-code interpretation, extracted for testability.
+fn interpret_chat_status(status: reqwest::StatusCode) -> TestConnectionResponse {
+    if status.is_success() {
+        TestConnectionResponse {
+            ok: true,
+            message: format!("Connected ({})", status),
+        }
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Authentication failed ({})", status),
+        }
+    } else if status == reqwest::StatusCode::BAD_REQUEST
+        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    {
+        // 400/422 = server reachable but the request was rejected, likely a
+        // wrong model name or endpoint variant.  Report as not-ok so the UI
+        // doesn't mislead the user with a green badge.
+        TestConnectionResponse {
+            ok: false,
+            message: format!(
+                "Server reachable but returned an error ({}). \
+                 Check the model name and adapter type.",
+                status
+            ),
+        }
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        // 404 = /models endpoint not found — server reachable but not OpenAI-compatible
+        TestConnectionResponse {
+            ok: false,
+            message: format!(
+                "Server reachable but /models endpoint not found ({}). \
+                 Check the base URL and adapter type.",
+                status
+            ),
+        }
+    } else if status.is_client_error() {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Client error ({})", status),
+        }
+    } else {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Server error ({})", status),
+        }
     }
 }
 
@@ -404,6 +412,7 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(crate::llm::DEFAULT_MODEL.to_string()),
         );
         entry.insert("api_key_required".into(), true.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), true.into());
         // Env defaults
         entry.insert(
@@ -446,6 +455,7 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(def.default_model.clone()),
         );
         entry.insert("api_key_required".into(), def.api_key_required.into());
+        entry.insert("base_url_required".into(), def.base_url_required.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
         // Env defaults
@@ -476,6 +486,7 @@ fn build_llm_providers() -> serde_json::Value {
             "anthropic.claude-3-sonnet-20240229-v1:0".into(),
         );
         entry.insert("api_key_required".into(), false.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), false.into());
         providers.push(serde_json::Value::Object(entry));
     }
@@ -531,6 +542,17 @@ fn is_nearai_private_endpoint(base_url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    use axum::{Router, http::StatusCode, routing::post};
+
+    use crate::channels::web::auth::UserIdentity;
+
+    use crate::channels::web::handlers::llm::{
+        llm_list_models_handler, llm_test_connection_handler,
+    };
+
+    use crate::channels::web::test_helpers::test_gateway_state;
+
     use super::*;
 
     // --- LLM providers handler tests ---
@@ -628,7 +650,32 @@ mod tests {
                 p.get("default_model").is_some(),
                 "{id} missing default_model"
             );
+            // api_key_required and base_url_required gate frontend activation —
+            // both must be present so isProviderConfigured() can reason about them.
+            assert!(
+                p.get("api_key_required").is_some(),
+                "{id} missing api_key_required"
+            );
+            assert!(
+                p.get("base_url_required").is_some(),
+                "{id} missing base_url_required"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn test_openai_compatible_exposes_base_url_required_true() {
+        // Regression: openai_compatible has base_url_required=true (no default).
+        // The frontend needs this flag to gate activation on a configured URL.
+        let result = build_llm_providers();
+        let arr = result.as_array().expect("should be an array");
+        let oc =
+            find_provider(arr, "openai_compatible").expect("openai_compatible should be present");
+        assert_eq!(
+            oc.get("base_url_required").and_then(|v| v.as_bool()),
+            Some(true),
+            "openai_compatible must advertise base_url_required=true so the UI gates activation"
+        );
     }
 
     // --- is_nearai_private_endpoint tests ---
@@ -660,5 +707,162 @@ mod tests {
     #[test]
     fn test_nearai_private_non_near_ai_rejected() {
         assert!(!is_nearai_private_endpoint("https://private.evil.com/v1"));
+    }
+
+    // --- interpret_chat_status tests ---
+
+    #[test]
+    fn test_interpret_chat_status_400_reports_not_ok() {
+        // Regression: 400 was previously reported as ok:true ("Server reachable"),
+        // which misled the UI into showing a green "connected" badge when the
+        // model name or endpoint was actually wrong.
+        let result = interpret_chat_status(reqwest::StatusCode::BAD_REQUEST);
+        assert!(!result.ok, "400 must not be reported as ok");
+        assert!(
+            result.message.contains("400"),
+            "message should include status code"
+        );
+        assert!(
+            result.message.contains("model name") || result.message.contains("adapter"),
+            "message should hint at model/adapter mismatch, got: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_interpret_chat_status_422_reports_not_ok() {
+        let result = interpret_chat_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!result.ok, "422 must not be reported as ok");
+        assert!(result.message.contains("422"));
+    }
+
+    #[test]
+    fn test_interpret_chat_status_200_reports_ok() {
+        let result = interpret_chat_status(reqwest::StatusCode::OK);
+        assert!(result.ok, "200 should be reported as ok");
+    }
+
+    #[test]
+    fn test_interpret_chat_status_401_reports_auth_failed() {
+        let result = interpret_chat_status(reqwest::StatusCode::UNAUTHORIZED);
+        assert!(!result.ok);
+        assert!(result.message.contains("Authentication"));
+    }
+
+    // --- Admin role + private base URL tests (staging) ---
+
+    #[tokio::test]
+    async fn test_llm_test_connection_allows_admin_private_base_url() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/test_connection")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("Invalid base URL"),
+            "private localhost endpoint should pass validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_llm_test_connection_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/llm/test_connection",
+                post(llm_test_connection_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "test-model"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/test_connection")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_llm_list_models_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "openai",
+            "base_url": "http://127.0.0.1:9/v1"
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
