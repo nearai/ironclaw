@@ -657,6 +657,28 @@ impl Tool for AboundSendWireTool {
             .ok_or_else(|| ToolError::InvalidParameters("amount must be a number".into()))?;
         let payment_reason_key = require_str(&params, "payment_reason_key")?;
 
+        let mut missing = Vec::new();
+        if funding_source_id.trim().is_empty() {
+            missing.push("funding_source_id");
+        }
+        if beneficiary_ref_id.trim().is_empty() {
+            missing.push("beneficiary_ref_id");
+        }
+        if payment_reason_key.trim().is_empty() {
+            missing.push("payment_reason_key");
+        }
+        if amount <= 0.0 {
+            missing.push("amount (must be > 0)");
+        }
+        if !missing.is_empty() {
+            return Err(ToolError::InvalidParameters(format!(
+                "Cannot initiate wire transfer — the following parameters are missing or invalid: {}. \
+                 Use abound_account_info to look up the correct values, and ask the user to pick a \
+                 funding source, beneficiary, and payment reason via choice_set before retrying.",
+                missing.join(", ")
+            )));
+        }
+
         let analysis = run_transfer_analysis(
             &self.client,
             &*self.secrets,
