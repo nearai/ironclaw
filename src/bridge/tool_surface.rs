@@ -65,6 +65,10 @@ impl SurfaceAssignment {
 }
 
 pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
+    if matches!(subject.status, CapabilityStatus::Error) {
+        return SurfaceAssignment::neither();
+    }
+
     if matches!(subject.invocation_mode, InvocationMode::RoutedOnly) {
         return SurfaceAssignment::capabilities_only();
     }
@@ -95,10 +99,7 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
 }
 
 const fn is_direct_ready(status: CapabilityStatus) -> bool {
-    matches!(
-        status,
-        CapabilityStatus::Ready | CapabilityStatus::ReadyScoped
-    )
+    matches!(status, CapabilityStatus::Ready)
 }
 
 const fn fallback_assignment(status: CapabilityStatus) -> SurfaceAssignment {
@@ -230,6 +231,17 @@ mod tests {
                 expected: SurfaceAssignment::capabilities_only(),
             },
             Case {
+                name: "ready-scoped extension direct action is not callable",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::ExtensionDirectAction,
+                    status: CapabilityStatus::ReadyScoped,
+                    invocation_mode: InvocationMode::Direct,
+                    approval_gated: false,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::neither(),
+            },
+            Case {
                 name: "ready leased engine-native direct action",
                 subject: SurfacePolicyInput {
                     kind: SurfaceSubjectKind::EngineNativeDirectAction,
@@ -250,6 +262,17 @@ mod tests {
                     leased_and_callable: false,
                 },
                 expected: SurfaceAssignment::capabilities_only(),
+            },
+            Case {
+                name: "error channel stays off all surfaces",
+                subject: SurfacePolicyInput {
+                    kind: SurfaceSubjectKind::Channel,
+                    status: CapabilityStatus::Error,
+                    invocation_mode: InvocationMode::RoutedOnly,
+                    approval_gated: false,
+                    leased_and_callable: false,
+                },
+                expected: SurfaceAssignment::neither(),
             },
         ];
 
