@@ -4430,12 +4430,193 @@ mod tests {
         assert!(!actions.iter().any(|action| action.name == "linear_search"));
     }
 
-    // NeedsAuth provider tool preservation is tested directly in
-    // action_projector::tests::needs_auth_provider_tools_remain_in_available_actions
-    // where the extension map can be constructed with correct NeedsAuth status.
-    // An EffectBridgeAdapter-level test would require a real WASM module to
-    // produce installed=true + authenticated=false; fake-wasm files produce
-    // installed=false (AvailableNotInstalled), making the test unreliable.
+    struct ProviderActionTool {
+        name: String,
+        description: String,
+        provider_extension: String,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for ProviderActionTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn provider_extension(&self) -> Option<&str> {
+            Some(&self.provider_extension)
+        }
+    }
+
+    async fn make_adapter_with_installed_provider_fixture(
+        provider_name: &str,
+        action_name: &str,
+        capabilities: serde_json::Value,
+    ) -> EffectBridgeAdapter {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        std::fs::create_dir_all(dir_path.join("tools")).expect("tools dir");
+        std::fs::write(
+            dir_path.join("tools").join(format!("{provider_name}.wasm")),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir_path
+                .join("tools")
+                .join(format!("{provider_name}.capabilities.json")),
+            serde_json::to_vec(&capabilities).expect("serialize capabilities"),
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(ProviderActionTool {
+                name: action_name.to_string(),
+                description: format!("{action_name} test action"),
+                provider_extension: provider_name.to_string(),
+            }))
+            .await;
+
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir_path.join("tools"),
+            dir_path.join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        adapter
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_needs_auth_provider_action() {
+        let adapter = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail_send",
+            serde_json::json!({
+                "auth": {
+                    "secret_name": "google_oauth_token",
+                    "display_name": "Google",
+                    "oauth": {
+                        "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                        "token_url": "https://oauth2.googleapis.com/token",
+                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                        "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+                        "use_pkce": false,
+                        "extra_params": {
+                            "access_type": "offline",
+                            "prompt": "consent"
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "gmail_send"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_needs_setup_provider_action() {
+        let adapter = make_adapter_with_installed_provider_fixture(
+            "notion",
+            "notion_search",
+            serde_json::json!({
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "notion_api_key",
+                            "prompt": "Provide your Notion API key"
+                        }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "notion_search"));
+    }
+
+    #[tokio::test]
+    async fn available_actions_omit_installed_inactive_provider_action() {
+        let adapter = make_adapter_with_installed_provider_fixture(
+            "github",
+            "github_search",
+            serde_json::json!({
+                "description": "GitHub provider fixture"
+            }),
+        )
+        .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        assert!(!actions.iter().any(|action| action.name == "github_search"));
+    }
 
     #[tokio::test]
     async fn available_capabilities_projects_inactive_provider_background() {
