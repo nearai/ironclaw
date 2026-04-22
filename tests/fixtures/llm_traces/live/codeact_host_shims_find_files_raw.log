@@ -1,0 +1,18 @@
+# Live Test Session: codeact_host_shims_find_files_raw
+# Mode: Live
+# LLM calls: 1, Input tokens: 19883, Output tokens: 97
+# Wall time: 5.3s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Under directory "/tmp/ironclaw_live_codeact_shims/find_files", find markdown files recursively and return their basenames sorted alphabetically. Then call FINAL exactly with `matches=alpha.md,beta.md`. IMPORTANT: this is the RAW variant, so do not use helper shims like find_files or list_entries. Use the canonical glob tool directly from Python. The canonical glob tool returns a dict with a `files` list of relative paths. Do not import os or os.path; derive basenames by splitting each relative path on '/'.
+────────────────────────────────────────────────────
+matches=alpha.md,beta.md
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19883 in / 97 out tokens
+  ● glob(/tmp/ironclaw_live_codeact_shims/find_files)
+  ✓ glob(/tmp/ironclaw_live_codeact_shims/find_files)
+  … Done

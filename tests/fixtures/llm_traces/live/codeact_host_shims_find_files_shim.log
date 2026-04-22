@@ -1,0 +1,18 @@
+# Live Test Session: codeact_host_shims_find_files_shim
+# Mode: Live
+# LLM calls: 1, Input tokens: 19855, Output tokens: 73
+# Wall time: 5.3s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Under directory "/tmp/ironclaw_live_codeact_shims/find_files", find markdown files recursively and return their basenames sorted alphabetically. Then call FINAL exactly with `matches=alpha.md,beta.md`. IMPORTANT: this is the SHIM variant, so prefer find_files(pattern, path=...) unless it fails. The shim returns the matched file paths directly, so split each returned path on '/'.
+────────────────────────────────────────────────────
+matches=alpha.md,beta.md
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19855 in / 73 out tokens
+  ● glob(/tmp/ironclaw_live_codeact_shims/find_files)
+  ✓ glob(/tmp/ironclaw_live_codeact_shims/find_files)
+  … Done

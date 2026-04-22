@@ -466,6 +466,7 @@ pub struct LiveTestHarnessBuilder {
     max_tool_iterations: usize,
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
+    allow_local_tools: Option<bool>,
     skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
@@ -493,6 +494,7 @@ impl LiveTestHarnessBuilder {
             max_tool_iterations: 30,
             engine_v2: None,
             auto_approve_tools: None,
+            allow_local_tools: None,
             skills_dir: None,
             channel_name: None,
             seeded_secret_names: Vec::new(),
@@ -561,6 +563,16 @@ impl LiveTestHarnessBuilder {
     /// `Config::from_env()` is used in live mode (default: false).
     pub fn with_auto_approve_tools(mut self, enabled: bool) -> Self {
         self.auto_approve_tools = Some(enabled);
+        self
+    }
+
+    /// Override whether local filesystem/shell dev tools are available.
+    ///
+    /// Live tests mirror the user's real config by default, so this is useful
+    /// when a targeted scenario needs local file or shell access even if the
+    /// developer usually runs with local tools disabled.
+    pub fn with_allow_local_tools(mut self, enabled: bool) -> Self {
+        self.allow_local_tools = Some(enabled);
         self
     }
 
@@ -640,6 +652,9 @@ impl LiveTestHarnessBuilder {
         }
         if let Some(aa) = self.auto_approve_tools {
             config.agent.auto_approve_tools = aa;
+        }
+        if let Some(allow) = self.allow_local_tools {
+            config.agent.allow_local_tools = allow;
         }
         if let Some(ref dir) = self.skills_dir {
             config.skills.enabled = true;
@@ -733,6 +748,9 @@ impl LiveTestHarnessBuilder {
             .with_config(config)
             .with_llm(llm)
             .with_max_tool_iterations(self.max_tool_iterations);
+        if let Some(allow) = self.allow_local_tools {
+            rig_builder = rig_builder.with_allow_local_tools(allow);
+        }
         if let Some(interceptor) = http_interceptor {
             rig_builder = rig_builder.with_http_interceptor(interceptor);
         }
@@ -788,6 +806,9 @@ impl LiveTestHarnessBuilder {
             .with_trace(trace)
             .with_max_tool_iterations(self.max_tool_iterations)
             .with_auto_approve_tools(true);
+        if let Some(allow) = self.allow_local_tools {
+            rig_builder = rig_builder.with_allow_local_tools(allow);
+        }
         if let Some(dir) = self.skills_dir.clone() {
             rig_builder = rig_builder.with_skills_dir(dir);
         }

@@ -1,0 +1,29 @@
+# Live Test Session: codeact_host_shims_read_json_raw
+# Mode: Live
+# LLM calls: 2, Input tokens: 39806, Output tokens: 324
+# Wall time: 11.8s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Read the JSON file at "/tmp/ironclaw_live_codeact_shims/read_json/payload.json", extract the integer field `answer`, and call FINAL exactly with `answer=<value>`. IMPORTANT: this is the RAW variant, so do not use helper shims like read_json, read_text, write_text, append_text, list_entries, find_files, http_get, or run. Use the canonical host tools directly from Python and handle read_file line-number prefixes before parsing.
+────────────────────────────────────────────────────
+answer=42
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19752 in / 163 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  ● __codeact__
+  ✗ __codeact__: CodeAct execution failed: 
+Error: Traceback (most recent call last):
+  File "step.py", line 18, in <module>
+    payload = json.loads("\n".join(stripped))
+              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+json.JSONDecodeError: Extra data: line 1 column 7 (char 6)
+  ○ Calling LLM...
+  ○ Step complete — 20054 in / 161 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  … Done

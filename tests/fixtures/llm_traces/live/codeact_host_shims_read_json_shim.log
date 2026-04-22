@@ -1,0 +1,27 @@
+# Live Test Session: codeact_host_shims_read_json_shim
+# Mode: Live
+# LLM calls: 2, Input tokens: 39540, Output tokens: 87
+# Wall time: 9.3s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. Read the JSON file at "/tmp/ironclaw_live_codeact_shims/read_json/payload.json", extract the integer field `answer`, and call FINAL exactly with `answer=<value>`. IMPORTANT: this is the SHIM variant, so prefer read_json(path) instead of manual read_file parsing unless the shim fails.
+────────────────────────────────────────────────────
+answer=42
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 19720 in / 43 out tokens
+  ● __codeact__
+  ✗ __codeact__: CodeAct execution failed: 
+Error: Traceback (most recent call last):
+  File "step.py", line 2, in <module>
+    answer = payload["answer"]
+             ~~~~~~~~~~~~~~~~~
+TypeError: 'coroutine' object is not subscriptable
+  ○ Calling LLM...
+  ○ Step complete — 19820 in / 44 out tokens
+  ● read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/read_json/payload...)
+  … Done
