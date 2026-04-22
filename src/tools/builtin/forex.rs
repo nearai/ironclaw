@@ -639,6 +639,7 @@ pub async fn run_transfer_analysis(
         .collect();
 
     let could_save = amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
+    let could_save_str = could_save.map(|s| format!("₹{s:.2}"));
 
     let action_verb = if recommend == "now" {
         "Transfer now"
@@ -685,6 +686,7 @@ pub async fn run_transfer_analysis(
             "hit_rate_pct": (hr * 10.0).round() / 10.0,
             "recommend": recommend,
             "could_save": could_save,
+            "could_save_str": could_save_str,
         }
     }))
 }
