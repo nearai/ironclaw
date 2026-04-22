@@ -81,6 +81,27 @@ pub(crate) fn user_facing_thread_failure(error: &str) -> String {
     }
 }
 
+/// Convert a raw orchestrator-rollback reason into a short,
+/// operator-facing classification that is safe to broadcast over SSE.
+///
+/// The rollback event's source string is
+/// `format!("execution failed: {e}")` where `e` is an `EngineError` —
+/// variants like `Store { reason }` and `Llm { reason }` can carry DB
+/// connection strings, file paths, and raw upstream HTTP bodies. That
+/// raw text must not reach every authenticated SSE consumer. Callers
+/// should log the raw `reason` at `debug!` before calling this so
+/// operators retain the diagnostic detail server-side.
+pub(crate) fn user_facing_rollback_reason(reason: &str) -> &'static str {
+    match classify_failure(reason) {
+        FailureCategory::LlmUnavailable => "LLM provider unavailable",
+        FailureCategory::LlmRateLimited => "LLM provider rate-limited",
+        FailureCategory::ContextTooLarge => "context too large for provider",
+        FailureCategory::AuthFailure => "LLM provider authentication failed",
+        FailureCategory::IterationLimit => "execution step limit reached",
+        FailureCategory::Unknown => "execution failed",
+    }
+}
+
 /// Classify a raw failure string. Public(crate) so tests can assert on the
 /// category independently of the user-facing wording.
 pub(crate) fn classify_failure(error: &str) -> FailureCategory {
@@ -415,6 +436,45 @@ mod tests {
         assert!(
             msg.contains("re-authenticate"),
             "auth failure copy should guide users to re-authenticate: {msg}"
+        );
+    }
+
+    #[test]
+    fn rollback_reason_drops_engine_error_detail() {
+        // Regression for PR #2844: `EventKind::OrchestratorRollback.reason`
+        // originates from `format!("execution failed: {e}")` in the engine,
+        // where `e: EngineError` can render DB connection strings, file
+        // paths, and upstream HTTP bodies. The sanitizer must strip those.
+        let raw = "execution failed: store error: connection 'postgres://bob:hunter2@db:5432/x' refused: \
+            File \"/home/runner/.ironclaw/state.db\" not found";
+        let msg = user_facing_rollback_reason(raw);
+        assert_eq!(msg, "execution failed");
+        assert!(!msg.contains("postgres://"));
+        assert!(!msg.contains("hunter2"));
+        assert!(!msg.contains("/home/runner"));
+    }
+
+    #[test]
+    fn rollback_reason_classifies_known_upstream_failures() {
+        assert_eq!(
+            user_facing_rollback_reason("execution failed: LLM error: HTTP 502 Bad Gateway"),
+            "LLM provider unavailable"
+        );
+        assert_eq!(
+            user_facing_rollback_reason("execution failed: HTTP 429 Too Many Requests"),
+            "LLM provider rate-limited"
+        );
+        assert_eq!(
+            user_facing_rollback_reason("execution failed: HTTP 413 Payload Too Large"),
+            "context too large for provider"
+        );
+        assert_eq!(
+            user_facing_rollback_reason("execution failed: HTTP 401 Unauthorized"),
+            "LLM provider authentication failed"
+        );
+        assert_eq!(
+            user_facing_rollback_reason("execution failed: max iterations reached"),
+            "execution step limit reached"
         );
     }
 

@@ -4752,12 +4752,27 @@ fn thread_event_to_app_events(
             from_version,
             to_version,
             reason,
-        } => vec![AppEvent::OrchestratorRollback {
-            from_version: *from_version,
-            to_version: *to_version,
-            reason: reason.clone(),
-            thread_id: Some(thread_id.into()),
-        }],
+        } => {
+            // `reason` originates from `format!("execution failed: {e}")`
+            // in the engine's rollback path, where `e: EngineError` can
+            // render DB connection strings, file paths, or raw upstream
+            // HTTP bodies. SSE error-adjacent frames reach every
+            // authenticated consumer, so the wire carries a classified
+            // operator-facing message and the raw text stays in the log.
+            tracing::debug!(
+                from_version = *from_version,
+                to_version = *to_version,
+                raw_reason = %reason,
+                "orchestrator rollback event"
+            );
+            vec![AppEvent::OrchestratorRollback {
+                from_version: *from_version,
+                to_version: *to_version,
+                reason: crate::bridge::user_facing_errors::user_facing_rollback_reason(reason)
+                    .to_string(),
+                thread_id: Some(thread_id.into()),
+            }]
+        }
 
         // Explicitly-dropped engine variants. These are NOT bridged to
         // `AppEvent` because an equivalent event is emitted by a
@@ -7394,8 +7409,75 @@ mod tests {
         };
         assert_eq!(*from_version, 7);
         assert_eq!(*to_version, 6);
-        assert_eq!(reason, "health probe failed after upgrade");
+        // Unknown-shape reasons collapse to the safe generic classification.
+        assert_eq!(reason, "execution failed");
         assert_eq!(thread_id.as_deref(), Some("thread-rollback"));
+    }
+
+    #[test]
+    fn orchestrator_rollback_does_not_leak_engine_error_detail() {
+        // Regression for PR #2844 review: the engine rollback path emits
+        // `format!("execution failed: {e}")` where `e: EngineError`.
+        // Variants like `Store { reason }` / `Llm { reason }` can render
+        // DB connection strings, file paths, and raw upstream HTTP bodies.
+        // The bridge must sanitize before broadcasting to SSE consumers.
+        let leaky = "execution failed: store error: connection string \
+            'postgres://bob:hunter2@db.internal:5432/ironclaw' refused: \
+            File \"/home/runner/.ironclaw/state.db\" not found";
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 3,
+                to_version: 2,
+                reason: leaky.to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-leak");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert!(
+            !reason.contains("postgres://"),
+            "leaked connection string: {reason}"
+        );
+        assert!(!reason.contains("hunter2"), "leaked password: {reason}");
+        assert!(
+            !reason.contains("/home/runner"),
+            "leaked filesystem path: {reason}"
+        );
+        assert!(
+            !reason.contains("store error"),
+            "leaked internal wrap: {reason}"
+        );
+        assert!(
+            !reason.contains("state.db"),
+            "leaked internal filename: {reason}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rollback_classifies_known_upstream_failures() {
+        // A 502 in the rollback reason should still render a classified
+        // operator-facing message, not the bare "execution failed" fallback.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 4,
+                to_version: 3,
+                reason: "execution failed: LLM error: Provider nearai request failed: \
+                     HTTP 502 Bad Gateway"
+                    .to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-502");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert_eq!(reason, "LLM provider unavailable");
     }
 
     #[test]
