@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! NEAR AI Agentic Worker Framework
 //!
 //! An LLM-powered autonomous agent that operates on the NEAR AI marketplace.

@@ -146,14 +146,9 @@ urlencoding = "2"
 # The `sqlite` feature provides a persistent state + crypto store backed by SQLite.
 # `e2e-encryption` is added separately in the matrix-e2ee feature below.
 #
-# NOTE: vodozemac (the Olm/Megolm crypto library used by matrix-sdk) has an
-# unpatched high-severity vulnerability as of 2026-02-17 (identity-element DH
-# accepted in the 3DH handshake, allowing a participant with an all-zero public
-# key to produce a predictable shared secret). Track:
-#   https://github.com/matrix-org/vodozemac/issues
-# Upgrade vodozemac / matrix-sdk-crypto as soon as a patch ships.
-matrix-sdk = { version = "0.16", optional = true, default-features = false, features = [
-    "rustls-tls",
+# NOTE: This pilot tracks matrix-rust-sdk main until the released SDK line includes
+# the vodozemac contributory-behavior checks and compiles cleanly with this feature set.
+matrix-sdk = { git = "https://github.com/matrix-org/matrix-rust-sdk", branch = "main", optional = true, default-features = false, features = [
     "sqlite",
     "e2e-encryption",
 ] }
@@ -278,10 +273,8 @@ matrix-sdk-channel = ["dep:matrix-sdk"]
 # matrix-e2ee: enable end-to-end encryption in the Matrix channel.
 # Requires and implies matrix-sdk-channel. Default on.
 # Disable with --no-default-features to build without E2EE (or without matrix-sdk).
-# NOTE: vodozemac has an unpatched identity-element DH vulnerability as of
-# 2026-02-17. The threat model for a personal bot (trusted participants,
-# untrusted homeserver) makes E2EE still strictly better than plaintext.
-# Upgrade matrix-sdk when a patched vodozemac ships.
+# NOTE: The pilot follows matrix-rust-sdk main so E2EE can stay enabled while the
+# release line catches up with the vodozemac fix and current compiler behavior.
 matrix-e2ee = ["matrix-sdk-channel"]
 
 [[test]]
