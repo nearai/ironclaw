@@ -7,7 +7,7 @@ mod util;
 
 pub use event::{
     AppEvent, CodeExecutionFailureCategory, JobResultStatus, JobResultStatusParseError,
-    OnboardingStateDto, PlanStepDto, ToolDecisionDto,
+    OnboardingStateDto, PlanStepDto, SelfImprovementPhase, ToolDecisionDto,
 };
 pub use identity::{
     CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, IdentityError,
