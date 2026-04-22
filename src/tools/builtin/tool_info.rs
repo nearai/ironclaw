@@ -169,7 +169,7 @@ impl Tool for ToolInfoTool {
                     cap_registry.find_action(n).map(|(_, a)| a.clone())
                 })
             {
-                let crate::tools::registry::ActionDef {
+                let ironclaw_engine::types::capability::ActionDef {
                     name,
                     description,
                     parameters_schema,

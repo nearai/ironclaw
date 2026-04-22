@@ -1506,20 +1506,34 @@ async fn submit_pending_auth_credential(
 
 /// Share the capability registry with both the effect adapter (for LLM
 /// system-prompt advertisement) and the v1 `ToolRegistry` (for discovery
-/// tools). Centralized so the dual-consumer invariant is testable.
+/// tools). On a tool/capability name collision — e.g. a user-installed
+/// WASM or MCP tool whose name matches a v2 capability action — the
+/// colliding tool is unregistered and the wiring proceeds. Capability
+/// wins because `handle_mission_call` intercepts by name regardless of
+/// tool registration, so leaving the tool in place would produce a
+/// split-brain between discovery (tool) and execution (capability).
 async fn wire_capability_registry(
     effect_adapter: &EffectBridgeAdapter,
     tools: &crate::tools::ToolRegistry,
     capabilities: Arc<CapabilityRegistry>,
 ) {
+    let mut colliding_tool_names = Vec::new();
     for tool_name in tools.all_registered_names().await {
-        if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n)).is_some()
+        if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n))
+            .is_some()
         {
-            panic!(
-                "wire_capability_registry: tool '{tool_name}' collides with a \
-                 capability action — rename one of them"
-            );
+            colliding_tool_names.push(tool_name);
         }
+    }
+    for name in &colliding_tool_names {
+        tools.unregister(name).await;
+    }
+    if !colliding_tool_names.is_empty() {
+        tracing::error!(
+            tool_names = ?colliding_tool_names,
+            "wire_capability_registry: unregistered tools whose names collide with \
+             capability actions; capability wins because execution is intercepted by name"
+        );
     }
 
     effect_adapter
@@ -6147,11 +6161,13 @@ mod tests {
     }
 
     // A tool registered before v2 wiring that collides with a capability
-    // action name would cause split-brain discovery. Must run in release
-    // too, and must see v1-only tools hidden from `list()`.
+    // action must be unregistered — `handle_mission_call` intercepts by
+    // name, so leaving the tool in place would split-brain discovery
+    // (tool schema advertised) and execution (capability intercept).
+    // Also exercises `V1Only` tools (hidden from the engine-filtered
+    // `list()`) to confirm the check uses `all_registered_names()`.
     #[tokio::test]
-    #[should_panic(expected = "collides with a capability action")]
-    async fn wire_capability_registry_panics_on_collision() {
+    async fn wire_capability_registry_unregisters_colliding_tool() {
         use ironclaw_safety::SafetyConfig;
 
         struct Shadow;
@@ -6174,8 +6190,6 @@ mod tests {
                 unreachable!()
             }
             fn engine_compatibility(&self) -> crate::tools::EngineCompatibility {
-                // v1-only, so `list()` wouldn't surface this on a v2 registry —
-                // but `all_registered_names()` must.
                 crate::tools::EngineCompatibility::V1Only
             }
         }
@@ -6183,6 +6197,10 @@ mod tests {
         let tools =
             Arc::new(ToolRegistry::new().with_engine_version(crate::tools::EngineVersion::V2));
         tools.register(Arc::new(Shadow)).await;
+        assert!(
+            tools.get("mission_create").await.is_some(),
+            "shadow tool should be registered before wiring"
+        );
 
         let adapter = EffectBridgeAdapter::new(
             Arc::clone(&tools),
@@ -6209,6 +6227,15 @@ mod tests {
         });
 
         wire_capability_registry(&adapter, &tools, Arc::new(caps)).await;
+
+        assert!(
+            tools.get("mission_create").await.is_none(),
+            "colliding tool must be unregistered after wiring"
+        );
+        assert!(
+            tools.capability_registry().await.is_some(),
+            "capability registry must be wired despite the collision"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
