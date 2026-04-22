@@ -365,10 +365,10 @@ impl EffectBridgeAdapter {
         // `routine_delete(name="Daily Check")` arrives at `mission_complete`
         // as `{"name":"Daily Check"}` and fails UUID parsing.
         // Surface name-lookup errors; Ok covers both resolved and no-op cases.
-        if let Some(alias) = routine_alias.as_mut() {
-            if let Err(e) = resolve_mission_identity(alias, &mgr, context).await {
-                return Some(Err(e));
-            }
+        if let Some(alias) = routine_alias.as_mut()
+            && let Err(e) = resolve_mission_identity(alias, &mgr, context).await
+        {
+            return Some(Err(e));
         }
 
         let (effective_action, effective_params, post_create_update) =
@@ -1892,9 +1892,18 @@ async fn resolve_mission_identity(
     let Some(obj) = alias.mission_params.as_object_mut() else {
         return Ok(());
     };
-    if obj.contains_key("id") {
+    // An empty-string or null `id` is the LLM filling a schema slot it has no
+    // value for — not an affirmative id claim. Treat those as absent so name
+    // resolution can run; a non-empty garbage id stays and gets surfaced as
+    // "invalid mission id" by resolve_mission_id downstream.
+    let has_id_claim = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if has_id_claim {
         return Ok(());
     }
+    obj.remove("id");
     let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(str::to_string) else {
         return Ok(());
     };
@@ -5654,6 +5663,57 @@ Use this skill to set up a Pika meeting.
             msg.contains("no mission named") && msg.contains("ghost routine"),
             "error should name the missing routine, got: {msg}"
         );
+    }
+
+    // Regression: an empty-string or null `id` is the LLM filling a schema
+    // slot, not an id claim. resolve_mission_identity must treat it as
+    // absent so name resolution still runs.
+    #[tokio::test]
+    async fn routine_delete_with_empty_id_resolves_by_name() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd3"));
+
+        for (mission_name, empty_id) in [
+            ("Empty Id Check", serde_json::json!("")),
+            ("Null Id Check", serde_json::json!(null)),
+        ] {
+            let create = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": mission_name,
+                        "goal": "review things",
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!create.is_error, "create failed: {}", create.output);
+
+            let delete = adapter
+                .execute_action(
+                    "routine_delete",
+                    serde_json::json!({"id": empty_id, "name": mission_name}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("routine_delete should resolve by name when id is empty/null");
+
+            assert!(
+                !delete.is_error,
+                "empty id={empty_id} must not block name resolution, got: {}",
+                delete.output
+            );
+            assert_eq!(
+                delete.output.get("status").and_then(|v| v.as_str()),
+                Some("completed"),
+                "expected completion via name resolution for id={empty_id}, got: {}",
+                delete.output
+            );
+        }
     }
 
     /// Regression: `mission_update` has a real `name` param (the new
