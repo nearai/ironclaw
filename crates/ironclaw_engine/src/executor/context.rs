@@ -11,7 +11,6 @@ use crate::types::capability::{ActionDef, CapabilityLease};
 use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
 use crate::types::message::ThreadMessage;
-use crate::types::project::ProjectId;
 
 /// Maximum number of memory docs to inject into context.
 const MAX_CONTEXT_DOCS: usize = 5;
@@ -27,16 +26,18 @@ pub async fn build_step_context(
     effects: &Arc<dyn EffectExecutor>,
     retrieval: Option<&RetrievalEngine>,
     context: &ThreadExecutionContext,
-    project_id: ProjectId,
-    user_id: &str,
-    goal: &str,
 ) -> Result<(Vec<ThreadMessage>, Vec<ActionDef>), EngineError> {
     // Fetch actions and memory docs in parallel — they are independent.
     let actions_fut = effects.available_actions(leases, context);
     let docs_fut = async {
         if let Some(engine) = retrieval {
             engine
-                .retrieve_context(project_id, user_id, goal, MAX_CONTEXT_DOCS)
+                .retrieve_context(
+                    context.project_id,
+                    &context.user_id,
+                    context.thread_goal.as_deref().unwrap_or(""),
+                    MAX_CONTEXT_DOCS,
+                )
                 .await
         } else {
             Ok(Vec::new())
@@ -182,9 +183,6 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("search the web".into()),
             },
-            project,
-            "test-user",
-            "search the web",
         )
         .await
         .unwrap();
@@ -223,9 +221,6 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
             },
-            ProjectId::new(),
-            "test-user",
-            "hello",
         )
         .await
         .unwrap();
@@ -260,9 +255,6 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
             },
-            project,
-            "test-user",
-            "hello",
         )
         .await
         .unwrap();
