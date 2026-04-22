@@ -808,7 +808,6 @@ mod tests {
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
             codeact_host_shims: true,
-            codeact_host_result_objects: false,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

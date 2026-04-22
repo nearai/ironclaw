@@ -161,10 +161,6 @@ pub struct ThreadConfig {
     /// actions remain available either way.
     #[serde(default = "default_codeact_host_shims")]
     pub codeact_host_shims: bool,
-    /// Whether selected host shims should return richer host-backed objects
-    /// like `HttpResponse` and `CompletedProcess` instead of plain dicts.
-    #[serde(default)]
-    pub codeact_host_result_objects: bool,
 }
 
 impl Default for ThreadConfig {
@@ -185,7 +181,6 @@ impl Default for ThreadConfig {
             depth: 0,
             max_depth: 1,
             codeact_host_shims: true,
-            codeact_host_result_objects: false,
         }
     }
 }

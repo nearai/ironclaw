@@ -106,20 +106,13 @@ pub async fn build_codeact_system_prompt(
     project_id: ProjectId,
     platform: Option<&PlatformInfo>,
     codeact_host_shims: bool,
-    codeact_host_result_objects: bool,
 ) -> String {
     let overlay = if let Some(store) = store {
         load_prompt_overlay(store, project_id).await
     } else {
         None
     };
-    build_codeact_system_prompt_inner(
-        actions,
-        overlay.as_deref(),
-        platform,
-        codeact_host_shims,
-        codeact_host_result_objects,
-    )
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform, codeact_host_shims)
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -132,16 +125,9 @@ pub fn build_codeact_system_prompt_with_docs(
     system_docs: &[crate::types::memory::MemoryDoc],
     platform: Option<&PlatformInfo>,
     codeact_host_shims: bool,
-    codeact_host_result_objects: bool,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(
-        actions,
-        overlay.as_deref(),
-        platform,
-        codeact_host_shims,
-        codeact_host_result_objects,
-    )
+    build_codeact_system_prompt_inner(actions, overlay.as_deref(), platform, codeact_host_shims)
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
@@ -150,9 +136,8 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
     codeact_host_shims: bool,
-    codeact_host_result_objects: bool,
 ) -> String {
-    let mut prompt = render_codeact_preamble(codeact_host_shims, codeact_host_result_objects);
+    let mut prompt = render_codeact_preamble(codeact_host_shims);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -185,38 +170,12 @@ fn build_codeact_system_prompt_inner(
     prompt
 }
 
-fn render_codeact_preamble(codeact_host_shims: bool, codeact_host_result_objects: bool) -> String {
-    let mut prompt = if codeact_host_shims {
-        CODEACT_PREAMBLE.to_string()
-    } else {
-        strip_host_shim_section(CODEACT_PREAMBLE)
-    };
-
-    if codeact_host_shims && codeact_host_result_objects {
-        prompt = insert_rich_result_objects_section(&prompt);
+fn render_codeact_preamble(codeact_host_shims: bool) -> String {
+    if codeact_host_shims {
+        return CODEACT_PREAMBLE.to_string();
     }
 
-    prompt
-}
-
-fn insert_rich_result_objects_section(preamble: &str) -> String {
-    const INSERT_BEFORE: &str = "\n## Special functions\n";
-    const SECTION: &str = "\n## Rich host result objects\n\nWhen enabled, `http_get(...)` / `http_request(...)` return a `HttpResponse` object and `run(...)` returns a `CompletedProcess` object. These support attribute access like `resp.ok`, `resp.status`, `resp.json_body`, `proc.stdout`, and helper methods like `resp.json()` and `proc.check_returncode()`.\n\n";
-
-    match preamble.find(INSERT_BEFORE) {
-        Some(idx) => {
-            let mut out = String::with_capacity(preamble.len() + SECTION.len());
-            out.push_str(&preamble[..idx]);
-            out.push_str(SECTION);
-            out.push_str(&preamble[idx..]);
-            out
-        }
-        None => {
-            let mut out = String::from(preamble);
-            out.push_str(SECTION);
-            out
-        }
-    }
+    strip_host_shim_section(CODEACT_PREAMBLE)
 }
 
 fn strip_host_shim_section(preamble: &str) -> String {
@@ -269,8 +228,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true, false)
-                .await;
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true).await;
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
@@ -278,19 +236,10 @@ mod tests {
 
     #[test]
     fn prompt_without_host_shims_omits_shim_guidance() {
-        let prompt = build_codeact_system_prompt_inner(&[], None, None, false, false);
+        let prompt = build_codeact_system_prompt_inner(&[], None, None, false);
         assert!(!prompt.contains("## Preferred host-backed shims"));
         assert!(!prompt.contains("read_text(path)"));
         assert!(prompt.contains("## Special functions"));
-    }
-
-    #[test]
-    fn prompt_with_rich_result_objects_mentions_httpresponse_and_completedprocess() {
-        let prompt = build_codeact_system_prompt_inner(&[], None, None, true, true);
-        assert!(prompt.contains("HttpResponse"));
-        assert!(prompt.contains("CompletedProcess"));
-        assert!(prompt.contains("resp.ok"));
-        assert!(prompt.contains("proc.check_returncode()"));
     }
 
     #[tokio::test]
@@ -317,7 +266,6 @@ mod tests {
             project_id,
             None,
             true,
-            false,
         )
         .await;
         assert!(prompt.contains("Learned Rules"));
@@ -351,7 +299,6 @@ mod tests {
             project_id,
             None,
             true,
-            false,
         )
         .await;
 
@@ -384,7 +331,6 @@ mod tests {
             project_id,
             None,
             true,
-            false,
         )
         .await;
         assert!(!prompt.contains("Should not appear"));
@@ -402,15 +348,9 @@ mod tests {
             owner_id: Some("alice.near".into()),
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
-        let prompt = build_codeact_system_prompt(
-            &[],
-            None,
-            ProjectId(uuid::Uuid::nil()),
-            Some(&info),
-            true,
-            false,
-        )
-        .await;
+        let prompt =
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info), true)
+                .await;
         assert!(prompt.contains("IronClaw"));
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("nearai"));
@@ -424,8 +364,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_without_platform_info_has_no_platform_section() {
         let prompt =
-            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true, false)
-                .await;
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None, true).await;
         assert!(!prompt.contains("## Platform"));
     }
 }

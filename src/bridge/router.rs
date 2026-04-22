@@ -3641,7 +3641,6 @@ async fn handle_with_engine_inner(
     let thread_config = {
         let mut cfg = ThreadConfig::default();
         cfg.codeact_host_shims = agent.config().codeact_host_shims;
-        cfg.codeact_host_result_objects = agent.config().codeact_host_result_objects;
         if crate::llm::user_signals_execution_intent(content) {
             cfg.require_action_attempt = true;
         }
@@ -6621,7 +6620,6 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: true,
                 codeact_host_shims: true,
-                codeact_host_result_objects: false,
             },
             deps,
             channels,
@@ -7765,7 +7763,6 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: true,
                 codeact_host_shims: true,
-                codeact_host_result_objects: false,
             },
             deps,
             Arc::new(manager),

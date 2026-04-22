@@ -50,9 +50,6 @@ pub struct AgentConfig {
     /// Enable the Pythonic CodeAct host-shim layer (`read_text`, `read_json`, etc.).
     /// Raw canonical tools remain available either way.
     pub codeact_host_shims: bool,
-    /// When true, selected CodeAct shims return richer host-backed result objects
-    /// like `HttpResponse` and `CompletedProcess` instead of plain dicts.
-    pub codeact_host_result_objects: bool,
 }
 
 impl AgentConfig {
@@ -82,7 +79,6 @@ impl AgentConfig {
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
             codeact_host_shims: true,
-            codeact_host_result_objects: false,
         }
     }
 
@@ -166,7 +162,6 @@ impl AgentConfig {
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
             codeact_host_shims: parse_bool_env("CODEACT_HOST_SHIMS", true)?,
-            codeact_host_result_objects: parse_bool_env("CODEACT_HOST_RESULT_OBJECTS", false)?,
         })
     }
 }
@@ -208,24 +203,5 @@ mod tests {
             }
         };
         assert!(!config.codeact_host_shims);
-    }
-
-    #[test]
-    fn test_codeact_host_result_objects_env_override_can_enable() {
-        let _guard = crate::config::helpers::lock_env();
-        let settings = Settings::default();
-        let original = std::env::var("CODEACT_HOST_RESULT_OBJECTS").ok();
-        // SAFETY: Under ENV_MUTEX, no concurrent env access.
-        unsafe { std::env::set_var("CODEACT_HOST_RESULT_OBJECTS", "true") };
-        let config = AgentConfig::resolve(&settings).expect("resolve");
-        // SAFETY: Under ENV_MUTEX, no concurrent env access.
-        unsafe {
-            if let Some(value) = original {
-                std::env::set_var("CODEACT_HOST_RESULT_OBJECTS", value);
-            } else {
-                std::env::remove_var("CODEACT_HOST_RESULT_OBJECTS");
-            }
-        };
-        assert!(config.codeact_host_result_objects);
     }
 }

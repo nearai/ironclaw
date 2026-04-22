@@ -468,7 +468,6 @@ pub struct LiveTestHarnessBuilder {
     auto_approve_tools: Option<bool>,
     allow_local_tools: Option<bool>,
     codeact_host_shims: Option<bool>,
-    codeact_host_result_objects: Option<bool>,
     skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
@@ -498,7 +497,6 @@ impl LiveTestHarnessBuilder {
             auto_approve_tools: None,
             allow_local_tools: None,
             codeact_host_shims: None,
-            codeact_host_result_objects: None,
             skills_dir: None,
             channel_name: None,
             seeded_secret_names: Vec::new(),
@@ -586,12 +584,6 @@ impl LiveTestHarnessBuilder {
         self
     }
 
-    /// Override whether CodeAct shims return richer host-backed result objects.
-    pub fn with_codeact_host_result_objects(mut self, enabled: bool) -> Self {
-        self.codeact_host_result_objects = Some(enabled);
-        self
-    }
-
     /// Set a custom skills directory so the test rig loads skill files
     /// from a workspace path (e.g. `skills/` at the repo root) instead
     /// of an empty temp directory. Enables skill discovery automatically.
@@ -675,20 +667,16 @@ impl LiveTestHarnessBuilder {
         if let Some(enabled) = self.codeact_host_shims {
             config.agent.codeact_host_shims = enabled;
         }
-        if let Some(enabled) = self.codeact_host_result_objects {
-            config.agent.codeact_host_result_objects = enabled;
-        }
         if let Some(ref dir) = self.skills_dir {
             config.skills.enabled = true;
             config.skills.local_dir = dir.clone();
         }
 
         eprintln!(
-            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, codeact_host_shims={}, codeact_host_result_objects={}, auto_approve={}, skills_dir={}",
+            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, codeact_host_shims={}, auto_approve={}, skills_dir={}",
             config.agent.engine_v2,
             config.agent.allow_local_tools,
             config.agent.codeact_host_shims,
-            config.agent.codeact_host_result_objects,
             config.agent.auto_approve_tools,
             config.skills.local_dir.display(),
         );
@@ -778,9 +766,6 @@ impl LiveTestHarnessBuilder {
         if let Some(enabled) = self.codeact_host_shims {
             rig_builder = rig_builder.with_codeact_host_shims(enabled);
         }
-        if let Some(enabled) = self.codeact_host_result_objects {
-            rig_builder = rig_builder.with_codeact_host_result_objects(enabled);
-        }
         if let Some(interceptor) = http_interceptor {
             rig_builder = rig_builder.with_http_interceptor(interceptor);
         }
@@ -841,9 +826,6 @@ impl LiveTestHarnessBuilder {
         }
         if let Some(enabled) = self.codeact_host_shims {
             rig_builder = rig_builder.with_codeact_host_shims(enabled);
-        }
-        if let Some(enabled) = self.codeact_host_result_objects {
-            rig_builder = rig_builder.with_codeact_host_result_objects(enabled);
         }
         if let Some(dir) = self.skills_dir.clone() {
             rig_builder = rig_builder.with_skills_dir(dir);

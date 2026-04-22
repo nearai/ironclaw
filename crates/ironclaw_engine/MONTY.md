@@ -86,25 +86,6 @@ Host shims are now gated at three layers:
 
 When disabled, the shim names are removed from CodeAct name lookup and from the built-in CodeAct prompt guidance. Canonical raw tools remain available.
 
-### Experimental rich result objects
-
-An additional experimental layer can switch selected shim results from dicts to host-backed dataclasses:
-
-- agent config/env: `CODEACT_HOST_RESULT_OBJECTS=true|false`
-- per-thread runtime config: `ThreadConfig.codeact_host_result_objects`
-- test/live harness overrides: `with_codeact_host_result_objects(...)`
-
-Current richer objects:
-
-- `http_get(...)` / `http_request(...)` → `HttpResponse`
-  - attrs: `ok`, `status`, `headers`, `body`, `text`, `json_body`, `duration_ms`
-  - method: `json()`
-- `run(...)` → `CompletedProcess`
-  - attrs: `ok`, `exit_code`, `stdout`, `stderr`, `sandboxed`, `duration_ms`
-  - method: `check_returncode()`
-
-This layer is **off by default** so existing replay fixtures and dict-based shim consumers remain stable while we evaluate ergonomics.
-
 ## Upgrade Changelog
 
 | Date | Pin | Notable changes |
