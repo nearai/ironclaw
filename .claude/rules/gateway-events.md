@@ -83,14 +83,18 @@ the shared `strip_test_mod_lines` filter.
 
 The matcher covers two call-site shapes:
 
-1. Same-line receiver + method — `sse.broadcast(...)` /
-   `state.sse.broadcast_for_user(...)`.
-2. Dangling method-chain — `.broadcast_for_user(...)` at the start of
-   a line, which is how `rustfmt` wraps long calls like
-   `state\n    .sse\n    .broadcast_for_user(...)`. Only
-   `broadcast_for_user` is matched in the dangling form, because a bare
-   `.broadcast(` at line start can legitimately be the
-   `Channel::broadcast` trait method, which is out of scope.
+1. Any-receiver `.broadcast_for_user(...)` — the method is defined
+   only on `SseManager` (`src/channels/web/platform/sse.rs`), so
+   matching the method name alone catches same-line receivers
+   (`state.sse.broadcast_for_user(...)`), rustfmt wraps
+   (`state\n    .sse\n    .broadcast_for_user(...)`), and any other
+   receiver name (`manager.broadcast_for_user(...)`) without
+   false-positive risk.
+2. `<word-boundary>sse.broadcast(...)` — the single-name `broadcast`
+   is shared with the `Channel` trait, so this arm is deliberately
+   narrower and only fires when the receiver is literally named
+   `sse`. The boundary uses `(^|[^[:alnum:]_])` rather than `\b` so
+   the check is portable across GNU and BSD `grep -E`.
 
 ## Not covered by this rule
 
