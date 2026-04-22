@@ -349,6 +349,7 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         },
         source: V2SkillSource::Authored,
         trust: ironclaw_skills::SkillTrust::Trusted,
+        requires: Default::default(),
         code_snippets: vec![CodeSnippet {
             name: "list_github_issues".into(),
             code: r#"def list_github_issues(owner, repo, state="open"):
@@ -362,6 +363,8 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         revisions: vec![],
         repairs: vec![],
         content_hash: String::new(),
+        bundle_path: None,
+        source_url: None,
     };
 
     let prompt = "\

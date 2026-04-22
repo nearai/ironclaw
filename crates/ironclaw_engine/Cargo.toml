@@ -26,9 +26,10 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha2 = "0.10"
 
 [dev-dependencies]
 pretty_assertions = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

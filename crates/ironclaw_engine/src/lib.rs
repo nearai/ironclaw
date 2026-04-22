@@ -31,19 +31,20 @@ pub mod reliability;
 pub mod runtime;
 pub mod traits;
 pub mod types;
+pub mod workspace;
 
 // ── Re-exports: types ───────────────────────────────────────
 
 pub use types::capability::{
-    ActionDef, Capability, CapabilityLease, EffectType, GrantedActions, LeaseId, PolicyCondition,
-    PolicyEffect, PolicyRule,
+    ActionDef, Capability, CapabilityLease, CapabilityStatus, EffectType, GrantedActions, LeaseId,
+    PolicyCondition, PolicyEffect, PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};
-pub use types::project::{Project, ProjectId};
+pub use types::project::{Project, ProjectId, ProjectMetric};
 pub use types::provenance::Provenance;
 pub use types::step::{
     ActionCall, ActionResult, CodeExecutionFailure, ExecutionTier, LlmResponse, Step, StepId,
@@ -103,6 +104,12 @@ pub use memory::RetrievalEngine;
 // ── Re-exports: reliability ──────────────────────────────────
 
 pub use reliability::ReliabilityTracker;
+
+// ── Re-exports: workspace mounts ─────────────────────────────
+
+pub use workspace::{
+    MountBackend, MountError, ProjectMountFactory, ProjectMounts, WorkspaceMounts,
+};
 
 // ── Test utilities ──────────────────────────────────────────
 

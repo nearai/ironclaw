@@ -41,6 +41,13 @@ ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _GOOGLE_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-google-e2e-")
 _GOOGLE_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-google-e2e-home-")
 
+# Single source of truth for the OAuth client id advertised by this fixture.
+# The mock LLM's /oauth/refresh handler keys refresh behavior off this value
+# (see tests/e2e/conftest.py `hosted_oauth_refresh_server`), so the server env
+# and any in-test assertions must agree. Derive both from this constant
+# rather than hardcoding the literal in two places.
+EXPECTED_GOOGLE_CLIENT_ID = "hosted-google-client-id"
+
 
 def _forward_coverage_env(env: dict):
     """Forward LLVM coverage env vars from outer environment."""
@@ -52,15 +59,23 @@ def _forward_coverage_env(env: dict):
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     """Send signal and wait for process to exit."""
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +196,12 @@ credentials:
     hosts:
       - "{mock_api_host}"
     setup_instructions: "Paste your Google API key or access token below."
+    oauth:
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
+      scopes:
+        - "https://www.googleapis.com/auth/drive"
 ---
 # Google Drive API Skill
 
@@ -213,7 +234,7 @@ def _find_secret_row(
             """
             SELECT user_id, expires_at, updated_at
             FROM secrets
-            WHERE name = ?1
+            WHERE name = ?
             ORDER BY updated_at DESC
             LIMIT 1
             """,
@@ -229,7 +250,7 @@ def _expire_access_token(db_path: str, user_id: str, secret_name: str) -> None:
             """
             UPDATE secrets
             SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
-            WHERE user_id = ?1 AND name = ?2
+            WHERE user_id = ? AND name = ?
             """,
             (user_id, secret_name),
         )
@@ -254,7 +275,13 @@ async def _wait_for_response(
     timeout: float = 45.0,
     expect_substring: str | None = None,
 ) -> dict:
-    """Poll chat history until an assistant response appears."""
+    """Poll chat history until an assistant response appears or a pending_gate is raised.
+
+    Either surface counts as "thread is done acting on the latest input" —
+    auth/approval prompts are now delivered as pending_gate SSE events, so a
+    retry that hits another auth gate will not produce a turn response but
+    still advances the flow.
+    """
     for _ in range(int(timeout * 2)):
         r = await api_get(
             base_url,
@@ -269,6 +296,8 @@ async def _wait_for_response(
             if last_response:
                 if expect_substring is None or expect_substring.lower() in last_response.lower():
                     return history
+        if expect_substring is None and history.get("pending_gate"):
+            return history
         await asyncio.sleep(0.5)
 
     raise AssertionError(
@@ -284,16 +313,7 @@ async def _wait_for_auth_prompt(
     *,
     timeout: float = 45.0,
 ) -> dict:
-    """Poll until response mentions authentication or credential prompt."""
-    auth_indicators = [
-        "authentication",
-        "credential",
-        "paste your token",
-        "token below",
-        "google_drive_token",
-        "api key",
-        "access token",
-    ]
+    """Poll until the thread is gate-paused for authentication via pending_gate."""
     for _ in range(int(timeout * 2)):
         r = await api_get(
             base_url,
@@ -302,10 +322,13 @@ async def _wait_for_auth_prompt(
         )
         r.raise_for_status()
         history = r.json()
-        turns = history.get("turns", [])
-        if turns:
-            last_response = (turns[-1].get("response") or "").lower()
-            if last_response and any(ind in last_response for ind in auth_indicators):
+        pending = history.get("pending_gate")
+        if isinstance(pending, dict):
+            resume_kind = pending.get("resume_kind") or {}
+            gate_name = (pending.get("gate_name") or "").lower()
+            if gate_name == "authentication" or (
+                isinstance(resume_kind, dict) and "Authentication" in resume_kind
+            ):
                 return history
         await asyncio.sleep(0.5)
 
@@ -394,7 +417,16 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
         "WASM_TOOLS_DIR": wasm_tools_dir,
         "WASM_CHANNELS_DIR": os.path.join(home_dir, ".ironclaw", "wasm_channels"),
         "ONBOARD_COMPLETED": "true",
-        "GOOGLE_OAUTH_CLIENT_ID": "test-google-client-id",
+        # Match the `hosted-google-client-id` value the mock LLM's
+        # /oauth/refresh handler expects so `refresh_token_via_proxy`
+        # succeeds on the expired-token path. Other E2E fixtures use the
+        # same value (see tests/e2e/conftest.py:600, :901).
+        "GOOGLE_OAUTH_CLIENT_ID": EXPECTED_GOOGLE_CLIENT_ID,
+        # Refresh proxy URL is the mock_llm server on 127.0.0.1; the
+        # production SSRF guard blocks loopback by default. Mock-based
+        # E2E tests opt in to the loopback path via this env var
+        # (cf. src/auth/mod.rs::validate_oauth_proxy_url).
+        "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -438,6 +470,28 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+@pytest.fixture(autouse=True)
+async def _pin_mock_drive_api_url(mock_llm_server, mock_google_api):
+    """Point the mock LLM's tool-call URL at this module's Google Drive mock.
+
+    The mock LLM uses a single module-level `_github_api_url` to compose
+    every tool-call URL it synthesizes (GitHub, Drive, and any other
+    per-test HTTP destination that needs to look real to the engine). The
+    control endpoint is historically named `/__mock/set_github_api_url`
+    because the Drive test suite was added later and reused the same
+    knob — see `mock_llm.py`. A rename would cascade into every test file
+    that calls the endpoint, so the fixture keeps the existing wire name
+    and documents the shared nature here.
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_google_api["url"]},
+        )
+        response.raise_for_status()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -472,8 +526,8 @@ async def test_oauth_redirect_flow(v2_google_server):
     # Verify URL contains client_id and state
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
-    assert params.get("client_id") == ["test-google-client-id"], (
-        f"auth_url should include client_id=test-google-client-id: {auth_url}"
+    assert params.get("client_id") == [EXPECTED_GOOGLE_CLIENT_ID], (
+        f"auth_url should include client_id={EXPECTED_GOOGLE_CLIENT_ID}: {auth_url}"
     )
     state = params.get("state", [None])[0]
     assert state, f"auth_url should include state parameter: {auth_url}"
@@ -701,6 +755,25 @@ async def test_oauth_token_refresh_on_expiry(v2_google_server, mock_google_api):
 
     stored_user_id, expires_before, updated_before = _find_secret_row(db_path, secret_name)
 
+    # The refresh path needs both an access token AND a refresh token on
+    # disk — without the refresh token, `refresh_oauth_access_token` hits
+    # "No refresh token available" and falls straight through to the
+    # auth gate instead of renewing the token. Paste-based auth (the
+    # earlier tests' fallback when no google-drive WASM binary is
+    # available) only stores the access token; skip this test in that
+    # configuration rather than asserting refresh worked.
+    refresh_secret_name = f"{secret_name}_refresh_token"
+    try:
+        _find_secret_row(db_path, refresh_secret_name)
+    except AssertionError:
+        pytest.skip(
+            f"No {refresh_secret_name} stored; refresh requires a prior "
+            "OAuth callback flow (needs the google-drive WASM binary — "
+            "build with: cd tools-src/google-drive && "
+            "cargo build --target wasm32-wasip2 --release)"
+        )
+        return  # unreachable, satisfies type checkers
+
     # Reset mock OAuth state
     async with httpx.AsyncClient() as client:
         r = await client.post(f"{mock_llm_url}/__mock/oauth/reset", timeout=10)
@@ -735,25 +808,34 @@ async def test_oauth_token_refresh_on_expiry(v2_google_server, mock_google_api):
         for t in history.get("turns", [])
     ), f"Expected at least one non-empty response: {history}"
 
-    # Check if a refresh was issued to the mock OAuth proxy
+    # Check that a refresh was issued to the mock OAuth proxy. We already
+    # skipped above when no refresh_token was stored — past that skip, the
+    # expired-token path MUST call the refresh endpoint, otherwise the
+    # regression this test claims to pin (refresh never fires) slips
+    # through as a false-green.
     async with httpx.AsyncClient() as client:
         state_r = await client.get(f"{mock_llm_url}/__mock/oauth/state", timeout=10)
         state_r.raise_for_status()
         oauth_state = state_r.json()
 
-    # If refresh happened, verify the token was updated in the DB
-    if oauth_state.get("refresh_count", 0) >= 1:
-        _, expires_after, updated_after = _find_secret_row(db_path, secret_name)
-        expires_after_dt = _parse_timestamp(expires_after)
-        updated_after_dt = _parse_timestamp(updated_after)
-        updated_before_dt = _parse_timestamp(updated_before)
-        assert expires_after_dt is not None, "expires_at should be set after refresh"
-        assert updated_after_dt is not None, "updated_at should be set after refresh"
-        if updated_before_dt is not None:
-            assert updated_after_dt > updated_before_dt, (
-                f"updated_at should advance after refresh: "
-                f"before={updated_before_dt}, after={updated_after_dt}"
-            )
-        assert expires_after_dt > datetime.now(timezone.utc), (
-            f"expires_at should be in the future after refresh: {expires_after_dt}"
+    refresh_count = oauth_state.get("refresh_count", 0)
+    assert refresh_count >= 1, (
+        f"Expired-token path MUST call the OAuth refresh endpoint at least "
+        f"once; refresh_count={refresh_count}, oauth_state={oauth_state}"
+    )
+
+    # Verify the token was actually updated in the DB as a result of the refresh.
+    _, expires_after, updated_after = _find_secret_row(db_path, secret_name)
+    expires_after_dt = _parse_timestamp(expires_after)
+    updated_after_dt = _parse_timestamp(updated_after)
+    updated_before_dt = _parse_timestamp(updated_before)
+    assert expires_after_dt is not None, "expires_at should be set after refresh"
+    assert updated_after_dt is not None, "updated_at should be set after refresh"
+    if updated_before_dt is not None:
+        assert updated_after_dt > updated_before_dt, (
+            f"updated_at should advance after refresh: "
+            f"before={updated_before_dt}, after={updated_after_dt}"
         )
+    assert expires_after_dt > datetime.now(timezone.utc), (
+        f"expires_at should be in the future after refresh: {expires_after_dt}"
+    )

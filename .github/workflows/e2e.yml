@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: e2e-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Step 1: compile once ──────────────────────────────────────────────────
   build:

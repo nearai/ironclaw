@@ -1,0 +1,736 @@
+name: Live Canary
+
+on:
+  # Every job's `if:` guard matches the one cron below. Adding a new
+  # scheduled slot means also updating those guards, so keep this
+  # block and the job conditions in lockstep.
+  schedule:
+    # Single daily slot: every lane runs once per day at 02:00 UTC as
+    # parallel jobs in the same workflow run. One run = one red dot on
+    # failure, one notification, one place to drill into per-lane
+    # status. Job-level `if:` guards below all match this cron.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Lane to run"
+        type: choice
+        required: true
+        default: public-smoke
+        options:
+          - all
+          - deterministic-replay
+          - public-smoke
+          - persona-rotating
+          - private-oauth
+          - provider-matrix
+          - release-public-full
+          - upgrade-canary
+          - auth-smoke
+          - auth-full
+          - auth-channels
+          - auth-live-seeded
+          - auth-browser-consent
+      scenario:
+        description: "Optional scenario/test filter. Use auto for rotating persona."
+        type: string
+        required: false
+        default: ""
+      cases:
+        description: "Optional comma-separated provider list for auth live lanes"
+        required: false
+        default: ""
+        type: string
+      previous_ref:
+        description: "Previous release/tag for upgrade-canary"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_BACKEND: libsql
+  ALLOW_LOCAL_TOOLS: "true"
+  AGENT_AUTO_APPROVE_TOOLS: "true"
+  RUST_LOG: ironclaw=info
+
+jobs:
+  auth-smoke:
+    name: Auth Smoke
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LANE: auth-smoke
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: with-deps
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run auth smoke lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-smoke
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-full:
+    name: Auth Full
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      LANE: auth-full
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: with-deps
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run auth full lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-full
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-channels:
+    name: Auth Channels
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LANE: auth-channels
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: with-deps
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run auth channel lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-channels
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-live-seeded:
+    name: Auth Live Seeded
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      LANE: auth-live-seeded
+      PROVIDER: seeded
+      PLAYWRIGHT_INSTALL: with-deps
+      CASES: ${{ inputs.cases }}
+      STRICT_ARTIFACT_SCRUB: "true"
+      # Non-sensitive values stay in job env. Sensitive secrets (access /
+      # refresh tokens, client secrets) are materialised to per-file
+      # paths by the Materialize step below so they never appear in the
+      # job's `env:` block — see `scripts/auth_live_canary/run_live_canary.py`
+      # → `_hydrate_secrets`.
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      AUTH_LIVE_GITHUB_OWNER: ${{ vars.AUTH_LIVE_GITHUB_OWNER }}
+      AUTH_LIVE_GITHUB_REPO: ${{ vars.AUTH_LIVE_GITHUB_REPO }}
+      AUTH_LIVE_GITHUB_ISSUE_NUMBER: ${{ vars.AUTH_LIVE_GITHUB_ISSUE_NUMBER }}
+      AUTH_LIVE_NOTION_CLIENT_ID: ${{ secrets.AUTH_LIVE_NOTION_CLIENT_ID }}
+      AUTH_LIVE_NOTION_QUERY: ${{ vars.AUTH_LIVE_NOTION_QUERY }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Materialize sensitive secrets to files
+        shell: bash
+        # These env entries are scoped to *this step only* — they never
+        # appear in the job-wide `env:` block, so they aren't inherited
+        # by later steps' shell contexts and can't leak via an
+        # accidental `set -x` or `printenv`. Each value is written to a
+        # mode-0600 file under `$RUNNER_TEMP/auth-secrets/`, and we
+        # export the corresponding `<NAME>_PATH` to `$GITHUB_ENV` so
+        # `scripts/live_canary/common.py::env_secret` can find them.
+        # `set +x` is explicit so a future edit adding `-x` won't
+        # interpolate the secret value into the log.
+        env:
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
+          AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
+          AUTH_LIVE_GITHUB_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN }}
+          AUTH_LIVE_NOTION_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_NOTION_ACCESS_TOKEN }}
+          AUTH_LIVE_NOTION_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_NOTION_REFRESH_TOKEN }}
+          AUTH_LIVE_NOTION_CLIENT_SECRET: ${{ secrets.AUTH_LIVE_NOTION_CLIENT_SECRET }}
+        run: |
+          set +x
+          set -euo pipefail
+          secret_dir="${RUNNER_TEMP}/auth-secrets"
+          mkdir -p "${secret_dir}"
+          chmod 700 "${secret_dir}"
+          write_secret() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            local path="${secret_dir}/${name}"
+            printf '%s' "${value}" > "${path}"
+            chmod 600 "${path}"
+            echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
+          }
+          write_secret "GOOGLE_OAUTH_CLIENT_SECRET" "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+          write_secret "AUTH_LIVE_GOOGLE_ACCESS_TOKEN" "${AUTH_LIVE_GOOGLE_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_GOOGLE_REFRESH_TOKEN" "${AUTH_LIVE_GOOGLE_REFRESH_TOKEN:-}"
+          write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
+          write_secret "AUTH_LIVE_NOTION_ACCESS_TOKEN" "${AUTH_LIVE_NOTION_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_NOTION_REFRESH_TOKEN" "${AUTH_LIVE_NOTION_REFRESH_TOKEN:-}"
+          write_secret "AUTH_LIVE_NOTION_CLIENT_SECRET" "${AUTH_LIVE_NOTION_CLIENT_SECRET:-}"
+      - name: Run seeded auth live lane
+        run: |
+          set +x
+          scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-live-seeded
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-browser-consent:
+    name: Auth Browser Consent
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LANE: auth-browser-consent
+      PROVIDER: browser
+      PLAYWRIGHT_INSTALL: with-deps
+      CASES: ${{ inputs.cases }}
+      STRICT_ARTIFACT_SCRUB: "true"
+      # Non-sensitive values stay in job env. OAuth client secrets and
+      # provider passwords move to the Materialize step below —
+      # declaring them here would register their values as job-level
+      # masks and ship them in every step's env, which is exactly the
+      # surface the reviewer flagged.
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
+      AUTH_BROWSER_GOOGLE_USERNAME: ${{ secrets.AUTH_BROWSER_GOOGLE_USERNAME }}
+      AUTH_BROWSER_GITHUB_OWNER: ${{ secrets.AUTH_BROWSER_GITHUB_OWNER }}
+      AUTH_BROWSER_GITHUB_REPO: ${{ secrets.AUTH_BROWSER_GITHUB_REPO }}
+      AUTH_BROWSER_GITHUB_ISSUE_NUMBER: ${{ secrets.AUTH_BROWSER_GITHUB_ISSUE_NUMBER }}
+      AUTH_BROWSER_GITHUB_USERNAME: ${{ secrets.AUTH_BROWSER_GITHUB_USERNAME }}
+      AUTH_BROWSER_NOTION_USERNAME: ${{ secrets.AUTH_BROWSER_NOTION_USERNAME }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Materialize provider storage state
+        shell: bash
+        env:
+          AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64 }}
+          AUTH_BROWSER_GITHUB_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GITHUB_STORAGE_STATE_B64 }}
+          AUTH_BROWSER_NOTION_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_NOTION_STORAGE_STATE_B64 }}
+        run: |
+          set +x
+          set -euo pipefail
+          mkdir -p .tmp/auth-browser-state
+          if [[ -n "${AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/google.json
+            echo "AUTH_BROWSER_GOOGLE_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/google.json" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "${AUTH_BROWSER_GITHUB_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_GITHUB_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/github.json
+            echo "AUTH_BROWSER_GITHUB_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/github.json" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "${AUTH_BROWSER_NOTION_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_NOTION_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/notion.json
+            echo "AUTH_BROWSER_NOTION_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/notion.json" >> "$GITHUB_ENV"
+          fi
+      - name: Materialize sensitive secrets to files
+        shell: bash
+        # Scoped `env:` on this step only — see the auth-live-seeded
+        # Materialize step for the rationale.
+        env:
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
+          AUTH_BROWSER_GOOGLE_PASSWORD: ${{ secrets.AUTH_BROWSER_GOOGLE_PASSWORD }}
+          AUTH_BROWSER_GITHUB_PASSWORD: ${{ secrets.AUTH_BROWSER_GITHUB_PASSWORD }}
+          AUTH_BROWSER_NOTION_PASSWORD: ${{ secrets.AUTH_BROWSER_NOTION_PASSWORD }}
+        run: |
+          set +x
+          set -euo pipefail
+          secret_dir="${RUNNER_TEMP}/auth-secrets"
+          mkdir -p "${secret_dir}"
+          chmod 700 "${secret_dir}"
+          write_secret() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "${value}" ]]; then
+              return 0
+            fi
+            local path="${secret_dir}/${name}"
+            printf '%s' "${value}" > "${path}"
+            chmod 600 "${path}"
+            echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
+          }
+          write_secret "GOOGLE_OAUTH_CLIENT_SECRET" "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+          write_secret "GITHUB_OAUTH_CLIENT_SECRET" "${GITHUB_OAUTH_CLIENT_SECRET:-}"
+          write_secret "AUTH_BROWSER_GOOGLE_PASSWORD" "${AUTH_BROWSER_GOOGLE_PASSWORD:-}"
+          write_secret "AUTH_BROWSER_GITHUB_PASSWORD" "${AUTH_BROWSER_GITHUB_PASSWORD:-}"
+          write_secret "AUTH_BROWSER_NOTION_PASSWORD" "${AUTH_BROWSER_NOTION_PASSWORD:-}"
+      - name: Run browser-consent auth lane
+        run: |
+          set +x
+          scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-browser-consent
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  deterministic-replay:
+    name: Deterministic Replay
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' &&
+      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-deterministic-replay
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Run deterministic replay lane
+        env:
+          LANE: deterministic-replay
+          SCENARIO: ${{ inputs.scenario }}
+          PROVIDER: replay
+          COMMAND_TIMEOUT: 90m
+          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-replay.db
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-deterministic-replay
+          path: artifacts/live-canary/
+          retention-days: 14
+
+  public-smoke:
+    name: Public Live Smoke
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LLM_BACKEND: anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-public-smoke
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Pre-install zizmor
+        run: pip install zizmor || true
+      - name: Run public smoke lane
+        env:
+          LANE: public-smoke
+          SCENARIO: ${{ inputs.scenario }}
+          PROVIDER: anthropic
+          COMMAND_TIMEOUT: 90m
+          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-public-smoke.db
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-public-smoke
+          path: artifacts/live-canary/
+          retention-days: 14
+      - name: Open failure issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Live canary lane \`public-smoke\` failed."
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Lane: public-smoke"
+            echo "- Provider: anthropic"
+          } > /tmp/live-canary-issue.md
+          gh issue create --repo "${REPO}" --title "Live canary failed: public-smoke" --body-file /tmp/live-canary-issue.md
+
+  persona-rotating:
+    name: Rotating Persona Live
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      LLM_BACKEND: anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-persona-rotating
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Run rotating persona lane
+        env:
+          LANE: persona-rotating
+          SCENARIO: ${{ inputs.scenario || 'auto' }}
+          PROVIDER: anthropic
+          COMMAND_TIMEOUT: 150m
+          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-persona.db
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-persona-rotating
+          path: artifacts/live-canary/
+          retention-days: 14
+      - name: Open failure issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Live canary lane \`persona-rotating\` failed."
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Lane: persona-rotating"
+            echo "- Provider: anthropic"
+          } > /tmp/live-canary-issue.md
+          gh issue create --repo "${REPO}" --title "Live canary failed: persona-rotating" --body-file /tmp/live-canary-issue.md
+
+  private-oauth:
+    name: Private OAuth Live
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
+    runs-on: [self-hosted, ironclaw-live]
+    timeout-minutes: 120
+    env:
+      LANE: private-oauth
+      PROVIDER: dedicated-runner
+      COMMAND_TIMEOUT: 60m
+      STRICT_ARTIFACT_SCRUB: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Run private OAuth lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload summaries only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-private-oauth-summary
+          path: |
+            artifacts/live-canary/**/summary.md
+            artifacts/live-canary/**/env-summary.txt
+            artifacts/live-canary/**/trace-fixture-status.txt
+            artifacts/live-canary/**/scrub-matches.txt
+          retention-days: 7
+      - name: Open failure issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Live canary lane \`private-oauth\` failed on the dedicated runner."
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Lane: private-oauth"
+          } > /tmp/live-canary-issue.md
+          gh issue create --repo "${REPO}" --title "Live canary failed: private-oauth" --body-file /tmp/live-canary-issue.md
+
+  provider-matrix:
+    name: Provider Matrix (${{ matrix.provider }})
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: anthropic
+            test_target: e2e_live
+            scenario: zizmor_scan
+          - provider: openai-compatible
+            test_target: e2e_live_mission
+            scenario: mission_daily_news_digest_with_followup
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-provider-${{ matrix.provider }}
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Configure Anthropic provider
+        if: matrix.provider == 'anthropic'
+        env:
+          LIVE_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LIVE_ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+        run: |
+          echo "LLM_BACKEND=anthropic" >> "${GITHUB_ENV}"
+          echo "ANTHROPIC_MODEL=${LIVE_ANTHROPIC_MODEL}" >> "${GITHUB_ENV}"
+          echo "ANTHROPIC_API_KEY=${LIVE_ANTHROPIC_API_KEY}" >> "${GITHUB_ENV}"
+      - name: Configure OpenAI-compatible provider
+        if: matrix.provider == 'openai-compatible'
+        env:
+          LIVE_OPENAI_COMPATIBLE_API_KEY: ${{ secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+          LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL }}
+          LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL }}
+        run: |
+          echo "LLM_BACKEND=openai_compatible" >> "${GITHUB_ENV}"
+          echo "LLM_API_KEY=${LIVE_OPENAI_COMPATIBLE_API_KEY}" >> "${GITHUB_ENV}"
+          echo "LLM_BASE_URL=${LIVE_OPENAI_COMPATIBLE_BASE_URL}" >> "${GITHUB_ENV}"
+          echo "LLM_MODEL=${LIVE_OPENAI_COMPATIBLE_MODEL}" >> "${GITHUB_ENV}"
+      - name: Run provider matrix lane
+        env:
+          LANE: provider-matrix
+          PROVIDER: ${{ matrix.provider }}
+          PROVIDER_TEST_TARGET: ${{ matrix.test_target }}
+          SCENARIO: ${{ inputs.scenario || matrix.scenario }}
+          COMMAND_TIMEOUT: 90m
+          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-provider-${{ matrix.provider }}.db
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-provider-${{ matrix.provider }}
+          path: artifacts/live-canary/
+          retention-days: 14
+      - name: Open failure issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PROVIDER: ${{ matrix.provider }}
+        run: |
+          {
+            echo "Live canary provider lane failed."
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Lane: provider-matrix"
+            echo "- Provider: ${PROVIDER}"
+          } > /tmp/live-canary-issue.md
+          gh issue create --repo "${REPO}" --title "Live canary failed: provider-matrix ${PROVIDER}" --body-file /tmp/live-canary-issue.md
+
+  release-public-full:
+    name: Release Public Full Live
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'release-public-full'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      LLM_BACKEND: anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-release-public-full
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Pre-install zizmor
+        run: pip install zizmor || true
+      - name: Run release public full lane
+        env:
+          LANE: release-public-full
+          PROVIDER: anthropic
+          COMMAND_TIMEOUT: 300m
+          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-release.db
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-release-public-full
+          path: artifacts/live-canary/
+          retention-days: 30
+
+  upgrade-canary:
+    name: Upgrade Canary
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-upgrade
+      - name: Run upgrade canary lane
+        env:
+          LANE: upgrade-canary
+          PROVIDER: upgrade
+          PREVIOUS_REF: ${{ inputs.previous_ref }}
+          CURRENT_REF: ${{ github.sha }}
+          COMMAND_TIMEOUT: 150m
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-upgrade
+          path: artifacts/live-canary/
+          retention-days: 30

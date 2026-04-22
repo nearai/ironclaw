@@ -19,6 +19,7 @@
 //! - `__get_actions__` — available tool definitions
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
@@ -37,7 +38,7 @@ use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::traits::store::Store;
-use crate::types::error::EngineError;
+use crate::types::error::{EngineError, OrchestratorFailure, OrchestratorFailureKind};
 use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
@@ -96,12 +97,116 @@ fn normalize_pause_outcome(
     Ok(())
 }
 
+/// Default orchestrator VM wall-clock budget, in seconds.
+const ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS: u64 = 300;
+/// Floor for the configurable orchestrator budget, to prevent nonsense values.
+const ORCHESTRATOR_MIN_MAX_DURATION_SECS: u64 = 30;
+/// Ceiling for the configurable orchestrator budget, bounding resource waste.
+const ORCHESTRATOR_MAX_MAX_DURATION_SECS: u64 = 3600;
+
+/// Resolve the orchestrator VM wall-clock budget from
+/// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`. Cached for the process lifetime.
+fn orchestrator_max_duration() -> std::time::Duration {
+    static CACHED: OnceLock<std::time::Duration> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(ORCHESTRATOR_DEFAULT_MAX_DURATION_SECS)
+            .clamp(
+                ORCHESTRATOR_MIN_MAX_DURATION_SECS,
+                ORCHESTRATOR_MAX_MAX_DURATION_SECS,
+            );
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// Resource limits for the orchestrator VM.
 fn orchestrator_limits() -> ResourceLimits {
     ResourceLimits::new()
-        .max_duration(std::time::Duration::from_secs(300)) // 5 min (longer than user code)
+        .max_duration(orchestrator_max_duration())
         .max_allocations(5_000_000)
         .max_memory(128 * 1024 * 1024) // 128 MB
+}
+
+/// Classify a Monty orchestrator failure into a typed
+/// [`OrchestratorFailure`] that carries a user-safe classification plus
+/// the preserved low-level detail for gateway debug mode.
+///
+/// The raw `err_msg` (often a Python traceback containing internal file
+/// paths and upstream HTTP bodies) is always stored on the returned
+/// struct's `debug_detail` field and emitted at `debug!`, never placed
+/// into the user-visible classification — see
+/// `.claude/rules/error-handling.md`, "Error Boundaries at the Channel
+/// Edge" (#2546).
+fn classify_orchestrator_failure(prefix: &str, err_msg: &str) -> OrchestratorFailure {
+    debug!(prefix, err_msg, "orchestrator VM failure");
+
+    let lower = err_msg.to_ascii_lowercase();
+    // Reserve `TimeLimit` for unmistakable Monty wall-clock markers — the
+    // user-facing message tells operators to raise
+    // `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS`, which is wrong advice for
+    // upstream LLM / network timeouts. Bare `"timeout"` / `"timed out"`
+    // used to catch those (e.g. `reqwest`'s `"Request timed out"`,
+    // provider `"Connection timed out"`) and point users at the budget
+    // knob instead of the real failure class. Those now fall through to
+    // `Other` (generic internal failure). References: serrrfirat review
+    // on PR #2753, commit 82d06410.
+    //
+    // The predicates we keep are either the explicit env-var name in the
+    // VM's own error text, the phrase the Monty runtime uses for its
+    // duration limit, or the sentinel emitted by the engine when the
+    // orchestrator itself times out a step. Duplicating `ResourceLimits`
+    // wording is OK — those strings live alongside this classifier in the
+    // same crate.
+    let hit_time_limit = lower.contains("duration limit")
+        || lower.contains("max_duration")
+        || lower.contains("maximum duration")
+        || lower.contains("execution duration exceeded")
+        || lower.contains("orchestrator timed out");
+    let hit_memory_limit = lower.contains("memory limit") || lower.contains("allocation limit");
+    let hit_resource_limit = lower.contains("resource limit")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted");
+    let has_python_traceback =
+        lower.contains("traceback (most recent call last)") || lower.contains("traceback:");
+
+    let kind = if hit_time_limit {
+        OrchestratorFailureKind::TimeLimit {
+            prefix: prefix.to_string(),
+            limit_secs: orchestrator_max_duration().as_secs(),
+        }
+    } else if hit_memory_limit || hit_resource_limit {
+        OrchestratorFailureKind::ResourceLimit {
+            prefix: prefix.to_string(),
+        }
+    } else if has_python_traceback {
+        OrchestratorFailureKind::Traceback {
+            prefix: prefix.to_string(),
+        }
+    } else {
+        OrchestratorFailureKind::Other {
+            prefix: prefix.to_string(),
+        }
+    };
+
+    OrchestratorFailure::new(kind, err_msg)
+}
+
+/// Wrap a Monty VM panic (parse / start / resume phase) as a typed
+/// orchestrator failure. The panic itself has no textual payload — the
+/// `panic_payload` we can stringify is always a `&str` or `String` from
+/// `catch_unwind` — so `debug_detail` carries the phase tag for
+/// correlation.
+fn orchestrator_vm_panic(prefix: &str, phase: &'static str) -> OrchestratorFailure {
+    debug!(prefix, phase, "orchestrator VM panic");
+    OrchestratorFailure::new(
+        OrchestratorFailureKind::VmPanic {
+            prefix: prefix.to_string(),
+            phase,
+        },
+        format!("Monty VM panicked during {phase}"),
+    )
 }
 
 /// Maximum consecutive failures before auto-rollback.
@@ -284,7 +389,13 @@ pub async fn record_orchestrator_failure(
     .to_string();
     tracker.updated_at = chrono::Utc::now();
 
-    if let Err(e) = store.save_memory_doc(&tracker).await {
+    // The failure tracker carries the `orchestrator:` title prefix and is
+    // therefore gated by `is_protected_orchestrator_doc` in the store.
+    // Enter the trusted-internal-writes scope so the system-initiated save
+    // is admitted without being mistaken for an LLM-authored patch.
+    if let Err(e) =
+        crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await
+    {
         debug!("failed to save orchestrator failure tracker: {e}");
     }
 
@@ -303,7 +414,10 @@ pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: Pro
         let mut tracker = doc.clone();
         tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
         tracker.updated_at = chrono::Utc::now();
-        let _ = store.save_memory_doc(&tracker).await;
+        // Same rationale as `record_orchestrator_failure`: the tracker doc
+        // has an `orchestrator:` title so the store gate triggers. Enter
+        // the trusted-writes scope for this system-initiated reset.
+        let _ = crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await;
     }
 }
 
@@ -347,14 +461,19 @@ pub async fn execute_orchestrator(
     })) {
         Ok(Ok(runner)) => runner,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator parse error: {e}"),
-            });
+            // Route parse failures through the same typed sanitizer so
+            // a bad `default.py` deploy can't leak Monty internals to
+            // the channel edge.
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator parse error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator parsing".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator parse error",
+                "orchestrator parsing",
+            )));
         }
     };
 
@@ -369,14 +488,16 @@ pub async fn execute_orchestrator(
     let mut progress = match run_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            return Err(EngineError::Effect {
-                reason: format!("Orchestrator runtime error: {e}"),
-            });
+            return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                "Orchestrator runtime error",
+                &e.to_string(),
+            )));
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during orchestrator start".into(),
-            });
+            return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                "Orchestrator runtime error",
+                "orchestrator start",
+            )));
         }
     };
 
@@ -507,14 +628,16 @@ pub async fn execute_orchestrator(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator error after resume: {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            "Orchestrator error after resume",
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during orchestrator resume".into(),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            "Orchestrator error after resume",
+                            "orchestrator resume",
+                        )));
                     }
                 }
 
@@ -536,14 +659,16 @@ pub async fn execute_orchestrator(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Orchestrator NameError '{name}': {e}"),
-                        });
+                        return Err(EngineError::Orchestrator(classify_orchestrator_failure(
+                            &format!("Orchestrator NameError '{name}'"),
+                            &e.to_string(),
+                        )));
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("Monty panic on NameLookup '{name}'"),
-                        });
+                        return Err(EngineError::Orchestrator(orchestrator_vm_panic(
+                            &format!("Orchestrator NameError '{name}'"),
+                            "name lookup",
+                        )));
                     }
                 }
             }
@@ -717,6 +842,7 @@ async fn handle_execute_code_step(
         current_call_id: None,
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -770,6 +896,7 @@ async fn handle_execute_code_step(
                         // trace correlation.
                         call_id: format!("codeact-step-{}", exec_ctx.step_id.0),
                         error: error_msg,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
                         params_summary: None,
                     },
                 );
@@ -820,7 +947,7 @@ async fn handle_execute_code_step(
                 "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease } => serde_json::json!({
                             "gate_paused": true,
                             "gate_name": gate_name,
                             "action_name": action_name,
@@ -828,6 +955,7 @@ async fn handle_execute_code_step(
                             "parameters": parameters,
                             "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
                             "resume_output": resume_output,
+                            "paused_lease": paused_lease,
                         }),
                         _ => serde_json::Value::Null,
                     }
@@ -889,6 +1017,7 @@ async fn handle_execute_action(
         current_call_id: Some(call_id.clone()),
         source_channel: thread_source_channel(thread),
         user_timezone: thread_user_timezone(thread),
+        thread_goal: Some(thread.goal.clone()),
     };
 
     // Helper: emit event only. The orchestrator owns transcript recording.
@@ -920,6 +1049,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -953,6 +1083,7 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     },
                     &call_id,
@@ -1020,6 +1151,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -1036,6 +1168,7 @@ async fn handle_execute_action(
 
     // 4. Execute
     let ps = summarize_params(&name, &params);
+    let execution_start = std::time::Instant::now();
     match effects
         .execute_action(&name, params, &lease, &exec_ctx)
         .await
@@ -1052,6 +1185,7 @@ async fn handle_execute_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 emit_and_record(
                     thread,
                     event_tx,
@@ -1060,6 +1194,11 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: error_msg,
+                        duration_ms: if duration_ms > 0 {
+                            duration_ms
+                        } else {
+                            execution_start.elapsed().as_millis() as u64
+                        },
                         params_summary: ps.clone(),
                     },
                     &call_id,
@@ -1097,6 +1236,7 @@ async fn handle_execute_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -1127,6 +1267,7 @@ async fn handle_execute_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1140,6 +1281,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error: e.to_string(),
+                    duration_ms: execution_start.elapsed().as_millis() as u64,
                     params_summary: ps,
                 },
                 &call_id,
@@ -1252,6 +1394,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1283,6 +1426,7 @@ async fn handle_execute_actions_parallel(
                         action_name: pc.name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     };
                     preflight.push(Some(PfOutcome::Error {
@@ -1377,6 +1521,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1436,6 +1581,7 @@ async fn handle_execute_actions_parallel(
             // through the parallel batch path.
             source_channel: thread_source_channel(thread),
             user_timezone: thread_user_timezone(thread),
+            thread_goal: Some(thread.goal.clone()),
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1479,6 +1625,7 @@ async fn handle_execute_actions_parallel(
                 // See comment above — read from thread metadata, not None.
                 source_channel: parallel_source_channel.clone(),
                 user_timezone: parallel_user_timezone,
+                thread_goal: Some(thread.goal.clone()),
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1551,6 +1698,7 @@ async fn execute_single_action(
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
+    let execution_start = std::time::Instant::now();
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
             // Surface wrapped errors as ActionFailed (see resolve_tool_future
@@ -1562,11 +1710,17 @@ async fn execute_single_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 EventKind::ActionFailed {
                     step_id: exec_ctx.step_id,
                     action_name: name.to_string(),
                     call_id: call_id.to_string(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_start.elapsed().as_millis() as u64
+                    },
                     params_summary: params_summary.clone(),
                 }
             } else {
@@ -1593,6 +1747,7 @@ async fn execute_single_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
@@ -1615,6 +1770,7 @@ async fn execute_single_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             (result_json, event, output)
         }
@@ -1625,6 +1781,7 @@ async fn execute_single_action(
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 error: e.to_string(),
+                duration_ms: execution_start.elapsed().as_millis() as u64,
                 params_summary,
             };
             let result_json = serde_json::json!({
@@ -1705,11 +1862,13 @@ fn handle_emit_event(
             let action_name = extract_string_kwarg(kwargs, "action_name").unwrap_or_default();
             let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
             let error = extract_string_kwarg(kwargs, "error").unwrap_or_default();
+            let duration_ms = extract_u64_kwarg(kwargs, "duration_ms").unwrap_or(0);
             EventKind::ActionFailed {
                 step_id: StepId::new(),
                 action_name,
                 call_id,
                 error,
+                duration_ms,
                 params_summary: None,
             }
         }
@@ -1924,6 +2083,22 @@ async fn handle_get_actions(
 /// Loads all `DocType::Skill` MemoryDocs from the project and returns them
 /// as a list of Python dicts. The Python orchestrator handles scoring,
 /// selection, and injection — Rust just provides data access.
+///
+/// ## Setup-marker exclusion (v2 parity with v1 selector)
+///
+/// Before returning the skill list, this function filters out any
+/// skill whose `metadata.activation.setup_marker` is already present
+/// as a MemoryDoc title in the current project. In v2, workspace
+/// files are stored as MemoryDocs keyed by title, so "does the marker
+/// file exist" maps to "is there a MemoryDoc with that title" — and
+/// we already have the full doc list in scope for the skill filter,
+/// so this costs zero extra store calls.
+///
+/// This is the v2 equivalent of the `satisfied_setup_markers`
+/// argument threaded through `ironclaw_skills::prefilter_skills` on
+/// the v1 path. Both paths implement the same rule: a one-time setup
+/// skill whose marker file has been written has finished its job and
+/// should not keep burning activation budget on every subsequent turn.
 async fn handle_list_skills(
     _args: &[MontyObject],
     thread: &Thread,
@@ -1957,9 +2132,41 @@ async fn handle_list_skills(
     docs.sort_by_key(|d| d.id.0);
     docs.dedup_by_key(|d| d.id);
 
+    // Build the set of existing non-skill doc titles (== workspace paths
+    // in v2) once, so setup-marker filtering below is O(1) per skill.
+    // Exclude Skill docs so a marker like "github" doesn't collide with
+    // the skill doc of the same name.
+    let existing_titles: std::collections::HashSet<&str> = docs
+        .iter()
+        .filter(|d| d.doc_type != crate::types::memory::DocType::Skill)
+        .map(|d| d.title.as_str())
+        .collect();
+
     let skills: Vec<serde_json::Value> = docs
-        .into_iter()
+        .iter()
         .filter(|d| d.doc_type == crate::types::memory::DocType::Skill)
+        .filter(|d| {
+            // Setup-marker exclusion. If the skill's activation
+            // metadata declares a setup_marker and a MemoryDoc with
+            // that title already exists, the skill's setup has been
+            // completed and we skip it.
+            let marker = d
+                .metadata
+                .get("activation")
+                .and_then(|a| a.get("setup_marker"))
+                .and_then(|m| m.as_str());
+            match marker {
+                Some(m) if existing_titles.contains(m) => {
+                    debug!(
+                        skill = %d.title,
+                        marker = %m,
+                        "__list_skills__: excluding setup skill — marker already present"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        })
         .map(|d| {
             serde_json::json!({
                 "doc_id": d.id.0.to_string(),
@@ -2131,6 +2338,8 @@ fn build_orchestrator_inputs(
         "max_iterations": thread.config.max_iterations,
         "max_tool_intent_nudges": thread.config.max_tool_intent_nudges,
         "enable_tool_intent_nudge": thread.config.enable_tool_intent_nudge,
+        "require_action_attempt": thread.config.require_action_attempt,
+        "max_action_requirement_nudges": thread.config.max_action_requirement_nudges,
         "max_consecutive_errors": thread.config.max_consecutive_errors,
         "max_tokens_total": thread.config.max_tokens_total,
         "max_budget_usd": thread.config.max_budget_usd,
@@ -2424,6 +2633,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string(),
+            debug_detail: None,
         },
         "gate_paused" => {
             let resume_kind_value = result
@@ -2457,6 +2667,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
                 resume_output: result.get("resume_output").cloned(),
+                paused_lease: result
+                    .get("paused_lease")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -2507,6 +2721,189 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+
+    // ── Orchestrator budget / error mapping ─────────────────────
+
+    #[test]
+    fn failure_reason_maps_timeout_to_user_safe_message() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator error after resume",
+            "ResourceLimits: duration limit exceeded",
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "expected TimeLimit variant, got: {:?}",
+            failure.kind
+        );
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("time budget exhausted"),
+            "expected user-safe timeout reason, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+            "reason must point operators at the override env var, got: {rendered}"
+        );
+    }
+
+    /// Regression for serrrfirat review on PR #2753 (commit 82d06410) —
+    /// the classifier used to treat any `"timeout"` / `"timed out"`
+    /// substring as a wall-clock exhaustion, so upstream LLM / network
+    /// timeouts (`"Request timed out"`, `"Connection timed out"`) were
+    /// mapped to `TimeLimit` and the user-facing message advised raising
+    /// `IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS` — completely wrong for a
+    /// provider-side timeout. Those now fall through to `Other` so the
+    /// budget knob is only suggested when the failure is actually a
+    /// Monty wall-clock limit.
+    #[test]
+    fn failure_reason_does_not_treat_upstream_timeout_as_time_limit() {
+        for upstream in [
+            "Request timed out",
+            "Connection timed out",
+            "LLM call failed: timeout waiting for response",
+            "upstream provider timeout after 30s",
+        ] {
+            let failure = classify_orchestrator_failure("Orchestrator runtime error", upstream);
+            assert!(
+                !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+                "upstream timeout {upstream:?} must NOT classify as TimeLimit, got: {:?}",
+                failure.kind,
+            );
+            assert!(
+                matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+                "upstream timeout {upstream:?} should fall through to Other, got: {:?}",
+                failure.kind,
+            );
+            let rendered = failure.user_message();
+            assert!(
+                !rendered.contains("IRONCLAW_ORCHESTRATOR_MAX_DURATION_SECS"),
+                "user message for upstream timeout must not advise raising the budget knob, got: {rendered}",
+            );
+        }
+    }
+
+    #[test]
+    fn failure_reason_maps_memory_limit() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "memory limit hit");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::ResourceLimit { .. }
+        ));
+        assert!(
+            failure.user_message().contains("resource budget exhausted"),
+            "memory-limit reason should not leak raw Monty text, got: {}",
+            failure.user_message()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 (commit 042c2ee7) —
+    /// `Other`'s user-facing Display used to embed the raw `err_msg`.
+    /// Surfaces like `runtime/mission.rs::process_mission_outcome_and_notify`
+    /// render `format!("Mission failed: {error}")` directly, bypassing the
+    /// channel-edge sanitizer in `bridge::user_facing_errors`, so any
+    /// unclassified Monty output would leak tracebacks / internal paths
+    /// there. The generic user-facing text now reads "internal orchestrator
+    /// failure"; the raw message is preserved in `debug_detail`.
+    #[test]
+    fn failure_reason_hides_unknown_raw_message_from_user_text() {
+        let failure =
+            classify_orchestrator_failure("Orchestrator runtime error", "NameError: foo undefined");
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Other { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            !rendered.contains("NameError"),
+            "Other variant must not surface raw err_msg in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "Other variant should render the generic fallback, got: {rendered}"
+        );
+        // Raw detail is still available for operator triage via debug_detail.
+        assert!(
+            failure.debug_detail().contains("NameError"),
+            "debug_detail must preserve the raw err_msg, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    /// Regression for Copilot review on PR #2753 — substring `"duration"`
+    /// alone mis-classified any error whose message happened to contain
+    /// that word as a timeout. The narrow predicate set now requires
+    /// the full phrase `"duration limit"` / `"max_duration"` /
+    /// `"maximum duration"` or an explicit timeout word.
+    #[test]
+    fn failure_reason_does_not_treat_bare_duration_as_timeout() {
+        let failure = classify_orchestrator_failure(
+            "Orchestrator runtime error",
+            "TypeError: duration must be a positive integer",
+        );
+        assert!(
+            !matches!(failure.kind, OrchestratorFailureKind::TimeLimit { .. }),
+            "bare 'duration' in an unrelated error must not classify as TimeLimit, got: {:?}",
+            failure.kind
+        );
+        assert!(
+            matches!(failure.kind, OrchestratorFailureKind::Other { .. }),
+            "expected Other variant for unrelated duration-word error, got: {:?}",
+            failure.kind
+        );
+    }
+
+    #[test]
+    fn failure_reason_strips_python_traceback() {
+        // Regression for #2546 — bug bash 4/16 reported raw Python tracebacks
+        // from the Monty VM being shown verbatim to end users, including
+        // internal file paths ("orchestrator.py", line 907) and upstream
+        // HTTP response bodies.
+        let raw = "Traceback (most recent call last):\n  File \"orchestrator.py\", line 907, in run_loop\n  File \"orchestrator.py\", line 548, in __llm_complete__\nRuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
+        let failure = classify_orchestrator_failure("Orchestrator error after resume", raw);
+        assert!(matches!(
+            failure.kind,
+            OrchestratorFailureKind::Traceback { .. }
+        ));
+        let rendered = failure.user_message();
+        assert!(
+            rendered.contains("internal orchestrator failure"),
+            "should surface a generic internal-failure message, got: {rendered}"
+        );
+        for forbidden in [
+            "Traceback",
+            "orchestrator.py",
+            "File \"",
+            "line 907",
+            "line 548",
+            "HTTP 502",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "user-visible reason must not leak `{forbidden}`, got: {rendered}"
+            );
+        }
+        // The debug detail MUST retain the raw traceback so gateway
+        // debug mode can surface it without re-reading logs.
+        assert!(
+            failure.debug_detail().contains("Traceback"),
+            "debug detail must preserve the raw Monty trace, got: {}",
+            failure.debug_detail()
+        );
+    }
+
+    #[test]
+    fn max_duration_default_and_bounds() {
+        // Default (no env var set): 300s — but OnceLock may already be
+        // primed by another test in the suite, so we only check it's within
+        // the documented bounds.
+        let secs = orchestrator_max_duration().as_secs();
+        assert!(
+            (ORCHESTRATOR_MIN_MAX_DURATION_SECS..=ORCHESTRATOR_MAX_MAX_DURATION_SECS)
+                .contains(&secs),
+            "orchestrator_max_duration must be within [{ORCHESTRATOR_MIN_MAX_DURATION_SECS}, {ORCHESTRATOR_MAX_MAX_DURATION_SECS}], got {secs}"
+        );
+    }
 
     // ── Python helper unit tests via Monty ──────────────────────
     //
@@ -2761,6 +3158,65 @@ mod tests {
         ));
     }
 
+    // ── Skill activation: smart-quote / autocorrect resilience ───
+    //
+    // Regression for the ceo-setup non-activation report. iOS / macOS / most
+    // rich text inputs autocorrect `I'm` (ASCII U+0027) to `I'm` (curly
+    // U+2019). Authored regex patterns use ASCII punctuation, so without
+    // boundary normalization the curly form silently fails to match and
+    // the skill scores 0. `normalize_punctuation` in `default.py` folds
+    // curly quotes/dashes to ASCII before scoring.
+
+    #[test]
+    fn normalize_punctuation_folds_curly_quotes_and_dashes() {
+        // The input contains every typographic variant we fold. The
+        // expected output uses only ASCII punctuation, so a Rust-side
+        // regex that authors typed naturally still hits.
+        let raw =
+            "\u{2018}\u{2019}\u{201A}\u{201B}\u{201C}\u{201D}\u{201E}\u{201F}\u{2013}\u{2014}";
+        let expected = "''''\"\"\"\"--";
+        let program = format!("FINAL(normalize_punctuation({raw:?}) == {expected:?})");
+        // Run the helper-only slice of default.py with the assertion appended.
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Bool(true) => {}
+            other => panic!("normalize_punctuation did not produce ASCII fold: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_skills_matches_curly_apostrophe_input() {
+        // The ceo-setup skill's first pattern uses ASCII `'`. A user
+        // typing on iOS sends U+2019. With normalization, select_skills
+        // must still pick the skill; without it, the regex misses and
+        // the skill scores 0.
+        let pattern = r"(?i)I'm a (CEO|manager|executive|director|VP|founder)";
+        // Build a single-skill list as a Python literal — metadata shape
+        // matches what handle_list_skills emits at runtime.
+        let skill_literal = format!(
+            r#"[{{"doc_id": "test", "title": "ceo-setup", "content": "body", "metadata": {{"name": "ceo-setup", "activation": {{"patterns": [{pattern:?}], "max_context_tokens": 2500, "keywords": [], "tags": []}}}}}}]"#
+        );
+        let curly_goal = "I\u{2019}m Illia Polosukhin. I\u{2019}m a CEO of NEAR Foundation";
+        let program = format!(
+            "selected = select_skills({skill_literal}, {curly_goal:?}); FINAL(len(selected))"
+        );
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(1) => {}
+            other => {
+                panic!("select_skills should pick ceo-setup for curly-quoted input, got: {other:?}")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {
         let (code, version) = load_orchestrator(None, ProjectId::new(), true).await;
@@ -2969,6 +3425,7 @@ mod tests {
             parameters: serde_json::json!({"cmd":"ls"}),
             resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
             resume_output: None,
+            paused_lease: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);
@@ -2985,23 +3442,43 @@ mod tests {
     fn parse_outcome_failed() {
         let result = serde_json::json!({"outcome": "failed", "error": "boom"});
         let outcome = parse_outcome(&result);
-        assert!(matches!(outcome, ThreadOutcome::Failed { error } if error == "boom"));
+        assert!(matches!(outcome, ThreadOutcome::Failed { error, .. } if error == "boom"));
     }
 
     #[test]
     fn parse_outcome_gate_paused() {
+        let lease = crate::types::capability::CapabilityLease {
+            id: crate::types::capability::LeaseId::new(),
+            thread_id: crate::types::thread::ThreadId::new(),
+            capability_name: "test-capability".into(),
+            granted_actions: crate::types::capability::GrantedActions::Specific(vec![
+                "shell".into(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: Some(1),
+            uses_remaining: Some(1),
+            revoked: false,
+            revoked_reason: None,
+        };
         let result = serde_json::json!({
             "outcome": "gate_paused",
             "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
             "parameters": {"cmd": "rm -rf /"},
-            "resume_kind": {"Approval": {"allow_always": true}}
+            "resume_kind": {"Approval": {"allow_always": true}},
+            "paused_lease": lease,
         });
         let outcome = parse_outcome(&result);
-        assert!(
-            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
-        );
+        assert!(matches!(
+            outcome,
+            ThreadOutcome::GatePaused {
+                action_name,
+                paused_lease: Some(_),
+                ..
+            } if action_name == "shell"
+        ));
     }
 
     #[test]
@@ -3696,6 +4173,41 @@ FINAL(consecutive_action_errors)
 "#,
         );
         assert_eq!(count, 0);
+    }
+
+    /// Regression: `max_consecutive_errors` arrives as `null` when the Rust
+    /// caller passes `Option::None`. Python's `dict.get(key, default)` returns
+    /// the explicit `None`, not the default, so `None + 2` used to blow up in
+    /// the error-gating branch on the very first failed action call. The
+    /// orchestrator now coalesces `None` to a sentinel; this test pins that
+    /// behavior.
+    #[test]
+    fn action_errors_tolerate_null_max_consecutive_errors() {
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+if max_consecutive_errors is None:
+    max_consecutive_errors = 10**9
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# 0 = no nudge / no failure (expected with None = no-limit sentinel)
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None max_consecutive_errors must behave as no-limit, not crash"
+        );
     }
 
     #[test]

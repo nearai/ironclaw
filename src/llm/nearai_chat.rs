@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -22,7 +23,7 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, session::SessionManager};
+use crate::llm::{costs, rig_adapter::normalize_schema_strict, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,9 +259,16 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
-            response.headers().get("retry-after"),
-        ));
+        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
+        // header was actually present on the response — `None` otherwise, so
+        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
+        // schedule instead of the 60s default `parse_retry_after` applies to
+        // missing headers. The 60s floor for 429 (rate limit) is re-added
+        // explicitly at the 429 call site below via `.or(Some(...))`.
+        let retry_after_header: Option<Duration> = response
+            .headers()
+            .get("retry-after")
+            .map(crate::llm::retry::parse_retry_after_value);
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -293,9 +301,12 @@ impl NearAiChatProvider {
             }
 
             if status_code == 429 {
+                // Preserve existing rate-limit behavior: fall back to a 60s
+                // default when the server omits Retry-After. Long sleeps are
+                // appropriate for rate-limit backpressure.
                 return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header,
+                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
                 });
             }
 
@@ -322,6 +333,29 @@ impl NearAiChatProvider {
                     let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
                     return Err(LlmError::ContextLengthExceeded { used, limit });
                 }
+            }
+
+            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
+            // so the retry layer backs off, the circuit breaker counts a
+            // transient failure, and the channel boundary produces a user-safe
+            // message. HTTP 500 is the most important case for the #2546
+            // traceback-leak report: upstream application errors frequently
+            // return 500 with a Python traceback in the body. 502/503/504 are
+            // the proxy-layer variants. The `status` field preserves the
+            // specific code for operators; the body is logged at debug and
+            // never carried on the error.
+            if matches!(status_code, 500..=599) {
+                tracing::debug!(
+                    provider = "nearai_chat",
+                    status = status_code,
+                    body_preview = crate::agent::truncate_for_preview(&response_text, 512).as_str(),
+                    "NEAR AI Chat upstream 5xx response"
+                );
+                return Err(LlmError::BadGateway {
+                    provider: "nearai_chat".to_string(),
+                    status: status_code,
+                    retry_after: retry_after_header,
+                });
             }
 
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
@@ -572,28 +606,15 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
-        let tools: Vec<ChatCompletionTool> = req
-            .tools
-            .into_iter()
-            .map(|t| ChatCompletionTool {
-                tool_type: "function".to_string(),
-                function: ChatCompletionFunction {
-                    name: t.name,
-                    description: Some(t.description),
-                    parameters: Some(t.parameters),
-                },
-            })
-            .collect();
-
-        let request = ChatCompletionRequest {
+        let request = build_chat_completion_request(
             model,
             messages,
-            temperature: req.temperature,
-            max_tokens: req.max_tokens,
-            stop: req.stop_sequences,
-            tools: if tools.is_empty() { None } else { Some(tools) },
-            tool_choice: req.tool_choice,
-        };
+            req.tools,
+            req.temperature,
+            req.max_tokens,
+            req.stop_sequences,
+            req.tool_choice,
+        );
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
@@ -1027,7 +1048,13 @@ impl From<ChatMessage> for ChatCompletionMessage {
         } else if !msg.content_parts.is_empty() {
             // Build multimodal content array: text + image parts
             let mut parts = vec![crate::llm::ContentPart::Text { text: msg.content }];
-            parts.extend(msg.content_parts);
+            parts.extend(msg.content_parts.into_iter().map(|part| match part {
+                crate::llm::ContentPart::ImageUrl { mut image_url } => {
+                    image_url.detail = Some(image_url.normalized_openai_detail());
+                    crate::llm::ContentPart::ImageUrl { image_url }
+                }
+                other => other,
+            }));
             Some(MessageContent::Parts(parts))
         } else {
             Some(MessageContent::Text(msg.content))
@@ -1057,6 +1084,47 @@ struct ChatCompletionFunction {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parameters: Option<serde_json::Value>,
+}
+
+/// Convert a `ToolDefinition` to NEAR AI Chat Completions tool format.
+///
+/// Applies the same strict schema normalization used by the other OpenAI-compatible
+/// provider adapters so that top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas
+/// are flattened before request serialization.
+fn convert_tool_definition(tool: crate::llm::provider::ToolDefinition) -> ChatCompletionTool {
+    let mut description = tool.description.clone();
+    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
+
+    ChatCompletionTool {
+        tool_type: "function".to_string(),
+        function: ChatCompletionFunction {
+            name: tool.name,
+            description: Some(description),
+            parameters: Some(parameters),
+        },
+    }
+}
+
+fn build_chat_completion_request(
+    model: String,
+    messages: Vec<ChatCompletionMessage>,
+    tools: Vec<crate::llm::provider::ToolDefinition>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    stop: Option<Vec<String>>,
+    tool_choice: Option<String>,
+) -> ChatCompletionRequest {
+    let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
+
+    ChatCompletionRequest {
+        model,
+        messages,
+        temperature,
+        max_tokens,
+        stop,
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        tool_choice,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1205,6 +1273,47 @@ mod tests {
     }
 
     #[test]
+    fn test_message_conversion_defaults_missing_image_detail_to_auto() {
+        let msg = ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/jpeg;base64,Zm9v".to_string(),
+                    detail: None,
+                },
+            }],
+        );
+        let chat_msg: ChatCompletionMessage = msg.into();
+
+        let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,Zm9v"
+        );
+        assert_eq!(content[1]["image_url"]["detail"], "auto");
+    }
+
+    #[test]
+    fn test_message_conversion_preserves_explicit_image_detail() {
+        for expected in ["low", "high"] {
+            let msg = ChatMessage::user_with_parts(
+                "describe this",
+                vec![crate::llm::ContentPart::ImageUrl {
+                    image_url: crate::llm::ImageUrl {
+                        url: format!("https://example.com/{expected}.png"),
+                        detail: Some(expected.to_string()),
+                    },
+                }],
+            );
+            let chat_msg: ChatCompletionMessage = msg.into();
+            let content = serde_json::to_value(chat_msg.content).expect("serialize content");
+            assert_eq!(content[1]["image_url"]["detail"], expected);
+        }
+    }
+
+    #[test]
     fn test_tool_message_conversion() {
         let msg = ChatMessage::tool_result("call_123", "my_tool", "result");
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1251,6 +1360,44 @@ mod tests {
         let msg = ChatMessage::assistant("Hello");
         let chat_msg: ChatCompletionMessage = msg.into();
         assert!(chat_msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_convert_tool_definition_normalizes_top_level_oneof() {
+        use crate::llm::provider::ToolDefinition;
+
+        let tool = ToolDefinition {
+            name: "github".to_string(),
+            description: "Search GitHub".to_string(),
+            parameters: serde_json::json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "repo": { "type": "string" }
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "owner": { "type": "string" }
+                        }
+                    }
+                ]
+            }),
+        };
+
+        let converted = convert_tool_definition(tool);
+        let params = converted.function.parameters.expect("parameters");
+
+        assert_eq!(params["type"], "object");
+        assert!(params.get("oneOf").is_none());
+        let description = converted
+            .function
+            .description
+            .expect("description")
+            .to_lowercase();
+        assert!(description.contains("oneof"));
     }
 
     #[test]
@@ -1837,6 +1984,47 @@ mod tests {
         unsafe {
             std::env::remove_var("NEARAI_API_KEY");
         }
+    }
+
+    #[test]
+    fn test_build_chat_completion_request_normalizes_top_level_oneof() {
+        use crate::llm::provider::ToolDefinition;
+
+        let request = build_chat_completion_request(
+            "test-model".to_string(),
+            vec![ChatMessage::user("Use the github tool").into()],
+            vec![ToolDefinition {
+                name: "github".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters: serde_json::json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "repo": { "type": "string" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "owner": { "type": "string" }
+                            }
+                        }
+                    ]
+                }),
+            }],
+            Some(0.2),
+            Some(16),
+            None,
+            Some("auto".to_string()),
+        );
+
+        let tools = request.tools.expect("tools present");
+        assert_eq!(tools.len(), 1);
+        let parameters = tools[0].function.parameters.as_ref().expect("parameters");
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("oneOf").is_none());
+        assert!(parameters.get("properties").is_some());
     }
 
     // -- ModelInfo serde alias tests ------------------------------------------

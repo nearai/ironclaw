@@ -200,6 +200,15 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
     "llm_custom_providers",
     "ollama_base_url",
     "openai_compatible_base_url",
+    // Provider-selection keys — every member shares one LLM provider chain,
+    // so the choice of backend and the provider-specific endpoint knobs
+    // (Bedrock region / cross-region prefix / AWS profile) must be gated
+    // to admins. Members can still pick their own model via `selected_model`,
+    // which is intentionally NOT in this list.
+    "llm_backend",
+    "bedrock_region",
+    "bedrock_cross_region",
+    "bedrock_profile",
 ];
 
 /// Remove admin-only LLM setting keys from a flat DB settings map.
@@ -1035,6 +1044,13 @@ mod tests {
             "openai_compatible_base_url".to_string(),
             serde_json::json!("http://100.64.0.1"),
         );
+        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+        map.insert("bedrock_region".to_string(), serde_json::json!("us-east-1"));
+        map.insert("bedrock_cross_region".to_string(), serde_json::json!("us"));
+        map.insert(
+            "bedrock_profile".to_string(),
+            serde_json::json!("prod-bedrock"),
+        );
         map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
         map.insert("agent.name".to_string(), serde_json::json!("Iron"));
 
@@ -1044,7 +1060,15 @@ mod tests {
         assert!(!map.contains_key("llm_custom_providers"));
         assert!(!map.contains_key("ollama_base_url"));
         assert!(!map.contains_key("openai_compatible_base_url"));
-        // Non-admin keys must survive.
+        assert!(
+            !map.contains_key("llm_backend"),
+            "provider backend is admin-only"
+        );
+        assert!(!map.contains_key("bedrock_region"));
+        assert!(!map.contains_key("bedrock_cross_region"));
+        assert!(!map.contains_key("bedrock_profile"));
+        // Model selection stays per-user — admin chooses the provider,
+        // members pick the model within it.
         assert_eq!(
             map.get("selected_model"),
             Some(&serde_json::json!("gpt-4o"))
@@ -1053,16 +1077,16 @@ mod tests {
     }
 
     #[test]
-    fn strip_admin_only_llm_keys_is_a_no_op_for_clean_map() {
+    fn strip_admin_only_llm_keys_preserves_model_selection() {
         let mut map = HashMap::new();
         map.insert("selected_model".to_string(), serde_json::json!("gpt-4o"));
-        map.insert("llm_backend".to_string(), serde_json::json!("openai"));
+        map.insert("agent.name".to_string(), serde_json::json!("Iron"));
 
         strip_admin_only_llm_keys(&mut map);
 
         assert_eq!(map.len(), 2);
         assert!(map.contains_key("selected_model"));
-        assert!(map.contains_key("llm_backend"));
+        assert!(map.contains_key("agent.name"));
     }
 
     // --- async DNS regression (#1955: don't stall the tokio worker) ---

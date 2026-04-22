@@ -180,7 +180,9 @@ impl SubmissionParser {
             && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
             && matches!(
                 submission,
-                Submission::ExecApproval { .. } | Submission::ExternalCallback { .. }
+                Submission::ExecApproval { .. }
+                    | Submission::ExternalCallback { .. }
+                    | Submission::GateAuthResolution { .. }
             )
         {
             return submission;
@@ -306,6 +308,14 @@ pub enum Submission {
         request_id: Uuid,
     },
 
+    /// Resolve an authentication gate with an exact request id.
+    GateAuthResolution {
+        /// ID of the pending authentication gate being resolved.
+        request_id: Uuid,
+        /// Credential submission or cancellation for the gate.
+        resolution: AuthGateResolution,
+    },
+
     /// Simple approval response (yes/no/always) for the current pending approval.
     ApprovalResponse {
         /// Whether the execution was approved.
@@ -394,6 +404,12 @@ pub enum Submission {
         /// The plan subcommand.
         sub: PlanSubcommand,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AuthGateResolution {
+    CredentialProvided { token: String },
+    Cancelled,
 }
 
 /// Subcommands for the /plan command.
@@ -822,6 +838,27 @@ mod tests {
             "Expected ExecApproval, got {:?}",
             parsed
         );
+    }
+
+    #[test]
+    fn test_parser_json_gate_auth_resolution() {
+        let request_id = Uuid::new_v4();
+        let json = serde_json::to_string(&Submission::GateAuthResolution {
+            request_id,
+            resolution: AuthGateResolution::CredentialProvided {
+                token: "secret-token".to_string(),
+            },
+        })
+        .expect("serialize");
+
+        let parsed = SubmissionParser::parse(&json);
+        assert!(matches!(
+            parsed,
+            Submission::GateAuthResolution {
+                request_id: rid,
+                resolution: AuthGateResolution::CredentialProvided { token }
+            } if rid == request_id && token == "secret-token"
+        ));
     }
 
     #[test]

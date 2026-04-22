@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 
-use super::settings::resolve_settings_store;
 use crate::channels::web::auth::AdminUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::features::settings::resolve_settings_store;
+use crate::channels::web::platform::state::GatewayState;
 use crate::tools::permissions::{
     ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY, AdminToolPolicy, parse_admin_tool_policy,
     validate_admin_tool_policy,
@@ -29,8 +29,7 @@ pub async fn tool_policy_get_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
-    if pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),
@@ -73,8 +72,7 @@ pub async fn tool_policy_put_handler(
     AdminUser(_admin): AdminUser,
     Json(policy): Json<AdminToolPolicy>,
 ) -> Result<Json<AdminToolPolicy>, (StatusCode, String)> {
-    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: gateway-mode probe, not a state mutation
-    if pool.is_none() {
+    if !state.multi_tenant_mode {
         return Err((
             StatusCode::NOT_FOUND,
             "Admin tool policy is only available in multi-tenant mode".to_string(),

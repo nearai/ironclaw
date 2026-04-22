@@ -1,0 +1,88 @@
+---
+source: tests/e2e_engine_v2.rs
+---
+response_count: 1
+has_final_response: true
+tool_calls:
+  - name: shell
+    success: true
+  - name: shell
+    success: true
+  - name: shell
+    success: true
+events:
+  - kind: thinking
+    message: processing...
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 19610 in / 148 out token
+  - kind: tool_started
+    name: shell
+  - kind: tool_completed
+    name: shell
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 19742 in / 112 out token
+  - kind: tool_started
+    name: shell
+  - kind: tool_completed
+    name: shell
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 21386 in / 110 out token
+  - kind: tool_started
+    name: shell
+  - kind: tool_completed
+    name: shell
+    success: true
+    error: ~
+  - kind: thinking
+    message: calling llm...
+  - kind: thinking
+    message: step complete — 39477 in / 656 out token
+  - kind: status
+    message: done
+  - kind: other
+    variant: Other
+event_kind_counts:
+  Other: 1
+  Status: 1
+  Thinking: 9
+  ToolCompleted: 3
+  ToolStarted: 3
+llm_call_count: 4
+safety_warning_count: 0
+engine_threads:
+  - final_state: Done
+    step_count: 4
+    message_roles:
+      - System
+      - User
+      - Assistant
+    event_kinds:
+      - MessageAdded
+      - StateChanged
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - ActionExecuted
+      - StepStarted
+      - StepCompleted
+      - StateChanged
+      - MessageAdded
+      - StateChanged
+    issues:
+      - severity: info
+        category: mixed_mode

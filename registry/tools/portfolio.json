@@ -1,0 +1,36 @@
+{
+  "name": "portfolio",
+  "display_name": "Portfolio",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "keywords": [
+    "defi",
+    "portfolio",
+    "yield",
+    "wallet",
+    "rebalance",
+    "near-intents",
+    "crypto"
+  ],
+  "source": {
+    "dir": "tools-src/portfolio",
+    "capabilities": "portfolio-tool.capabilities.json",
+    "crate_name": "portfolio-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Dune Analytics",
+    "secrets": [
+      "dune_api_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://dune.com/settings/api"
+  },
+  "tags": [
+    "defi",
+    "finance"
+  ]
+}

@@ -8,7 +8,10 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod attachment_tests {
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    use tokio::sync::Mutex;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -22,6 +25,15 @@ mod attachment_tests {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
+    /// Serialize tests that mutate the process-global engine `project_root`
+    /// via `override_engine_project_root_for_test`. Concurrent overrides
+    /// would trample each other's paths — the lock is still required even
+    /// though each test now uses its own tempdir.
+    fn engine_v2_attachment_root_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     fn make_attachment(kind: AttachmentKind) -> IncomingAttachment {
         IncomingAttachment {
             id: "att-1".to_string(),
@@ -31,6 +43,7 @@ mod attachment_tests {
             size_bytes: None,
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: vec![],
             duration_secs: None,
@@ -164,9 +177,9 @@ mod attachment_tests {
 
         // The text should note the image is sent as visual content
         assert!(
-            last_user_msg
-                .content
-                .contains("[Image attached — sent as visual content]"),
+            last_user_msg.content.contains(
+                "[Image attached — you can already see this image directly in the conversation."
+            ),
             "augmented text should note image sent as visual content"
         );
 
@@ -206,5 +219,98 @@ mod attachment_tests {
 
         rig.verify_trace_expects(&trace, &responses);
         rig.shutdown();
+    }
+
+    #[tokio::test]
+    async fn engine_v2_channel_attachments_persist_for_telegram_and_whatsapp() {
+        let _guard = engine_v2_attachment_root_lock().lock().await;
+
+        // Each iteration gets its own tempdir so attachment writes stay
+        // fully off the host HOME directory. The previous version of this
+        // test derived `project_root` from `bootstrap::ironclaw_base_dir()`
+        // and would actually write real files into `~/.ironclaw/attachments`
+        // on a dev machine / CI runner.
+        let project_root_tmp = tempfile::tempdir().expect("create attachment project_root tempdir");
+        let project_root = project_root_tmp.path().to_path_buf();
+
+        for channel in ["telegram", "whatsapp"] {
+            let rig = TestRigBuilder::new().with_engine_v2().build().await;
+            // Redirect the engine's project_root to our tempdir so the
+            // assertion on saved_path below sees the real write. Without
+            // this override the engine joins paths against the cached
+            // `ironclaw_base_dir()` (first-caller-wins LazyLock), which
+            // resolves to `$HOME/.ironclaw` and is unrelated to the
+            // per-test tempdir here.
+            assert!(
+                ironclaw::bridge::override_engine_project_root_for_test(project_root.clone()).await,
+                "engine state should be installed after build()"
+            );
+
+            let attachment_bytes = format!("Attachment from {channel}").into_bytes();
+            let mut msg = IncomingMessage::new(channel, "cross-channel-user", "check this file");
+            msg.attachments.push(IncomingAttachment {
+                id: format!("{channel}-att-1"),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some(format!("{channel}-notes.txt")),
+                size_bytes: Some(attachment_bytes.len() as u64),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: Some(format!("Attachment from {channel}")),
+                data: attachment_bytes.clone(),
+                duration_secs: None,
+            });
+
+            rig.send_incoming(msg).await;
+            let deadline = tokio::time::Instant::now() + TIMEOUT;
+            let requests = loop {
+                let requests = rig.captured_llm_requests();
+                if !requests.is_empty() {
+                    break requests;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "should capture an LLM request for {channel}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            let last_request = requests.last().expect("captured LLM request");
+            let last_user_msg = last_request
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, ironclaw::llm::Role::User))
+                .expect("user message");
+
+            let expected_suffix = format!("{channel}-notes.txt");
+            let project_path = last_user_msg
+                .content
+                .split("project_path=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .expect("project_path attribute");
+            assert!(
+                project_path.contains(".ironclaw/attachments/"),
+                "missing persisted attachment path for {channel}: {}",
+                last_user_msg.content
+            );
+            assert!(
+                project_path.ends_with(&expected_suffix),
+                "unexpected persisted path for {channel}: {project_path}"
+            );
+
+            let saved_path = project_root.join(project_path);
+            assert!(
+                saved_path.exists(),
+                "saved attachment missing: {}",
+                saved_path.display()
+            );
+            assert_eq!(
+                std::fs::read(saved_path).expect("read saved attachment"),
+                attachment_bytes
+            );
+
+            rig.shutdown();
+        }
     }
 }

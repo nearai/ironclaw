@@ -1,0 +1,39 @@
+id: bridge-opportunity
+description: |
+  Cross-chain rebalance via NEAR Intents. The plan has a 3-leg
+  movement (withdraw on ethereum → bridge → deposit on base). The
+  replay solver returns a quoted bundle with `depends_on` edges; the
+  bundler must respect the topo order and the bounded checks must
+  pass against the config.
+steps:
+  - name: build_intent
+    action: build_intent
+    params:
+      plan:
+        proposal_id: bridge-opportunity
+        legs:
+          - kind: withdraw
+            chain: ethereum
+            description: Withdraw 5000 USDC from Aave v3 on Ethereum
+          - kind: bridge
+            chain: base
+            description: Bridge USDC Ethereum → Base
+          - kind: deposit
+            chain: base
+            description: Deposit into Morpho Blue on Base
+        expected_out:
+          symbol: USDC
+          chain: base
+          amount: "4985.00"
+          value_usd: "4985.00"
+        expected_cost_usd: "15.00"
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 10000
+        max_slippage_bps: 50
+      solver: replay
+    expect:
+      bundle_legs_min: 3
+      bundle_schema_version: portfolio-intent/1

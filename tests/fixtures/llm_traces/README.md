@@ -4,6 +4,41 @@ Trace fixtures are JSON files that script LLM behavior for deterministic E2E tes
 
 Traces can be **hand-written** or **recorded** from a live session using the `RecordingLlm` wrapper (`src/llm/recording.rs`). Recorded traces include additional fields (memory snapshots, HTTP exchanges, expected tool results) that enable fully deterministic replay.
 
+## Two files per scenario: driver + regression snapshot
+
+A trace plays two distinct roles, owned by two different files:
+
+| Role | File | Owner | When it changes |
+|------|------|-------|-----------------|
+| **Replay driver** | `.json` under this directory | `RecordingLlm` / hand-written | Only when you re-record from a new live session |
+| **Regression snapshot** | `tests/snapshots/replay__<name>.snap` | `insta` via `ReplayOutcome` | Every time engine dispatch, tools, or safety changes observable output |
+
+The JSON encodes *what the LLM would have said*. It's a stub, not a contract, and it lives in this directory. The `.snap` encodes *what the agent actually did with that response* (tool order, final state, retrospective issues) — it's the reviewable contract, lives in `tests/snapshots/`, and is what reviewers diff on every PR touching engine code.
+
+Editing the JSON without re-generating the snapshot is a code smell: it means the regression the snapshot was pinning moved. Run `cargo insta review` to inspect and accept the drift.
+
+### When to touch which
+
+- **Prompt-wording change** in the engine: usually no JSON change, often a snapshot drift — normal, review and accept.
+- **Tool sequencing change**: JSON stays the same; snapshot drifts to reflect the new order.
+- **LLM provider switch** (new model, new backend): re-record fixtures; snapshots may or may not drift depending on how the new model routes.
+- **Recording a fresh fixture**: `scripts/replay-snap.sh record <name>` drives both.
+
+## Developer ergonomics
+
+```bash
+scripts/replay-snap.sh review       # interactive diff review (cargo insta review)
+scripts/replay-snap.sh accept       # accept all pending snapshots
+scripts/replay-snap.sh test         # run the replay gate locally (cargo insta test --check)
+scripts/replay-snap.sh record <name>  # record a fresh fixture against a real LLM
+scripts/trace-coverage.sh           # report which EventKind variants have snapshot coverage
+```
+
+CI runs the gate via `cargo insta test --test-runner nextest` with
+`NEXTEST_PROFILE=ci`, so test binaries execute in parallel processes
+and the per-test timeouts defined in `.config/nextest.toml` apply.
+Local dev does not require nextest — `cargo test` still works.
+
 ## Trace Format
 
 A trace is a model name and a list of **turns**. Each turn pairs a user message with the LLM response steps that follow it.

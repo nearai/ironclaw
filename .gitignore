@@ -25,6 +25,10 @@ bench-results/
 # Coverage reports (local runs, not committed)
 /coverage/
 
+# Canary / E2E run outputs (per-run logs, screenshots, trace artifacts —
+# CI uploads these via actions/upload-artifact; never commit local copies)
+artifacts/
+
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
@@ -34,6 +38,7 @@ trace_*.json
 # Local Claude Code settings (machine-specific, should not be committed)
 .claude/settings.local.json
 .worktrees/
+.ironclaw/
 
 # Python cache
 __pycache__/
@@ -41,3 +46,9 @@ __pycache__/
 *.pyo
 *.pyd
 engine_trace_*.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.json
+tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.log
+# Per-test live-replay logs — generated when running `--ignored` live
+# tests locally. Only the .json fixtures for each scenario are checked
+# in; the .log files are local debugging artifacts.
+tests/fixtures/llm_traces/live/*.log
