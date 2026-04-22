@@ -140,6 +140,27 @@
     }
   },
   {
+    "id": "manifest",
+    "aliases": [
+      "mnfst"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://app.manifest.build/v1",
+    "api_key_env": "MANIFEST_API_KEY",
+    "api_key_required": true,
+    "base_url_env": "MANIFEST_BASE_URL",
+    "model_env": "MANIFEST_MODEL",
+    "default_model": "auto",
+    "description": "Manifest smart model router (auto-routes to cheapest capable model)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_manifest_api_key",
+      "key_url": "https://app.manifest.build",
+      "display_name": "Manifest",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "groq",
     "aliases": [],
     "protocol": "open_ai_completions",
