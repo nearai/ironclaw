@@ -368,16 +368,30 @@ At least one of the following should improve without hurting pass rate:
 - fewer total turns
 - better scenario success rate
 
-### Additional rich-object canary (2026-04-22)
+### Additional rich-object canaries (2026-04-22)
 
-Added one live/replay scenario specifically for the new result-object layer:
+Added live/replay scenarios specifically for the new result-object layer:
 
 - `codeact_completed_process_shim_vs_rich_objects`
   - baseline: shimmed `run(...)` returning the existing normalized dict-like result
   - variant: shimmed `run(...)` with `CODEACT_HOST_RESULT_OBJECTS` enabled so the model sees `CompletedProcess`
   - task: run a tiny local script, verify success, and summarize stdout lines
+- `codeact_completed_process_recovery_shim_vs_rich_objects`
+  - baseline: dict-like `run(...)` result
+  - variant: `CompletedProcess`
+  - task: run a failing validator, inspect failure output, repair a local config file, rerun, and verify success
+- `codeact_http_response_shim_vs_rich_objects`
+  - baseline: dict-like `http_request(...)` result
+  - variant: `HttpResponse`
+  - task: fetch update instructions over HTTP, edit a local file, POST the edited content for validation, and verify success
 
-This is intentionally a **canary / ergonomics benchmark**, not a claim that rich objects are already a large ROI win. It verifies that the richer object layer is replayable, preserves canonical `shell` execution underneath, and can be compared against the stable shim baseline with the same harness.
+These are intentionally **canary / ergonomics benchmarks**, not claims that rich objects are already clear ROI wins. They verify that the richer object layer is replayable, preserves canonical `shell` / `http` execution underneath, and can be compared against the stable shim baseline with the same harness.
+
+Initial observations from those rich-object canaries:
+
+- the simple `CompletedProcess` canary is roughly neutral
+- the more complex `CompletedProcess` recovery scenario was actually worse in the recorded pass (more LLM calls / tokens), which is useful evidence against assuming richer objects automatically help
+- the `HttpResponse` scenario was roughly neutral on tokens/calls, with a small reduction in total tool calls for the rich variant
 
 ## Feature flag / rollout suggestion
 

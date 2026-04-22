@@ -1,0 +1,48 @@
+# Live Test Session: codeact_host_shims_completed_process_recovery_rich
+# Mode: Live
+# LLM calls: 3, Input tokens: 61907, Output tokens: 1065
+# Wall time: 26.5s, Cost: $0.0000
+# ──────────────────────────────────────────────────
+
+## Turn 1
+[USER] › Use a Python CodeAct script, not plain prose. In the directory "/tmp/ironclaw_live_codeact_shims/completed_process_recovery/rich", there is an `app.conf` file and a validator script `./check_config.sh`. Run the validator first. It should fail because `app.conf` is missing one required line. Inspect the failure output to determine what line is missing, update `app.conf` to add that line while preserving the existing `name=demo` line, rerun the validator, verify success, then re-read `app.conf` and call FINAL exactly with `config=name=demo,mode=enabled`. You may use `read_text(...)` and `write_text(...)` for the file edit. IMPORTANT: this is the RICH variant. Rich host result objects are enabled, so `await run(...)` returns a `CompletedProcess`. Use the first process object's `stderr` to learn what is missing. After fixing the file, rerun the validator and call `check.check_returncode()` on the successful second run before finalizing.
+────────────────────────────────────────────────────
+config=name=demo,mode=enabled
+
+## Activity
+  ○ Processing...
+  ○ Calling LLM...
+  ○ Step complete — 20219 in / 362 out tokens
+  ● __codeact__
+  ✗ __codeact__: CodeAct execution failed: 
+Error: Traceback (most recent call last):
+  File "step.py", line 1, in <module>
+    import os.path
+ModuleNotFoundError: No module named 'os.path'
+  ○ Calling LLM...
+  ○ Step complete — 20624 in / 343 out tokens
+  ● shell(./check_config.sh)
+  ✓ shell(./check_config.sh)
+  ● __codeact__
+  ✗ __codeact__: CodeAct execution failed: 
+Error: Traceback (most recent call last):
+  File "step.py", line 23, in <module>
+    raise Exception("Could not determine missing line from validator stderr: " + stderr_text)
+Exception: Could not determine missing line from validator stderr: 
+  ○ Calling LLM...
+  ○ Step complete — 21064 in / 360 out tokens
+  ● shell(./check_config.sh)
+  ✓ shell(./check_config.sh)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/completed_process...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/completed_process...)
+  ● write_file(name=demo
+mode=enabled
+)
+  ✓ write_file(name=demo
+mode=enabled
+)
+  ● shell(./check_config.sh)
+  ✓ shell(./check_config.sh)
+  ● read_file(/tmp/ironclaw_live_codeact_shims/completed_process...)
+  ✓ read_file(/tmp/ironclaw_live_codeact_shims/completed_process...)
+  … Done

@@ -36,7 +36,14 @@ mod tests {
     use std::sync::OnceLock;
     use std::time::Duration;
 
-    use tokio::sync::Mutex;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        routing::{get, post},
+    };
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex, oneshot};
 
     use crate::support::cleanup::CleanupGuard;
     use crate::support::live_harness::{LiveTestHarnessBuilder, TestMode};
@@ -74,6 +81,25 @@ mod tests {
         tool_calls_started: Vec<String>,
         tool_calls_completed: Vec<(String, bool)>,
         trace_errors: Vec<String>,
+    }
+
+    struct HttpScenarioGuard {
+        _cleanup: CleanupGuard,
+        shutdown: Option<oneshot::Sender<()>>,
+    }
+
+    impl Drop for HttpScenarioGuard {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct HttpResponseScenarioState {
+        required_status: String,
+        required_marker: String,
     }
 
     fn trace_fixture_path(test_name: &str) -> PathBuf {
@@ -147,15 +173,104 @@ mod tests {
         )))
         .unwrap_or_else(|e| panic!("failed to load recorded trace for {scenario_id}/{label}: {e}"));
 
-        trace
+        let parts: Vec<String> = trace
             .turns
             .iter()
             .flat_map(|turn| turn.steps.iter())
-            .find_map(|step| match &step.response {
+            .filter_map(|step| match &step.response {
                 TraceResponse::Text { content, .. } => Some(content.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing recorded text response for {scenario_id}/{label}"))
+            .collect();
+
+        assert!(
+            !parts.is_empty(),
+            "missing recorded text response for {scenario_id}/{label}"
+        );
+        parts.join("\n")
+    }
+
+    async fn http_plan_handler(
+        State(state): State<HttpResponseScenarioState>,
+    ) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "required_status": state.required_status,
+            "required_marker": state.required_marker,
+        }))
+    }
+
+    async fn http_validate_handler(
+        State(state): State<HttpResponseScenarioState>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        let content = payload
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        let mut missing = Vec::new();
+        let required_status_line = format!("status={}", state.required_status);
+        if !content
+            .lines()
+            .any(|line| line.trim() == required_status_line)
+        {
+            missing.push(required_status_line);
+        }
+        if !content
+            .lines()
+            .any(|line| line.trim() == state.required_marker)
+        {
+            missing.push(state.required_marker.clone());
+        }
+
+        if missing.is_empty() {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "summary": "validated" })),
+            )
+        } else {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "ok": false, "missing": missing })),
+            )
+        }
+    }
+
+    async fn start_http_response_result_object_server() -> (String, oneshot::Sender<()>) {
+        let state = HttpResponseScenarioState {
+            required_status: "done".to_string(),
+            required_marker: "reviewed=true".to_string(),
+        };
+        let app = Router::new()
+            .route("/plan", get(http_plan_handler))
+            .route("/validate", post(http_validate_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local http scenario server");
+        let addr = listener.local_addr().expect("local http scenario addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        (format!("http://{addr}"), shutdown_tx)
+    }
+
+    fn ensure_http_allow_localhost_enabled() {
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            // SAFETY: this ignored live/replay benchmark binary is run serially,
+            // and HttpTool caches this flag in a OnceLock on first use. We set
+            // it once process-wide so localhost test servers remain available
+            // regardless of test execution order.
+            unsafe {
+                std::env::set_var("HTTP_ALLOW_LOCALHOST", "1");
+            }
+        });
     }
 
     fn total_tokens(trace: &TraceMetrics) -> u32 {
@@ -330,6 +445,8 @@ mod tests {
         tolerate_host_failures: bool,
         rich_result_objects: bool,
     ) -> VariantRun {
+        ensure_http_allow_localhost_enabled();
+
         let test_name = variant_test_name_for_label(scenario_id, label);
         let harness = LiveTestHarnessBuilder::new(&test_name)
             .with_engine_v2(true)
@@ -430,6 +547,53 @@ mod tests {
         (
             CleanupGuard::new().dir(dir.display().to_string()),
             dir.display().to_string(),
+        )
+    }
+
+    fn setup_completed_process_recovery(label: &str) -> (CleanupGuard, String) {
+        let dir = Path::new(ROOT)
+            .join("completed_process_recovery")
+            .join(label);
+        reset_dir(&dir);
+        let config = dir.join("app.conf");
+        fs::write(&config, "name=demo\n").expect("failed to seed app.conf");
+        let check = dir.join("check_config.sh");
+        fs::write(
+            &check,
+            "#!/bin/sh\nif grep -qx 'mode=enabled' app.conf; then\n  printf 'config ok\\n'\n  exit 0\nelse\n  printf 'missing mode=enabled in app.conf\\n' >&2\n  exit 7\nfi\n",
+        )
+        .expect("failed to seed check_config.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&check)
+                .expect("failed to stat check_config.sh")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&check, perms).expect("failed to chmod check_config.sh");
+        }
+        (
+            CleanupGuard::new().dir(dir.display().to_string()),
+            dir.display().to_string(),
+        )
+    }
+
+    async fn setup_http_response_result_object(label: &str) -> (HttpScenarioGuard, String, String) {
+        let dir = Path::new(ROOT)
+            .join("http_response_result_object")
+            .join(label);
+        reset_dir(&dir);
+        let status_file = dir.join("status.txt");
+        fs::write(&status_file, "status=pending\nowner=alice\n")
+            .expect("failed to seed status.txt");
+        let (base_url, shutdown) = start_http_response_result_object_server().await;
+        (
+            HttpScenarioGuard {
+                _cleanup: CleanupGuard::new().dir(dir.display().to_string()),
+                shutdown: Some(shutdown),
+            },
+            dir.display().to_string(),
+            base_url,
         )
     }
 
@@ -986,6 +1150,38 @@ mod tests {
         }
     }
 
+    fn assert_completed_process_recovery(root: &str) {
+        let path = Path::new(root).join("app.conf");
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("missing app.conf after recovery scenario: {e}"));
+        assert!(
+            content.lines().any(|line| line.trim() == "name=demo"),
+            "expected app.conf to preserve name=demo, got: {content:?}"
+        );
+        assert!(
+            content.lines().any(|line| line.trim() == "mode=enabled"),
+            "expected app.conf to contain mode=enabled, got: {content:?}"
+        );
+    }
+
+    fn assert_http_response_result_object(root: &str) {
+        let path = Path::new(root).join("status.txt");
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("missing status.txt after http scenario: {e}"));
+        assert!(
+            content.lines().any(|line| line.trim() == "status=done"),
+            "expected status.txt to contain status=done, got: {content:?}"
+        );
+        assert!(
+            content.lines().any(|line| line.trim() == "owner=alice"),
+            "expected status.txt to preserve owner=alice, got: {content:?}"
+        );
+        assert!(
+            content.lines().any(|line| line.trim() == "reviewed=true"),
+            "expected status.txt to contain reviewed=true, got: {content:?}"
+        );
+    }
+
     fn read_json_prompt(path: &str, variant: Variant) -> String {
         match variant {
             Variant::Raw => format!(
@@ -1019,6 +1215,40 @@ mod tests {
         } else {
             format!(
                 "{preamble} IMPORTANT: this is the SHIM baseline variant, not the rich-object variant. Treat `await run(...)` as the current normalized dict-like result with fields like `ok`, `exit_code`, `stdout`, `stderr`, and `sandboxed`. Do not assume object methods like `check_returncode()` are available."
+            )
+        }
+    }
+
+    fn completed_process_recovery_prompt(root: &str, rich_result_objects: bool) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. In the directory {root:?}, there is an `app.conf` file and a validator script `./check_config.sh`. Run the validator first. It should fail because `app.conf` is missing one required line. Inspect the failure output to determine what line is missing, update `app.conf` to add that line while preserving the existing `name=demo` line, rerun the validator, verify success, then re-read `app.conf` and call FINAL exactly with `config=name=demo,mode=enabled`. You may use `read_text(...)` and `write_text(...)` for the file edit."
+        );
+        if rich_result_objects {
+            format!(
+                "{preamble} IMPORTANT: this is the RICH variant. Rich host result objects are enabled, so `await run(...)` returns a `CompletedProcess`. Use the first process object's `stderr` to learn what is missing. After fixing the file, rerun the validator and call `check.check_returncode()` on the successful second run before finalizing."
+            )
+        } else {
+            format!(
+                "{preamble} IMPORTANT: this is the SHIM baseline variant, not the rich-object variant. Treat `await run(...)` as the current normalized dict-like result with fields like `ok`, `exit_code`, `stdout`, `stderr`, and `sandboxed`. Use `.get(...)` access on that result and do not assume object methods like `check_returncode()` exist."
+            )
+        }
+    }
+
+    fn http_response_result_object_prompt(
+        root: &str,
+        api_base: &str,
+        rich_result_objects: bool,
+    ) -> String {
+        let preamble = format!(
+            "Use a Python CodeAct script, not plain prose. In the directory {root:?}, there is a `status.txt` file. First fetch the update plan from {api_base:?}/plan using `http_request('GET', url)`. The JSON response body includes exactly two keys: `required_status` and `required_marker`. Update `status.txt` so it keeps `owner=alice`, changes the status line to `status=<required_status>`, and ensures the exact `required_marker` line exists. Then POST the updated file content as JSON to {api_base:?}/validate using `http_request('POST', url, json={{'content': text}})`. If validation succeeds, re-read `status.txt` and call FINAL exactly with `state=status=done|reviewed=true`. You may use `read_text(...)` and `write_text(...)` for the file edit."
+        );
+        if rich_result_objects {
+            format!(
+                "{preamble} IMPORTANT: this is the RICH variant. Rich host result objects are enabled, so `http_request(...)` returns an `HttpResponse`. Use `plan.status` plus `plan.json()` for the first call, then `validation.status` plus `validation.json()` for the second call."
+            )
+        } else {
+            format!(
+                "{preamble} IMPORTANT: this is the SHIM baseline variant, not the rich-object variant. Treat `http_request(...)` as the current normalized dict-like result with fields like `status`, `json_body`, `text`, and `headers`. Use `.get('status')` and `.get('json_body')` style access, and do not assume methods like `.json()` exist."
             )
         }
     }
@@ -1693,6 +1923,156 @@ mod tests {
         assert!(
             rich_code.contains("proc.stdout"),
             "rich variant should use attribute access on CompletedProcess, got: {}",
+            rich_code
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_completed_process_recovery_shim_vs_rich_objects() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_names("completed_process_recovery", &["shim", "rich"]) {
+            return;
+        }
+
+        let (_cleanup_shim, shim_root) = setup_completed_process_recovery("shim");
+        let shim = run_named_variant(
+            "completed_process_recovery",
+            "shim",
+            completed_process_recovery_prompt(&shim_root, false),
+            false,
+        )
+        .await;
+
+        let (_cleanup_rich, rich_root) = setup_completed_process_recovery("rich");
+        let rich = run_named_variant(
+            "completed_process_recovery",
+            "rich",
+            completed_process_recovery_prompt(&rich_root, true),
+            true,
+        )
+        .await;
+
+        print_pair_report(&shim, &rich);
+        assert_exact_suffix(&shim.response, "config=", "name=demo,mode=enabled");
+        assert_exact_suffix(&rich.response, "config=", "name=demo,mode=enabled");
+        assert_completed_process_recovery(&shim_root);
+        assert_completed_process_recovery(&rich_root);
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .filter(|name| name.starts_with("shell"))
+                .count()
+                >= 2,
+            "shim recovery variant should run the validator at least twice, got {:?}",
+            shim.tool_calls_started
+        );
+        assert!(
+            rich.tool_calls_started
+                .iter()
+                .filter(|name| name.starts_with("shell"))
+                .count()
+                >= 2,
+            "rich recovery variant should run the validator at least twice, got {:?}",
+            rich.tool_calls_started
+        );
+
+        let shim_code = recorded_text_response("completed_process_recovery", "shim");
+        assert!(
+            shim_code.contains("get(\"stderr\"") || shim_code.contains("get('stderr'"),
+            "shim recovery variant should inspect stderr through dict-like access, got: {}",
+            shim_code
+        );
+        assert!(
+            !shim_code.contains("check_returncode"),
+            "shim recovery variant should not use rich-object methods, got: {}",
+            shim_code
+        );
+
+        let rich_code = recorded_text_response("completed_process_recovery", "rich");
+        assert!(
+            rich_code.contains(".stderr"),
+            "rich recovery variant should inspect CompletedProcess.stderr, got: {}",
+            rich_code
+        );
+        assert!(
+            rich_code.contains("check_returncode()"),
+            "rich recovery variant should use CompletedProcess.check_returncode(), got: {}",
+            rich_code
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn codeact_http_response_shim_vs_rich_objects() {
+        let _guard = engine_v2_live_lock().lock().await;
+        if !should_run_fixture_names("http_response_result_object", &["shim", "rich"]) {
+            return;
+        }
+
+        let (_cleanup_shim, shim_root, shim_api) = setup_http_response_result_object("shim").await;
+        let shim = run_named_variant(
+            "http_response_result_object",
+            "shim",
+            http_response_result_object_prompt(&shim_root, &shim_api, false),
+            false,
+        )
+        .await;
+
+        let (_cleanup_rich, rich_root, rich_api) = setup_http_response_result_object("rich").await;
+        let rich = run_named_variant(
+            "http_response_result_object",
+            "rich",
+            http_response_result_object_prompt(&rich_root, &rich_api, true),
+            true,
+        )
+        .await;
+
+        print_pair_report(&shim, &rich);
+        assert_exact_suffix(&shim.response, "state=", "status=done|reviewed=true");
+        assert_exact_suffix(&rich.response, "state=", "status=done|reviewed=true");
+        assert_http_response_result_object(&shim_root);
+        assert_http_response_result_object(&rich_root);
+        assert!(
+            shim.tool_calls_started
+                .iter()
+                .filter(|name| name.starts_with("http"))
+                .count()
+                >= 2,
+            "shim http variant should make at least two canonical http calls, got {:?}",
+            shim.tool_calls_started
+        );
+        assert!(
+            rich.tool_calls_started
+                .iter()
+                .filter(|name| name.starts_with("http"))
+                .count()
+                >= 2,
+            "rich http variant should make at least two canonical http calls, got {:?}",
+            rich.tool_calls_started
+        );
+
+        let shim_code = recorded_text_response("http_response_result_object", "shim");
+        assert!(
+            shim_code.contains("get(\"json_body\"") || shim_code.contains("get('json_body'"),
+            "shim http variant should use dict-like json_body access, got: {}",
+            shim_code
+        );
+        assert!(
+            !shim_code.contains("plan.json()") && !shim_code.contains("validation.json()"),
+            "shim http variant should not use HttpResponse.json(), got: {}",
+            shim_code
+        );
+
+        let rich_code = recorded_text_response("http_response_result_object", "rich");
+        assert!(
+            rich_code.contains("plan.status") || rich_code.contains("validation.status"),
+            "rich http variant should use HttpResponse.status, got: {}",
+            rich_code
+        );
+        assert!(
+            rich_code.contains("plan.json()") || rich_code.contains("validation.json()"),
+            "rich http variant should use HttpResponse.json(), got: {}",
             rich_code
         );
     }
