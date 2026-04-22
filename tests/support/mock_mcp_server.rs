@@ -31,6 +31,21 @@ pub struct MockToolResponse {
     pub content: serde_json::Value,
 }
 
+/// Full tool definition override — lets a test specify the exact
+/// wire-shape of the tool advertised via `tools/list`. Needed for
+/// tests that care about fields beyond name (e.g. annotations, which
+/// drive the approval policy on `McpToolWrapper` and therefore
+/// participate in the tool-surface conflict fingerprint).
+#[derive(Clone, Debug)]
+pub struct MockToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub annotations: Option<serde_json::Value>,
+    /// JSON response content for `tools/call`.
+    pub content: serde_json::Value,
+}
+
 /// A running mock MCP server.
 pub struct MockMcpServer {
     /// Base URL including port (e.g., "http://127.0.0.1:12345").
@@ -111,6 +126,12 @@ struct McpToolDef {
     description: String,
     #[serde(rename = "inputSchema")]
     input_schema: serde_json::Value,
+    /// Optional — omitted from the JSON entirely when `None` so the
+    /// wire matches a spec-minimum MCP server that emits no
+    /// `annotations` field. Present when a test wants to exercise
+    /// approval-hint behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    annotations: Option<serde_json::Value>,
 }
 
 /// Start a mock MCP server on a random port.
@@ -129,6 +150,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
                 name: tr.name.clone(),
                 description: format!("Mock tool: {}", tr.name),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                annotations: None,
             });
         }
         response_map
@@ -179,6 +201,83 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
     });
 
     // Wait briefly for the server to start accepting.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    MockMcpServer {
+        base_url,
+        state,
+        shutdown_tx: Some(shutdown_tx),
+        handle: Some(handle),
+    }
+}
+
+/// Same as `start_mock_mcp_server` but every dimension of the
+/// `tools/list` response is caller-controlled — description,
+/// input schema, and annotations. Use this when a test needs to
+/// exercise behavior that depends on specific fields the default
+/// builder hard-codes (e.g. the tool-surface conflict check, which
+/// hashes annotations to detect approval-policy divergence across
+/// users of the same server name).
+pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockMcpServer {
+    let mut tools = Vec::new();
+    let mut response_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut seen_tools = std::collections::HashSet::new();
+
+    for spec in &specs {
+        if seen_tools.insert(spec.name.clone()) {
+            tools.push(McpToolDef {
+                name: spec.name.clone(),
+                description: spec.description.clone(),
+                input_schema: spec.input_schema.clone(),
+                annotations: spec.annotations.clone(),
+            });
+        }
+        response_map
+            .entry(spec.name.clone())
+            .or_default()
+            .push(spec.content.clone());
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind mock MCP server");
+    let addr: SocketAddr = listener.local_addr().expect("no local addr");
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let state = Arc::new(MockState {
+        base_url: base_url.clone(),
+        tools,
+        tool_responses: response_map,
+        tool_response_idx: std::sync::Mutex::new(HashMap::new()),
+        recorded_requests: std::sync::Mutex::new(Vec::new()),
+        session_counter: std::sync::Mutex::new(0),
+    });
+
+    let app = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(handle_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(handle_auth_server_metadata),
+        )
+        .route("/register", post(handle_register))
+        .route("/authorize", get(handle_authorize))
+        .route("/token", post(handle_token))
+        .route("/mcp", post(handle_mcp))
+        .with_state(Arc::clone(&state));
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("mock MCP server failed");
+    });
+
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     MockMcpServer {

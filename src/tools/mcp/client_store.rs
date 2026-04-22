@@ -22,37 +22,111 @@ use tokio::sync::RwLock;
 use super::client::McpClient;
 use super::protocol::McpTool;
 
+/// Render a `serde_json::Value` as a stable, order-insensitive
+/// canonical JSON string: object keys are sorted recursively. Used
+/// by `surface_signature` so two schemas that are semantically
+/// equivalent but differ only in JSON key order produce the same
+/// fingerprint. Without this, a backend that emits `{"a":1,"b":2}`
+/// on one call and `{"b":2,"a":1}` on the next — both legal JSON —
+/// would falsely trip the cross-tenant conflict check.
+fn canonicalize_json(value: &serde_json::Value) -> String {
+    fn recurse(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    // `serde_json::to_string` on a String handles the
+                    // escape rules correctly.
+                    out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                    out.push(':');
+                    recurse(&map[*k], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    recurse(v, out);
+                }
+                out.push(']');
+            }
+            other => {
+                // Null / bool / number / string: serde_json's default
+                // serialization is already canonical.
+                out.push_str(&serde_json::to_string(other).unwrap_or_default());
+            }
+        }
+    }
+    let mut buf = String::new();
+    recurse(value, &mut buf);
+    buf
+}
+
 /// Compute a deterministic fingerprint of an MCP server's reported tool
 /// surface. Used by `McpClientStore::check_surface_conflict` to detect
 /// when two users activate the same `server_name` but the backend
-/// returns a different set of tools or different parameter schemas —
-/// the global `ToolRegistry` is keyed by tool name only, so the second
-/// activation's schemas would silently shadow the first and leak
-/// schema shape across tenants.
+/// returns a different set of tools, different parameter schemas, or
+/// different behavioral annotations — the global `ToolRegistry` is
+/// keyed by tool name only, so the second activation would silently
+/// shadow the first and leak whichever dimension differed across
+/// tenants.
 ///
-/// The fingerprint covers every field that surfaces to the LLM or the
-/// runtime: tool name, description, and the full input-schema JSON.
-/// Sorted by name so server-side ordering doesn't influence the hash.
+/// The fingerprint covers every dimension of the tool surface that
+/// affects runtime behavior visible to the LLM or the approval
+/// pipeline:
+/// - `name` + `description` (schema advertised to the LLM)
+/// - `input_schema` (parameter validation shape)
+/// - `annotations` (approval gating — `destructive_hint` drives
+///   `McpTool::requires_approval`, and `ToolRegistry` treats the
+///   globally-registered wrapper's approval policy as authoritative
+///   for every caller. Two backends returning the same schema but
+///   different `destructive_hint` must therefore be treated as
+///   conflicting surfaces, else one user's approval semantics leak
+///   to the other.)
+///
+/// JSON values (`input_schema`, `annotations`) are canonicalized
+/// (object keys sorted recursively) so that semantically equivalent
+/// payloads with different key order produce identical fingerprints.
+/// Tool list is sorted by name so server-side ordering doesn't
+/// influence the hash either.
 pub fn surface_signature(tools: &[McpTool]) -> String {
-    let mut entries: Vec<(String, String, String)> = tools
+    let mut entries: Vec<(String, String, String, String)> = tools
         .iter()
         .map(|t| {
             (
                 t.name.clone(),
                 t.description.clone(),
-                serde_json::to_string(&t.input_schema).unwrap_or_default(),
+                canonicalize_json(&t.input_schema),
+                t.annotations
+                    .as_ref()
+                    .map(|a| {
+                        canonicalize_json(
+                            &serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                        )
+                    })
+                    .unwrap_or_default(),
             )
         })
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
-    for (name, description, schema) in &entries {
+    for (name, description, schema, annotations) in &entries {
         hasher.update(name.as_bytes());
         hasher.update(b"\x00");
         hasher.update(description.as_bytes());
         hasher.update(b"\x00");
         hasher.update(schema.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(annotations.as_bytes());
         hasher.update(b"\x01");
     }
     format!("{:x}", hasher.finalize())
@@ -210,6 +284,115 @@ impl McpClientStore {
 mod tests {
     use super::*;
     use crate::tools::mcp::McpClient;
+    use crate::tools::mcp::protocol::{McpTool, McpToolAnnotations};
+
+    fn tool_with_annotations(name: &str, annotations: Option<McpToolAnnotations>) -> McpTool {
+        McpTool {
+            name: name.to_string(),
+            description: "shared-desc".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            annotations,
+        }
+    }
+
+    #[test]
+    fn surface_signature_diverges_when_only_annotations_differ() {
+        // Same name / description / schema; only `destructive_hint`
+        // differs. McpTool::requires_approval reads that field, and
+        // ToolRegistry keys wrappers by tool name — without this
+        // dimension in the fingerprint, the second user's activation
+        // would be accepted and the globally-registered wrapper's
+        // approval policy would leak to the first user's dispatches.
+        let safe = tool_with_annotations(
+            "do_thing",
+            Some(McpToolAnnotations {
+                destructive_hint: false,
+                ..Default::default()
+            }),
+        );
+        let destructive = tool_with_annotations(
+            "do_thing",
+            Some(McpToolAnnotations {
+                destructive_hint: true,
+                ..Default::default()
+            }),
+        );
+
+        let sig_safe = surface_signature(std::slice::from_ref(&safe));
+        let sig_destructive = surface_signature(std::slice::from_ref(&destructive));
+        assert_ne!(
+            sig_safe, sig_destructive,
+            "annotation-only divergence must produce distinct fingerprints so \
+             cross-user activations with different approval policies are \
+             rejected instead of sharing one registered wrapper",
+        );
+
+        // And make the round-trip obvious: identical annotations must
+        // still fingerprint identically.
+        let also_safe = tool_with_annotations(
+            "do_thing",
+            Some(McpToolAnnotations {
+                destructive_hint: false,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            sig_safe,
+            surface_signature(std::slice::from_ref(&also_safe)),
+            "matching annotations must fingerprint identically",
+        );
+    }
+
+    #[test]
+    fn surface_signature_is_object_key_order_insensitive() {
+        // JSON object key ordering is not semantically meaningful, and
+        // a server is free to emit the same schema with different key
+        // order across calls. Without canonicalization, two equivalent
+        // schemas would produce different fingerprints and incorrectly
+        // trip the cross-tenant conflict check, blocking legitimate
+        // multi-user activation.
+        let t1 = McpTool {
+            name: "do_thing".into(),
+            description: "d".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+                "required": ["a", "b"]
+            }),
+            annotations: None,
+        };
+        let t2 = McpTool {
+            name: "do_thing".into(),
+            description: "d".into(),
+            input_schema: serde_json::json!({
+                "required": ["a", "b"],
+                "properties": {"b": {"type": "integer"}, "a": {"type": "string"}},
+                "type": "object"
+            }),
+            annotations: None,
+        };
+        assert_eq!(
+            surface_signature(std::slice::from_ref(&t1)),
+            surface_signature(std::slice::from_ref(&t2)),
+            "equivalent schemas with reordered keys must fingerprint identically",
+        );
+    }
+
+    #[test]
+    fn surface_signature_treats_missing_vs_default_annotations_distinctly() {
+        // `None` vs `Some(default)` are different wire shapes (the
+        // server either omitted `annotations` entirely or returned an
+        // explicit empty object). The fingerprint should reflect the
+        // actual bytes the server sent so two backends that disagree
+        // on whether to emit the field are not merged into one
+        // wrapper surface.
+        let none = tool_with_annotations("do_thing", None);
+        let default_some = tool_with_annotations("do_thing", Some(McpToolAnnotations::default()));
+        assert_ne!(
+            surface_signature(std::slice::from_ref(&none)),
+            surface_signature(std::slice::from_ref(&default_some)),
+        );
+    }
 
     #[tokio::test]
     async fn insert_and_get_are_per_user() {

@@ -139,6 +139,24 @@ def generate_secrets_master_key() -> str:
 
 
 def reserve_loopback_port() -> int:
+    """Pick a free loopback port by binding and closing a throwaway socket.
+
+    Known TOCTOU: the kernel releases the port the moment this
+    function returns, so a concurrent process COULD claim it before
+    the caller's subprocess re-binds. For subprocesses that accept
+    `--port 0` and print the bound port on stdout (e.g. `mock_llm.py`),
+    prefer the "bind-then-report" pattern via `wait_for_port_line`
+    instead — that pattern is race-free because the child is the only
+    party that ever binds.
+
+    This helper remains for callers whose subprocess expects a
+    pre-chosen port via env var (e.g. the ironclaw gateway, which
+    reads `GATEWAY_PORT` as a fixed u16 and does not support
+    port-0 discovery). The race window there is on the order of
+    milliseconds on an otherwise idle canary runner; if you see
+    `EADDRINUSE` failures in practice, wrap the subprocess start in
+    a retry loop that re-reserves on bind failure.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
@@ -308,9 +326,14 @@ async def start_gateway_stack(
 ) -> GatewayStack:
     secrets_master_key = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
-    mock_llm_port = reserve_loopback_port()
+    # Race-free port acquisition: `mock_llm.py --port 0` binds the
+    # kernel-assigned port itself and prints `MOCK_LLM_PORT=<N>` on
+    # startup, which `wait_for_port_line` reads below. Using
+    # `reserve_loopback_port()` here would open a TOCTOU window where
+    # another process could claim the port between reservation and
+    # subprocess bind.
     mock_llm_proc = subprocess.Popen(
-        [str(python), str(E2E_DIR / "mock_llm.py"), "--port", str(mock_llm_port)],
+        [str(python), str(E2E_DIR / "mock_llm.py"), "--port", "0"],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

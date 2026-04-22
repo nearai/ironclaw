@@ -85,7 +85,19 @@ impl McpProcessManager {
         // Same-user re-activation: shut the previous child down before
         // the new one takes its slot so the old process doesn't become
         // an orphan.
-        if let Some(old_transport) = self.transports.write().await.remove(&key)
+        //
+        // CRITICAL: the write-guard from `transports.write().await` is
+        // dropped at the end of the enclosing `let` statement (inside
+        // this block), BEFORE we `.await` the shutdown. Holding the
+        // guard across the await would block every other caller of
+        // the process manager for the duration of `shutdown()` (which
+        // can take seconds if the child is wedged) and risk a
+        // deadlock if any shutdown path ever re-enters the manager.
+        let previous = {
+            let mut map = self.transports.write().await;
+            map.remove(&key)
+        };
+        if let Some(old_transport) = previous
             && let Err(e) = old_transport.shutdown().await
         {
             tracing::warn!(
@@ -180,8 +192,15 @@ impl McpProcessManager {
                 ))
             })?;
 
-        // Shut down and remove old transport to avoid orphaning a wedged process.
-        if let Some(old_transport) = self.transports.write().await.remove(&key) {
+        // Shut down and remove old transport to avoid orphaning a
+        // wedged process. The write-guard is scoped to the inner
+        // block so it's released BEFORE awaiting `shutdown()` — see
+        // the matching rationale in `spawn_stdio`.
+        let previous = {
+            let mut map = self.transports.write().await;
+            map.remove(&key)
+        };
+        if let Some(old_transport) = previous {
             let _ = old_transport.shutdown().await;
         }
 

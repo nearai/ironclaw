@@ -17,7 +17,9 @@ mod tests {
     use ironclaw::tools::mcp::{McpProcessManager, McpServerConfig, McpSessionManager};
     use secrecy::SecretString;
 
-    use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
+    use crate::support::mock_mcp_server::{
+        MockToolResponse, MockToolSpec, start_mock_mcp_server, start_mock_mcp_server_with_specs,
+    };
 
     const SERVER_NAME: &str = "shared_mcp";
     const USER_A: &str = "user-a";
@@ -569,6 +571,110 @@ mod tests {
         assert!(
             tool_registry.get("different_tool").await.is_none(),
             "user-b's divergent tool name must NOT have leaked into the registry",
+        );
+
+        mock_server_a.shutdown().await;
+        mock_server_b.shutdown().await;
+    }
+
+    /// Regression: the tool-surface conflict check must reject a
+    /// cross-user activation that agrees on name / description /
+    /// schema but disagrees on MCP annotations. `destructive_hint`
+    /// drives `McpTool::requires_approval`, and `ToolRegistry` holds
+    /// a SINGLE globally-registered wrapper per tool name — so if
+    /// two tenants' backends advertised the same tool with different
+    /// annotation hints, one user's approval policy would silently
+    /// leak into the other's dispatches. The fingerprint must treat
+    /// annotation-only divergence as a conflict.
+    #[tokio::test]
+    async fn activate_rejects_divergent_annotations_on_shared_server_name() {
+        // Same name + description + schema; only `destructiveHint`
+        // differs between the two backends.
+        let shared_name = "mock_search";
+        let shared_description = "Mock tool: mock_search".to_string();
+        let shared_schema = serde_json::json!({"type": "object", "properties": {}});
+        let shared_content = serde_json::json!({"ok": true});
+
+        let mock_server_a = start_mock_mcp_server_with_specs(vec![MockToolSpec {
+            name: shared_name.to_string(),
+            description: shared_description.clone(),
+            input_schema: shared_schema.clone(),
+            annotations: Some(serde_json::json!({"destructiveHint": false})),
+            content: shared_content.clone(),
+        }])
+        .await;
+        let mock_server_b = start_mock_mcp_server_with_specs(vec![MockToolSpec {
+            name: shared_name.to_string(),
+            description: shared_description,
+            input_schema: shared_schema,
+            annotations: Some(serde_json::json!({"destructiveHint": true})),
+            content: shared_content,
+        }])
+        .await;
+
+        let (db, _db_dir) = test_db().await;
+        let ext_dirs = tempfile::tempdir().expect("extension tempdir");
+        let secrets = test_secrets_store();
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tool_registry),
+            None,
+            None,
+            ext_dirs.path().join("tools"),
+            ext_dirs.path().join("channels"),
+            None,
+            "owner".to_string(),
+            Some(db),
+            Vec::new(),
+        );
+
+        let server_a = McpServerConfig::new(SERVER_NAME, mock_server_a.mcp_url());
+        let server_b = McpServerConfig::new(SERVER_NAME, mock_server_b.mcp_url());
+
+        // User A activates with destructive_hint=false.
+        let tool_name_a =
+            activate_for_user(&manager, &secrets, &server_a, USER_A, "token-user-a").await;
+        assert!(
+            tool_registry.get(&tool_name_a).await.is_some(),
+            "user-a's wrapper must be live after the first activation",
+        );
+
+        // User B attempts activation against a backend whose only
+        // divergence is `destructiveHint=true`.
+        manager
+            .install(
+                SERVER_NAME,
+                Some(&server_b.url),
+                Some(ExtensionKind::McpServer),
+                USER_B,
+            )
+            .await
+            .expect("install (distinct url) for user-b should succeed");
+        secrets
+            .create(
+                USER_B,
+                CreateSecretParams::new(server_b.token_secret_name(), "token-user-b")
+                    .with_provider(SERVER_NAME.to_string()),
+            )
+            .await
+            .expect("store user-b token");
+
+        let activation = manager.activate(SERVER_NAME, USER_B).await;
+        let err = activation
+            .expect_err("user-b activation must be rejected when only the MCP annotations diverge");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("tool surface"),
+            "rejection message should reference the surface conflict, got: {message}"
+        );
+
+        // User A's wrapper and approval policy must be intact.
+        assert!(
+            tool_registry.get(&tool_name_a).await.is_some(),
+            "rejection must leave user-a's wrapper in the registry",
         );
 
         mock_server_a.shutdown().await;
