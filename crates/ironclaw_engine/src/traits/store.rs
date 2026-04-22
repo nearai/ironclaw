@@ -337,16 +337,21 @@ pub trait Store: Send + Sync {
         Err(unimplemented_budget_op("reserve_atomic"))
     }
 
-    /// Settle an outstanding reservation by converting `reserved_usd` to
-    /// `spent_usd`, with `actual_usd` possibly smaller than the original
-    /// reservation. `actual_usd` above the reservation is allowed
-    /// (post-flight cost > pre-flight estimate) and is recorded as extra
-    /// spend, provided it stays within the limit. Implementations must
-    /// do this in a single atomic step to avoid a reconcile/reserve race.
+    /// Settle an outstanding reservation. Atomically:
+    /// - decrements `reserved_usd` by `original_reserved_usd` (clamped at 0),
+    /// - increments `spent_usd` by `actual_usd`,
+    /// - increments `tokens_used` by `actual_tokens`.
+    ///
+    /// `actual_usd` may differ from `original_reserved_usd` (post-flight
+    /// cost was smaller or larger than the pre-flight estimate) — the
+    /// reservation slot is cleared regardless, and only the actual spend
+    /// is recorded.
+    #[allow(clippy::too_many_arguments)]
     async fn reconcile_reservation(
         &self,
         _reservation_id: ReservationId,
         _budget_id: BudgetId,
+        _original_reserved_usd: Decimal,
         _actual_usd: Decimal,
         _actual_tokens: u64,
         _now: DateTime<Utc>,
@@ -355,11 +360,13 @@ pub trait Store: Send + Sync {
     }
 
     /// Release a reservation without recording any spend (thread aborted,
-    /// LLM call failed before doing work). Decrements `reserved_usd`.
+    /// LLM errored before doing work). Decrements `reserved_usd` by
+    /// `original_reserved_usd` (clamped at 0).
     async fn release_reservation(
         &self,
         _reservation_id: ReservationId,
         _budget_id: BudgetId,
+        _original_reserved_usd: Decimal,
         _now: DateTime<Utc>,
     ) -> Result<(), BudgetError> {
         Err(unimplemented_budget_op("release_reservation"))

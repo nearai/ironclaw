@@ -1246,6 +1246,120 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+/// Cost-based budget persistence (issue #2843).
+///
+/// Backs the engine `BudgetEnforcer` runtime. Methods map 1:1 to the
+/// budget operations on `ironclaw_engine::Store` — the host-side
+/// `HybridStore` delegates to a `BudgetStore` implementation via
+/// `Arc<dyn Database>`.
+///
+/// Implementations MUST ensure `reserve` is atomic against concurrent
+/// readers: two threads may not both observe the same pre-increment
+/// ledger state and both succeed. PostgreSQL achieves this with a
+/// conditional `UPDATE ... RETURNING`; libSQL with
+/// `BEGIN IMMEDIATE` + read-check-update-commit.
+#[async_trait]
+pub trait BudgetStore: Send + Sync {
+    /// Persist a new budget row.
+    async fn save_budget(
+        &self,
+        budget: &ironclaw_engine::types::budget::Budget,
+    ) -> Result<(), DatabaseError>;
+
+    /// Load a budget by id.
+    async fn load_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<Option<ironclaw_engine::types::budget::Budget>, DatabaseError>;
+
+    /// Return all active budgets whose scope matches `(scope_kind, scope_id)`.
+    async fn list_active_budgets_for_scope(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Vec<ironclaw_engine::types::budget::Budget>, DatabaseError>;
+
+    /// Mark a budget inactive. Row is retained for audit.
+    async fn deactivate_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<(), DatabaseError>;
+
+    /// Read or lazily create the ledger row covering `now` for `budget_id`.
+    async fn get_or_create_ledger_for_period(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<ironclaw_engine::types::budget::BudgetLedger, DatabaseError>;
+
+    /// Atomically reserve `requested_usd` against the current-period
+    /// ledger iff the remaining headroom is sufficient.
+    ///
+    /// - `Ok(Some((reservation_id, new_ledger)))` — durably committed.
+    /// - `Ok(None)` — clean denial (budget would be exceeded).
+    /// - `Err(..)` — plumbing failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn reserve_atomic(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        requested_usd: Decimal,
+        requested_tokens: u64,
+        limit_usd: Decimal,
+        now: DateTime<Utc>,
+    ) -> Result<
+        Option<(
+            ironclaw_engine::types::budget::ReservationId,
+            ironclaw_engine::types::budget::BudgetLedger,
+        )>,
+        DatabaseError,
+    >;
+
+    /// Convert a reservation into settled spend atomically. Decrements
+    /// `reserved_usd` by `original_reserved_usd` (clamped at 0),
+    /// increments `spent_usd` by `actual_usd`.
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_reservation(
+        &self,
+        reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        original_reserved_usd: Decimal,
+        actual_usd: Decimal,
+        actual_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Release a reservation without recording spend. Decrements
+    /// `reserved_usd` by `original_reserved_usd` (clamped at 0).
+    async fn release_reservation(
+        &self,
+        reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        original_reserved_usd: Decimal,
+        now: DateTime<Utc>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Record an audit row in `budget_events`.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_budget_event(
+        &self,
+        id: Uuid,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        thread_id: Option<ironclaw_engine::ThreadId>,
+        event_kind: &str,
+        amount_usd: Option<Decimal>,
+        tokens: Option<u64>,
+        reason: Option<&str>,
+        actor_user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1262,6 +1376,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + BudgetStore
     + Send
     + Sync
 {

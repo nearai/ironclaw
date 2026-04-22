@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
+    ApiTokenRecord, BudgetStore, ChannelPairingStore, ConversationStore, Database, IdentityStore,
+    JobStore, PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
     UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
@@ -1650,4 +1650,464 @@ impl IdentityStore for PgBackend {
         tx.commit().await?;
         Ok(())
     }
+}
+
+// ==================== BudgetStore (issue #2843) ====================
+
+#[async_trait]
+impl BudgetStore for PgBackend {
+    async fn save_budget(
+        &self,
+        budget: &ironclaw_engine::types::budget::Budget,
+    ) -> Result<(), DatabaseError> {
+        let client = self.pool().get().await?;
+        let usd = budget.limit.usd;
+        let tokens: Option<i64> = budget.limit.tokens.map(|n| n as i64);
+        let wall_clock: Option<i64> = budget.limit.wall_clock_secs.map(|n| n as i64);
+        let (period_tz, period_unit) = match &budget.period {
+            ironclaw_engine::types::budget::BudgetPeriod::Calendar { tz, unit } => {
+                (Some(tz.clone()), Some(unit.as_str().to_string()))
+            }
+            _ => (None, None),
+        };
+        client
+            .execute(
+                "INSERT INTO budgets (
+                    id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                    limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                    source, active, created_at, created_by
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                )",
+                &[
+                    &budget.id.0,
+                    &budget.scope.user_id(),
+                    &budget.scope.kind_str(),
+                    &budget.scope.scope_id(),
+                    &usd,
+                    &tokens,
+                    &wall_clock,
+                    &budget.period.kind_str(),
+                    &period_tz,
+                    &period_unit,
+                    &budget.source.as_str(),
+                    &budget.active,
+                    &budget.created_at,
+                    &budget.created_by,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("save_budget: {e}")))?;
+        Ok(())
+    }
+
+    async fn load_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<Option<ironclaw_engine::types::budget::Budget>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                    limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                    source, active, created_at, created_by
+                 FROM budgets WHERE id = $1",
+                &[&id.0],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("load_budget: {e}")))?;
+        row.map(budget_from_row).transpose()
+    }
+
+    async fn list_active_budgets_for_scope(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Vec<ironclaw_engine::types::budget::Budget>, DatabaseError> {
+        let client = self.pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                    limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                    source, active, created_at, created_by
+                 FROM budgets
+                 WHERE scope_kind = $1 AND scope_id = $2 AND active = TRUE",
+                &[&scope_kind, &scope_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("list_active_budgets_for_scope: {e}")))?;
+        rows.into_iter().map(budget_from_row).collect()
+    }
+
+    async fn deactivate_budget(
+        &self,
+        id: ironclaw_engine::types::budget::BudgetId,
+    ) -> Result<(), DatabaseError> {
+        let client = self.pool().get().await?;
+        client
+            .execute("UPDATE budgets SET active = FALSE WHERE id = $1", &[&id.0])
+            .await
+            .map_err(|e| DatabaseError::Query(format!("deactivate_budget: {e}")))?;
+        Ok(())
+    }
+
+    async fn get_or_create_ledger_for_period(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<ironclaw_engine::types::budget::BudgetLedger, DatabaseError> {
+        let client = self.pool().get().await?;
+        // ON CONFLICT DO NOTHING so concurrent callers don't race.
+        client
+            .execute(
+                "INSERT INTO budget_ledgers (
+                    budget_id, period_start, period_end, spent_usd, reserved_usd,
+                    tokens_used, updated_at
+                 ) VALUES ($1, $2, $3, 0, 0, 0, $4)
+                 ON CONFLICT (budget_id, period_start) DO NOTHING",
+                &[&budget_id.0, &period_start, &period_end, &now],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("get_or_create_ledger insert: {e}")))?;
+        let row = client
+            .query_one(
+                "SELECT budget_id, period_start, period_end, spent_usd, reserved_usd,
+                    tokens_used, updated_at
+                 FROM budget_ledgers
+                 WHERE budget_id = $1 AND period_start = $2",
+                &[&budget_id.0, &period_start],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("get_or_create_ledger select: {e}")))?;
+        ledger_from_row(row)
+    }
+
+    async fn reserve_atomic(
+        &self,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        requested_usd: Decimal,
+        _requested_tokens: u64,
+        limit_usd: Decimal,
+        now: DateTime<Utc>,
+    ) -> Result<
+        Option<(
+            ironclaw_engine::types::budget::ReservationId,
+            ironclaw_engine::types::budget::BudgetLedger,
+        )>,
+        DatabaseError,
+    > {
+        if requested_usd.is_sign_negative() {
+            return Err(DatabaseError::Query(
+                "reserve_atomic: requested_usd must be non-negative".into(),
+            ));
+        }
+
+        let client = self.pool().get().await?;
+
+        // Ensure the ledger row exists first — ON CONFLICT DO NOTHING.
+        client
+            .execute(
+                "INSERT INTO budget_ledgers (
+                    budget_id, period_start, period_end, spent_usd, reserved_usd,
+                    tokens_used, updated_at
+                 ) VALUES ($1, $2, $3, 0, 0, 0, $4)
+                 ON CONFLICT (budget_id, period_start) DO NOTHING",
+                &[&budget_id.0, &period_start, &period_end, &now],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("reserve_atomic seed ledger: {e}")))?;
+
+        // Conditional UPDATE: the row is modified ONLY if the check
+        // passes. Empty result ⇒ clean denial. `RETURNING` gives back
+        // the new ledger state in the same round-trip.
+        //
+        // NUMERIC arithmetic in PostgreSQL is lossless over the
+        // rust_decimal precision we use, so the in-SQL comparison is
+        // safe — no re-parse in application code, no TOCTOU window.
+        let row = client
+            .query_opt(
+                "UPDATE budget_ledgers
+                    SET reserved_usd = reserved_usd + $3,
+                        updated_at = $4
+                  WHERE budget_id = $1
+                    AND period_start = $2
+                    AND spent_usd + reserved_usd + $3 <= $5
+                 RETURNING budget_id, period_start, period_end, spent_usd,
+                           reserved_usd, tokens_used, updated_at",
+                &[
+                    &budget_id.0,
+                    &period_start,
+                    &requested_usd,
+                    &now,
+                    &limit_usd,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("reserve_atomic UPDATE: {e}")))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let ledger = ledger_from_row(row)?;
+        Ok(Some((
+            ironclaw_engine::types::budget::ReservationId::new(),
+            ledger,
+        )))
+    }
+
+    async fn reconcile_reservation(
+        &self,
+        _reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        original_reserved_usd: Decimal,
+        actual_usd: Decimal,
+        actual_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        if actual_usd.is_sign_negative() || original_reserved_usd.is_sign_negative() {
+            return Err(DatabaseError::Query(
+                "reconcile_reservation: amounts must be non-negative".into(),
+            ));
+        }
+        let tokens_delta = actual_tokens as i64;
+        let client = self.pool().get().await?;
+        client
+            .execute(
+                "UPDATE budget_ledgers
+                    SET spent_usd = spent_usd + $3,
+                        reserved_usd = GREATEST(reserved_usd - $4, 0),
+                        tokens_used = tokens_used + $5,
+                        updated_at = $6
+                  WHERE budget_id = $1 AND period_start = $2",
+                &[
+                    &budget_id.0,
+                    &period_start,
+                    &actual_usd,
+                    &original_reserved_usd,
+                    &tokens_delta,
+                    &now,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("reconcile_reservation: {e}")))?;
+        Ok(())
+    }
+
+    async fn release_reservation(
+        &self,
+        reservation_id: ironclaw_engine::types::budget::ReservationId,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        period_start: DateTime<Utc>,
+        original_reserved_usd: Decimal,
+        now: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        self.reconcile_reservation(
+            reservation_id,
+            budget_id,
+            period_start,
+            original_reserved_usd,
+            Decimal::ZERO,
+            0,
+            now,
+        )
+        .await
+    }
+
+    async fn record_budget_event(
+        &self,
+        id: Uuid,
+        budget_id: ironclaw_engine::types::budget::BudgetId,
+        thread_id: Option<ironclaw_engine::ThreadId>,
+        event_kind: &str,
+        amount_usd: Option<Decimal>,
+        tokens: Option<u64>,
+        reason: Option<&str>,
+        actor_user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let tokens_i64: Option<i64> = tokens.map(|n| n as i64);
+        let thread_uuid: Option<Uuid> = thread_id.map(|t| t.0);
+        let client = self.pool().get().await?;
+        client
+            .execute(
+                "INSERT INTO budget_events (
+                    id, budget_id, thread_id, event_kind, amount_usd, tokens,
+                    reason, actor_user_id, created_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &id,
+                    &budget_id.0,
+                    &thread_uuid,
+                    &event_kind,
+                    &amount_usd,
+                    &tokens_i64,
+                    &reason,
+                    &actor_user_id,
+                    &created_at,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("record_budget_event: {e}")))?;
+        Ok(())
+    }
+}
+
+fn budget_from_row(
+    row: tokio_postgres::Row,
+) -> Result<ironclaw_engine::types::budget::Budget, DatabaseError> {
+    use ironclaw_engine::types::budget as b;
+
+    let id: Uuid = row.get("id");
+    let user_id: String = row.get("user_id");
+    let scope_kind: String = row.get("scope_kind");
+    let scope_id: String = row.get("scope_id");
+
+    let scope = rehydrate_scope(&scope_kind, &scope_id, user_id)?;
+
+    let tokens: Option<i64> = row.get("limit_tokens");
+    let wall_clock: Option<i64> = row.get("limit_wall_clock_secs");
+    let limit = b::BudgetLimit {
+        usd: row.get("limit_usd"),
+        tokens: tokens.map(|n| n as u64),
+        wall_clock_secs: wall_clock.map(|n| n as u64),
+    };
+
+    let period_kind: String = row.get("period_kind");
+    let period_tz: Option<String> = row.get("period_tz");
+    let period_unit: Option<String> = row.get("period_unit");
+    let period = rehydrate_period(&period_kind, period_tz, period_unit)?;
+
+    let source_str: String = row.get("source");
+    let source = match source_str.as_str() {
+        "user_override" => b::BudgetSource::UserOverride,
+        "inherited" => b::BudgetSource::InheritedFromParent,
+        _ => b::BudgetSource::Default,
+    };
+
+    Ok(b::Budget {
+        id: b::BudgetId(id),
+        scope,
+        limit,
+        period,
+        source,
+        active: row.get("active"),
+        created_at: row.get("created_at"),
+        created_by: row.get("created_by"),
+    })
+}
+
+fn ledger_from_row(
+    row: tokio_postgres::Row,
+) -> Result<ironclaw_engine::types::budget::BudgetLedger, DatabaseError> {
+    let tokens_used: i64 = row.get("tokens_used");
+    Ok(ironclaw_engine::types::budget::BudgetLedger {
+        budget_id: ironclaw_engine::types::budget::BudgetId(row.get("budget_id")),
+        period_start: row.get("period_start"),
+        period_end: row.get("period_end"),
+        spent_usd: row.get("spent_usd"),
+        reserved_usd: row.get("reserved_usd"),
+        tokens_used: tokens_used as u64,
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn rehydrate_scope(
+    kind: &str,
+    scope_id: &str,
+    user_id: String,
+) -> Result<ironclaw_engine::types::budget::BudgetScope, DatabaseError> {
+    use ironclaw_engine::types::budget::{BackgroundKind, BudgetScope};
+
+    Ok(match kind {
+        "user" => BudgetScope::User { user_id },
+        "project" => BudgetScope::Project {
+            user_id,
+            project_id: ironclaw_engine::types::project::ProjectId(
+                Uuid::parse_str(scope_id)
+                    .map_err(|e| DatabaseError::Query(format!("project scope id: {e}")))?,
+            ),
+        },
+        "mission" => BudgetScope::Mission {
+            user_id,
+            mission_id: ironclaw_engine::types::mission::MissionId(
+                Uuid::parse_str(scope_id)
+                    .map_err(|e| DatabaseError::Query(format!("mission scope id: {e}")))?,
+            ),
+        },
+        "thread" => BudgetScope::Thread {
+            user_id,
+            thread_id: ironclaw_engine::ThreadId(
+                Uuid::parse_str(scope_id)
+                    .map_err(|e| DatabaseError::Query(format!("thread scope id: {e}")))?,
+            ),
+        },
+        "background" => {
+            let (kind_str, corr) = scope_id
+                .split_once(':')
+                .ok_or_else(|| DatabaseError::Query("background scope malformed".into()))?;
+            let bk = match kind_str {
+                "heartbeat" => BackgroundKind::Heartbeat,
+                "routine_lightweight" => BackgroundKind::RoutineLightweight,
+                "routine_standard" => BackgroundKind::RoutineStandard,
+                "mission_tick" => BackgroundKind::MissionTick,
+                "container_job" => BackgroundKind::ContainerJob,
+                "user_initiated" => BackgroundKind::UserInitiated,
+                other => {
+                    return Err(DatabaseError::Query(format!(
+                        "unknown background kind '{other}'"
+                    )));
+                }
+            };
+            BudgetScope::BackgroundInvocation {
+                user_id,
+                kind: bk,
+                correlation_id: corr.to_string(),
+            }
+        }
+        other => {
+            return Err(DatabaseError::Query(format!(
+                "unknown scope_kind '{other}'"
+            )));
+        }
+    })
+}
+
+fn rehydrate_period(
+    kind: &str,
+    tz: Option<String>,
+    unit: Option<String>,
+) -> Result<ironclaw_engine::types::budget::BudgetPeriod, DatabaseError> {
+    use ironclaw_engine::types::budget::{BudgetPeriod, PeriodUnit};
+
+    Ok(match kind {
+        "per_invocation" => BudgetPeriod::PerInvocation,
+        "rolling_24h" => BudgetPeriod::Rolling24h,
+        "calendar" => {
+            let tz = tz.ok_or_else(|| DatabaseError::Query("calendar period missing tz".into()))?;
+            let unit = match unit
+                .as_deref()
+                .ok_or_else(|| DatabaseError::Query("calendar period missing unit".into()))?
+            {
+                "day" => PeriodUnit::Day,
+                "week" => PeriodUnit::Week,
+                "month" => PeriodUnit::Month,
+                other => {
+                    return Err(DatabaseError::Query(format!(
+                        "unknown period_unit '{other}'"
+                    )));
+                }
+            };
+            BudgetPeriod::Calendar { tz, unit }
+        }
+        other => {
+            return Err(DatabaseError::Query(format!(
+                "unknown period_kind '{other}'"
+            )));
+        }
+    })
 }

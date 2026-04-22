@@ -322,38 +322,48 @@ mod tests {
 
     #[test]
     fn validate_rejects_negative_budget() {
-        let mut cfg = BudgetConfig::default();
-        cfg.user_daily_usd = dec!(-1);
+        let cfg = BudgetConfig {
+            user_daily_usd: dec!(-1),
+            ..BudgetConfig::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("BUDGET_USER_DAILY_USD"));
     }
 
     #[test]
     fn validate_rejects_budget_above_hard_cap() {
-        let mut cfg = BudgetConfig::default();
-        cfg.project_daily_usd = dec!(9999);
+        let cfg = BudgetConfig {
+            project_daily_usd: dec!(9999),
+            ..BudgetConfig::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("HARD_CAP_BUDGET_USD"));
     }
 
     #[test]
     fn validate_rejects_inverted_thresholds() {
-        let mut cfg = BudgetConfig::default();
-        cfg.warn_threshold = 0.95;
-        cfg.approval_threshold = 0.90;
+        let cfg = BudgetConfig {
+            warn_threshold: 0.95,
+            approval_threshold: 0.90,
+            ..BudgetConfig::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("BUDGET_APPROVAL_THRESHOLD"));
     }
 
     #[test]
     fn validate_rejects_out_of_range_thresholds() {
-        let mut cfg = BudgetConfig::default();
-        cfg.warn_threshold = 1.5;
-        cfg.approval_threshold = 2.0;
+        let cfg = BudgetConfig {
+            warn_threshold: 1.5,
+            approval_threshold: 2.0,
+            ..BudgetConfig::default()
+        };
         assert!(cfg.validate().is_err());
 
-        let mut cfg = BudgetConfig::default();
-        cfg.warn_threshold = 0.0;
+        let cfg = BudgetConfig {
+            warn_threshold: 0.0,
+            ..BudgetConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
