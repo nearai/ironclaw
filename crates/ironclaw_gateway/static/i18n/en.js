@@ -28,6 +28,7 @@ I18n.register('en', {
   'restart.progressTitle': 'Restarting IronClaw',
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
+  'restart.closeTooltip': 'Close',
   
   // Theme
   'theme.tooltipDark': 'Theme: Dark (click for Light)',
@@ -101,6 +102,7 @@ I18n.register('en', {
   'status.reconnecting': 'Reconnecting...',
   'status.teeVerified': 'TEE Verified',
   'status.restart': 'Restart',
+  'status.restartTooltip': 'Gracefully restart the process',
   'status.active': 'Active',
   'status.installed': 'Installed',
   'status.awaitingPairing': 'Awaiting Pairing',
@@ -457,6 +459,10 @@ I18n.register('en', {
   'config.builtin': 'built-in',
   'config.useProvider': 'Use',
   'config.configureProvider': 'Configure',
+  'config.notConfigured': 'Not Configured',
+  'config.configureToUse': 'Configure the API key before using this provider.',
+  'config.baseUrlRequired': 'Base URL is required. Please configure the provider first.',
+  'config.modelRequired': 'A model must be configured before using this provider.',
   'config.providerConfigured': 'Provider "{name}" configured (restart to apply)',
   'config.currentModel': 'Model: {model}',
   'config.providerName': 'Display Name',

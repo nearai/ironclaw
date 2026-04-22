@@ -37,7 +37,6 @@ use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
@@ -64,6 +63,26 @@ struct HostedOAuthFlowStart {
     flow: crate::auth::oauth::PendingOAuthFlow,
     instructions: Option<String>,
     setup_url: Option<String>,
+}
+
+/// Key for the `pending_auth` map. Per-user because the same extension name
+/// (e.g. `gmail`) can have a pending auth flow for user A and user B at the
+/// same time. Using a tuple struct instead of a delimited string avoids any
+/// separator-collision risk if an extension name or user id contains unusual
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PendingAuthKey {
+    user_id: String,
+    name: String,
+}
+
+impl PendingAuthKey {
+    fn new(user_id: &str, name: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -342,8 +361,21 @@ pub struct ExtensionManager {
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
     mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
-    /// Active MCP clients keyed by server name.
-    mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// Active MCP clients keyed by `(user, server)`. Shared as `Arc` with
+    /// every registered `McpToolWrapper` so tool dispatch can resolve the
+    /// caller's per-user client at execute time instead of embedding a
+    /// specific client in the globally-registered wrapper (which would
+    /// let the second activating user's credentials shadow the first).
+    mcp_clients: Arc<crate::tools::mcp::McpClientStore>,
+    /// Per-server async mutex that serialises `activate_mcp` and the
+    /// `McpServer` arm of `remove` on the same server name. Without this,
+    /// user B's `remove` (which unregisters the server's global tool
+    /// wrappers once it's the last user out) can interleave with user C's
+    /// `activate` (which re-registers the wrappers and inserts C's
+    /// client), leaving the store with C's client but the registry with
+    /// C's wrappers already unregistered. Parallelism across *different*
+    /// servers is preserved.
+    mcp_lifecycle_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 
     // WASM tool infrastructure
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -363,7 +395,7 @@ pub struct ExtensionManager {
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
-    pending_auth: RwLock<HashMap<String, PendingAuth>>,
+    pending_auth: RwLock<HashMap<PendingAuthKey, PendingAuth>>,
     /// Tunnel URL for webhook configuration and remote OAuth callbacks.
     tunnel_url: Option<String>,
     user_id: String,
@@ -612,7 +644,8 @@ impl ExtensionManager {
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
             mcp_process_manager,
-            mcp_clients: RwLock::new(HashMap::new()),
+            mcp_clients: Arc::new(crate::tools::mcp::McpClientStore::new()),
+            mcp_lifecycle_locks: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
@@ -1123,19 +1156,46 @@ impl ExtensionManager {
         &self.secrets
     }
 
-    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    /// Expose the per-user MCP client store. Tool wrappers registered in
+    /// the global `ToolRegistry` hold an `Arc<McpClientStore>` and resolve
+    /// the caller's client at dispatch time via
+    /// `store.get(ctx.user_id, server_name)`.
+    pub(crate) fn mcp_client_store(&self) -> Arc<crate::tools::mcp::McpClientStore> {
+        Arc::clone(&self.mcp_clients)
+    }
+
+    /// Fetch (lazy-creating if needed) the per-server activation/removal
+    /// lock. Caller should `.lock().await` the returned mutex and hold
+    /// the guard for the duration of the lifecycle transition
+    /// (activate's `insert + register`, or remove's `remove +
+    /// unregister`). Parallelism across different servers is preserved
+    /// because each server gets its own mutex.
+    async fn mcp_lifecycle_lock(&self, server_name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.mcp_lifecycle_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(server_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    /// Inject a pre-created MCP client (from startup loading) into the
+    /// manager and register its tool wrappers with the global
+    /// `ToolRegistry`. Wrappers hold `mcp_client_store()` and resolve the
+    /// caller's client at dispatch time from `JobContext.user_id`, so the
+    /// client must be stored before any tool call arrives.
     ///
-    /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
-    /// otherwise dropped. This method stores the client so that `list()` reports
-    /// accurate "connected" status and reconnection/session management works.
+    /// Returns the normalized tool names that were registered (empty if
+    /// the name fails validation or tool listing fails).
     pub(crate) async fn inject_mcp_client(
         &self,
         name: String,
+        user_id: &str,
         client: Arc<crate::tools::mcp::McpClient>,
-    ) {
+    ) -> Vec<String> {
         if name.is_empty() {
             tracing::warn!("inject_mcp_client called with empty name; ignoring");
-            return;
+            return Vec::new();
         }
         if let Err(e) = Self::validate_extension_name(&name) {
             tracing::warn!(
@@ -1143,9 +1203,72 @@ impl ExtensionManager {
                 name = %name,
                 "inject_mcp_client called with invalid name; ignoring"
             );
-            return;
+            return Vec::new();
         }
-        self.mcp_clients.write().await.insert(name, client);
+        // Take the per-server lifecycle lock so that if startup inject
+        // somehow overlaps with a user-initiated activate/remove for the
+        // same server (not expected in practice — startup runs before
+        // channels are open — but cheap defense-in-depth) the
+        // store-insert and tool-wrapper registration stay atomic.
+        let lifecycle_lock = self.mcp_lifecycle_lock(&name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+
+        // Fingerprint the client's tool surface before registering so we
+        // can detect the case where an earlier injected client for the
+        // same `name` (but a different `user_id`) reported a different
+        // set of tools — the `ToolRegistry` is keyed by tool name only,
+        // so the later registration would silently shadow the earlier
+        // one and leak schemas across tenants. The second `list_tools`
+        // call inside `create_tools_with_store` hits the per-client
+        // cache, so fetching the list here doesn't cost a second round
+        // trip.
+        let surface_signature = match client.list_tools().await {
+            Ok(tools) => crate::tools::mcp::surface_signature(&tools),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    server = %name,
+                    "inject_mcp_client: list_tools failed; skipping registration"
+                );
+                return Vec::new();
+            }
+        };
+        if let Some(other) = self
+            .mcp_clients
+            .check_surface_conflict(user_id, &name, &surface_signature)
+            .await
+        {
+            tracing::warn!(
+                server = %name,
+                conflicting_user = %other,
+                "inject_mcp_client: tool surface differs from an already-active user on the same server name; refusing to inject to avoid cross-tenant schema shadowing"
+            );
+            return Vec::new();
+        }
+        self.mcp_clients
+            .insert(user_id, &name, client.clone(), surface_signature)
+            .await;
+        match client
+            .create_tools_with_store(self.mcp_client_store())
+            .await
+        {
+            Ok(tool_impls) => {
+                let tool_names: Vec<String> =
+                    tool_impls.iter().map(|t| t.name().to_string()).collect();
+                for tool in tool_impls {
+                    self.tool_registry.register(tool).await;
+                }
+                tool_names
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    server = %name,
+                    "Failed to create tool wrappers for injected MCP client"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Register channel names that are already running in the current process.
@@ -1289,18 +1412,28 @@ impl ExtensionManager {
         self
     }
 
-    async fn clear_pending_extension_auth(&self, name: &str) {
+    async fn clear_pending_extension_auth(&self, name: &str, user_id: &str) {
         {
             let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
+            if let Some(old) = pending.remove(&PendingAuthKey::new(user_id, name))
                 && let Some(handle) = old.task_handle
             {
                 handle.abort();
             }
         }
 
-        let mut flows = self.pending_oauth_flows.write().await;
-        flows.retain(|_, flow| flow.extension_name != name);
+        self.drop_pending_oauth_flows_for(name, user_id).await;
+    }
+
+    /// Drop any `pending_oauth_flows` entries that reference the given
+    /// `(extension_name, user_id)` pair. Used by both the in-progress-auth
+    /// cleanup path and the `remove()` path; keeping one implementation
+    /// guarantees the two never drift on what "same flow" means.
+    async fn drop_pending_oauth_flows_for(&self, name: &str, user_id: &str) {
+        self.pending_oauth_flows
+            .write()
+            .await
+            .retain(|_, flow| !(flow.extension_name == name && flow.user_id == user_id));
     }
 
     fn rewrite_oauth_state_param(
@@ -1361,7 +1494,7 @@ impl ExtensionManager {
         // Dedupe by (secret_name, user_id): a retry from the same user for
         // the same credential should reuse a single pending entry rather than
         // accumulate stale flows. This logic used to live in
-        // bridge::auth_manager and was lost when the call moved here; without
+        // crate::auth::extension and was lost when the call moved here; without
         // it, repeated `check_action_auth` calls leak pending entries.
         let secret_name = request.flow.secret_name.clone();
         let user_id = request.flow.user_id.clone();
@@ -1372,7 +1505,7 @@ impl ExtensionManager {
         drop(pending_flows);
 
         self.pending_auth.write().await.insert(
-            request.name.clone(),
+            PendingAuthKey::new(&user_id, &request.name),
             PendingAuth {
                 _name: request.name.clone(),
                 _kind: request.kind,
@@ -1658,7 +1791,7 @@ impl ExtensionManager {
             } => {}
         }
 
-        if self.is_extension_active(&name, kind).await {
+        if self.is_extension_active(&name, kind, user_id).await {
             return Ok(EnsureReadyOutcome::Ready {
                 name,
                 kind,
@@ -1751,7 +1884,7 @@ impl ExtensionManager {
         if let Ok(servers) = self.load_mcp_servers(user_id).await {
             for server in servers.servers {
                 if !self
-                    .is_extension_active(&server.name, ExtensionKind::McpServer)
+                    .is_extension_active(&server.name, ExtensionKind::McpServer, user_id)
                     .await
                 {
                     for action in self.latent_actions_for_mcp_server(&server) {
@@ -1763,7 +1896,7 @@ impl ExtensionManager {
 
         for action in self.cached_latent_wasm_provider_actions(user_id).await {
             if self
-                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool)
+                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool, user_id)
                 .await
             {
                 continue;
@@ -1918,8 +2051,7 @@ impl ExtensionManager {
                 Ok(servers) => {
                     for server in &servers.servers {
                         let authenticated = self.mcp_has_configured_auth(server, user_id).await;
-                        let clients = self.mcp_clients.read().await;
-                        let active = clients.contains_key(&server.name);
+                        let active = self.mcp_clients.contains(user_id, &server.name).await;
                         let has_auth = if authenticated {
                             true
                         } else {
@@ -2156,15 +2288,16 @@ impl ExtensionManager {
         // Clean up any in-progress OAuth flows for this extension.
         // TCP mode: abort the listener task so port 9876 is freed immediately.
         // Gateway mode: remove stale pending flow entries.
-        if let Some(pending) = self.pending_auth.write().await.remove(&name)
+        if let Some(pending) = self
+            .pending_auth
+            .write()
+            .await
+            .remove(&PendingAuthKey::new(user_id, &name))
             && let Some(handle) = pending.task_handle
         {
             handle.abort();
         }
-        self.pending_oauth_flows
-            .write()
-            .await
-            .retain(|_, flow| flow.extension_name.as_str() != name);
+        self.drop_pending_oauth_flows_for(&name, user_id).await;
 
         match kind {
             ExtensionKind::McpServer => {
@@ -2172,22 +2305,42 @@ impl ExtensionManager {
                     .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
-                // Unregister tools with this server's normalized prefix.
-                let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
-                let tool_names: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&prefix))
-                    .collect();
+                // Hold the per-server lifecycle lock for the entire
+                // remove-and-unregister sequence. Without it a concurrent
+                // `activate` (user C) could slip between our "last user
+                // out" check and the `tool_registry.unregister` loop,
+                // leaving C with a client in the store but no registered
+                // wrappers. Atomicity on the client side is handled by
+                // `remove_and_check_empty`, which holds the store's
+                // write lock across both the remove and the emptiness
+                // probe — see `.claude/rules/safety-and-sandbox.md`
+                // "Cache Keys Must Be Complete" and the TOCTOU scenario
+                // in review comment on src/extensions/manager.rs.
+                let lifecycle_lock = self.mcp_lifecycle_lock(&name).await;
+                let _lifecycle_guard = lifecycle_lock.lock().await;
 
-                for tool_name in &tool_names {
-                    self.tool_registry.unregister(tool_name).await;
+                let removed_last_active_client = self
+                    .mcp_clients
+                    .remove_and_check_empty(user_id, &name)
+                    .await;
+
+                let mut tool_names = Vec::new();
+                if removed_last_active_client {
+                    // Unregister tools with this server's normalized prefix only
+                    // when no other user still has the same server active.
+                    let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
+                    tool_names = self
+                        .tool_registry
+                        .list()
+                        .await
+                        .into_iter()
+                        .filter(|t| t.starts_with(&prefix))
+                        .collect();
+
+                    for tool_name in &tool_names {
+                        self.tool_registry.unregister(tool_name).await;
+                    }
                 }
-
-                // Remove MCP client
-                self.mcp_clients.write().await.remove(&name);
 
                 // Remove from config
                 self.remove_mcp_server(&name, user_id)
@@ -2669,7 +2822,7 @@ impl ExtensionManager {
                 let info = serde_json::json!({
                     "name": name,
                     "kind": "mcp_server",
-                    "connected": self.mcp_clients.read().await.contains_key(name),
+                    "connected": self.mcp_clients.contains(user_id, name).await,
                 });
                 Ok(info)
             }
@@ -3690,7 +3843,7 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
         let is_gateway = self.should_use_gateway_mode();
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -3879,7 +4032,7 @@ impl ExtensionManager {
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                PendingAuthKey::new(user_id, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::McpServer,
@@ -3973,9 +4126,44 @@ impl ExtensionManager {
         }
 
         // OAuth flow: if the tool has OAuth config, start the browser-based flow.
-        // But only if credentials are available — if the tool has setup secrets
-        // for client_id/secret that aren't configured yet, return needs_setup.
+        // If client credentials are missing but the tool also declares manual
+        // instructions, preserve the manual token fallback instead of forcing
+        // a broken OAuth path.
         if let Some(ref oauth) = auth.oauth {
+            let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
+            let (setup_client_id_entry, _) = self.find_setup_credential_names(name).await;
+            let setup_client_id_name = setup_client_id_entry.map(|(n, _)| n);
+            let oauth_client_id_available = self
+                .resolve_oauth_credential(
+                    &oauth.client_id,
+                    &oauth.client_id_env,
+                    builtin.as_ref().map(|c| c.client_id),
+                    setup_client_id_name.as_deref(),
+                    user_id,
+                )
+                .await
+                .is_some();
+
+            if !oauth_client_id_available
+                && (auth.instructions.is_some() || auth.token_hint.is_some())
+            {
+                let display = auth
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| name.to_string());
+                let instructions = auth
+                    .instructions
+                    .clone()
+                    .unwrap_or_else(|| format!("Please provide your {} API token/key.", display));
+
+                return Ok(AuthResult::awaiting_token(
+                    name,
+                    ExtensionKind::WasmTool,
+                    instructions,
+                    auth.setup_url.clone(),
+                ));
+            }
+
             if self
                 .needs_setup_credentials(name, &auth, oauth, user_id)
                 .await
@@ -4793,7 +4981,7 @@ impl ExtensionManager {
             )
             .await;
 
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -4865,6 +5053,9 @@ impl ExtensionManager {
             let secret_name = launch.flow.secret_name.clone();
             let provider = launch.flow.provider.clone();
             let validation_endpoint = launch.flow.validation_endpoint.clone();
+            // Keep a copy for the post-spawn `pending_auth` insert below — the
+            // `task_handle` closure moves the shadowed `user_id` String.
+            let user_id_for_pending = launch.flow.user_id.clone();
             let user_id = launch.flow.user_id.clone();
             let secrets = Arc::clone(&launch.flow.secrets);
             let sse_manager = self.sse_manager.read().await.clone();
@@ -4966,9 +5157,11 @@ impl ExtensionManager {
                 }
             });
 
-            // Store pending auth with task handle
+            // Store pending auth with task handle. The original `user_id`
+            // String was moved into the spawn closure above; use the cloned
+            // copy we stashed before the closure captured it.
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                PendingAuthKey::new(&user_id_for_pending, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::WasmTool,
@@ -5100,9 +5293,9 @@ impl ExtensionManager {
         }
     }
 
-    async fn is_extension_active(&self, name: &str, kind: ExtensionKind) -> bool {
+    async fn is_extension_active(&self, name: &str, kind: ExtensionKind, user_id: &str) -> bool {
         match kind {
-            ExtensionKind::McpServer => self.mcp_clients.read().await.contains_key(name),
+            ExtensionKind::McpServer => self.mcp_clients.contains(user_id, name).await,
             ExtensionKind::WasmTool => self.tool_registry.has(name).await,
             ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
                 self.active_channel_names.read().await.contains(name)
@@ -5307,32 +5500,42 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        // Check if already activated
-        {
-            let clients = self.mcp_clients.read().await;
-            if clients.contains_key(name) {
-                // Already connected, just return the tool names
-                // Use the same normalization as `mcp_tool_id` for the
-                // prefix filter so hyphenated server names match the
-                // underscore-only keys in the registry. `mcp_tool_id(name, "")`
-                // produces `normalized_server_` which is exactly the prefix
-                // every tool registered by this server starts with.
-                let prefix = crate::tools::mcp::mcp_tool_id(name, "");
-                let tools: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&prefix))
-                    .collect();
+        // Serialise activate/remove on this server so a concurrent
+        // `remove` (last-user-out, unregistering global tool wrappers)
+        // can't interleave with our `insert + register` below and leave
+        // the registry with this user's client present but the wrappers
+        // gone. Parallelism across different servers is preserved.
+        let lifecycle_lock = self.mcp_lifecycle_lock(name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
 
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::McpServer,
-                    tools_loaded: tools,
-                    message: format!("MCP server '{}' already active", name),
-                });
-            }
+        // Check if already activated for this user. Note: another user may
+        // already have the same server active (their client sits in
+        // `mcp_clients` under a different key), in which case the global
+        // tool wrappers are already registered. We still need to insert
+        // *this* user's client below so per-user dispatch routes to the
+        // right credential.
+        if self.mcp_clients.contains(user_id, name).await {
+            // Already connected, just return the tool names
+            // Use the same normalization as `mcp_tool_id` for the
+            // prefix filter so hyphenated server names match the
+            // underscore-only keys in the registry. `mcp_tool_id(name, "")`
+            // produces `normalized_server_` which is exactly the prefix
+            // every tool registered by this server starts with.
+            let prefix = crate::tools::mcp::mcp_tool_id(name, "");
+            let tools: Vec<String> = self
+                .tool_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|t| t.starts_with(&prefix))
+                .collect();
+
+            return Ok(ActivateResult {
+                name: name.to_string(),
+                kind: ExtensionKind::McpServer,
+                tools_loaded: tools,
+                message: format!("MCP server '{}' already active", name),
+            });
         }
 
         let server = self
@@ -5371,16 +5574,72 @@ impl ExtensionManager {
             }
         })?;
 
+        // Before registering any tool wrappers for this user, fingerprint
+        // the tool surface the server reported and reject activation if
+        // another user already has the same `name` active with a
+        // DIFFERENT surface. The `ToolRegistry` keys wrappers by tool
+        // name only, so without this check user B's incoming schemas
+        // would silently shadow user A's — one user's `list_tools()`
+        // result becomes the shared wrapper shape for every tenant.
+        // Reviewer call-out: the earlier (user_id, server_name)
+        // partitioning of the client store addressed the runtime
+        // dispatch leak, but the registry surface was still global and
+        // susceptible to the same cross-tenant leak.
+        //
+        // CRITICAL: this check must run BEFORE persisting
+        // `cached_tools` on the server row. `latent_provider_actions()`
+        // surfaces `server.cached_tools` for inactive MCP servers, so
+        // writing them first and then rejecting would leave the
+        // affected user seeing tool names and schemas from a backend
+        // that cannot be activated while the other user owns the
+        // shared server name.
+        let surface_signature = crate::tools::mcp::surface_signature(&mcp_tools);
+        if let Some(other_user) = self
+            .mcp_clients
+            .check_surface_conflict(user_id, name, &surface_signature)
+            .await
+        {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "MCP server '{name}' is already active for another user with a different tool surface (conflicting user: {other_user}). \
+                 The global tool registry is keyed by tool name only, so activating a second client with a different schema would \
+                 shadow the existing user's wrappers. Either use a distinct server name (the user-facing identifier) per backend/account, \
+                 or coordinate so both users connect to a backend that returns an identical tool surface."
+            )));
+        }
+
         let mut updated_server = server.clone();
         updated_server.cached_tools = mcp_tools.clone();
         self.update_mcp_server(updated_server, user_id)
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        let tool_impls = client
-            .create_tools()
+        // Store the client for this user first, then register the
+        // (user-agnostic) tool wrappers. The wrappers resolve the caller's
+        // client at dispatch time from the shared `McpClientStore`, so the
+        // client must be in the store before any tool call arrives.
+        //
+        // If wrapper construction fails, pull the just-inserted client
+        // back out so we don't leave an orphan entry in the store (no
+        // wrappers registered in `ToolRegistry` → dispatch attempts
+        // against this user would fail with "tool not found" despite
+        // `contains(user_id, name) == true`). The per-server lifecycle
+        // lock held at the top of this function keeps the cleanup safe
+        // against concurrent `remove` / re-`activate` on the same server.
+        let client = Arc::new(client);
+        self.mcp_clients
+            .insert(user_id, name, client.clone(), surface_signature)
+            .await;
+
+        let tool_impls = match client
+            .create_tools_with_store(self.mcp_client_store())
             .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        {
+            Ok(tools) => tools,
+            Err(e) => {
+                self.mcp_clients.remove(user_id, name).await;
+                return Err(ExtensionError::ActivationFailed(e.to_string()));
+            }
+        };
 
         // Source the reported names from the wrapper itself, not from the
         // raw McpTool list. The wrapper canonicalizes dashes to underscores
@@ -5392,12 +5651,6 @@ impl ExtensionManager {
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
         }
-
-        // Store the client
-        self.mcp_clients
-            .write()
-            .await
-            .insert(name.to_string(), Arc::new(client));
 
         tracing::info!(
             "Activated MCP server '{}' with {} tools",
@@ -7989,6 +8242,63 @@ mod tests {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
     }
 
+    #[tokio::test]
+    async fn inject_mcp_client_partitions_cache_by_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+            "notion",
+            "http://localhost:3001",
+        ));
+        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+            "notion",
+            "http://localhost:3002",
+        ));
+
+        manager
+            .inject_mcp_client("notion".to_string(), "user-a", Arc::clone(&client_a))
+            .await;
+        manager
+            .inject_mcp_client("notion".to_string(), "user-b", Arc::clone(&client_b))
+            .await;
+
+        let stored_a = manager
+            .mcp_clients
+            .get("user-a", "notion")
+            .await
+            .expect("user-a client");
+        let stored_b = manager
+            .mcp_clients
+            .get("user-b", "notion")
+            .await
+            .expect("user-b client");
+
+        assert!(Arc::ptr_eq(&stored_a, &client_a));
+        assert!(Arc::ptr_eq(&stored_b, &client_b));
+
+        assert!(
+            manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-a")
+                .await
+        );
+        assert!(
+            manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-b")
+                .await
+        );
+        assert!(
+            !manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-c")
+                .await
+        );
+    }
+
     fn write_test_tool(
         dir: &std::path::Path,
         name: &str,
@@ -10272,7 +10582,7 @@ mod tests {
         });
         let abort_handle = listener.abort_handle();
         mgr.pending_auth.write().await.insert(
-            "gmail".to_string(),
+            super::PendingAuthKey::new("test", "gmail"),
             super::PendingAuth {
                 _name: "gmail".to_string(),
                 _kind: ExtensionKind::WasmTool,
@@ -10348,7 +10658,11 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(
-            mgr.pending_auth.read().await.get("gmail").is_none(),
+            mgr.pending_auth
+                .read()
+                .await
+                .get(&super::PendingAuthKey::new("test", "gmail"))
+                .is_none(),
             "pending auth entry should be removed"
         );
         assert!(
@@ -10377,6 +10691,79 @@ mod tests {
             .await
             .expect_err("invalid format should be rejected");
         assert!(matches!(err, ExtensionError::ValidationFailed(_)));
+    }
+
+    /// Regression: `clear_pending_extension_auth` must only clear the flow
+    /// for the given `(user_id, extension)` pair — user A cancelling their
+    /// auth on `github` must not remove user B's concurrent flow on the
+    /// same extension.
+    #[tokio::test]
+    async fn test_clear_pending_extension_auth_only_clears_matching_user_flow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let secrets = Arc::clone(&mgr.secrets);
+
+        mgr.pending_auth.write().await.insert(
+            super::PendingAuthKey::new("user-a", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+        mgr.pending_auth.write().await.insert(
+            super::PendingAuthKey::new("user-b", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        for (state, user_id) in [("state-a", "user-a"), ("state-b", "user-b")] {
+            mgr.pending_oauth_flows().write().await.insert(
+                state.to_string(),
+                crate::auth::oauth::PendingOAuthFlow {
+                    extension_name: ironclaw_common::ExtensionName::from_trusted(
+                        "github".to_string(),
+                    ),
+                    display_name: "GitHub".to_string(),
+                    token_url: "https://github.com/login/oauth/access_token".to_string(),
+                    client_id: "client-id".to_string(),
+                    client_secret: None,
+                    redirect_uri: "https://example.com/oauth/callback".to_string(),
+                    code_verifier: None,
+                    access_token_field: "access_token".to_string(),
+                    secret_name: "github_token".to_string(),
+                    provider: None,
+                    validation_endpoint: None,
+                    scopes: vec![],
+                    user_id: user_id.to_string(),
+                    secrets: Arc::clone(&secrets),
+                    sse_manager: None,
+                    gateway_token: None,
+                    token_exchange_extra_params: std::collections::HashMap::new(),
+                    client_id_secret_name: None,
+                    client_secret_secret_name: None,
+                    client_secret_expires_at: None,
+                    created_at: std::time::Instant::now(),
+                    auto_activate_extension: true,
+                },
+            );
+        }
+
+        mgr.clear_pending_extension_auth("github", "user-b").await;
+
+        let pending = mgr.pending_auth.read().await;
+        assert!(pending.contains_key(&super::PendingAuthKey::new("user-a", "github")));
+        assert!(!pending.contains_key(&super::PendingAuthKey::new("user-b", "github")));
+        drop(pending);
+
+        let flows = mgr.pending_oauth_flows().read().await;
+        assert!(flows.contains_key("state-a"));
+        assert!(!flows.contains_key("state-b"));
     }
 
     #[tokio::test]
@@ -11994,6 +12381,140 @@ mod tests {
             match original_client_secret {
                 Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", value),
                 None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_github_oauth_uses_browser_flow_when_client_env_present() -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::set_var("GITHUB_OAUTH_CLIENT_ID", "test-github-client-id");
+            std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", "test-github-client-secret");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "github_token",
+                "display_name": "GitHub",
+                "oauth": {
+                    "authorization_url": "https://github.com/login/oauth/authorize",
+                    "token_url": "https://github.com/login/oauth/access_token",
+                    "client_id_env": "GITHUB_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GITHUB_OAUTH_CLIENT_SECRET",
+                    "scopes": ["repo", "workflow", "read:org"],
+                    "use_pkce": false
+                },
+                "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+                "setup_url": "https://github.com/settings/apps",
+                "env_var": "GITHUB_TOKEN"
+            }
+        });
+        std::fs::write(tools_dir.join("github.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("github.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        mgr.enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        let result = mgr
+            .auth("github", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        let auth_url = result
+            .auth_url()
+            .expect("GitHub OAuth should return auth_url");
+        assert!(auth_url.contains("github.com/login/oauth/authorize"));
+        assert!(auth_url.contains("client_id=test-github-client-id"));
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_github_oauth_falls_back_to_manual_token_when_client_env_missing()
+    -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::remove_var("GITHUB_OAUTH_CLIENT_ID");
+            std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "github_token",
+                "display_name": "GitHub",
+                "oauth": {
+                    "authorization_url": "https://github.com/login/oauth/authorize",
+                    "token_url": "https://github.com/login/oauth/access_token",
+                    "client_id_env": "GITHUB_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GITHUB_OAUTH_CLIENT_SECRET",
+                    "scopes": ["repo", "workflow", "read:org"],
+                    "use_pkce": false
+                },
+                "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+                "setup_url": "https://github.com/settings/tokens",
+                "env_var": "GITHUB_TOKEN"
+            }
+        });
+        std::fs::write(tools_dir.join("github.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("github.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        let result = mgr
+            .auth("github", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(result.auth_url(), None);
+        let instructions = result.instructions().expect("manual fallback instructions");
+        assert!(instructions.contains("Personal Access Token"));
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET"),
             }
         }
 
