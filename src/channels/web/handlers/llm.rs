@@ -369,16 +369,23 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
 /// Returns all builtin LLM provider definitions plus env-var defaults.
 ///
 /// Each entry contains the provider definition (id, name, adapter, base_url,
-/// default_model, api_key_required, can_list_models) and env-var overrides
-/// (has_api_key presence flag, model override, base_url override).
-/// API keys are never returned — only a boolean `has_api_key`.
+/// default_model, api_key_required, can_list_models). For admin callers the
+/// entry also includes env-var overlay fields (`env_base_url`, `env_model`,
+/// `has_api_key`) which reveal admin-configured infrastructure targets —
+/// these are stripped for non-admin callers. API keys themselves are never
+/// returned.
+///
+/// The corresponding write path for these fields lives in
+/// `handlers/settings.rs` and is gated via `ADMIN_ONLY_LLM_SETTING_KEYS`;
+/// this handler keeps the read-side symmetry so non-admin members cannot
+/// discover private provider endpoints by listing providers.
 pub async fn llm_providers_handler(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Json<serde_json::Value> {
-    Json(build_llm_providers())
+    Json(build_llm_providers(user.role == "admin"))
 }
 
-fn build_llm_providers() -> serde_json::Value {
+fn build_llm_providers(include_admin_fields: bool) -> serde_json::Value {
     use crate::config::helpers::optional_env;
     use crate::llm::registry::ProviderRegistry;
 
@@ -405,16 +412,20 @@ fn build_llm_providers() -> serde_json::Value {
         );
         entry.insert("api_key_required".into(), true.into());
         entry.insert("can_list_models".into(), true.into());
-        // Env defaults
-        entry.insert(
-            "has_api_key".into(),
-            read_env("NEARAI_API_KEY").is_some().into(),
-        );
-        if let Some(model) = read_env("NEARAI_MODEL") {
-            entry.insert("env_model".into(), serde_json::Value::String(model));
-        }
-        if let Some(url) = read_env("NEARAI_BASE_URL") {
-            entry.insert("env_base_url".into(), serde_json::Value::String(url));
+        // Env overlay fields reveal admin-configured infrastructure — strip
+        // for non-admin callers. See handler docstring for the paired
+        // `ADMIN_ONLY_LLM_SETTING_KEYS` write-side gate.
+        if include_admin_fields {
+            entry.insert(
+                "has_api_key".into(),
+                read_env("NEARAI_API_KEY").is_some().into(),
+            );
+            if let Some(model) = read_env("NEARAI_MODEL") {
+                entry.insert("env_model".into(), serde_json::Value::String(model));
+            }
+            if let Some(url) = read_env("NEARAI_BASE_URL") {
+                entry.insert("env_base_url".into(), serde_json::Value::String(url));
+            }
         }
         providers.push(serde_json::Value::Object(entry));
     }
@@ -448,17 +459,19 @@ fn build_llm_providers() -> serde_json::Value {
         entry.insert("api_key_required".into(), def.api_key_required.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
-        // Env defaults
-        if let Some(ref api_key_env) = def.api_key_env {
-            entry.insert("has_api_key".into(), read_env(api_key_env).is_some().into());
-        }
-        if let Some(model) = read_env(&def.model_env) {
-            entry.insert("env_model".into(), serde_json::Value::String(model));
-        }
-        if let Some(ref base_url_env) = def.base_url_env
-            && let Some(url) = read_env(base_url_env)
-        {
-            entry.insert("env_base_url".into(), serde_json::Value::String(url));
+        // Env overlay fields: admin only. See handler docstring.
+        if include_admin_fields {
+            if let Some(ref api_key_env) = def.api_key_env {
+                entry.insert("has_api_key".into(), read_env(api_key_env).is_some().into());
+            }
+            if let Some(model) = read_env(&def.model_env) {
+                entry.insert("env_model".into(), serde_json::Value::String(model));
+            }
+            if let Some(ref base_url_env) = def.base_url_env
+                && let Some(url) = read_env(base_url_env)
+            {
+                entry.insert("env_base_url".into(), serde_json::Value::String(url));
+            }
         }
         providers.push(serde_json::Value::Object(entry));
     }
@@ -546,6 +559,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_providers_returns_nearai_with_env_vars() {
+        // Combined admin-view + non-admin-view asserts. Tests are merged
+        // intentionally: both touch the same process-wide env vars and
+        // running in parallel (the default) would produce false negatives.
+        //
         // SAFETY: test-only; tokio::test runs single-threaded by default.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "test-key-123");
@@ -553,33 +570,63 @@ mod tests {
             std::env::set_var("NEARAI_BASE_URL", "https://test.near.ai/v1");
         }
 
-        let result = build_llm_providers();
-        let arr = result.as_array().expect("should be an array");
-
-        let nearai = find_provider(arr, "nearai").expect("nearai entry");
-        // API key should NOT be exposed — only has_api_key presence flag.
+        // Admin view: env overlay fields present.
+        let admin_result = build_llm_providers(true);
+        let admin_arr = admin_result.as_array().expect("should be an array");
+        let admin_nearai = find_provider(admin_arr, "nearai").expect("nearai entry");
         assert_eq!(
-            nearai.get("has_api_key").and_then(|v| v.as_bool()),
+            admin_nearai.get("has_api_key").and_then(|v| v.as_bool()),
             Some(true)
         );
         assert!(
-            nearai.get("api_key").is_none(),
+            admin_nearai.get("api_key").is_none(),
             "raw api_key must never be returned"
         );
         assert_eq!(
-            nearai.get("env_model").and_then(|v| v.as_str()),
+            admin_nearai.get("env_model").and_then(|v| v.as_str()),
             Some("test-model")
         );
         assert_eq!(
-            nearai.get("env_base_url").and_then(|v| v.as_str()),
+            admin_nearai.get("env_base_url").and_then(|v| v.as_str()),
             Some("https://test.near.ai/v1")
         );
-        // Check definition fields are present
         assert_eq!(
-            nearai.get("adapter").and_then(|v| v.as_str()),
+            admin_nearai.get("adapter").and_then(|v| v.as_str()),
             Some("nearai")
         );
-        assert_eq!(nearai.get("builtin").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            admin_nearai.get("builtin").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // Regression: non-admin view must NOT expose env overlay fields,
+        // which leak admin-configured infrastructure targets. Write-side
+        // for the same settings is gated via `ADMIN_ONLY_LLM_SETTING_KEYS`;
+        // the read-side symmetry is enforced here.
+        let member_result = build_llm_providers(false);
+        let member_arr = member_result.as_array().expect("should be an array");
+        let member_nearai = find_provider(member_arr, "nearai").expect("nearai entry");
+        assert!(
+            member_nearai.get("env_base_url").is_none(),
+            "non-admin must not see env_base_url: {member_nearai}"
+        );
+        assert!(
+            member_nearai.get("env_model").is_none(),
+            "non-admin must not see env_model: {member_nearai}"
+        );
+        assert!(
+            member_nearai.get("has_api_key").is_none(),
+            "non-admin must not see has_api_key: {member_nearai}"
+        );
+        // Public provider definition fields must still be present.
+        assert_eq!(
+            member_nearai.get("id").and_then(|v| v.as_str()),
+            Some("nearai")
+        );
+        assert_eq!(
+            member_nearai.get("adapter").and_then(|v| v.as_str()),
+            Some("nearai")
+        );
 
         // Clean up
         unsafe {
@@ -591,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_providers_includes_registry_and_special_providers() {
-        let result = build_llm_providers();
+        let result = build_llm_providers(true);
         let arr = result.as_array().expect("should be an array");
 
         // Registry providers should be present

@@ -17,9 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use ironclaw::agent::routine::{
-    Routine, RoutineAction, RoutineGuardrails, Trigger,
-};
+use ironclaw::agent::routine::{Routine, RoutineAction, RoutineGuardrails, Trigger};
 use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::db::{Database, RoutineStore, UserRecord, UserStore, WorkspaceMgmtStore};
 use serde_json::json;
@@ -87,9 +85,7 @@ fn routine(
     }
 }
 
-async fn seed_two_user_archived_workspace(
-    backend: &Arc<LibSqlBackend>,
-) -> (Uuid, Uuid) {
+async fn seed_two_user_archived_workspace(backend: &Arc<LibSqlBackend>) -> (Uuid, Uuid) {
     backend.create_user(&test_user("alice")).await.unwrap();
     let ws = backend
         .create_workspace("Demo", "demo", "", "alice", &json!({}))
