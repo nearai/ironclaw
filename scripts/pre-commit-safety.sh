@@ -13,6 +13,7 @@
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #   8. CredentialName referenced in web-layer code (wrong identity at boundary)
+#   9. SSE broadcast emitted outside the engine→AppEvent projection bridge
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
@@ -20,6 +21,7 @@
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 # For check #7, use "// dispatch-exempt: <reason>" instead.
 # For check #8, use "// web-identity-exempt: <reason>" instead.
+# For check #9, use "// projection-exempt: <reason>" instead.
 
 set -euo pipefail
 
@@ -380,11 +382,34 @@ if [ -n "$WEB_IDENTITY_DIFF" ]; then
     fi
 fi
 
+# 9. SSE `AppEvent` broadcast outside the engine→AppEvent projection bridge.
+#    Every `AppEvent` that hits the SSE/WS stream should project from a typed
+#    source log (`ironclaw_engine::EventKind`, `JobEvent`, channel-lifecycle)
+#    or belong to the documented transport-only allowlist. Direct
+#    `sse.broadcast(...)` / `sse.broadcast_for_user(...)` calls from tools,
+#    handlers, or extension managers drift the UI stream out of alignment
+#    with the replayable source, which is the root cause of the state
+#    desync class tracked by #2792. See `.claude/rules/gateway-events.md`.
+#
+#    Annotation format: `// projection-exempt: <category>, <detail>` — the
+#    category names the source log (`bridge dispatcher`, `channel-lifecycle`,
+#    `sandbox JobEvent`, `legacy v1 auth`) or the transport-only allowlist
+#    (`transport-only, heartbeat`). Unannotated added lines fail the check.
+PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
+    | grep -E '\bsse\.(broadcast|broadcast_for_user)\(' \
+    | grep -vE '// projection-exempt:|// safety:|^\+\+\+' \
+    | head -5 || true)
+if [ -n "$PROJECTION_HITS" ]; then
+    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`bridge::thread_event_to_app_events\` (project from a typed source log) or annotate with '// projection-exempt: <reason>'. See .claude/rules/gateway-events.md."
+    echo "$PROJECTION_HITS" | sed 's/^/    /'
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
+    echo "(For PROJECTION warnings, use '// projection-exempt: <reason>' instead.)"
     echo ""
     exit 1
 fi
