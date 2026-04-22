@@ -5,9 +5,32 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::types::provenance::Provenance;
 use crate::types::step::{ActionCall, AssistantContent};
+
+/// Strongly-typed message identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageId(pub Uuid);
+
+impl MessageId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for MessageId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for MessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Role of a message participant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +45,11 @@ pub enum MessageRole {
 /// A message in a thread's conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadMessage {
+    /// Stable identifier — `MessageAdded` events reference messages by this
+    /// id so consumers can resolve typed content without re-deriving it from
+    /// a truncated preview string.
+    #[serde(default)]
+    pub id: MessageId,
     pub role: MessageRole,
     pub content: String,
     /// Optional typed assistant-content semantics. This supplements the legacy
@@ -43,6 +71,7 @@ impl ThreadMessage {
     /// Create a system message.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
+            id: MessageId::new(),
             role: MessageRole::System,
             content: content.into(),
             assistant_content: None,
@@ -57,6 +86,7 @@ impl ThreadMessage {
     /// Create a user message.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
+            id: MessageId::new(),
             role: MessageRole::User,
             content: content.into(),
             assistant_content: None,
@@ -77,6 +107,7 @@ impl ThreadMessage {
     pub fn assistant_with_typed_content(content: AssistantContent) -> Self {
         let raw_content = content.text().to_string();
         Self {
+            id: MessageId::new(),
             role: MessageRole::Assistant,
             content: raw_content,
             assistant_content: Some(content),
@@ -91,6 +122,7 @@ impl ThreadMessage {
     /// Create an assistant message with action calls.
     pub fn assistant_with_actions(content: Option<String>, calls: Vec<ActionCall>) -> Self {
         Self {
+            id: MessageId::new(),
             role: MessageRole::Assistant,
             content: content.unwrap_or_default(),
             assistant_content: None,
@@ -112,6 +144,7 @@ impl ThreadMessage {
             .map(|content| content.text().to_string())
             .unwrap_or_default();
         Self {
+            id: MessageId::new(),
             role: MessageRole::Assistant,
             content: raw_content,
             assistant_content: content,
@@ -131,6 +164,7 @@ impl ThreadMessage {
     ) -> Self {
         let name: String = action_name.into();
         Self {
+            id: MessageId::new(),
             role: MessageRole::ActionResult,
             content: content.into(),
             assistant_content: None,

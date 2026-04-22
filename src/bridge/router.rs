@@ -4163,20 +4163,25 @@ fn format_action_display_name(action_name: &str, params_summary: &Option<String>
 /// Interpret a MessageAdded event into a human-readable status message.
 /// Returns `None` for events that don't need UI surfacing.
 ///
+/// The only assistant kind that actually surfaces text to the status
+/// stream is `UserVisibleNarrative` — and that text is carried inline on
+/// the event as `narrative`, so the router never has to reach back into
+/// the thread's message list to render it.
+///
 /// User-role code-execution result messages (`[stdout]…`, `[code …]`,
 /// `Traceback`) no longer drive UI status — that surface is owned by the
 /// typed `CodeExecutionStarted`/`CodeExecutionCompleted`/`CodeExecutionFailed`
 /// events emitted by the executor.
 fn interpret_message_event(
     role: &str,
-    content_preview: &str,
     assistant_content_kind: Option<&ironclaw_engine::AssistantContentKind>,
+    narrative: Option<&str>,
 ) -> Option<String> {
     if role == "Assistant" {
         match assistant_content_kind {
             Some(ironclaw_engine::AssistantContentKind::InternalReasoning) => None,
             Some(ironclaw_engine::AssistantContentKind::UserVisibleNarrative) => {
-                Some(content_preview.to_string())
+                narrative.map(|t| t.to_string())
             }
             Some(ironclaw_engine::AssistantContentKind::Final) => {
                 // Final assistant responses are surfaced through the main
@@ -4555,11 +4560,12 @@ async fn forward_event_to_channel(
         }
         EventKind::MessageAdded {
             role,
-            content_preview,
             assistant_content_kind,
+            narrative,
+            ..
         } => {
             if let Some(text) =
-                interpret_message_event(role, content_preview, assistant_content_kind.as_ref())
+                interpret_message_event(role, assistant_content_kind.as_ref(), narrative.as_deref())
             {
                 let _ = channels
                     .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
@@ -4716,9 +4722,10 @@ fn thread_event_to_app_events(
         }],
         EventKind::MessageAdded {
             role,
-            content_preview,
             assistant_content_kind,
-        } => interpret_message_event(role, content_preview, assistant_content_kind.as_ref())
+            narrative,
+            ..
+        } => interpret_message_event(role, assistant_content_kind.as_ref(), narrative.as_deref())
             .map(|text| AppEvent::Thinking {
                 message: text,
                 thread_id: Some(thread_id.into()),
@@ -7413,10 +7420,11 @@ mod tests {
             ironclaw_engine::ThreadId::new(),
             ironclaw_engine::EventKind::MessageAdded {
                 role: "Assistant".to_string(),
-                content_preview: "I should inspect the page before answering.".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
                 assistant_content_kind: Some(
                     ironclaw_engine::types::event::AssistantContentKind::InternalReasoning,
                 ),
+                narrative: None,
             },
         );
 
@@ -7431,10 +7439,11 @@ mod tests {
             ironclaw_engine::ThreadId::new(),
             ironclaw_engine::EventKind::MessageAdded {
                 role: "Assistant".to_string(),
-                content_preview: "Inspecting the page first...".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
                 assistant_content_kind: Some(
                     ironclaw_engine::types::event::AssistantContentKind::UserVisibleNarrative,
                 ),
+                narrative: Some("Inspecting the page first...".to_string()),
             },
         );
 
@@ -7449,15 +7458,37 @@ mod tests {
     }
 
     #[test]
+    fn thread_event_to_app_events_narrative_without_text_is_suppressed() {
+        // A defensive guard: if a narrative event arrives without inline
+        // text, we suppress it rather than emitting an empty Thinking bubble.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::MessageAdded {
+                role: "Assistant".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
+                assistant_content_kind: Some(
+                    ironclaw_engine::types::event::AssistantContentKind::UserVisibleNarrative,
+                ),
+                narrative: None,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert!(app_events.is_empty());
+    }
+
+    #[test]
     fn thread_event_to_app_events_final_assistant_message_relies_on_response_stream() {
         let event = ironclaw_engine::ThreadEvent::new(
             ironclaw_engine::ThreadId::new(),
             ironclaw_engine::EventKind::MessageAdded {
                 role: "Assistant".to_string(),
-                content_preview: "Here is the answer".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
                 assistant_content_kind: Some(
                     ironclaw_engine::types::event::AssistantContentKind::Final,
                 ),
+                narrative: None,
             },
         );
 
@@ -7472,8 +7503,9 @@ mod tests {
             ironclaw_engine::ThreadId::new(),
             ironclaw_engine::EventKind::MessageAdded {
                 role: "Assistant".to_string(),
-                content_preview: "legacy assistant message".to_string(),
+                message_id: ironclaw_engine::MessageId::new(),
                 assistant_content_kind: None,
+                narrative: None,
             },
         );
 
