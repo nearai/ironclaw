@@ -4782,7 +4782,9 @@ mod tests {
 
     // Regression: `complete_mission` previously took only `id`, letting any
     // caller complete any mission if they knew its UUID (IDOR). It now
-    // mirrors pause/resume/fire and enforces ownership.
+    // requires a caller and enforces ownership checks, consistent with
+    // pause/resume authorization without implying identical `fire_mission`
+    // shared-mission semantics.
     #[tokio::test]
     async fn complete_mission_ownership_check() {
         let store = Arc::new(TestStore::new());
