@@ -1519,8 +1519,7 @@ async fn wire_capability_registry(
 ) {
     let mut colliding_tool_names = Vec::new();
     for tool_name in tools.all_registered_names().await {
-        if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n))
-            .is_some()
+        if crate::tools::resolve_with_aliases(&tool_name, |n| capabilities.find_action(n)).is_some()
         {
             colliding_tool_names.push(tool_name);
         }
