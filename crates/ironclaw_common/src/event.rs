@@ -578,21 +578,19 @@ pub enum AppEvent {
     /// Background self-improvement lifecycle event.
     ///
     /// Bridged from engine `EventKind::SelfImprovement{Started,Complete,Failed}`.
-    /// Collapses the three engine variants into one wire event with a
-    /// phase discriminator — consumers only need one handler, and the
-    /// per-phase fields carry the variant-specific payload.
+    /// The three engine variants collapse into one wire event with a
+    /// nested `SelfImprovementPhase` carrying per-phase data — consumers
+    /// need one handler, and the compiler enforces that phase-specific
+    /// fields travel with their phase (no `Option<T>` sentinels that
+    /// claim "maybe present" when the phase excludes them).
+    ///
+    /// Wire shape uses `#[serde(flatten)]` + the phase enum's
+    /// `#[serde(tag = "phase")]`, so the JSON payload is flat:
+    /// `{"type": "self_improvement", "phase": "complete", "prompt_updated": true, ...}`.
     #[serde(rename = "self_improvement")]
     SelfImprovement {
+        #[serde(flatten)]
         phase: SelfImprovementPhase,
-        /// Set on `Complete` phase.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        prompt_updated: Option<bool>,
-        /// Set on `Complete` phase.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        patterns_added: Option<usize>,
-        /// Set on `Failed` phase.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -612,17 +610,28 @@ pub enum AppEvent {
     },
 }
 
-/// Phase discriminator for `AppEvent::SelfImprovement`.
+/// Phase data for `AppEvent::SelfImprovement`.
 ///
 /// Mirrors engine `EventKind::SelfImprovement{Started,Complete,Failed}`
-/// collapsed into a single wire variant. Per `.claude/rules/types.md`
-/// "Wire-stable enums" — snake_case serde, no stringly-typed status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// as a single typed wire enum. Variant-specific fields are part of the
+/// variant, not optional fields on the outer event — per
+/// `.claude/rules/types.md` the compiler should reject a `Failed` value
+/// carrying `prompt_updated`, which an `Option`-field approach cannot.
+///
+/// Serialized with an internally-tagged `phase` discriminator; the
+/// outer `AppEvent::SelfImprovement` flattens this into its payload so
+/// the wire shape stays a single flat JSON object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum SelfImprovementPhase {
     Started,
-    Complete,
-    Failed,
+    Complete {
+        prompt_updated: bool,
+        patterns_added: usize,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Wire-side mirror of `ironclaw_engine::CodeExecutionFailure`.
@@ -916,9 +925,6 @@ mod tests {
             },
             AppEvent::SelfImprovement {
                 phase: SelfImprovementPhase::Started,
-                prompt_updated: None,
-                patterns_added: None,
-                error: None,
                 thread_id: None,
             },
             AppEvent::OrchestratorRollback {

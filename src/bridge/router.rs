@@ -4730,26 +4730,22 @@ fn thread_event_to_app_events(
         }],
         EventKind::SelfImprovementStarted => vec![AppEvent::SelfImprovement {
             phase: ironclaw_common::SelfImprovementPhase::Started,
-            prompt_updated: None,
-            patterns_added: None,
-            error: None,
             thread_id: Some(thread_id.into()),
         }],
         EventKind::SelfImprovementComplete {
             prompt_updated,
             patterns_added,
         } => vec![AppEvent::SelfImprovement {
-            phase: ironclaw_common::SelfImprovementPhase::Complete,
-            prompt_updated: Some(*prompt_updated),
-            patterns_added: Some(*patterns_added),
-            error: None,
+            phase: ironclaw_common::SelfImprovementPhase::Complete {
+                prompt_updated: *prompt_updated,
+                patterns_added: *patterns_added,
+            },
             thread_id: Some(thread_id.into()),
         }],
         EventKind::SelfImprovementFailed { error } => vec![AppEvent::SelfImprovement {
-            phase: ironclaw_common::SelfImprovementPhase::Failed,
-            prompt_updated: None,
-            patterns_added: None,
-            error: Some(error.clone()),
+            phase: ironclaw_common::SelfImprovementPhase::Failed {
+                error: error.clone(),
+            },
             thread_id: Some(thread_id.into()),
         }],
         EventKind::OrchestratorRollback {
@@ -4762,7 +4758,26 @@ fn thread_event_to_app_events(
             reason: reason.clone(),
             thread_id: Some(thread_id.into()),
         }],
-        _ => vec![],
+
+        // Explicitly-dropped engine variants. These are NOT bridged to
+        // `AppEvent` because an equivalent event is emitted by a
+        // different source log today, and double-emission would have
+        // the UI rendering the same thing twice. Migration plan per
+        // #2792 Phase 1 PR 3:
+        //
+        // - `ApprovalRequested` / `ApprovalReceived` → migrate the gate
+        //   manager to emit through the engine event log (replacing its
+        //   current direct `AppEvent::GateRequired` / `GateResolved`
+        //   broadcasts), then drop these arms and let the bridge
+        //   project the engine events.
+        EventKind::ApprovalRequested { .. } => vec![],
+        EventKind::ApprovalReceived { .. } => vec![],
+
+        // Forward-compat catch-all in the engine enum (see
+        // `#[serde(other)] Unknown` in `ironclaw_engine::EventKind`).
+        // Nothing useful to show; the unknown variant would have been
+        // written by a newer binary during a rolling deploy.
+        EventKind::Unknown => vec![],
     }
 }
 
@@ -7333,26 +7348,21 @@ mod tests {
         let app_events = thread_event_to_app_events(&event, "thread-improve");
 
         assert_eq!(app_events.len(), 1);
-        let AppEvent::SelfImprovement {
-            phase,
-            prompt_updated,
-            patterns_added,
-            error,
-            thread_id,
-        } = &app_events[0]
-        else {
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
             panic!(
                 "expected AppEvent::SelfImprovement, got {:?}",
                 app_events[0]
             );
         };
-        assert_eq!(*phase, ironclaw_common::SelfImprovementPhase::Complete);
-        assert_eq!(*prompt_updated, Some(true));
-        assert_eq!(*patterns_added, Some(3));
-        assert!(
-            error.is_none(),
-            "error should be None on Complete phase, got {error:?}"
-        );
+        let ironclaw_common::SelfImprovementPhase::Complete {
+            prompt_updated,
+            patterns_added,
+        } = phase
+        else {
+            panic!("expected SelfImprovementPhase::Complete, got {phase:?}");
+        };
+        assert!(*prompt_updated);
+        assert_eq!(*patterns_added, 3);
         assert_eq!(thread_id.as_deref(), Some("thread-improve"));
     }
 
