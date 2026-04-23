@@ -250,6 +250,10 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     // Validate
     config.validate()?;
     let has_custom_auth_header = config.has_custom_auth_header();
+    // Capture the canonical stored name so follow-up hints suggest the
+    // identifier as it was persisted (matches what `mcp auth <name>` expects
+    // and keeps the suggestion shell-safe).
+    let canonical_name = config.name.clone();
 
     // Save (DB if available, else disk)
     let (db, owner_id) = connect_db().await;
@@ -258,7 +262,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     save_servers(db.as_deref(), &owner_id, &servers).await?;
 
     println!();
-    println!("  ✓ Added MCP server '{}'", name);
+    println!("  ✓ Added MCP server '{}'", canonical_name);
 
     match transport_lower.as_str() {
         "stdio" => {
@@ -280,7 +284,10 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!(
+            "  Run 'ironclaw mcp auth {}' to authenticate.",
+            canonical_name
+        );
     }
 
     println!();

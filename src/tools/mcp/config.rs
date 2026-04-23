@@ -566,7 +566,13 @@ pub async fn load_mcp_servers() -> Result<McpServersFile, ConfigError> {
 /// Truncation is char-boundary safe: the loaded string may contain
 /// arbitrary UTF-8 even though the allowlist ultimately rejects non-ASCII,
 /// because this runs *before* `validate()`.
-fn migrate_legacy_server_name(name: &mut String) {
+/// Returns `true` if the name was rewritten (either truncated or
+/// canonicalized), `false` if it was already in canonical form. The caller
+/// uses this signal to break ties in [`deduplicate_by_name`]: when two rows
+/// collide after migration, rows that were already canonical are preferred
+/// over rows that had to be rewritten.
+fn migrate_legacy_server_name(name: &mut String) -> bool {
+    let mut changed = false;
     if name.len() > MAX_MCP_SERVER_NAME_LEN {
         let original_len = name.len();
         let mut end = MAX_MCP_SERVER_NAME_LEN;
@@ -584,6 +590,7 @@ fn migrate_legacy_server_name(name: &mut String) {
              introduced with McpServerName; re-save to persist the shorter form"
         );
         *name = truncated;
+        changed = true;
     }
 
     // Canonicalize only legal-but-non-canonical legacy names (e.g.
@@ -603,29 +610,78 @@ fn migrate_legacy_server_name(name: &mut String) {
                  ExtensionName::new; re-save to persist the canonical form"
             );
             *name = canonical;
+            changed = true;
         }
     }
+    changed
 }
 
 /// Drop rows whose name collides with an already-seen canonical name.
 ///
 /// Can happen when load-time canonicalization in [`migrate_legacy_server_name`]
 /// rewrites a legacy row (e.g. `my-server`) to a form that matches an
-/// existing canonical row (`my_server`). We keep the first occurrence and
-/// warn on drops so the user can reconcile the duplicate manually.
-fn deduplicate_by_name(servers: &mut Vec<McpServerConfig>) {
-    let mut seen = std::collections::HashSet::new();
-    servers.retain(|server| {
-        if seen.insert(server.name.clone()) {
-            true
-        } else {
-            tracing::warn!(
-                server_name = %server.name,
-                "Dropping duplicate MCP server entry after load-time canonicalization; \
-                 keeping the first occurrence"
-            );
-            false
+/// existing canonical row (`my_server`).
+///
+/// Tie-breaking rules when two rows share the same (post-migration) name:
+///
+/// 1. Prefer the row whose original name was already canonical
+///    (`was_migrated == false`) over one that had to be rewritten. This
+///    ensures a newer canonical row is not silently replaced by a stale
+///    legacy row that happened to appear first in the file.
+/// 2. If both rows were already canonical, or both were migrated, keep the
+///    **last** occurrence. The config file is written append-last on
+///    `upsert`, so the later entry is more likely to reflect user intent.
+///
+/// Dropped rows are logged so the user can reconcile duplicates manually.
+fn deduplicate_by_name(servers: &mut Vec<McpServerConfig>, was_migrated: &[bool]) {
+    debug_assert_eq!(servers.len(), was_migrated.len());
+
+    // First pass: pick the winning index for each canonical name.
+    let mut winners: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (idx, server) in servers.iter().enumerate() {
+        match winners.get(&server.name).copied() {
+            None => {
+                winners.insert(server.name.clone(), idx);
+            }
+            Some(prev_idx) => {
+                let prev_migrated = was_migrated.get(prev_idx).copied().unwrap_or(false);
+                let cur_migrated = was_migrated.get(idx).copied().unwrap_or(false);
+                // Prefer canonical (non-migrated) over migrated.
+                // Otherwise prefer the later occurrence.
+                let replace = match (prev_migrated, cur_migrated) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => true, // same migration status: later wins
+                };
+                if replace {
+                    tracing::warn!(
+                        server_name = %server.name,
+                        dropped_index = prev_idx,
+                        kept_index = idx,
+                        "Dropping duplicate MCP server entry after load-time canonicalization; \
+                         keeping the canonical/later occurrence"
+                    );
+                    winners.insert(server.name.clone(), idx);
+                } else {
+                    tracing::warn!(
+                        server_name = %server.name,
+                        dropped_index = idx,
+                        kept_index = prev_idx,
+                        "Dropping duplicate MCP server entry after load-time canonicalization; \
+                         keeping the canonical/earlier occurrence"
+                    );
+                }
+            }
         }
+    }
+
+    // Second pass: retain only the winning indices, preserving original order.
+    let winning_indices: std::collections::HashSet<usize> = winners.values().copied().collect();
+    let mut idx = 0usize;
+    servers.retain(|_| {
+        let keep = winning_indices.contains(&idx);
+        idx += 1;
+        keep
     });
 }
 
@@ -644,8 +700,14 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     // warning instead of failing the entire config — this prevents legacy
     // names (e.g. "My Server") from disabling all MCP integrations after
     // an upgrade that tightened validation.
+    //
+    // We also track per-server whether `migrate_legacy_server_name`
+    // rewrote the name. `deduplicate_by_name` uses this to prefer
+    // already-canonical rows over legacy rows that canonicalized into a
+    // collision.
+    let mut was_migrated: Vec<bool> = Vec::with_capacity(config.servers.len());
     config.servers.retain_mut(|server| {
-        migrate_legacy_server_name(&mut server.name);
+        let migrated = migrate_legacy_server_name(&mut server.name);
         if let Err(e) = server.validate() {
             tracing::warn!(
                 server_name = %server.name,
@@ -653,10 +715,11 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
             );
             false
         } else {
+            was_migrated.push(migrated);
             true
         }
     });
-    deduplicate_by_name(&mut config.servers);
+    deduplicate_by_name(&mut config.servers, &was_migrated);
 
     Ok(config)
 }
@@ -742,8 +805,9 @@ pub async fn load_mcp_servers_from_db(
             // Validate every server on load. Invalid entries are skipped
             // with a warning to avoid breaking all MCP integrations when
             // legacy names don't pass tightened validation.
+            let mut was_migrated: Vec<bool> = Vec::with_capacity(config.servers.len());
             config.servers.retain_mut(|server| {
-                migrate_legacy_server_name(&mut server.name);
+                let migrated = migrate_legacy_server_name(&mut server.name);
                 if let Err(e) = server.validate() {
                     tracing::warn!(
                         server_name = %server.name,
@@ -751,10 +815,11 @@ pub async fn load_mcp_servers_from_db(
                     );
                     false
                 } else {
+                    was_migrated.push(migrated);
                     true
                 }
             });
-            deduplicate_by_name(&mut config.servers);
+            deduplicate_by_name(&mut config.servers, &was_migrated);
             Ok(config)
         }
         Ok(None) => {
@@ -2062,10 +2127,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp-servers.json");
 
+        // Legacy row appears first, canonical row second. After
+        // canonicalization both names collapse to `my_server`.
+        // The canonical row must win, regardless of file order, because
+        // it was not rewritten by the migration.
         let payload = serde_json::json!({
             "servers": [
-                { "name": "my-server", "url": "https://first.example.com", "enabled": true, "headers": {} },
-                { "name": "my_server", "url": "https://second.example.com", "enabled": true, "headers": {} },
+                { "name": "my-server", "url": "https://legacy.example.com", "enabled": true, "headers": {} },
+                { "name": "my_server", "url": "https://canonical.example.com", "enabled": true, "headers": {} },
             ]
         });
         tokio::fs::write(&path, payload.to_string()).await.unwrap();
@@ -2078,9 +2147,77 @@ mod tests {
         );
         assert_eq!(result.servers[0].name, "my_server");
         assert_eq!(
-            result.servers[0].url, "https://first.example.com",
-            "first occurrence wins on collision"
+            result.servers[0].url, "https://canonical.example.com",
+            "canonical row must win over the legacy row on collision"
         );
+    }
+
+    // Regression: same collision but with the canonical row listed FIRST.
+    // The canonical row must still win (first-occurrence dedup would also
+    // pick it here, so this test locks in the tie-break contract regardless
+    // of file order).
+    #[tokio::test]
+    async fn test_load_dedup_prefers_canonical_regardless_of_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "my_server", "url": "https://canonical.example.com", "enabled": true, "headers": {} },
+                { "name": "my-server", "url": "https://legacy.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "my_server");
+        assert_eq!(
+            result.servers[0].url, "https://canonical.example.com",
+            "canonical row must win regardless of file order"
+        );
+    }
+
+    // Regression: when two rows have the same migration status (both
+    // already canonical), the later occurrence should win since `upsert`
+    // appends to the end of the file and that matches user intent.
+    #[tokio::test]
+    async fn test_load_dedup_two_canonical_rows_keeps_later() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "my_server", "url": "https://older.example.com", "enabled": true, "headers": {} },
+                { "name": "my_server", "url": "https://newer.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].url, "https://newer.example.com");
+    }
+
+    // Regression: when both rows were migrated (e.g. two differently
+    // hyphenated legacy forms), the later occurrence wins.
+    #[tokio::test]
+    async fn test_load_dedup_two_legacy_rows_keeps_later() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let payload = serde_json::json!({
+            "servers": [
+                { "name": "My-Server", "url": "https://older.example.com", "enabled": true, "headers": {} },
+                { "name": "MY-SERVER", "url": "https://newer.example.com", "enabled": true, "headers": {} },
+            ]
+        });
+        tokio::fs::write(&path, payload.to_string()).await.unwrap();
+
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "my_server");
+        assert_eq!(result.servers[0].url, "https://newer.example.com");
     }
 
     #[tokio::test]
