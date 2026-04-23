@@ -614,13 +614,9 @@ jobs:
           LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL }}
           LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL }}
         run: |
-          # Strip surrounding whitespace: GH Actions repo variables frequently
-          # carry trailing newlines from the UI, which `http::Uri` rejects as
-          # "invalid uri character" downstream.
-          BASE_URL="$(printf '%s' "${LIVE_OPENAI_COMPATIBLE_BASE_URL}" | tr -d '[:space:]')"
           echo "LLM_BACKEND=openai_compatible" >> "${GITHUB_ENV}"
           echo "LLM_API_KEY=${LIVE_OPENAI_COMPATIBLE_API_KEY}" >> "${GITHUB_ENV}"
-          echo "LLM_BASE_URL=${BASE_URL}" >> "${GITHUB_ENV}"
+          echo "LLM_BASE_URL=${LIVE_OPENAI_COMPATIBLE_BASE_URL}" >> "${GITHUB_ENV}"
           echo "LLM_MODEL=${LIVE_OPENAI_COMPATIBLE_MODEL}" >> "${GITHUB_ENV}"
       - name: Run provider matrix lane
         env:

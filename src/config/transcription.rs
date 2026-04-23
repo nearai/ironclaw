@@ -59,12 +59,12 @@ impl TranscriptionConfig {
         let model =
             optional_env("TRANSCRIPTION_MODEL")?.unwrap_or_else(|| default_model.to_string());
 
-        let base_url = optional_env("TRANSCRIPTION_BASE_URL")?;
-
-        // Validate base URL to prevent SSRF (#1103).
-        if let Some(ref url) = base_url {
-            validate_base_url(url, "TRANSCRIPTION_BASE_URL")?;
-        }
+        // Validate base URL to prevent SSRF (#1103). The validator also
+        // trims leading/trailing whitespace (#2886).
+        let base_url = match optional_env("TRANSCRIPTION_BASE_URL")? {
+            Some(url) => Some(validate_base_url(&url, "TRANSCRIPTION_BASE_URL")?),
+            None => None,
+        };
 
         Ok(Self {
             enabled,
