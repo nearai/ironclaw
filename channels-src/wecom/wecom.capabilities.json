@@ -71,7 +71,8 @@
     "http": {
       "allowlist": [
         { "host": "qyapi.weixin.qq.com", "path_prefix": "/cgi-bin/" },
-        { "host": "openws.work.weixin.qq.com", "path_prefix": "/", "methods": ["GET"] }
+        { "host": "openws.work.weixin.qq.com", "path_prefix": "/", "methods": ["GET"] },
+        { "host": "*.myqcloud.com", "path_prefix": "/", "methods": ["GET"] }
       ],
       "max_response_bytes": 20971520,
       "rate_limit": {

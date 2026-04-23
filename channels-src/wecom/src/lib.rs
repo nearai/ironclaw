@@ -10,7 +10,7 @@ wit_bindgen::generate!({
     path: "../../wit/channel.wit",
 });
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::NoPadding, block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use aes::Aes256;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -1254,6 +1254,164 @@ fn default_filename_for_media(media_id: &str, media_kind: InboundMediaKind) -> S
     format!("{media_id}.{ext}")
 }
 
+fn websocket_default_mime_and_extension(msg_type: &str) -> (&'static str, &'static str) {
+    match msg_type {
+        "image" => ("image/jpeg", "jpg"),
+        "video" => ("video/mp4", "mp4"),
+        _ => ("application/octet-stream", "bin"),
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn header_value_case_insensitive<'a>(
+    headers: &'a JsonMap<String, JsonValue>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| value.as_str())
+}
+
+fn decode_base64_with_padding(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Base64 value is empty".to_string());
+    }
+
+    let mut padded = trimmed.to_string();
+    let missing_padding = padded.len() % 4;
+    if missing_padding != 0 {
+        padded.push_str(&"=".repeat(4 - missing_padding));
+    }
+
+    BASE64_STANDARD
+        .decode(padded)
+        .map_err(|e| format!("Failed to decode base64 value: {e}"))
+}
+
+fn remove_wecom_pkcs7_padding(data: &[u8]) -> Result<&[u8], String> {
+    let Some(last) = data.last().copied() else {
+        return Err("Decrypted payload is empty".to_string());
+    };
+    let pad_len = last as usize;
+    if pad_len == 0 || pad_len > 32 || pad_len > data.len() {
+        return Err(format!("Invalid WeCom PKCS#7 padding length: {pad_len}"));
+    }
+    if !data[data.len() - pad_len..]
+        .iter()
+        .all(|byte| *byte as usize == pad_len)
+    {
+        return Err("Invalid WeCom PKCS#7 padding bytes".to_string());
+    }
+    Ok(&data[..data.len() - pad_len])
+}
+
+fn decrypt_websocket_media_payload(ciphertext: &[u8], aes_key: &str) -> Result<Vec<u8>, String> {
+    if ciphertext.is_empty() {
+        return Err("Encrypted websocket media payload is empty".to_string());
+    }
+    if !ciphertext.len().is_multiple_of(16) {
+        return Err(format!(
+            "Encrypted websocket media length {} is not a multiple of AES block size",
+            ciphertext.len()
+        ));
+    }
+
+    let key = decode_base64_with_padding(aes_key)?;
+    if key.len() != 32 {
+        return Err(format!(
+            "Unexpected websocket media AES key length: {}",
+            key.len()
+        ));
+    }
+
+    let iv = &key[..16];
+    let mut buf = ciphertext.to_vec();
+    let decrypted = Aes256CbcDec::new_from_slices(&key, iv)
+        .map_err(|e| format!("Failed to initialize websocket media decryptor: {e}"))?
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|e| format!("Failed to decrypt websocket media payload: {e}"))?;
+    let unpadded = remove_wecom_pkcs7_padding(decrypted)?;
+    Ok(unpadded.to_vec())
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn hydrate_websocket_binary_attachment_data(
+    attachment: &mut InboundAttachment,
+    msg_type: &str,
+    aes_key: Option<&str>,
+) -> Result<(), String> {
+    let source_url = attachment
+        .source_url
+        .as_deref()
+        .ok_or_else(|| "Websocket attachment source_url is missing".to_string())?;
+
+    let response = channel_host::http_request("GET", source_url, "{}", None, Some(30_000))
+        .map_err(|e| format!("Failed to download websocket attachment: {e}"))?;
+    if response.status != 200 {
+        return Err(format!(
+            "Websocket attachment download returned {}: {}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        ));
+    }
+    if response.body.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Websocket attachment exceeds {} bytes",
+            MAX_ATTACHMENT_BYTES
+        ));
+    }
+
+    let headers: JsonMap<String, JsonValue> =
+        serde_json::from_str(&response.headers_json).unwrap_or_default();
+    let body = response.body;
+    let data = match aes_key {
+        Some(raw_key) if raw_key.trim().is_empty() => {
+            return Err("Websocket attachment aeskey is empty".to_string());
+        }
+        Some(raw_key) => {
+            decrypt_websocket_media_payload(&body, raw_key.trim()).map_err(|decrypt_error| {
+                format!("Failed to decrypt websocket attachment payload: {decrypt_error}")
+            })?
+        }
+        None => body,
+    };
+    if data.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Decrypted websocket attachment exceeds {} bytes",
+            MAX_ATTACHMENT_BYTES
+        ));
+    }
+
+    channel_host::store_attachment_data(&attachment.id, &data)
+        .map_err(|e| format!("Failed to store websocket attachment data: {e}"))?;
+
+    let (fallback_mime, _) = websocket_default_mime_and_extension(msg_type);
+    let mut mime_type = header_value_case_insensitive(&headers, "content-type")
+        .map(base_mime_type)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_mime.to_string());
+    let mime_lower = mime_type.to_ascii_lowercase();
+    if msg_type == "image" && !mime_lower.starts_with("image/") {
+        mime_type = "image/jpeg".to_string();
+    } else if msg_type == "video" && !mime_lower.starts_with("video/") {
+        mime_type = "video/mp4".to_string();
+    }
+
+    if let Some(filename) = header_value_case_insensitive(&headers, "content-disposition")
+        .and_then(extract_filename_from_content_disposition)
+        .filter(|value| !value.trim().is_empty())
+    {
+        attachment.filename = Some(filename);
+    }
+    attachment.mime_type = mime_type;
+    attachment.size_bytes = Some(data.len() as u64);
+
+    Ok(())
+}
+
 fn chunk_text(text: &str, limit_bytes: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1907,13 +2065,8 @@ fn websocket_attachment_from_binary(
     msg_type: &str,
     content: &WecomWsBinaryContent,
 ) -> InboundAttachment {
-    let (mime_type, extension) = match msg_type {
-        "image" => ("image/*", "img"),
-        "video" => ("video/*", "video"),
-        _ => ("application/octet-stream", "bin"),
-    };
-
-    InboundAttachment {
+    let (mime_type, extension) = websocket_default_mime_and_extension(msg_type);
+    let attachment = InboundAttachment {
         id: format!("{msg_id}:{msg_type}"),
         mime_type: mime_type.to_string(),
         filename: Some(format!("{msg_id}.{extension}")),
@@ -1926,7 +2079,28 @@ fn websocket_attachment_from_binary(
             "wecom_ws_msgtype": msg_type,
         })
         .to_string(),
-    }
+    };
+
+    #[cfg(not(test))]
+    let attachment = {
+        let mut hydrated = attachment;
+        if let Err(error) = hydrate_websocket_binary_attachment_data(
+            &mut hydrated,
+            msg_type,
+            content.aeskey.as_deref(),
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Failed to hydrate WeCom websocket {} attachment '{}': {}",
+                    msg_type, hydrated.id, error
+                ),
+            );
+        }
+        hydrated
+    };
+
+    attachment
 }
 
 fn websocket_quote_context(quote: Option<&WecomWsQuoteContent>) -> Option<String> {
@@ -2684,6 +2858,7 @@ impl Guest for WecomChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::cipher::block_padding::NoPadding;
     use aes::cipher::BlockEncryptMut;
     use cbc::Encryptor;
 
@@ -2711,6 +2886,21 @@ mod tests {
             .to_vec();
 
         BASE64_STANDARD.encode(ciphertext)
+    }
+
+    fn encrypt_websocket_media_for_test(key_bytes: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+        let block_size = 32usize;
+        let pad_len = block_size - (plaintext.len() % block_size);
+        let mut padded = plaintext.to_vec();
+        padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
+
+        let iv = &key_bytes[..16];
+        let msg_len = padded.len();
+        Aes256CbcEnc::new_from_slices(key_bytes, iv)
+            .expect("encryptor")
+            .encrypt_padded_mut::<NoPadding>(&mut padded, msg_len)
+            .expect("encrypt")
+            .to_vec()
     }
 
     #[test]
@@ -3282,6 +3472,27 @@ mod tests {
 
         assert_eq!(decrypted_xml, xml);
         assert_eq!(decrypted_corp_id, corp_id);
+    }
+
+    #[test]
+    fn decrypt_websocket_media_payload_round_trips_with_trimmed_key_padding() {
+        let key_bytes = [11u8; 32];
+        let key_base64 = BASE64_STANDARD.encode(key_bytes);
+        let trimmed_key = key_base64.trim_end_matches('=');
+        let plaintext = b"wecom websocket media payload";
+
+        let ciphertext = encrypt_websocket_media_for_test(&key_bytes, plaintext);
+        let decrypted =
+            decrypt_websocket_media_payload(&ciphertext, trimmed_key).expect("decrypt media");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn remove_wecom_pkcs7_padding_rejects_inconsistent_padding() {
+        let data = b"hello\x04\x04\x04\x03";
+        let error = remove_wecom_pkcs7_padding(data).expect_err("padding mismatch");
+        assert!(error.contains("padding"));
     }
 
     #[test]
