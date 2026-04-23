@@ -861,12 +861,13 @@ impl TestRigBuilder {
         self
     }
 
-    /// Replace a tool by name regardless of protection status.
+    /// Replace a built-in or test tool by name after the normal registry
+    /// setup pass has completed.
     ///
-    /// Unlike `with_extra_tools`, this uses `ToolRegistry::replace_for_test`
-    /// which bypasses the `PROTECTED_TOOL_NAMES` guard in `register()`.
-    /// Use this to swap built-in tools (e.g. `tool_activate`, `tool_auth`)
-    /// with probe stubs that emit specific outputs for gate testing.
+    /// Unlike `with_extra_tools`, these overrides are applied at the end of
+    /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
+    /// intentionally replace an earlier built-in registration (e.g.
+    /// `tool_activate`, `tool_auth`) for gate testing.
     pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
         self.test_tool_overrides.push(tool);
         self
@@ -1248,7 +1249,7 @@ impl TestRigBuilder {
             // registrations) so these stubs take precedence over any
             // protected tool registered earlier.
             for tool in test_tool_overrides {
-                components.tools.replace_for_test(tool).await;
+                components.tools.register_sync(tool);
             }
 
             // Register WASM tools with the shared HTTP interceptor.

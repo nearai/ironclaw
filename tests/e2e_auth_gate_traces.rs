@@ -108,12 +108,13 @@ mod auth_gate_trace_tests {
 
     /// Poll `captured_status_events` until an `AuthRequired` with a
     /// `request_id` is observed (past `initial_count`). Returns the first
-    /// new `request_id` as a `Uuid`.
+    /// new `request_id` as a `Uuid`, or a descriptive error when the
+    /// router emitted a malformed ID or the status never arrived.
     async fn wait_for_auth_required(
         rig: &TestRig,
         initial_count: usize,
         timeout: Duration,
-    ) -> Option<uuid::Uuid> {
+    ) -> Result<uuid::Uuid, String> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let events = rig.captured_status_events();
@@ -127,14 +128,17 @@ mod auth_gate_trace_tests {
                     _ => None,
                 })
                 .collect();
-            if with_id.len() > initial_count
-                && let Some(raw) = with_id.get(initial_count)
-                && let Ok(uuid) = uuid::Uuid::parse_str(raw)
-            {
-                return Some(uuid);
+            if with_id.len() > initial_count {
+                let raw = with_id
+                    .get(initial_count)
+                    .expect("length checked above; request_id must exist");
+                return uuid::Uuid::parse_str(raw)
+                    .map_err(|e| format!("malformed AuthRequired.request_id {raw:?}: {e}"));
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return Err(format!(
+                    "timed out waiting for AuthRequired #{initial_count}; saw events: {events:?}"
+                ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

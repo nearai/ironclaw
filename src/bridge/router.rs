@@ -6180,7 +6180,7 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::{StreamExt, stream};
+    use futures::{FutureExt, StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
@@ -9103,6 +9103,22 @@ mod tests {
         }
     }
 
+    async fn with_installed_engine_state<T, F>(state: EngineState, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+        *lock.write().await = None;
+        match outcome {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// Caller-level regression: the text-based auth fallback inside
     /// `handle_with_engine_inner()` must convert a completed thread
     /// response containing `authentication_required` into a pending auth
@@ -9111,19 +9127,16 @@ mod tests {
     #[tokio::test]
     async fn handle_with_engine_text_auth_fallback_emits_pending_gate_for_registered_credential() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
-        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
-        *lock.write().await = None;
 
-        let outcome = async {
-            let store = Arc::new(TestStore::new());
-            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
-                text: r#"{"error":"authentication_required","credential_name":"github_pat"}"#
-                    .to_string(),
-            });
-            let state = make_expected_test_state_with_llm(store, llm);
-            let pending_gates = Arc::clone(&state.pending_gates);
-            *lock.write().await = Some(state);
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: r#"{"error":"authentication_required","credential_name":"github_pat"}"#
+                .to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
 
+        let outcome = with_installed_engine_state(state, async move {
             let (mut agent, statuses) = make_test_agent_with_status_channel("web").await;
 
             let credential_registry = Arc::new(crate::tools::wasm::SharedCredentialRegistry::new());
@@ -9163,10 +9176,9 @@ mod tests {
             assert_eq!(pending[0].parameters["credential_name"], "github_pat");
 
             Ok::<(), crate::error::Error>(())
-        }
+        })
         .await;
 
-        *lock.write().await = None;
         outcome.expect("registered auth fallback should create pending gate");
     }
 
@@ -9176,19 +9188,16 @@ mod tests {
     #[tokio::test]
     async fn handle_with_engine_text_auth_fallback_passthrough_for_unregistered_credential() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
-        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
-        *lock.write().await = None;
 
-        let outcome = async {
-            let store = Arc::new(TestStore::new());
-            let raw = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
-            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
-                text: raw.to_string(),
-            });
-            let state = make_expected_test_state_with_llm(store, llm);
-            let pending_gates = Arc::clone(&state.pending_gates);
-            *lock.write().await = Some(state);
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
 
+        let outcome = with_installed_engine_state(state, async move {
             let (agent, statuses) = make_test_agent_with_status_channel("web").await;
             let message = IncomingMessage::new("web", "alice", "call the github api");
             let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
@@ -9214,10 +9223,9 @@ mod tests {
             );
 
             Ok::<(), crate::error::Error>(())
-        }
+        })
         .await;
 
-        *lock.write().await = None;
         outcome.expect("unregistered auth fallback should pass through raw text");
     }
 
@@ -9228,19 +9236,16 @@ mod tests {
     #[tokio::test]
     async fn handle_with_engine_text_auth_fallback_rejects_invalid_credential_name() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
-        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
-        *lock.write().await = None;
 
-        let outcome = async {
-            let store = Arc::new(TestStore::new());
-            let raw = r#"{"error":"authentication_required","credential_name":"github-pat"}"#;
-            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
-                text: raw.to_string(),
-            });
-            let state = make_expected_test_state_with_llm(store, llm);
-            let pending_gates = Arc::clone(&state.pending_gates);
-            *lock.write().await = Some(state);
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github-pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
 
+        let outcome = with_installed_engine_state(state, async move {
             let (agent, statuses) = make_test_agent_with_status_channel("web").await;
             let message = IncomingMessage::new("web", "alice", "call the github api");
             let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
@@ -9266,10 +9271,9 @@ mod tests {
             );
 
             Ok::<(), crate::error::Error>(())
-        }
+        })
         .await;
 
-        *lock.write().await = None;
         outcome.expect("invalid credential names should be rejected by caller path");
     }
 

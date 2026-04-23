@@ -217,6 +217,13 @@ fn evaluate_expectation(
             })
         }
         (Err(err), TraceExpectation::Failure { error_contains }) => {
+            if error_contains.trim().is_empty() {
+                return Some(TraceFailure {
+                    operation_index: index,
+                    tool_name: op.tool_name.clone(),
+                    reason: "failure expectations must set a non-empty error_contains".into(),
+                });
+            }
             let msg = err.to_string();
             if msg.contains(error_contains) {
                 None
@@ -368,6 +375,20 @@ mod tests {
             }
         });
         assert!(check_success_assertions(&out, &asserts).is_none());
+    }
+
+    #[test]
+    fn failure_expectation_rejects_empty_error_contains() {
+        let op = TraceOperation {
+            tool_name: "missing".into(),
+            params: serde_json::Value::Null,
+            expected: TraceExpectation::Failure {
+                error_contains: " ".into(),
+            },
+        };
+        let failure = evaluate_expectation(0, &op, &Err(ToolError::ExecutionFailed("boom".into())))
+            .expect("empty error_contains must be rejected");
+        assert!(failure.reason.contains("non-empty error_contains"));
     }
 
     #[test]
