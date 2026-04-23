@@ -102,7 +102,7 @@ pub async fn run_logs_command(cmd: LogsCommand, config_path: Option<&Path>) -> a
 /// backwards in chunks to find the last `limit` newlines, so memory usage
 /// is proportional to the output size, not the file size.
 fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
-    let log_path = crate::bootstrap::ironclaw_base_dir().join("gateway.log");
+    let log_path = crate::bootstrap::gateway_log_path();
     if !log_path.exists() {
         anyhow::bail!(
             "No gateway log file found at {}.\n\
@@ -456,11 +456,25 @@ async fn resolve_gateway_params(
         token.clone()
     } else if let Some(t) = gw_config.as_ref().and_then(|c| c.auth_token.clone()) {
         t
+    } else if let Ok(token) = std::fs::read_to_string(crate::bootstrap::gateway_token_path()) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            std::env::var("GATEWAY_AUTH_TOKEN").map_err(|_| {
+                anyhow::anyhow!(
+                    "No auth token provided. Use --token <TOKEN>, set GATEWAY_AUTH_TOKEN, or read {}.\n\
+                     Standalone gateway start writes the token there.",
+                    crate::bootstrap::gateway_token_path().display()
+                )
+            })?
+        } else {
+            token
+        }
     } else {
         std::env::var("GATEWAY_AUTH_TOKEN").map_err(|_| {
             anyhow::anyhow!(
-                "No auth token provided. Use --token <TOKEN> or set GATEWAY_AUTH_TOKEN.\n\
-                 The token is printed when the gateway starts."
+                "No auth token provided. Use --token <TOKEN>, set GATEWAY_AUTH_TOKEN, or read {}.\n\
+                 Standalone gateway start writes the token there.",
+                crate::bootstrap::gateway_token_path().display()
             )
         })?
     };

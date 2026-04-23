@@ -62,7 +62,7 @@ mod tests {
 
         let auth =
             MultiAuthState::single(gateway.auth_token().to_string(), config.owner_id.clone());
-        let addr = start_server(
+        let (addr, _server_handle) = start_server(
             "127.0.0.1:0".parse().expect("localhost addr"),
             gateway.state().clone(),
             auth.into(),

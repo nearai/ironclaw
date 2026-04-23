@@ -621,6 +621,11 @@ impl GatewayChannel {
         self.auth.env_auth.first_token().unwrap_or("")
     }
 
+    /// Get the combined auth state used by the router.
+    pub fn auth(&self) -> &CombinedAuthState {
+        &self.auth
+    }
+
     /// Get a reference to the shared gateway state (for the agent to push SSE events).
     pub fn state(&self) -> &Arc<GatewayState> {
         &self.state
@@ -655,7 +660,8 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        let (_bound_addr, _server_handle) =
+            platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

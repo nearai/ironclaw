@@ -992,7 +992,7 @@ mod tests {
             "test-token".to_string(),
             "test".to_string(),
         ));
-        let bound = start_server(addr, state.clone(), auth)
+        let (bound, _server_handle) = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");
 

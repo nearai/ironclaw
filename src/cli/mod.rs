@@ -21,6 +21,7 @@ mod completion;
 mod config;
 mod doctor;
 pub mod fmt;
+mod gateway;
 mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
@@ -42,6 +43,7 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use gateway::{GatewayCommand, run_gateway_command};
 pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
@@ -247,6 +249,14 @@ pub enum Command {
         long_about = "Install, start, or stop service.\nExample: ironclaw service install"
     )]
     Service(ServiceCommand),
+
+    /// Manage standalone gateway lifecycle
+    #[command(
+        subcommand,
+        about = "Manage standalone gateway lifecycle",
+        long_about = "Run the web gateway without the full agent loop.\nExamples:\n  ironclaw gateway serve\n  ironclaw gateway start\n  ironclaw gateway status"
+    )]
+    Gateway(GatewayCommand),
 
     /// Manage SKILL.md-based skills
     #[command(
@@ -508,5 +518,17 @@ mod tests {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);
+    }
+
+    #[test]
+    fn test_gateway_status_command_parses() {
+        let parsed = Cli::try_parse_from(["ironclaw", "gateway", "status"]);
+        assert!(parsed.is_ok(), "gateway status should parse: {parsed:?}");
+    }
+
+    #[test]
+    fn test_gateway_serve_command_parses() {
+        let parsed = Cli::try_parse_from(["ironclaw", "gateway", "serve"]);
+        assert!(parsed.is_ok(), "gateway serve should parse: {parsed:?}");
     }
 }
