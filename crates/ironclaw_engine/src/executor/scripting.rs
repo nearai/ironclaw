@@ -30,6 +30,7 @@ use crate::capability::lease::LeaseManager;
 use crate::capability::policy::{PolicyDecision, PolicyEngine};
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::traits::llm::{LlmBackend, LlmCallConfig};
+use crate::types::capability::ActionDef;
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
@@ -431,12 +432,16 @@ pub async fn execute_code_with_skills(
     // Without this, `mission_list()` in code raises NameError because Monty
     // resolves the name before calling it, and Undefined → NameError.
     let active_leases = leases.active_for_thread(thread.id).await;
-    let mut known_actions: std::collections::HashSet<String> = effects
+    let available_actions: Arc<[ActionDef]> = effects
         .available_actions(&active_leases, context)
         .await
         .unwrap_or_default()
-        .into_iter()
-        .map(|a| a.name)
+        .into();
+    let mut execution_context = context.clone();
+    execution_context.available_actions_snapshot = Some(Arc::clone(&available_actions));
+    let mut known_actions: std::collections::HashSet<String> = available_actions
+        .iter()
+        .map(|action| action.name.clone())
         .collect();
 
     // Register skill code snippet function names as additional known actions.
@@ -705,10 +710,9 @@ pub async fn execute_code_with_skills(
                     &action_name,
                     &params,
                     thread,
-                    effects,
                     leases,
                     policy,
-                    context,
+                    &execution_context,
                     capability_policies,
                     &str_call_id,
                     &mut events,
@@ -722,7 +726,7 @@ pub async fn execute_code_with_skills(
                         let name = action_name.clone();
                         let params_clone = params.clone();
                         let lease_clone = lease.clone();
-                        let mut ctx = context.clone();
+                        let mut ctx = execution_context.clone();
                         ctx.current_call_id = Some(str_call_id.clone());
                         let ps = crate::types::event::summarize_params(&name, &params);
 
@@ -1120,7 +1124,6 @@ async fn preflight_action(
     action_name: &str,
     params: &serde_json::Value,
     thread: &Thread,
-    effects: &Arc<dyn EffectExecutor>,
     leases: &LeaseManager,
     policy: &PolicyEngine,
     context: &ThreadExecutionContext,
@@ -1146,17 +1149,20 @@ async fn preflight_action(
         }
     };
 
-    let action_def = effects
-        .available_actions(std::slice::from_ref(&lease), context)
-        .await
-        .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.matches_name(action_name)));
+    let action_def = context
+        .available_actions_snapshot
+        .as_ref()
+        .and_then(|actions| {
+            actions
+                .iter()
+                .find(|action| action.matches_name(action_name))
+        });
     let canonical_action_name = action_def
         .as_ref()
         .map(|action| action.name.as_str())
         .unwrap_or(action_name);
 
-    if let Some(ref action_def) = action_def {
+    if let Some(action_def) = action_def {
         match policy.evaluate(action_def, &lease, capability_policies) {
             PolicyDecision::Deny { reason } => {
                 events.push(EventKind::ActionFailed {
@@ -2085,6 +2091,81 @@ mod tests {
             &serde_json::json!({}),
         )
         .await
+    }
+
+    struct SnapshotAwareToolInfoEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for SnapshotAwareToolInfoEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            parameters: serde_json::Value,
+            _lease: &CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let output = if action_name == "tool_info" {
+                let requested = parameters
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                match ctx.available_actions_snapshot.as_ref().and_then(|actions| {
+                    actions.iter().find(|action| action.matches_name(requested))
+                }) {
+                    Some(action) => serde_json::json!({
+                        "name": action.name,
+                        "summary": {
+                            "always_required": ["name", "goal", "cadence"]
+                        }
+                    }),
+                    None => serde_json::json!({"error": "missing action snapshot"}),
+                }
+            } else {
+                serde_json::json!({"error": format!("unexpected action '{action_name}'")})
+            };
+
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                is_error: output.get("error").is_some(),
+                output,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![
+                test_action("tool_info"),
+                ActionDef {
+                    name: "mission_create".into(),
+                    description: "Create a mission".into(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "goal": {"type": "string"},
+                            "cadence": {"type": "string"}
+                        },
+                        "required": ["name", "goal", "cadence"]
+                    }),
+                    effects: vec![EffectType::WriteLocal],
+                    requires_approval: false,
+                    discovery: None,
+                },
+            ])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
     }
 
     // ── Single await tool call ──────────────────────────────
@@ -3326,6 +3407,48 @@ except Exception as e:
 
         assert!(matches!(result, ExtFunctionResult::Error(_)));
         assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_code_propagates_snapshot_to_tool_execution_context() {
+        let thread = make_test_thread();
+        let effects: Arc<dyn EffectExecutor> = Arc::new(SnapshotAwareToolInfoEffects);
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            r#"
+result = await tool_info(name="mission-create", detail="summary")
+"#,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.failure.is_none(),
+            "unexpected failure: {:?}",
+            result.failure
+        );
+        assert_eq!(result.action_results.len(), 1);
+        assert!(!result.action_results[0].is_error);
+        assert_eq!(
+            result.action_results[0].output["name"],
+            serde_json::json!("mission_create")
+        );
     }
 
     // ── Error classification tests ──────────────────────────────

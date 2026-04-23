@@ -64,6 +64,11 @@ pub async fn execute_action_calls(
     let mut preflight_results: Vec<PreflightOutcome> = Vec::with_capacity(calls.len());
     let mut early_events = Vec::new();
     let mut early_results = Vec::new();
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
+        .available_actions(&active_leases, context)
+        .await?
+        .into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies for every call. RequireApproval interrupts
@@ -104,13 +109,11 @@ pub async fn execute_action_calls(
         };
 
         // 2. Find the action definition and check policy
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease), context)
-            .await?
-            .into_iter()
-            .find(|a| action_name_matches(&a.name, &call.action_name));
+        let action_def = available_actions
+            .iter()
+            .find(|action| action.matches_name(&call.action_name));
 
-        if let Some(ref action_def) = action_def {
+        if let Some(action_def) = action_def {
             let decision = policy.evaluate(action_def, &lease, capability_policies);
             match decision {
                 PolicyDecision::Deny { reason } => {
@@ -214,6 +217,7 @@ pub async fn execute_action_calls(
         let call = &calls[idx];
         let mut exec_ctx = context.clone();
         exec_ctx.current_call_id = Some(call.id.clone());
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
         let execution_start = Instant::now();
         let exec_result = effects
             .execute_action(
@@ -241,6 +245,7 @@ pub async fn execute_action_calls(
             let call = calls[idx].clone();
             let mut ctx = context.clone();
             ctx.current_call_id = Some(call.id.clone());
+            ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             let effects = effects.clone();
             let lease = lease.clone();
 
@@ -449,17 +454,6 @@ fn classify_exec_result(
 
 fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> bool {
     matches!(result, Err(EngineError::GatePaused { .. }))
-}
-
-fn action_name_matches(candidate: &str, requested: &str) -> bool {
-    if candidate == requested {
-        return true;
-    }
-
-    let candidate_hyphenated = candidate.replace('_', "-");
-    let candidate_underscored = candidate.replace('-', "_");
-
-    requested == candidate_hyphenated || requested == candidate_underscored
 }
 
 #[cfg(test)]
@@ -1224,5 +1218,89 @@ mod tests {
         if let Some(EventKind::ActionExecuted { call_id, .. }) = result.events.first() {
             assert_eq!(call_id, mistral_id);
         }
+    }
+
+    struct SnapshotAwareEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for SnapshotAwareEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            _params: serde_json::Value,
+            _lease: &CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let canonical_name = ctx
+                .available_actions_snapshot
+                .as_ref()
+                .and_then(|actions| actions.iter().find(|action| action.matches_name(name)))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| format!("missing_snapshot:{name}"));
+
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: canonical_name,
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![test_action("create_issue")])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_propagates_snapshot_to_executor_context() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(SnapshotAwareEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_snapshot_ctx".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "snapshot propagation"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].action_name, "create_issue");
+        assert!(!result.results[0].is_error);
     }
 }
