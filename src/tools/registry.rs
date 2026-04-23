@@ -282,6 +282,20 @@ impl ToolRegistry {
         }
     }
 
+    /// Test-only: replace a registered tool regardless of protection.
+    ///
+    /// Used by the integration test rig to swap built-in tools (e.g.
+    /// `tool_activate`) for stubs that `register()` would otherwise
+    /// reject due to the `PROTECTED_TOOL_NAMES` guard.
+    #[doc(hidden)]
+    pub async fn replace_for_test(&self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        let mut tools = self.tools.write().await;
+        tools.insert(name.clone(), tool);
+        let mut builtins = self.builtin_names.write().await;
+        builtins.insert(name);
+    }
+
     /// Resolve a tool name to the key under which it is registered,
     /// trying the exact name first, then hyphen→underscore and
     /// underscore→hyphen aliases.
