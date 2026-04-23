@@ -343,6 +343,7 @@ fn create_openai_compat_from_registry(
         api_key,
         streaming_base_url,
         config.model.clone(),
+        config.provider_id.clone(),
         extra_headers_vec,
         unsupported,
     )

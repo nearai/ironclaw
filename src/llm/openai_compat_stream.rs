@@ -37,6 +37,8 @@ pub struct OpenAiCompatStreamingProvider {
     base_url: String,
     api_key: String,
     model_name: String,
+    /// Human-readable provider identifier used in error attribution (e.g. "openrouter", "groq").
+    provider_id: String,
     /// Raw (key, value) pairs sent as additional HTTP headers on every request.
     extra_headers: Vec<(String, String)>,
     /// Parameter names that this provider does not accept (e.g. `"temperature"`).
@@ -49,6 +51,7 @@ impl OpenAiCompatStreamingProvider {
         api_key: String,
         base_url: String,
         model_name: String,
+        provider_id: String,
         extra_headers: Vec<(String, String)>,
         unsupported_params: HashSet<String>,
     ) -> Result<Self, reqwest::Error> {
@@ -65,6 +68,7 @@ impl OpenAiCompatStreamingProvider {
             base_url,
             api_key,
             model_name,
+            provider_id,
             extra_headers,
             unsupported_params,
         })
@@ -105,7 +109,7 @@ impl OpenAiCompatStreamingProvider {
 
         let response = builder.json(&body).send().await.map_err(|e| {
             LlmError::RequestFailed {
-                provider: "openai_compat".to_string(),
+                provider: self.provider_id.clone(),
                 reason: e.to_string(),
             }
         })?;
@@ -125,10 +129,10 @@ impl OpenAiCompatStreamingProvider {
 
             return Err(match code {
                 401 | 403 => LlmError::AuthFailed {
-                    provider: "openai_compat".to_string(),
+                    provider: self.provider_id.clone(),
                 },
                 429 => LlmError::RateLimited {
-                    provider: "openai_compat".to_string(),
+                    provider: self.provider_id.clone(),
                     retry_after,
                 },
                 413 => {
@@ -149,26 +153,26 @@ impl OpenAiCompatStreamingProvider {
                         LlmError::ContextLengthExceeded { used, limit }
                     } else {
                         LlmError::RequestFailed {
-                            provider: "openai_compat".to_string(),
+                            provider: self.provider_id.clone(),
                             reason: format!("HTTP 400: {}", truncated),
                         }
                     }
                 }
                 500..=599 => {
                     tracing::debug!(
-                        provider = "openai_compat",
+                        provider = %self.provider_id,
                         status = code,
                         body_preview = truncated.as_str(),
                         "openai_compat streaming upstream 5xx response",
                     );
                     LlmError::BadGateway {
-                        provider: "openai_compat".to_string(),
+                        provider: self.provider_id.clone(),
                         status: code,
                         retry_after,
                     }
                 }
                 _ => LlmError::RequestFailed {
-                    provider: "openai_compat".to_string(),
+                    provider: self.provider_id.clone(),
                     reason: format!("HTTP {}: {}", status, truncated),
                 },
             });
@@ -186,7 +190,7 @@ impl OpenAiCompatStreamingProvider {
 
         while let Some(event) = event_stream.next().await {
             let event = event.map_err(|e| LlmError::RequestFailed {
-                provider: "openai_compat".to_string(),
+                provider: self.provider_id.clone(),
                 reason: format!("SSE stream error: {}", e),
             })?;
 
@@ -230,7 +234,10 @@ impl OpenAiCompatStreamingProvider {
                                 .get("index")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0) as u32;
-                            let entry = tool_acc.entry(idx).or_default();
+                            let entry = tool_acc.entry(idx).or_insert_with(|| PartialTool {
+                                index: idx,
+                                ..Default::default()
+                            });
                             if let Some(id) = tc.get("id").and_then(|v| v.as_str())
                                 && !id.is_empty()
                             {
@@ -284,14 +291,17 @@ impl OpenAiCompatStreamingProvider {
                         tracing::warn!(
                             tool = %p.name,
                             error = %e,
-                            raw = %p.arguments,
+                            raw_len = p.arguments.len(),
                             "Failed to parse streamed tool_call arguments as JSON; preserving raw text",
                         );
                         serde_json::Value::String(p.arguments.clone())
                     }
                 };
                 ToolCall {
-                    id: p.id,
+                    id: crate::llm::rig_adapter::normalize_tool_call_id_for_streaming(
+                        &p.id,
+                        p.index as usize,
+                    ),
                     name: p.name,
                     arguments,
                     reasoning: None,
@@ -307,6 +317,7 @@ impl OpenAiCompatStreamingProvider {
 
 #[derive(Debug, Default)]
 struct PartialTool {
+    index: u32,
     id: String,
     name: String,
     arguments: String,
@@ -355,7 +366,14 @@ fn messages_to_json(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
                 let mut parts =
                     vec![serde_json::json!({"type": "text", "text": msg.content})];
                 for p in &msg.content_parts {
-                    parts.push(serde_json::to_value(p).unwrap_or_default());
+                    match serde_json::to_value(p) {
+                        Ok(v) => parts.push(v),
+                        Err(e) => tracing::warn!(
+                            role = %role,
+                            error = %e,
+                            "Failed to serialize content part; skipping",
+                        ),
+                    }
                 }
                 serde_json::Value::Array(parts)
             } else if role == "assistant"

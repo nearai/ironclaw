@@ -269,7 +269,8 @@ pub struct ReasoningContext {
     /// When set, each text token/chunk from streaming LLM calls is sent to this
     /// channel so callers can forward it to the client in real time.
     ///
-    /// Bounded to apply backpressure; chunks that cannot be queued are dropped.
+    /// Typically backed by a bounded channel to cap memory usage; chunks that
+    /// cannot be queued may be dropped when the buffer is full.
     pub chunk_sender: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
