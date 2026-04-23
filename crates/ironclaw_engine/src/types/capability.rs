@@ -198,12 +198,14 @@ impl ActionDef {
         if trimmed.is_empty() {
             return false;
         }
-        if self.name == trimmed || self.discovery_name() == trimmed {
+        let discovery_name = self.discovery_name();
+        if self.name == trimmed || discovery_name == trimmed {
             return true;
         }
-        if trimmed.contains('-') {
+        if trimmed.contains('-') || self.name.contains('-') || discovery_name.contains('-') {
             let normalized = trimmed.replace('-', "_");
-            return self.name == normalized || self.discovery_name() == normalized;
+            return normalized == self.name.replace('-', "_")
+                || normalized == discovery_name.replace('-', "_");
         }
         false
     }
@@ -526,6 +528,21 @@ mod tests {
 
         assert!(action.matches_name("mission-create"));
         assert!(action.matches_name("mission_create"));
+    }
+
+    #[test]
+    fn action_def_matches_hyphenated_canonical_names_from_underscore_input() {
+        let action = ActionDef {
+            name: "mission-create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
     }
 
     #[test]

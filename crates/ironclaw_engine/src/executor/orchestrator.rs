@@ -982,11 +982,12 @@ async fn handle_execute_action(
 
     let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions = effects
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
         .available_actions(&active_leases, &exec_ctx)
         .await
-        .unwrap_or_default();
-    exec_ctx.available_actions_snapshot = Some(available_actions.clone());
+        .unwrap_or_default()
+        .into();
+    exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1334,10 +1335,11 @@ async fn handle_execute_actions_parallel(
     let step_id = StepId::new();
     let actions_context = thread_execution_context(thread, step_id, None);
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions = effects
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
         .available_actions(&active_leases, &actions_context)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1385,7 +1387,7 @@ async fn handle_execute_actions_parallel(
 
         // Check policy
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.available_actions_snapshot = Some(available_actions.clone());
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
         let action_def = available_actions
             .iter()
             .find(|a| a.matches_name(&pc.name))
@@ -1555,7 +1557,7 @@ async fn handle_execute_actions_parallel(
             .map(|action| action.name.clone())
             .unwrap_or_else(|| pc.name.clone());
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.available_actions_snapshot = Some(available_actions.clone());
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
         let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1590,7 +1592,7 @@ async fn handle_execute_actions_parallel(
             let effects = effects.clone();
             let lease = lease.clone();
             let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
-            exec_ctx.available_actions_snapshot = Some(available_actions.clone());
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {

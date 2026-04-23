@@ -4,6 +4,8 @@
 //! trait. The main crate implements it by wrapping `ToolRegistry` and
 //! `SafetyLayer` — the engine itself has no knowledge of specific tools.
 
+use std::sync::Arc;
+
 use crate::types::capability::{ActionDef, CapabilityLease, CapabilitySummary};
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
@@ -37,7 +39,7 @@ pub struct ThreadExecutionContext {
     ///
     /// Populated by the orchestrator when an execution path needs on-demand
     /// discovery parity (for example `tool_info`).
-    pub available_actions_snapshot: Option<Vec<ActionDef>>,
+    pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
 }
 
 /// Abstraction over capability action execution.

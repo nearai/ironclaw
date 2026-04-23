@@ -50,7 +50,7 @@ impl ActionDiscovery {
         let schema = action.discovery_schema();
         let mut info = serde_json::json!({
             "name": action.discovery_name(),
-            "description": action.description,
+            "description": action.description.as_str(),
             "parameters": schema_param_names(schema),
         });
 

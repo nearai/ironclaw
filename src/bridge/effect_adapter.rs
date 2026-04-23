@@ -950,7 +950,7 @@ impl EffectBridgeAdapter {
         let canonical_action_name = context
             .available_actions_snapshot
             .as_ref()
-            .and_then(|actions| ActionDiscovery::resolve(actions, action_name))
+            .and_then(|actions| ActionDiscovery::resolve(actions.as_ref(), action_name))
             .map(|action| action.name.as_str())
             .unwrap_or(action_name);
 
@@ -987,7 +987,7 @@ impl EffectBridgeAdapter {
         if canonical_action_name == "tool_info"
             && let Some(actions) = context.available_actions_snapshot.as_ref()
         {
-            match ActionDiscovery::tool_info(&parameters, actions) {
+            match ActionDiscovery::tool_info(&parameters, actions.as_ref()) {
                 Ok(Some(output)) => {
                     return Ok(ActionResult {
                         call_id: context
@@ -2615,37 +2615,40 @@ mod tests {
     async fn tool_info_reads_callable_action_snapshot_for_engine_native_actions() {
         let adapter = make_adapter();
         let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
-        ctx.available_actions_snapshot = Some(vec![ActionDef {
-            name: "mission_create".to_string(),
-            description: "Create a mission".to_string(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "cadence": {"type": "string"}
-                },
-                "required": ["name", "goal", "cadence"]
-            }),
-            effects: vec![],
-            requires_approval: false,
-            discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
                 name: "mission_create".to_string(),
-                summary: Some(ironclaw_engine::ActionDiscoverySummary {
-                    always_required: vec![
-                        "name".to_string(),
-                        "goal".to_string(),
-                        "cadence".to_string(),
-                    ],
-                    conditional_requirements: vec![
-                        "Use this only for recurring or scheduled work".to_string(),
-                    ],
-                    notes: vec![],
-                    examples: vec![],
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "cadence": {"type": "string"}
+                    },
+                    "required": ["name", "goal", "cadence"]
                 }),
-                schema_override: None,
-            }),
-        }]);
+                effects: vec![],
+                requires_approval: false,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "mission_create".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec![
+                            "name".to_string(),
+                            "goal".to_string(),
+                            "cadence".to_string(),
+                        ],
+                        conditional_requirements: vec![
+                            "Use this only for recurring or scheduled work".to_string(),
+                        ],
+                        notes: vec![],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }]
+            .into(),
+        );
 
         let result = adapter
             .execute_action(
@@ -2687,14 +2690,17 @@ mod tests {
             ironclaw_engine::ThreadId::new(),
             Some("call_tool_info_registry"),
         );
-        ctx.available_actions_snapshot = Some(vec![ActionDef {
-            name: "mission_create".to_string(),
-            description: "Create a mission".to_string(),
-            parameters_schema: serde_json::json!({"type": "object"}),
-            effects: vec![],
-            requires_approval: false,
-            discovery: None,
-        }]);
+        ctx.available_actions_snapshot = Some(
+            vec![ActionDef {
+                name: "mission_create".to_string(),
+                description: "Create a mission".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                discovery: None,
+            }]
+            .into(),
+        );
 
         let result = adapter
             .execute_action(
@@ -2715,7 +2721,7 @@ mod tests {
         let adapter = make_adapter_with_missions().await;
         let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_mission_alias"));
         ctx.available_actions_snapshot =
-            Some(crate::bridge::engine_actions::mission_capability_actions());
+            Some(crate::bridge::engine_actions::mission_capability_actions().into());
 
         let result = adapter
             .execute_action(
