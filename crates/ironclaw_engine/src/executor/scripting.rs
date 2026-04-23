@@ -743,6 +743,7 @@ pub async fn execute_code_with_skills(
                                 lease_id: lease.id,
                                 parameters: params.clone(),
                                 params_summary: ps,
+                                display_hint: None,
                             },
                         );
 
@@ -851,6 +852,7 @@ pub async fn execute_code_with_skills(
                                 lease_id,
                                 parameters,
                                 params_summary,
+                                display_hint,
                             } => {
                                 resolve_tool_future(
                                     handle,
@@ -859,6 +861,7 @@ pub async fn execute_code_with_skills(
                                     lease_id,
                                     parameters,
                                     params_summary,
+                                    display_hint,
                                     leases,
                                     context,
                                     &mut action_results,
@@ -1082,6 +1085,7 @@ enum PendingFuture {
         lease_id: crate::types::capability::LeaseId,
         parameters: serde_json::Value,
         params_summary: Option<String>,
+        display_hint: Option<String>,
     },
     /// LLM call (llm_query / llm_query_batched / rlm_query).
     Llm {
@@ -1138,6 +1142,7 @@ async fn preflight_action(
                 error: format!("no lease for action '{action_name}'"),
                 duration_ms: 0,
                 params_summary: None,
+                display_hint: None,
             });
             return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
@@ -1162,6 +1167,7 @@ async fn preflight_action(
                     error: reason.clone(),
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 });
                 return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,
@@ -1646,6 +1652,7 @@ async fn resolve_tool_future(
     lease_id: crate::types::capability::LeaseId,
     parameters: serde_json::Value,
     params_summary: Option<String>,
+    display_hint: Option<String>,
     leases: &LeaseManager,
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
@@ -1678,6 +1685,7 @@ async fn resolve_tool_future(
                         execution_duration_ms
                     },
                     params_summary,
+                    display_hint,
                 });
             } else {
                 events.push(EventKind::ActionExecuted {
@@ -1686,6 +1694,7 @@ async fn resolve_tool_future(
                     call_id: call_id.into(),
                     duration_ms: result.duration.as_millis() as u64,
                     params_summary,
+                    display_hint,
                 });
             }
             let monty_val = json_to_monty(&result.output);
@@ -1728,6 +1737,7 @@ async fn resolve_tool_future(
                 error: e.to_string(),
                 duration_ms: execution_duration_ms,
                 params_summary,
+                display_hint,
             });
             action_results.push(ActionResult {
                 call_id: call_id.into(),

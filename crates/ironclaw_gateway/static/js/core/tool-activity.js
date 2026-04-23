@@ -27,7 +27,7 @@ function buildToolFailureText(parameters, error) {
 
 function getToolActivityBodyText(entry) {
   if (!entry) return '';
-  return entry.error || entry.result || entry.result_preview || '';
+  return entry.error || entry.result || entry.result_preview || entry.display_hint || '';
 }
 
 function normalizeHistoryToolCall(toolCall) {
@@ -38,6 +38,7 @@ function normalizeHistoryToolCall(toolCall) {
     result_preview: toolCall.result_preview || '',
     result: toolCall.result || '',
     error: toolCall.error || '',
+    display_hint: toolCall.display_hint || '',
     duration_ms: null,
   };
 }
@@ -95,7 +96,11 @@ function applyToolActivityCardState(rendered, options) {
   }
 
   rendered.output.textContent = getToolActivityBodyText(entry);
-  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
+  const shouldAutoExpand = !!(
+    (options.expandErrors && status === 'fail' && rendered.output.textContent)
+    || (status === 'running' && entry.display_hint)
+    || (status === 'success' && entry.display_hint && !entry.result && !entry.result_preview)
+  );
   setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
@@ -345,6 +350,7 @@ function createToolActivityController(options) {
       result_preview: '',
       result: '',
       error: '',
+      display_hint: event.display_hint || '',
       duration_ms: null,
       started_at_ms: Date.now(),
     };
@@ -380,6 +386,10 @@ function createToolActivityController(options) {
     rendered.entry.duration_ms = typeof event.duration_ms === 'number'
       ? event.duration_ms
       : (Date.now() - rendered.entry.started_at_ms);
+
+    if (event.display_hint) {
+      rendered.entry.display_hint = event.display_hint;
+    }
 
     if (!event.success && (event.error || event.parameters)) {
       rendered.entry.error = buildToolFailureText(event.parameters, event.error);

@@ -681,6 +681,7 @@ mod tests {
                     name: "echo".into(),
                     detail: None,
                     call_id: None,
+                    display_hint: None,
                 },
                 &metadata,
             )

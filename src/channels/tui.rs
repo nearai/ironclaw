@@ -445,22 +445,26 @@ impl Channel for TuiChannel {
                 name,
                 detail,
                 call_id,
+                display_hint,
             } => TuiEvent::ToolStarted {
                 name,
                 detail,
                 call_id,
+                display_hint,
             },
             StatusUpdate::ToolCompleted {
                 name,
                 success,
                 error,
                 call_id,
+                display_hint,
                 ..
             } => TuiEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 call_id,
+                display_hint,
             },
             StatusUpdate::ToolResult {
                 name,

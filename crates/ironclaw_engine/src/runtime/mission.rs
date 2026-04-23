@@ -6280,6 +6280,7 @@ mod tests {
             error: "gh auth status: not authenticated".to_string(),
             duration_ms: 0,
             params_summary: None,
+            display_hint: None,
         });
 
         let trace = crate::executor::trace::build_trace(&thread);
@@ -6326,6 +6327,7 @@ mod tests {
             error: "authentication required for credential github".to_string(),
             duration_ms: 0,
             params_summary: None,
+            display_hint: None,
         });
 
         let trace = crate::executor::trace::build_trace(&thread);
@@ -6393,6 +6395,7 @@ mod tests {
             error: "gh auth status: not authenticated".to_string(),
             duration_ms: 0,
             params_summary: Some("gh auth status".to_string()),
+            display_hint: None,
         });
         let failing_trace = crate::executor::trace::build_trace(&failing_thread);
         assert!(!thread_completed_successfully(
@@ -6735,6 +6738,7 @@ mod tests {
             call_id: "call_1".to_string(),
             params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
             duration_ms: 15,
+            display_hint: None,
         });
 
         let trace = crate::executor::trace::build_trace(&thread);

@@ -93,6 +93,7 @@ pub async fn execute_action_calls(
                     error: format!("no lease for action '{}'", call.action_name),
                     duration_ms: 0,
                     params_summary: None,
+                    display_hint: None,
                 };
                 preflight_results.push(PreflightOutcome::Error {
                     index: idx,
@@ -128,6 +129,7 @@ pub async fn execute_action_calls(
                         error: reason,
                         duration_ms: 0,
                         params_summary: None,
+                        display_hint: None,
                     };
                     preflight_results.push(PreflightOutcome::Error {
                         index: idx,
@@ -374,6 +376,7 @@ fn classify_exec_result(
                         execution_duration_ms
                     },
                     params_summary: None,
+                    display_hint: call.display_hint.clone(),
                 }
             } else {
                 EventKind::ActionExecuted {
@@ -382,6 +385,7 @@ fn classify_exec_result(
                     call_id: call.id.clone(),
                     duration_ms: action_result.duration.as_millis() as u64,
                     params_summary: None,
+                    display_hint: call.display_hint.clone(),
                 }
             };
             (action_result, event)
@@ -441,6 +445,7 @@ fn classify_exec_result(
                 error: e.to_string(),
                 duration_ms: execution_duration_ms,
                 params_summary: None,
+                display_hint: call.display_hint.clone(),
             };
             (error_result, event)
         }
@@ -586,6 +591,7 @@ mod tests {
             id: "call_r2o5mqBgdNUlH8KzskncUGaX".into(),
             action_name: "web_search".into(),
             parameters: serde_json::json!({"query": "test"}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -643,6 +649,7 @@ mod tests {
             id: "call_abc123def".into(),
             action_name: "shell".into(),
             parameters: serde_json::json!({"cmd": "ls"}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -682,6 +689,7 @@ mod tests {
             id: "call_no_lease_123".into(),
             action_name: "web_search".into(),
             parameters: serde_json::json!({}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -742,11 +750,13 @@ mod tests {
                 id: "id_aaaa".into(),
                 action_name: "tool_a".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
             ActionCall {
                 id: "id_bbbb".into(),
                 action_name: "tool_b".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
         ];
 
@@ -797,6 +807,7 @@ mod tests {
             id: "call_alias_consume".into(),
             action_name: "create-issue".into(),
             parameters: serde_json::json!({"title": "test"}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -853,6 +864,7 @@ mod tests {
             id: "call_alias_policy".into(),
             action_name: "create-issue".into(),
             parameters: serde_json::json!({"title": "policy should still apply"}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -927,6 +939,7 @@ mod tests {
             id: "call_auth_1".into(),
             action_name: "http".into(),
             parameters: serde_json::json!({"url": "https://api.github.com/repos"}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -1020,11 +1033,13 @@ mod tests {
                 id: "call_1".into(),
                 action_name: "http".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
             ActionCall {
                 id: "call_2".into(),
                 action_name: "echo".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
         ];
 
@@ -1102,11 +1117,13 @@ mod tests {
                 id: "call_1".into(),
                 action_name: "http".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
             ActionCall {
                 id: "call_2".into(),
                 action_name: "echo".into(),
                 parameters: serde_json::json!({}),
+                display_hint: None,
             },
         ];
 
@@ -1160,6 +1177,7 @@ mod tests {
             id: "aB3xK9mZq".into(), // Mistral-compatible 9-char ID
             action_name: "echo".into(),
             parameters: serde_json::json!({}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
@@ -1208,6 +1226,7 @@ mod tests {
             id: mistral_id.into(),
             action_name: "web_search".into(),
             parameters: serde_json::json!({}),
+            display_hint: None,
         }];
 
         let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])

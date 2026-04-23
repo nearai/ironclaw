@@ -412,6 +412,9 @@ pub enum StatusUpdate {
         /// Stable tool-call ID when available, used to disambiguate repeated
         /// calls to the same tool name in a single turn.
         call_id: Option<String>,
+        /// Human-readable hint derived from the tool's description + params
+        /// (e.g. "Searching your memories for 'last week'").
+        display_hint: Option<String>,
     },
     /// Tool execution completed.
     ///
@@ -431,6 +434,8 @@ pub enum StatusUpdate {
         call_id: Option<String>,
         /// Actual tool execution duration when available.
         duration_ms: Option<u64>,
+        /// Human-readable hint mirrored from `ToolStarted`.
+        display_hint: Option<String>,
     },
     /// Brief preview of tool execution output.
     ToolResult {
@@ -691,6 +696,7 @@ impl StatusUpdate {
             detail: tool_call_detail(&name, arguments),
             name,
             call_id,
+            display_hint: None,
         }
     }
 
@@ -728,6 +734,7 @@ impl StatusUpdate {
             parameters,
             call_id,
             duration_ms,
+            display_hint: None,
         }
     }
 }

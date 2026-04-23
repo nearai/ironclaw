@@ -4431,6 +4431,7 @@ async fn forward_event_to_channel(
             call_id,
             duration_ms,
             params_summary,
+            display_hint,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -4441,6 +4442,7 @@ async fn forward_event_to_channel(
                         name: display_name.clone(),
                         detail: params_summary.clone(),
                         call_id: Some(call_id.clone()),
+                        display_hint: display_hint.clone(),
                     },
                     metadata,
                 )
@@ -4455,6 +4457,7 @@ async fn forward_event_to_channel(
                         parameters: None,
                         call_id: Some(call_id.clone()),
                         duration_ms: Some(*duration_ms),
+                        display_hint: display_hint.clone(),
                     },
                     metadata,
                 )
@@ -4466,6 +4469,7 @@ async fn forward_event_to_channel(
             error,
             duration_ms,
             params_summary,
+            display_hint,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -4476,6 +4480,7 @@ async fn forward_event_to_channel(
                         name: display_name.clone(),
                         detail: params_summary.clone(),
                         call_id: Some(call_id.clone()),
+                        display_hint: display_hint.clone(),
                     },
                     metadata,
                 )
@@ -4490,6 +4495,7 @@ async fn forward_event_to_channel(
                         parameters: None,
                         call_id: Some(call_id.clone()),
                         duration_ms: Some(*duration_ms),
+                        display_hint: display_hint.clone(),
                     },
                     metadata,
                 )
@@ -4607,6 +4613,7 @@ fn thread_event_to_app_events(
             call_id,
             duration_ms,
             params_summary,
+            display_hint,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -4616,6 +4623,7 @@ fn thread_event_to_app_events(
                     detail: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
+                    display_hint: display_hint.clone(),
                 },
                 AppEvent::ToolCompleted {
                     name: display_name,
@@ -4625,6 +4633,7 @@ fn thread_event_to_app_events(
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
+                    display_hint: display_hint.clone(),
                 },
             ]
         }
@@ -4634,6 +4643,7 @@ fn thread_event_to_app_events(
             error,
             duration_ms,
             params_summary,
+            display_hint,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -4643,6 +4653,7 @@ fn thread_event_to_app_events(
                     detail: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
+                    display_hint: display_hint.clone(),
                 },
                 AppEvent::ToolCompleted {
                     name: display_name,
@@ -4652,6 +4663,7 @@ fn thread_event_to_app_events(
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
+                    display_hint: display_hint.clone(),
                 },
             ]
         }
@@ -7132,11 +7144,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    display_hint: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    display_hint: None,
                 },
             ],
         ));
@@ -7177,6 +7191,7 @@ mod tests {
                 call_id: "call-memory-read-1".to_string(),
                 duration_ms: 42,
                 params_summary: Some("notes/today.md".to_string()),
+                display_hint: None,
             },
         );
 
@@ -7217,6 +7232,7 @@ mod tests {
                 error: "permission denied".to_string(),
                 duration_ms: 17,
                 params_summary: Some("secret.md".to_string()),
+                display_hint: None,
             },
         );
 
@@ -7605,11 +7621,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    display_hint: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    display_hint: None,
                 },
             ],
         ));
@@ -7656,11 +7674,13 @@ mod tests {
                     id: "call-1".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "pwd"}),
+                    display_hint: None,
                 },
                 ironclaw_engine::ActionCall {
                     id: "call-2".to_string(),
                     action_name: "shell".to_string(),
                     parameters: serde_json::json!({"cmd": "ls"}),
+                    display_hint: None,
                 },
             ],
         ));
@@ -8437,11 +8457,13 @@ mod tests {
                         id: "call-1".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "pwd"}),
+                        display_hint: None,
                     },
                     ironclaw_engine::ActionCall {
                         id: "call-2".to_string(),
                         action_name: "shell".to_string(),
                         parameters: serde_json::json!({"cmd": "ls"}),
+                        display_hint: None,
                     },
                 ],
             ));
@@ -8562,6 +8584,7 @@ mod tests {
                     id: "call-install".to_string(),
                     action_name: "tool_install".to_string(),
                     parameters: serde_json::json!({"name": channel_name}),
+                    display_hint: None,
                 }],
             ));
             thread.state = ironclaw_engine::ThreadState::Waiting;

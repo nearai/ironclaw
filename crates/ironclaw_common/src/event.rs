@@ -216,6 +216,9 @@ pub enum AppEvent {
         call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// Human-readable hint like "Searching memories for 'notes'".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_hint: Option<String>,
     },
     #[serde(rename = "tool_completed")]
     ToolCompleted {
@@ -231,6 +234,9 @@ pub enum AppEvent {
         duration_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// Human-readable hint mirrored from ToolStarted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_hint: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
