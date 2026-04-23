@@ -734,3 +734,50 @@ jobs:
           name: live-canary-upgrade
           path: artifacts/live-canary/
           retention-days: 30
+
+  canary-report:
+    name: Canary Report
+    needs:
+      - auth-smoke
+      - auth-full
+      - auth-channels
+      - auth-live-seeded
+      - auth-browser-consent
+      - deterministic-replay
+      - public-smoke
+      - persona-rotating
+      - private-oauth
+      - provider-matrix
+      - release-public-full
+      - upgrade-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Download all lane artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          # Each upstream lane uploads to `live-canary-<lane>` / `live-canary-provider-<provider>`.
+          # Merging into a single artifacts/live-canary/ tree lets notify_slack.py
+          # walk the <lane>/<provider>/<timestamp>/ layout it already expects.
+          pattern: live-canary-*
+          path: artifacts/live-canary
+          merge-multiple: true
+      - name: Generate and post Slack report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          # The notifier is intentionally side-effect-light: it exits 0 even on
+          # failure so the canary run's overall status isn't masked by a flaky
+          # notification path.
+          python3 scripts/live-canary/notify_slack.py \
+            --artifacts-dir artifacts/live-canary
