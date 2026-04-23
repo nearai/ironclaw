@@ -1034,16 +1034,14 @@ async fn handle_execute_action(
     };
 
     // 2. Check policy
-    let action_def = available_actions
-        .into_iter()
-        .find(|a| a.matches_name(&name));
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
 
     let canonical_name = action_def
         .as_ref()
         .map(|action| action.name.clone())
         .unwrap_or_else(|| name.clone());
 
-    if let Some(ref ad) = action_def {
+    if let Some(ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
             crate::capability::policy::PolicyDecision::Deny { reason } => {
                 let output = serde_json::json!({"error": format!("Denied: {reason}")});
