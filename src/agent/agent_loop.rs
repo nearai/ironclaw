@@ -730,73 +730,82 @@ impl Agent {
                 .collect();
             let cheap_llm = self.cheap_llm().clone();
             let reasoning = Reasoning::new(cheap_llm.clone());
-            match reasoning
+
+            // Preflight budget check: skip the LLM fallback if the user or
+            // global budget is already exhausted.
+            let budget_ok = self
+                .deps
+                .cost_guard
+                .check_allowed_for_user(user_id)
+                .await;
+            if let Err(e) = budget_ok {
+                tracing::debug!(
+                    error = %e,
+                    "Skipping LLM skill fallback — cost budget exhausted"
+                );
+            } else if let Ok((selected_names, usage)) = reasoning
                 .select_skill_names_with_llm(&rewritten, &candidates, skills_cfg.max_active_skills)
                 .await
             {
-                Ok((selected_names, usage)) => {
-                    // Record the LLM call against the cost guard and per-user budget.
-                    let model = cheap_llm.model_name().to_string();
-                    self.deps
-                        .cost_guard
-                        .record_llm_call_for_user(
-                            user_id,
-                            &model,
-                            usage.input_tokens,
-                            usage.output_tokens,
-                            usage.cache_read_input_tokens,
-                            usage.cache_creation_input_tokens,
-                            cheap_llm.cache_read_discount(),
-                            cheap_llm.cache_write_multiplier(),
-                            Some(cheap_llm.cost_per_token()),
-                        )
-                        .await;
+                // Record the LLM call against the cost guard and per-user budget.
+                let model = cheap_llm.model_name().to_string();
+                self.deps
+                    .cost_guard
+                    .record_llm_call_for_user(
+                        user_id,
+                        &model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_input_tokens,
+                        usage.cache_creation_input_tokens,
+                        cheap_llm.cache_read_discount(),
+                        cheap_llm.cache_write_multiplier(),
+                        Some(cheap_llm.cost_per_token()),
+                    )
+                    .await;
 
-                    let mut budget_remaining = skills_cfg.max_context_tokens;
+                let mut budget_remaining = skills_cfg.max_context_tokens;
 
-                    for name in selected_names {
-                        let Some(skill) = fallback_candidates
-                            .iter()
-                            .copied()
-                            .find(|skill| skill.name() == name)
-                        else {
-                            continue;
-                        };
-                        if selected.iter().any(|selected_skill| {
-                            selected_skill.manifest.name == skill.manifest.name
-                        }) {
-                            continue;
-                        }
-
-                        let token_cost = skill_context_token_cost(skill);
-                        if token_cost > budget_remaining {
-                            tracing::debug!(
-                                skill = %skill.name(),
-                                token_cost,
-                                budget_remaining,
-                                "Skipping LLM-selected skill due to context budget"
-                            );
-                            continue;
-                        }
-                        budget_remaining -= token_cost;
-                        selected.push(skill.clone());
+                for name in selected_names {
+                    let Some(skill) = fallback_candidates
+                        .iter()
+                        .copied()
+                        .find(|skill| skill.name() == name)
+                    else {
+                        continue;
+                    };
+                    if selected.iter().any(|selected_skill| {
+                        selected_skill.manifest.name == skill.manifest.name
+                    }) {
+                        continue;
                     }
 
-                    if selected.is_empty() {
-                        tracing::debug!("LLM skill fallback returned no usable skills");
-                    } else {
+                    let token_cost = skill_context_token_cost(skill);
+                    if token_cost > budget_remaining {
                         tracing::debug!(
-                            selected = ?selected.iter().map(|s| s.name()).collect::<Vec<_>>(),
-                            "LLM skill fallback selected skills"
+                            skill = %skill.name(),
+                            token_cost,
+                            budget_remaining,
+                            "Skipping LLM-selected skill due to context budget"
                         );
+                        continue;
                     }
+                    budget_remaining -= token_cost;
+                    selected.push(skill.clone());
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "LLM skill fallback failed; continuing with no active skills"
+
+                if selected.is_empty() {
+                    tracing::debug!("LLM skill fallback returned no usable skills");
+                } else {
+                    tracing::debug!(
+                        selected = ?selected.iter().map(|s| s.name()).collect::<Vec<_>>(),
+                        "LLM skill fallback selected skills"
                     );
                 }
+            } else {
+                tracing::warn!(
+                    "LLM skill fallback failed; continuing with no active skills"
+                );
             }
         }
 
