@@ -82,7 +82,7 @@ jobs:
             printf '%s\n' "$CHANGED_FILES" | grep -Eq "$1"
           }
 
-          if [ -z "$CHANGED_FILES" ] || [ -z "$(printf '%s\n' "$CHANGED_FILES" | grep -Ev '(^docs/|^\\.github/ISSUE_TEMPLATE/|^\\.github/pull_request_template\\.md$|^[^/]+\\.md$)')" ]; then
+          if [ -z "$CHANGED_FILES" ] || [ -z "$(printf '%s\n' "$CHANGED_FILES" | grep -Ev '(^docs/|^\\.github/ISSUE_TEMPLATE/|^\\.github/pull_request_template\\.md$|^[^/]+\\.md$)' || true)" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
           else
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -94,7 +94,7 @@ jobs:
             echo "has_core_code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(crates/ironclaw_engine/|src/agent/|src/bridge/|src/llm/|src/tools/builtin/|src/context/|src/orchestrator/|src/worker/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|\.github/workflows/replay-gate\.yml$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(crates/ironclaw_engine/|src/agent/|src/bridge/|src/llm/|src/tools/builtin/|src/context/|src/orchestrator/|src/worker/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/replay-gate\.yml$|\.github/workflows/test\.yml$)'; then
             echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"

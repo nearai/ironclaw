@@ -22,6 +22,8 @@ on:
         required: false
         type: string
   pull_request:
+    branches:
+      - staging
     paths:
       - 'crates/ironclaw_engine/**'
       - 'src/agent/**'
