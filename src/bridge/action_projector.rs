@@ -158,15 +158,19 @@ impl ActionProjector {
         // requires auth first — so the LLM never calls them and the
         // auth-on-first-call gate never fires. See issue #2883.
         if let Some(auth_manager) = auth_manager {
-            for latent in auth_manager
-                .latent_provider_actions(&context.user_id)
-                .await
-            {
-                if !seen.insert(latent.action_name.clone()) {
+            for latent in auth_manager.latent_provider_actions(&context.user_id).await {
+                // Normalize hyphen→underscore to match the first loop's
+                // `td.name.replace('-', '_')`. This keeps the action name
+                // stable for the LLM before and after auth (registered
+                // tools surface as underscores) and ensures the `seen`
+                // dedup correctly suppresses overlap with tools already
+                // added above.
+                let name = latent.action_name.replace('-', "_");
+                if !seen.insert(name.clone()) {
                     continue;
                 }
                 actions.push(ActionDef {
-                    name: latent.action_name,
+                    name,
                     description: latent.description,
                     parameters_schema: latent.parameters_schema,
                     effects: vec![],
