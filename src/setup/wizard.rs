@@ -1105,7 +1105,13 @@ impl SetupWizard {
                 return self.step_database().await;
             }
 
-            if let Ok(url) = std::env::var("DATABASE_URL") {
+            // Only use an ambient DATABASE_URL when the user hasn't explicitly
+            // selected a different backend. Previously we took this branch on
+            // any DATABASE_URL presence, which hijacked `DATABASE_BACKEND=libsql`
+            // deployments whose shell/env had a Postgres URL sitting around.
+            if env_backend.is_none()
+                && let Ok(url) = std::env::var("DATABASE_URL")
+            {
                 return self.finish_postgres_auto_setup(url).await;
             }
         }
@@ -1203,8 +1209,12 @@ impl SetupWizard {
             }
         }
 
+        // set_runtime_env stores a fallback that `optional_env` only consults
+        // when the real env is unset — so on any host with `IRONCLAW_PROFILE`
+        // in the shell or `.env`, the user's wizard choice was silently
+        // overridden by the ambient value. Pass the name directly instead.
         crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
-        crate::config::profile::apply_profile(&mut self.settings)
+        crate::config::profile::apply_named_profile(&mut self.settings, profile)
             .map_err(|e| SetupError::Config(e.to_string()))?;
 
         self.selected_deployment_profile = Some(profile.to_string());
@@ -4063,6 +4073,13 @@ mod tests {
         );
     }
 
+
+
+    /// Regression test for the env-priority bug: `set_runtime_env` was a
+    /// fallback, not an override, so a host-set `IRONCLAW_PROFILE=server`
+    /// silently hijacked the wizard's `apply_quick_local_profile("local")`.
+    /// Fix: pass the profile name directly via `apply_named_profile`.
+
     #[test]
     fn test_apply_quick_local_profile_sets_profile_and_preserves_db_config_on_merge() {
         let _guard = lock_env();
@@ -4698,6 +4715,12 @@ mod tests {
 
     /// Regression test for #846: auto_setup_database must establish a DB
     /// connection and run migrations so that persist_settings succeeds.
+
+
+    /// Also regression-tests the fix for the ambient-`DATABASE_URL` leak
+    /// where `DATABASE_BACKEND=libsql` was silently overridden by any
+    /// Postgres URL on the host shell.
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
