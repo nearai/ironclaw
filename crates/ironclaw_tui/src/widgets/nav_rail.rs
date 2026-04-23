@@ -57,11 +57,17 @@ pub(crate) fn nav_hit_areas(area: Rect) -> Vec<(ActiveTab, Rect)> {
 
 pub struct NavRailWidget {
     theme: Theme,
+    show_badges: bool,
+    show_hints: bool,
 }
 
 impl NavRailWidget {
-    pub fn new(theme: Theme) -> Self {
-        Self { theme }
+    pub fn new(theme: Theme, show_badges: bool, show_hints: bool) -> Self {
+        Self {
+            theme,
+            show_badges,
+            show_hints,
+        }
     }
 }
 
@@ -81,13 +87,14 @@ impl TuiWidget for NavRailWidget {
 
         let block = Block::default()
             .borders(Borders::RIGHT)
-            .border_style(self.theme.border_style())
+            .border_style(self.theme.chrome_border_style())
             .style(self.theme.nav_style())
-            .title(" Control ");
+            .title(" IronClaw ");
         let inner = block.inner(area);
         block.render(area, buf);
 
         let mut lines = vec![
+            Line::from(Span::styled(" control room", self.theme.bold_style())),
             Line::from(Span::styled(" surfaces", self.theme.dim_style())),
             Line::from(""),
         ];
@@ -111,7 +118,7 @@ impl TuiWidget for NavRailWidget {
                 },
             ));
             let badge = badge_count(tab, state);
-            if badge > 0 {
+            if self.show_badges && badge > 0 {
                 spans.push(Span::styled(" ", self.theme.nav_style()));
                 spans.push(Span::styled(
                     if badge > 99 {
@@ -122,27 +129,34 @@ impl TuiWidget for NavRailWidget {
                     if is_active {
                         self.theme.selected_style()
                     } else {
-                        Style::default().fg(self.theme.accent.to_color())
+                        Style::default().fg(self.theme.nav_active_fg.to_color())
                     },
                 ));
             }
             lines.push(Line::from(spans));
         }
 
-        let footer_padding = inner.height.saturating_sub(lines.len() as u16 + 3) as usize;
+        let hint_rows = if self.show_hints { 4 } else { 0 };
+        let footer_padding = inner.height.saturating_sub(lines.len() as u16 + hint_rows) as usize;
         lines.extend(std::iter::repeat_n(Line::from(""), footer_padding));
-        lines.push(Line::from(Span::styled(
-            " ctrl-b projects",
-            self.theme.dim_style(),
-        )));
-        lines.push(Line::from(Span::styled(
-            " ctrl-l logs",
-            self.theme.dim_style(),
-        )));
-        lines.push(Line::from(Span::styled(
-            " /resume threads",
-            self.theme.dim_style(),
-        )));
+        if self.show_hints {
+            lines.push(Line::from(Span::styled(
+                " quick keys",
+                self.theme.dim_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                " ctrl-b projects",
+                self.theme.dim_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                " ctrl-l logs",
+                self.theme.dim_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                " /resume threads",
+                self.theme.dim_style(),
+            )));
+        }
 
         Paragraph::new(lines)
             .style(self.theme.nav_style())

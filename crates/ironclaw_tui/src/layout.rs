@@ -9,7 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeOverrides};
 
 /// Top-level layout configuration for the TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +17,10 @@ pub struct TuiLayout {
     /// Theme name or inline theme definition.
     #[serde(default = "default_theme_name")]
     pub theme: String,
+
+    /// Optional color-token overrides applied on top of the named theme.
+    #[serde(default)]
+    pub theme_overrides: ThemeOverrides,
 
     /// Header bar configuration.
     #[serde(default)]
@@ -51,6 +55,7 @@ impl Default for TuiLayout {
     fn default() -> Self {
         Self {
             theme: default_theme_name(),
+            theme_overrides: ThemeOverrides::default(),
             header: HeaderConfig::default(),
             status_bar: StatusBarConfig::default(),
             conversation: ConversationConfig::default(),
@@ -98,10 +103,11 @@ impl TuiLayout {
 
     /// Resolve the theme from the layout's theme name.
     pub fn resolve_theme(&self) -> Theme {
-        match self.theme.as_str() {
+        let base = match self.theme.as_str() {
             "light" => Theme::light(),
             _ => Theme::dark(),
-        }
+        };
+        base.apply_overrides(&self.theme_overrides)
     }
 }
 
@@ -195,6 +201,16 @@ impl Default for ConversationConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopTabBarMode {
+    #[default]
+    Auto,
+    Full,
+    Compact,
+    Hidden,
+}
+
 /// Shell chrome configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellConfig {
@@ -206,10 +222,26 @@ pub struct ShellConfig {
 
     #[serde(default = "default_true")]
     pub show_surface_header: bool,
+
+    #[serde(default = "default_surface_header_height")]
+    pub surface_header_height: u16,
+
+    #[serde(default)]
+    pub top_tab_bar_mode: TopTabBarMode,
+
+    #[serde(default = "default_true")]
+    pub nav_badges: bool,
+
+    #[serde(default = "default_true")]
+    pub nav_hints: bool,
 }
 
 fn default_nav_rail_width() -> u16 {
     18
+}
+
+fn default_surface_header_height() -> u16 {
+    4
 }
 
 impl Default for ShellConfig {
@@ -218,6 +250,10 @@ impl Default for ShellConfig {
             show_nav_rail: true,
             nav_rail_width: default_nav_rail_width(),
             show_surface_header: true,
+            surface_header_height: default_surface_header_height(),
+            top_tab_bar_mode: TopTabBarMode::Auto,
+            nav_badges: true,
+            nav_hints: true,
         }
     }
 }
@@ -239,6 +275,7 @@ pub enum TuiSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeColor;
 
     #[test]
     fn default_layout_is_valid() {
@@ -323,5 +360,56 @@ mod tests {
 
         assert!(layout.conversation.show_work_sidebar);
         assert_eq!(layout.conversation.work_sidebar_width_percent, Some(28));
+    }
+
+    #[test]
+    fn resolve_theme_applies_shell_theme_overrides() {
+        let layout = TuiLayout {
+            theme_overrides: ThemeOverrides {
+                nav_bg: Some(ThemeColor::Rgb { r: 1, g: 2, b: 3 }),
+                tab_active_bg: Some(ThemeColor::Rgb { r: 4, g: 5, b: 6 }),
+                header_fg: Some(ThemeColor::Rgb { r: 7, g: 8, b: 9 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let theme = layout.resolve_theme();
+        assert_eq!(
+            theme.nav_bg.to_color(),
+            ThemeColor::Rgb { r: 1, g: 2, b: 3 }.to_color()
+        );
+        assert_eq!(
+            theme.tab_active_bg.to_color(),
+            ThemeColor::Rgb { r: 4, g: 5, b: 6 }.to_color()
+        );
+        assert_eq!(
+            theme.header_fg.to_color(),
+            ThemeColor::Rgb { r: 7, g: 8, b: 9 }.to_color()
+        );
+    }
+
+    #[test]
+    fn load_from_file_reads_shell_chrome_options() {
+        let path = unique_test_layout_path("shell-options");
+        std::fs::write(
+            &path,
+            r#"{
+                "shell": {
+                    "top_tab_bar_mode": "hidden",
+                    "nav_badges": false,
+                    "nav_hints": false,
+                    "surface_header_height": 5
+                }
+            }"#,
+        )
+        .expect("write layout");
+
+        let layout = TuiLayout::load_from_file(&path);
+
+        assert_eq!(layout.shell.top_tab_bar_mode, TopTabBarMode::Hidden);
+        assert!(!layout.shell.nav_badges);
+        assert!(!layout.shell.nav_hints);
+        assert_eq!(layout.shell.surface_header_height, 5);
     }
 }

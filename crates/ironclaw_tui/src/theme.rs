@@ -22,15 +22,60 @@ pub struct Theme {
     pub error: ThemeColor,
     pub border: ThemeColor,
     pub header_bg: ThemeColor,
+    #[serde(default = "default_header_fg")]
+    pub header_fg: ThemeColor,
     pub status_bg: ThemeColor,
+    #[serde(default = "default_status_fg")]
+    pub status_fg: ThemeColor,
     #[serde(default = "default_nav_bg")]
     pub nav_bg: ThemeColor,
+    #[serde(default = "default_nav_fg")]
+    pub nav_fg: ThemeColor,
+    #[serde(default = "default_nav_active_fg")]
+    pub nav_active_fg: ThemeColor,
     #[serde(default = "default_panel_bg")]
     pub panel_bg: ThemeColor,
     #[serde(default = "default_panel_alt_bg")]
     pub panel_alt_bg: ThemeColor,
+    #[serde(default = "default_surface_header_bg")]
+    pub surface_header_bg: ThemeColor,
+    #[serde(default = "default_surface_header_fg")]
+    pub surface_header_fg: ThemeColor,
     #[serde(default = "default_selected_bg")]
     pub selected_bg: ThemeColor,
+    #[serde(default = "default_tab_bar_bg")]
+    pub tab_bar_bg: ThemeColor,
+    #[serde(default = "default_tab_active_bg")]
+    pub tab_active_bg: ThemeColor,
+    #[serde(default = "default_tab_active_fg")]
+    pub tab_active_fg: ThemeColor,
+    #[serde(default = "default_tab_inactive_fg")]
+    pub tab_inactive_fg: ThemeColor,
+    #[serde(default = "default_chrome_border")]
+    pub chrome_border: ThemeColor,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThemeOverrides {
+    pub accent: Option<ThemeColor>,
+    pub border: Option<ThemeColor>,
+    pub header_bg: Option<ThemeColor>,
+    pub header_fg: Option<ThemeColor>,
+    pub status_bg: Option<ThemeColor>,
+    pub status_fg: Option<ThemeColor>,
+    pub nav_bg: Option<ThemeColor>,
+    pub nav_fg: Option<ThemeColor>,
+    pub nav_active_fg: Option<ThemeColor>,
+    pub panel_bg: Option<ThemeColor>,
+    pub panel_alt_bg: Option<ThemeColor>,
+    pub surface_header_bg: Option<ThemeColor>,
+    pub surface_header_fg: Option<ThemeColor>,
+    pub selected_bg: Option<ThemeColor>,
+    pub tab_bar_bg: Option<ThemeColor>,
+    pub tab_active_bg: Option<ThemeColor>,
+    pub tab_active_fg: Option<ThemeColor>,
+    pub tab_inactive_fg: Option<ThemeColor>,
+    pub chrome_border: Option<ThemeColor>,
 }
 
 /// Serialisable color representation.
@@ -63,11 +108,35 @@ impl ThemeColor {
     }
 }
 
+fn default_header_fg() -> ThemeColor {
+    ThemeColor::Named("white".to_string())
+}
+
+fn default_status_fg() -> ThemeColor {
+    ThemeColor::Named("dark_gray".to_string())
+}
+
 fn default_nav_bg() -> ThemeColor {
     ThemeColor::Rgb {
         r: 13,
         g: 17,
         b: 23,
+    }
+}
+
+fn default_nav_fg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 125,
+        g: 137,
+        b: 149,
+    }
+}
+
+fn default_nav_active_fg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 207,
+        g: 250,
+        b: 238,
     }
 }
 
@@ -87,6 +156,18 @@ fn default_panel_alt_bg() -> ThemeColor {
     }
 }
 
+fn default_surface_header_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 17,
+        g: 26,
+        b: 36,
+    }
+}
+
+fn default_surface_header_fg() -> ThemeColor {
+    ThemeColor::Named("white".to_string())
+}
+
 fn default_selected_bg() -> ThemeColor {
     ThemeColor::Rgb {
         r: 20,
@@ -95,9 +176,108 @@ fn default_selected_bg() -> ThemeColor {
     }
 }
 
+fn default_tab_bar_bg() -> ThemeColor {
+    ThemeColor::Rgb { r: 9, g: 12, b: 17 }
+}
+
+fn default_tab_active_bg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 17,
+        g: 26,
+        b: 36,
+    }
+}
+
+fn default_tab_active_fg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 207,
+        g: 250,
+        b: 238,
+    }
+}
+
+fn default_tab_inactive_fg() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 108,
+        g: 122,
+        b: 136,
+    }
+}
+
+fn default_chrome_border() -> ThemeColor {
+    ThemeColor::Rgb {
+        r: 36,
+        g: 45,
+        b: 56,
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
+    }
+}
+
+impl Theme {
+    pub fn apply_overrides(mut self, overrides: &ThemeOverrides) -> Self {
+        if let Some(color) = overrides.accent.clone() {
+            self.accent = color;
+        }
+        if let Some(color) = overrides.border.clone() {
+            self.border = color;
+        }
+        if let Some(color) = overrides.header_bg.clone() {
+            self.header_bg = color;
+        }
+        if let Some(color) = overrides.header_fg.clone() {
+            self.header_fg = color;
+        }
+        if let Some(color) = overrides.status_bg.clone() {
+            self.status_bg = color;
+        }
+        if let Some(color) = overrides.status_fg.clone() {
+            self.status_fg = color;
+        }
+        if let Some(color) = overrides.nav_bg.clone() {
+            self.nav_bg = color;
+        }
+        if let Some(color) = overrides.nav_fg.clone() {
+            self.nav_fg = color;
+        }
+        if let Some(color) = overrides.nav_active_fg.clone() {
+            self.nav_active_fg = color;
+        }
+        if let Some(color) = overrides.panel_bg.clone() {
+            self.panel_bg = color;
+        }
+        if let Some(color) = overrides.panel_alt_bg.clone() {
+            self.panel_alt_bg = color;
+        }
+        if let Some(color) = overrides.surface_header_bg.clone() {
+            self.surface_header_bg = color;
+        }
+        if let Some(color) = overrides.surface_header_fg.clone() {
+            self.surface_header_fg = color;
+        }
+        if let Some(color) = overrides.selected_bg.clone() {
+            self.selected_bg = color;
+        }
+        if let Some(color) = overrides.tab_bar_bg.clone() {
+            self.tab_bar_bg = color;
+        }
+        if let Some(color) = overrides.tab_active_bg.clone() {
+            self.tab_active_bg = color;
+        }
+        if let Some(color) = overrides.tab_active_fg.clone() {
+            self.tab_active_fg = color;
+        }
+        if let Some(color) = overrides.tab_inactive_fg.clone() {
+            self.tab_inactive_fg = color;
+        }
+        if let Some(color) = overrides.chrome_border.clone() {
+            self.chrome_border = color;
+        }
+        self
     }
 }
 
@@ -123,15 +303,26 @@ impl Theme {
                 g: 14,
                 b: 20,
             },
+            header_fg: default_header_fg(),
             status_bg: ThemeColor::Rgb {
                 r: 10,
                 g: 14,
                 b: 20,
             },
+            status_fg: default_status_fg(),
             nav_bg: default_nav_bg(),
+            nav_fg: default_nav_fg(),
+            nav_active_fg: default_nav_active_fg(),
             panel_bg: default_panel_bg(),
             panel_alt_bg: default_panel_alt_bg(),
+            surface_header_bg: default_surface_header_bg(),
+            surface_header_fg: default_surface_header_fg(),
             selected_bg: default_selected_bg(),
+            tab_bar_bg: default_tab_bar_bg(),
+            tab_active_bg: default_tab_active_bg(),
+            tab_active_fg: default_tab_active_fg(),
+            tab_inactive_fg: default_tab_inactive_fg(),
+            chrome_border: default_chrome_border(),
         }
     }
 
@@ -156,16 +347,24 @@ impl Theme {
                 g: 246,
                 b: 249,
             },
+            header_fg: ThemeColor::Named("black".to_string()),
             status_bg: ThemeColor::Rgb {
                 r: 243,
                 g: 246,
                 b: 249,
             },
+            status_fg: ThemeColor::Named("gray".to_string()),
             nav_bg: ThemeColor::Rgb {
                 r: 244,
                 g: 247,
                 b: 250,
             },
+            nav_fg: ThemeColor::Rgb {
+                r: 92,
+                g: 104,
+                b: 116,
+            },
+            nav_active_fg: ThemeColor::Rgb { r: 9, g: 92, b: 72 },
             panel_bg: ThemeColor::Rgb {
                 r: 255,
                 g: 255,
@@ -176,10 +375,37 @@ impl Theme {
                 g: 250,
                 b: 252,
             },
+            surface_header_bg: ThemeColor::Rgb {
+                r: 236,
+                g: 241,
+                b: 245,
+            },
+            surface_header_fg: ThemeColor::Named("black".to_string()),
             selected_bg: ThemeColor::Rgb {
                 r: 220,
                 g: 245,
                 b: 235,
+            },
+            tab_bar_bg: ThemeColor::Rgb {
+                r: 239,
+                g: 243,
+                b: 247,
+            },
+            tab_active_bg: ThemeColor::Rgb {
+                r: 229,
+                g: 235,
+                b: 241,
+            },
+            tab_active_fg: ThemeColor::Rgb { r: 9, g: 92, b: 72 },
+            tab_inactive_fg: ThemeColor::Rgb {
+                r: 102,
+                g: 113,
+                b: 125,
+            },
+            chrome_border: ThemeColor::Rgb {
+                r: 210,
+                g: 218,
+                b: 226,
             },
         }
     }
@@ -222,6 +448,10 @@ impl Theme {
         Style::default().fg(self.border.to_color())
     }
 
+    pub fn chrome_border_style(&self) -> Style {
+        Style::default().fg(self.chrome_border.to_color())
+    }
+
     pub fn panel_style(&self) -> Style {
         Style::default()
             .bg(self.panel_bg.to_color())
@@ -237,26 +467,51 @@ impl Theme {
     pub fn nav_style(&self) -> Style {
         Style::default()
             .bg(self.nav_bg.to_color())
-            .fg(self.dim.to_color())
+            .fg(self.nav_fg.to_color())
     }
 
     pub fn selected_style(&self) -> Style {
         Style::default()
             .bg(self.selected_bg.to_color())
-            .fg(self.accent.to_color())
+            .fg(self.nav_active_fg.to_color())
             .add_modifier(Modifier::BOLD)
     }
 
     pub fn header_style(&self) -> Style {
         Style::default()
             .bg(self.header_bg.to_color())
-            .fg(self.fg.to_color())
+            .fg(self.header_fg.to_color())
     }
 
     pub fn status_style(&self) -> Style {
         Style::default()
             .bg(self.status_bg.to_color())
-            .fg(self.dim.to_color())
+            .fg(self.status_fg.to_color())
+    }
+
+    pub fn surface_header_style(&self) -> Style {
+        Style::default()
+            .bg(self.surface_header_bg.to_color())
+            .fg(self.surface_header_fg.to_color())
+    }
+
+    pub fn tab_bar_style(&self) -> Style {
+        Style::default()
+            .bg(self.tab_bar_bg.to_color())
+            .fg(self.tab_inactive_fg.to_color())
+    }
+
+    pub fn tab_active_style(&self) -> Style {
+        Style::default()
+            .bg(self.tab_active_bg.to_color())
+            .fg(self.tab_active_fg.to_color())
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn tab_inactive_style(&self) -> Style {
+        Style::default()
+            .bg(self.tab_bar_bg.to_color())
+            .fg(self.tab_inactive_fg.to_color())
     }
 
     // ── Syntax highlighting (computed, not serialized) ────────────

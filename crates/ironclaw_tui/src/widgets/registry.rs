@@ -34,8 +34,16 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
 
     BuiltinWidgets {
         header: HeaderWidget::new(theme.clone()),
-        tab_bar: TabBarWidget::new(theme.clone()),
-        nav_rail: NavRailWidget::new(theme.clone()),
+        tab_bar: TabBarWidget::new(
+            theme.clone(),
+            layout.shell.top_tab_bar_mode,
+            layout.shell.nav_badges,
+        ),
+        nav_rail: NavRailWidget::new(
+            theme.clone(),
+            layout.shell.nav_badges,
+            layout.shell.nav_hints,
+        ),
         surface_header: SurfaceHeaderWidget::new(theme.clone()),
         conversation: ConversationWidget::new(theme.clone()),
         workspace: WorkspaceWidget::new(theme.clone()),

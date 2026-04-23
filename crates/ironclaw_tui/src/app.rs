@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::event::{TuiAttachment, TuiEvent, TuiLogEntry, TuiUserMessage};
 use crate::input::{InputAction, map_key};
-use crate::layout::TuiLayout;
+use crate::layout::{TopTabBarMode, TuiLayout};
 use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
 use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::conversation::ConversationWidget;
@@ -2604,10 +2604,30 @@ fn handle_mouse_release(column: u16, row: u16, state: &mut AppState) {
     });
 }
 
+fn shell_nav_is_visible(size: Rect, layout: &TuiLayout) -> bool {
+    layout.shell.show_nav_rail && size.width >= 72
+}
+
+fn effective_top_tab_bar_mode(size: Rect, layout: &TuiLayout) -> TopTabBarMode {
+    match layout.shell.top_tab_bar_mode {
+        TopTabBarMode::Auto => {
+            if shell_nav_is_visible(size, layout) {
+                TopTabBarMode::Compact
+            } else {
+                TopTabBarMode::Full
+            }
+        }
+        mode => mode,
+    }
+}
+
 fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5] {
     let header_height = if layout.header.visible { 1 } else { 0 };
     let status_height = if layout.status_bar.visible { 1 } else { 0 };
-    let tab_bar_height = 1u16;
+    let tab_bar_height = match effective_top_tab_bar_mode(size, layout) {
+        TopTabBarMode::Hidden => 0,
+        TopTabBarMode::Full | TopTabBarMode::Compact | TopTabBarMode::Auto => 1,
+    };
     // Input grows with logical line count up to displaying 10 rows. tui-textarea
     // scrolls internally once content exceeds the cap.
     let attachment_rows = if state.pending_attachments.is_empty() {
@@ -2639,7 +2659,7 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
 }
 
 fn shell_nav_and_content_areas(main_area: Rect, layout: &TuiLayout) -> (Option<Rect>, Rect) {
-    let show_nav = layout.shell.show_nav_rail && main_area.width >= 72;
+    let show_nav = shell_nav_is_visible(main_area, layout);
     if !show_nav {
         return (None, main_area);
     }
@@ -2664,7 +2684,10 @@ fn shell_content_sections(content_area: Rect, layout: &TuiLayout) -> (Option<Rec
 
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(layout.shell.surface_header_height.max(3)),
+            Constraint::Min(4),
+        ])
         .split(content_area);
     (Some(split[0]), split[1])
 }
@@ -2697,6 +2720,10 @@ fn tab_at(
     column: u16,
     row: u16,
 ) -> Option<ActiveTab> {
+    if effective_top_tab_bar_mode(size, layout) != TopTabBarMode::Full {
+        return None;
+    }
+
     let tab_bar_area = frame_sections(size, layout, state)[1];
     if !rect_contains(tab_bar_area, column, row) {
         return None;
@@ -2985,9 +3012,12 @@ fn render_frame(
     }
 
     // Tab bar
-    widgets
-        .tab_bar
-        .render(tab_bar_area, frame.buffer_mut(), state);
+    let tab_bar_mode = effective_top_tab_bar_mode(size, layout);
+    if tab_bar_mode != TopTabBarMode::Hidden {
+        widgets
+            .tab_bar
+            .render_with_mode(tab_bar_area, frame.buffer_mut(), state, tab_bar_mode);
+    }
 
     let (nav_area, content_area) = shell_nav_and_content_areas(main_area, layout);
     if let Some(nav_area) = nav_area {
@@ -3203,7 +3233,7 @@ fn update_input_overlays_from_input(
 /// Render a horizontal border line.
 fn render_horizontal_border(frame: &mut ratatui::Frame<'_>, area: Rect, layout: &TuiLayout) {
     let theme = layout.resolve_theme();
-    let border_style = theme.border_style();
+    let border_style = theme.chrome_border_style();
 
     for x in area.x..area.x + area.width {
         if let Some(cell) = frame.buffer_mut().cell_mut((x, area.y)) {
@@ -3445,20 +3475,30 @@ mod tests {
     use ratatui::layout::Rect;
 
     async fn apply_event(state: &mut AppState, event: TuiEvent) {
-        let layout = TuiLayout::default();
-        let mut widgets = create_default_widgets(&layout);
+        apply_event_with_layout(state, event, &TuiLayout::default()).await;
+    }
+
+    async fn apply_event_with_layout(state: &mut AppState, event: TuiEvent, layout: &TuiLayout) {
+        let mut widgets = create_default_widgets(layout);
         let (msg_tx, _msg_rx) = mpsc::channel(4);
-        handle_event(event, state, &mut widgets, &msg_tx, &layout).await;
+        handle_event(event, state, &mut widgets, &msg_tx, layout).await;
     }
 
     async fn apply_event_and_take_messages(
         state: &mut AppState,
         event: TuiEvent,
     ) -> Vec<TuiUserMessage> {
-        let layout = TuiLayout::default();
-        let mut widgets = create_default_widgets(&layout);
+        apply_event_and_take_messages_with_layout(state, event, &TuiLayout::default()).await
+    }
+
+    async fn apply_event_and_take_messages_with_layout(
+        state: &mut AppState,
+        event: TuiEvent,
+        layout: &TuiLayout,
+    ) -> Vec<TuiUserMessage> {
+        let mut widgets = create_default_widgets(layout);
         let (msg_tx, mut msg_rx) = mpsc::channel(4);
-        handle_event(event, state, &mut widgets, &msg_tx, &layout).await;
+        handle_event(event, state, &mut widgets, &msg_tx, layout).await;
 
         let mut messages = Vec::new();
         while let Ok(message) = msg_rx.try_recv() {
@@ -3849,35 +3889,44 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_click_switches_active_tab() {
+        let layout = TuiLayout {
+            shell: crate::layout::ShellConfig {
+                top_tab_bar_mode: TopTabBarMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut state = AppState::default();
-        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let tab_bar_area = frame_sections(terminal_area(), &layout, &state)[1];
         let projects_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
             .into_iter()
             .find_map(|(tab, range)| (tab == ActiveTab::Projects).then_some(range))
             .expect("projects range");
 
-        apply_event(
+        apply_event_with_layout(
             &mut state,
             TuiEvent::MouseClick {
                 column: projects_range.start,
                 row: tab_bar_area.y,
             },
+            &layout,
         )
         .await;
         assert_eq!(state.active_tab, ActiveTab::Projects);
 
-        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let tab_bar_area = frame_sections(terminal_area(), &layout, &state)[1];
         let logs_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
             .into_iter()
             .find_map(|(tab, range)| (tab == ActiveTab::Logs).then_some(range))
             .expect("logs range");
 
-        apply_event(
+        apply_event_with_layout(
             &mut state,
             TuiEvent::MouseClick {
                 column: logs_range.start,
                 row: tab_bar_area.y,
             },
+            &layout,
         )
         .await;
         assert_eq!(state.active_tab, ActiveTab::Logs);
@@ -3907,6 +3956,13 @@ mod tests {
 
     #[tokio::test]
     async fn mouse_click_uses_dynamic_tab_hit_areas_for_settings() {
+        let layout = TuiLayout {
+            shell: crate::layout::ShellConfig {
+                top_tab_bar_mode: TopTabBarMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut log_entries = crate::event::LogRingBuffer::new(10);
         log_entries.push(TuiLogEntry {
             level: "INFO".to_string(),
@@ -3928,19 +3984,20 @@ mod tests {
             log_entries,
             ..Default::default()
         };
-        let tab_bar_area = frame_sections(terminal_area(), &TuiLayout::default(), &state)[1];
+        let tab_bar_area = frame_sections(terminal_area(), &layout, &state)[1];
         let settings_range = crate::widgets::tab_bar::tab_hit_areas(tab_bar_area, &state)
             .into_iter()
             .find_map(|(tab, range)| (tab == ActiveTab::Settings).then_some(range))
             .expect("settings range");
         let click_column = settings_range.start;
 
-        apply_event(
+        apply_event_with_layout(
             &mut state,
             TuiEvent::MouseClick {
                 column: click_column,
                 row: tab_bar_area.y,
             },
+            &layout,
         )
         .await;
 

@@ -64,8 +64,8 @@ impl TuiWidget for SurfaceHeaderWidget {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(self.theme.border_style())
-            .style(self.theme.panel_alt_style());
+            .border_style(self.theme.chrome_border_style())
+            .style(self.theme.surface_header_style());
         let inner = block.inner(area);
         block.render(area, buf);
 
@@ -83,7 +83,7 @@ impl TuiWidget for SurfaceHeaderWidget {
         ];
 
         Paragraph::new(lines)
-            .style(self.theme.panel_alt_style())
+            .style(self.theme.surface_header_style())
             .render(inner, buf);
     }
 }

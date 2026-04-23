@@ -48,7 +48,7 @@ impl TuiWidget for HeaderWidget {
         let mut spans = vec![
             Span::styled(
                 format!("  ironclaw v{}", state.version),
-                self.theme.accent_style().add_modifier(Modifier::BOLD),
+                self.theme.bold_accent_style().add_modifier(Modifier::BOLD),
             ),
             sep.clone(),
             Span::styled(state.model.clone(), self.theme.bold_style()),
