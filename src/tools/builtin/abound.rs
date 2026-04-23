@@ -475,9 +475,15 @@ impl Tool for AboundSendWireTool {
             tracing::debug!(
                 user_id = %ctx.user_id,
                 notify_id = %notify_id,
-                ctx_metadata = %ctx.metadata,
                 "abound_send_wire: send action — resolving notify_thread_id"
             );
+
+            if notify_id.is_empty() {
+                tracing::debug!(
+                    user_id = %ctx.user_id,
+                    "abound_send_wire: notify_thread_id is empty — notification will have no resumable thread"
+                );
+            }
 
             let notif_body = json!({
                 "message_id": format!("wire_approval_{ts}"),
@@ -518,6 +524,13 @@ impl Tool for AboundSendWireTool {
                 ));
             } else {
                 let err_info = extract_abound_error(status, notif_result.get("body"));
+                tracing::debug!(
+                    user_id = %ctx.user_id,
+                    status,
+                    err_info = %err_info,
+                    response = %notif_result,
+                    "abound_send_wire: notification POST failed"
+                );
                 return Ok(ToolOutput::text(
                     format!(
                         "Failed to send approval notification for wire transfer of ${amount} {err_info}. \
@@ -584,7 +597,7 @@ impl Tool for AboundSendWireTool {
                         ))
                     })?;
 
-                // Set max_threads_per_day to 24 and add success criteria
+                // Set max_threads_per_day to 2×24 to absorb retries while still bounding the mission
                 let updates = ironclaw_engine::runtime::mission::MissionUpdate {
                     name: None,
                     description: None,
@@ -593,7 +606,7 @@ impl Tool for AboundSendWireTool {
                     notify_channels: None,
                     notify_user: None,
                     context_paths: None,
-                    max_threads_per_day: Some(24),
+                    max_threads_per_day: Some(48),
                     success_criteria: Some(
                         "Target rate reached and notification sent, or 24 hourly checks completed."
                             .into(),
@@ -602,16 +615,19 @@ impl Tool for AboundSendWireTool {
                     max_concurrent: None,
                     dedup_window_secs: None,
                 };
-                if let Err(e) = mgr.update_mission(mission_id, &ctx.user_id, updates).await {
+                let guardrail_note = if let Err(e) = mgr.update_mission(mission_id, &ctx.user_id, updates).await {
                     tracing::debug!("failed to update mission guardrails: {e}");
-                }
+                    " (warning: 24-run guardrail could not be applied — mission may run longer than expected)"
+                } else {
+                    ""
+                };
 
                 return Ok(ToolOutput::text(
                     format!(
                         "Hourly rate monitoring set up (mission {mission_id}). \
                          Will check USD/INR against ₹{} every hour for 24 hours. \
                          You'll get a notification when the target is reached, or a status \
-                         update after 24 hours. Current rate: ₹{}.",
+                         update after 24 hours. Current rate: ₹{}.{guardrail_note}",
                         format_rate(threshold),
                         format_rate(current_rate),
                     ),
@@ -619,7 +635,8 @@ impl Tool for AboundSendWireTool {
                 ));
             } else {
                 return Err(ToolError::ExecutionFailed(
-                    "mission manager not available yet".into(),
+                    "Mission manager is not available — the routine engine may still be initializing. \
+                     Try again in a moment.".into(),
                 ));
             }
         } else if action == "execute" {
@@ -649,6 +666,36 @@ impl Tool for AboundSendWireTool {
                     "Cannot execute wire transfer — the following parameters are missing or invalid: {}. \
                      Use abound_account_info to look up the correct values before retrying.",
                     missing.join(", ")
+                )));
+            }
+
+            let account_info = abound_get(
+                &self.client,
+                &*self.secrets,
+                &ctx.user_id,
+                &format!("{REMITTANCE_BASE}/account/info"),
+            )
+            .await?;
+            let account_str = account_info.to_string();
+            let mut bad_ids = Vec::new();
+            if !account_str.contains(funding_source_id) {
+                bad_ids.push(format!("funding_source_id '{funding_source_id}'"));
+            }
+            if !account_str.contains(beneficiary_ref_id) {
+                bad_ids.push(format!("beneficiary_ref_id '{beneficiary_ref_id}'"));
+            }
+            if !account_str.contains(payment_reason_key) {
+                bad_ids.push(format!("payment_reason_key '{payment_reason_key}'"));
+            }
+            if !bad_ids.is_empty() {
+                tracing::debug!(
+                    bad_ids = ?bad_ids,
+                    "abound_send_wire: execute — invalid IDs rejected"
+                );
+                return Err(ToolError::InvalidParameters(format!(
+                    "Cannot execute wire transfer — the following IDs were not found in your \
+                     Abound account: {}. Call abound_account_info to retrieve the real IDs and retry.",
+                    bad_ids.join(", ")
                 )));
             }
 
@@ -700,6 +747,41 @@ impl Tool for AboundSendWireTool {
                  Use abound_account_info to look up the correct values, and ask the user to pick a \
                  funding source, beneficiary, and payment reason via choice_set before retrying.",
                 missing.join(", ")
+            )));
+        }
+
+        // Validate IDs against live account info before running analysis.
+        let account_info = abound_get(
+            &self.client,
+            &*self.secrets,
+            &ctx.user_id,
+            &format!("{REMITTANCE_BASE}/account/info"),
+        )
+        .await?;
+        tracing::debug!(
+            funding_source_id = %funding_source_id,
+            beneficiary_ref_id = %beneficiary_ref_id,
+            payment_reason_key = %payment_reason_key,
+            account_info = %account_info,
+            "abound_send_wire: initiate — validating IDs against account info"
+        );
+        let account_str = account_info.to_string();
+        let mut bad_ids = Vec::new();
+        if !account_str.contains(funding_source_id) {
+            bad_ids.push(format!("funding_source_id '{funding_source_id}'"));
+        }
+        if !account_str.contains(beneficiary_ref_id) {
+            bad_ids.push(format!("beneficiary_ref_id '{beneficiary_ref_id}'"));
+        }
+        if !account_str.contains(payment_reason_key) {
+            bad_ids.push(format!("payment_reason_key '{payment_reason_key}'"));
+        }
+        if !bad_ids.is_empty() {
+            return Err(ToolError::InvalidParameters(format!(
+                "The following IDs were not found in your Abound account: {}. \
+                 These may be placeholder or invented values. \
+                 Call abound_account_info to retrieve the real IDs and retry.",
+                bad_ids.join(", ")
             )));
         }
 
@@ -939,7 +1021,10 @@ impl Tool for AboundRateAlertTool {
                             .and_then(|s| s.parse::<f64>().ok())
                     })
             })
-            .unwrap_or(0.0);
+            .unwrap_or_else(|| {
+                tracing::debug!("abound_rate_alert: could not parse current_rate — unexpected response shape");
+                0.0
+            });
 
         let effective_rate = rate_response
             .get("body")
@@ -988,15 +1073,30 @@ impl Tool for AboundRateAlertTool {
                 },
             });
             let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
-            let notif_result = abound_post(
+            match abound_post(
                 &self.client,
                 &*self.secrets,
                 &ctx.user_id,
                 &notif_url,
                 &notif_body,
             )
-            .await;
-            notif_result.is_ok()
+            .await
+            {
+                Ok(r) => {
+                    let status = r.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if !(200..300).contains(&status) {
+                        tracing::debug!(
+                            status,
+                            "abound_rate_alert: notification POST returned non-2xx"
+                        );
+                    }
+                    (200..300).contains(&status)
+                }
+                Err(e) => {
+                    tracing::debug!("abound_rate_alert: notification POST failed: {e}");
+                    false
+                }
+            }
         } else {
             false
         };
@@ -1007,6 +1107,11 @@ impl Tool for AboundRateAlertTool {
             "threshold": threshold,
             "exceeded": exceeded,
             "notification_sent": notification_sent,
+            "notification_error": if should_notify && !notification_sent {
+                serde_json::Value::String("notification delivery failed — check abound credentials or retry".into())
+            } else {
+                serde_json::Value::Null
+            },
             "pair": format!("{from}/{to}"),
         });
         Ok(ToolOutput::success(result, start.elapsed()))
