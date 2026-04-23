@@ -754,6 +754,315 @@ function closeMissionDetail() {
   loadMissions();
 }
 
+function renderMissionRichBlock(text, extraClass) {
+  var classes = 'ms-rich';
+  if (extraClass) classes += ' ' + extraClass;
+  return '<div class="' + classes + '">' + renderMarkdown(text || '') + '</div>';
+}
+
+function isLikelyMissionHeading(lines, index) {
+  var line = (lines[index] || '').trim();
+  if (!line || line.length > 48) return false;
+  if (/^[-*+]\s/.test(line) || /^\d+[.)]\s/.test(line) || /[:.]$/.test(line)) return false;
+
+  var known = [
+    'input', 'inputs', 'investigation process', 'process', 'root cause categories',
+    'classification', 'hard rules', 'rules', 'fix policy', 'success criteria', 'output'
+  ];
+  if (known.indexOf(line.toLowerCase()) !== -1) return true;
+
+  var prev = index > 0 ? (lines[index - 1] || '').trim() : '';
+  var next = index < lines.length - 1 ? (lines[index + 1] || '').trim() : '';
+  if (next === '' || (prev && prev !== '---')) return false;
+  return /^[A-Za-z][A-Za-z0-9 /&()_\-]+$/.test(line);
+}
+
+function splitMissionDocument(text) {
+  var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  var intro = [];
+  var sections = [];
+  var current = null;
+
+  lines.forEach(function(line, index) {
+    var trimmed = line.trim();
+    var markdownHeading = trimmed.match(/^#{1,6}\s+(.+?)\s*#*$/);
+    var plainHeading = !markdownHeading && isLikelyMissionHeading(lines, index) ? trimmed : null;
+
+    if (markdownHeading || plainHeading) {
+      current = {
+        title: (markdownHeading ? markdownHeading[1] : plainHeading).trim(),
+        lines: []
+      };
+      sections.push(current);
+      return;
+    }
+
+    if (current) current.lines.push(line);
+    else intro.push(line);
+  });
+
+  return {
+    intro: intro.join('\n').trim(),
+    sections: sections
+      .map(function(section) {
+        return {
+          title: section.title,
+          body: section.lines.join('\n').trim()
+        };
+      })
+      .filter(function(section) {
+        return section.title || section.body;
+      })
+  };
+}
+
+function inferMissionBriefKind(title) {
+  var lower = String(title || '').toLowerCase();
+  if (lower.indexOf('input') !== -1) return 'inputs';
+  if (lower.indexOf('process') !== -1 || lower.indexOf('steps') !== -1) return 'process';
+  if (lower.indexOf('rule') !== -1 || lower.indexOf('policy') !== -1) return 'rules';
+  if (lower.indexOf('classification') !== -1 || lower.indexOf('root cause') !== -1) return 'classification';
+  return 'generic';
+}
+
+function parseMissionDefinitions(text) {
+  var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  var items = [];
+  var notes = [];
+  var raw = [];
+
+  lines.forEach(function(line) {
+    var trimmed = line.trim();
+    if (!trimmed) return;
+
+    var match = trimmed.match(/^(?:[-*+]\s+)?`?([A-Za-z0-9_."\[\]()\/-]+)`?\s*(?:—|–|-|:)\s*(.+)$/);
+    if (match) {
+      items.push({
+        key: match[1],
+        text: match[2]
+      });
+      return;
+    }
+
+    if (/contains:$/i.test(trimmed) || /includes:$/i.test(trimmed)) {
+      notes.push(trimmed);
+      return;
+    }
+
+    raw.push(line);
+  });
+
+  return {
+    items: items,
+    note: notes.join('\n').trim(),
+    raw: raw.join('\n').trim()
+  };
+}
+
+function parseMissionListItems(text) {
+  var items = [];
+  String(text || '').replace(/\r\n/g, '\n').split('\n').forEach(function(line) {
+    var match = line.match(/^\s*(?:\d+[.)]|[-*+])\s+(.+)$/);
+    if (match) items.push(match[1]);
+  });
+  return items;
+}
+
+function renderMissionBriefSection(section) {
+  var kind = inferMissionBriefKind(section.title);
+  var html = '<section class="ms-brief-section ms-brief-section--' + kind + '">'
+    + '<div class="ms-brief-section-head">'
+    + '<h3 class="ms-brief-section-title">' + escapeHtml(section.title) + '</h3>'
+    + '</div>';
+
+  if (kind === 'inputs') {
+    var defs = parseMissionDefinitions(section.body);
+    if (defs.note) {
+      html += '<div class="ms-brief-note">' + renderMissionRichBlock(defs.note, 'ms-brief-note-copy') + '</div>';
+    }
+    if (defs.items.length > 0) {
+      html += '<div class="ms-schema-list">';
+      defs.items.forEach(function(item) {
+        html += '<div class="ms-schema-item">'
+          + '<div class="ms-schema-key">' + escapeHtml(item.key) + '</div>'
+          + '<div class="ms-schema-text">' + escapeHtml(item.text) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+    if (defs.raw) html += renderMissionRichBlock(defs.raw, 'ms-brief-copy');
+  } else if (kind === 'process') {
+    var steps = parseMissionListItems(section.body);
+    if (steps.length > 0) {
+      html += '<div class="ms-step-list">';
+      steps.forEach(function(step, index) {
+        html += '<div class="ms-step-item">'
+          + '<div class="ms-step-index">' + (index + 1) + '</div>'
+          + '<div class="ms-step-copy">' + escapeHtml(step) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    } else {
+      html += renderMissionRichBlock(section.body, 'ms-brief-copy');
+    }
+  } else if (kind === 'rules') {
+    var rules = parseMissionListItems(section.body);
+    if (rules.length > 0) {
+      html += '<div class="ms-callout-list">';
+      rules.forEach(function(rule) {
+        html += '<div class="ms-callout-item">'
+          + '<div class="ms-callout-icon">!</div>'
+          + '<div class="ms-callout-copy">' + escapeHtml(rule) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    } else {
+      html += renderMissionRichBlock(section.body, 'ms-brief-copy');
+    }
+  } else if (kind === 'classification') {
+    var categories = parseMissionDefinitions(section.body);
+    if (categories.items.length > 0) {
+      html += '<div class="ms-category-list">';
+      categories.items.forEach(function(item) {
+        html += '<div class="ms-category-item">'
+          + '<div class="ms-category-key">' + escapeHtml(item.key) + '</div>'
+          + '<div class="ms-category-text">' + escapeHtml(item.text) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+    if (categories.raw) html += renderMissionRichBlock(categories.raw, 'ms-brief-copy');
+  } else {
+    html += renderMissionRichBlock(section.body, 'ms-brief-copy');
+  }
+
+  html += '</section>';
+  return html;
+}
+
+function renderMissionBrief(text) {
+  var parsed = splitMissionDocument(text);
+  if (!parsed.sections.length) {
+    return '<div class="ms-brief ms-brief-fallback">' + renderMissionRichBlock(text, 'ms-brief-copy') + '</div>';
+  }
+
+  var html = '<div class="ms-brief">';
+  if (parsed.intro) {
+    html += '<section class="ms-brief-intro">'
+      + '<div class="ms-brief-kicker">' + escapeHtml(I18n.t('missions.missionBrief')) + '</div>'
+      + renderMissionRichBlock(parsed.intro, 'ms-brief-intro-copy')
+      + '</section>';
+  }
+
+  parsed.sections.forEach(function(section) {
+    html += renderMissionBriefSection(section);
+  });
+
+  html += '</div>';
+  return html;
+}
+
+function normalizeApproachField(label) {
+  var lower = String(label || '').toLowerCase().replace(/[^a-z]+/g, ' ').trim();
+  if (lower.indexOf('expected') !== -1) return 'expected';
+  if (lower.indexOf('what happened') !== -1 || lower.indexOf('observed') !== -1 || lower.indexOf('actual') !== -1) return 'observed';
+  if (lower.indexOf('root cause') !== -1 || lower.indexOf('classification') !== -1) return 'classification';
+  if (lower.indexOf('fix applied') !== -1 || lower === 'fix' || lower.indexOf('applied') !== -1) return 'fix';
+  if (lower.indexOf('next focus') !== -1 || lower === 'next') return 'next';
+  if (lower.indexOf('goal achieved') !== -1 || lower.indexOf('outcome') !== -1 || lower.indexOf('result') !== -1) return 'outcome';
+  return '';
+}
+
+function parseApproachHistoryRecord(text) {
+  var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  var record = {
+    lead: [],
+    fields: {}
+  };
+  var currentField = '';
+
+  lines.forEach(function(line) {
+    var trimmed = line.trim();
+    if (/^run\s+\d+$/i.test(trimmed)) return;
+
+    var match = trimmed.match(/^(?:[-*+]\s+)?([A-Za-z][A-Za-z ]{1,40}):\s*(.*)$/);
+    var normalized = match ? normalizeApproachField(match[1]) : '';
+    if (normalized) {
+      currentField = normalized;
+      if (!record.fields[currentField]) record.fields[currentField] = [];
+      if (match[2]) record.fields[currentField].push(match[2]);
+      return;
+    }
+
+    if (currentField) {
+      if (!record.fields[currentField]) record.fields[currentField] = [];
+      record.fields[currentField].push(line);
+    } else {
+      record.lead.push(line);
+    }
+  });
+
+  Object.keys(record.fields).forEach(function(key) {
+    record.fields[key] = record.fields[key].join('\n').trim();
+  });
+  record.lead = record.lead.join('\n').trim();
+  return record;
+}
+
+function renderApproachField(label, value, className) {
+  if (!value) return '';
+  var classes = 'ms-approach-field';
+  if (className) classes += ' ' + className;
+  return '<div class="' + classes + '">'
+    + '<div class="ms-approach-label">' + escapeHtml(label) + '</div>'
+    + renderMissionRichBlock(value, 'ms-approach-value')
+    + '</div>';
+}
+
+function renderApproachHistoryCard(entryText, index, isLatest) {
+  var parsed = parseApproachHistoryRecord(entryText);
+  var classification = parsed.fields.classification || '';
+  var outcome = parsed.fields.outcome || '';
+  var achieved = /\b(yes|resolved|fixed|done|completed|achieved)\b/i.test(outcome) && !/\b(no|not yet|pending|blocked)\b/i.test(outcome);
+
+  var html = '<article class="ms-approach-entry' + (isLatest ? ' latest' : '') + '">'
+    + '<div class="ms-approach-head">'
+    + '<div class="ms-approach-run"><span>' + escapeHtml(I18n.t('missions.runLabel', { number: index + 1 })) + '</span></div>'
+    + '<div class="ms-approach-badges">';
+
+  if (classification) {
+    html += '<span class="ms-approach-chip classification">' + escapeHtml(classification) + '</span>';
+  }
+  if (isLatest) {
+    html += '<span class="ms-approach-chip latest">' + escapeHtml(I18n.t('missions.latestRun')) + '</span>';
+  }
+  if (outcome) {
+    html += '<span class="ms-approach-chip ' + (achieved ? 'success' : 'open') + '">' + escapeHtml(achieved ? I18n.t('missions.goalAchieved') : I18n.t('missions.openLoop')) + '</span>';
+  }
+
+  html += '</div></div>';
+
+  if (parsed.lead) {
+    html += '<div class="ms-approach-summary">' + renderMissionRichBlock(parsed.lead, 'ms-approach-summary-copy') + '</div>';
+  }
+
+  var fieldsHtml = '';
+  fieldsHtml += renderApproachField(I18n.t('missions.expectedLabel'), parsed.fields.expected);
+  fieldsHtml += renderApproachField(I18n.t('missions.observedLabel'), parsed.fields.observed);
+  fieldsHtml += renderApproachField(I18n.t('missions.fixAppliedLabel'), parsed.fields.fix, 'full');
+  fieldsHtml += renderApproachField(I18n.t('missions.nextFocusLabel'), parsed.fields.next);
+  fieldsHtml += renderApproachField(I18n.t('missions.outcomeLabel'), parsed.fields.outcome);
+
+  if (fieldsHtml) {
+    html += '<div class="ms-approach-grid">' + fieldsHtml + '</div>';
+  } else {
+    html += '<div class="ms-approach-body">' + renderMarkdown(entryText) + '</div>';
+  }
+
+  html += '</article>';
+  return html;
+}
+
 function renderMissionDetail(m) {
   var body = document.getElementById('missions-body');
   if (body) body.style.display = 'none';
@@ -776,7 +1085,6 @@ function renderMissionDetail(m) {
     + '<span class="badge ' + badgeClass + '">' + escapeHtml(m.status) + '</span>'
     + (progress ? '<span class="ms-live-tag"><span class="ms-live-dot"></span> Running</span>' : '')
     + '</div>'
-    + '<div class="ms-detail-goal">' + renderMarkdown(m.goal) + '</div>'
     + '</div>'
     + '<div class="ms-detail-actions">';
 
@@ -799,30 +1107,31 @@ function renderMissionDetail(m) {
     + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.created')) + '</div><div class="ms-meta-value">' + formatDate(m.created_at) + '</div></div>'
     + '</div>';
 
+  if (m.goal) {
+    html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.prompt')) + '</div>'
+      + '<div class="ms-detail-goal">' + renderMissionBrief(m.goal) + '</div>';
+  }
+
   if (m.current_focus) {
     html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.currentFocus')) + '</div>'
-      + '<div class="ms-content-block"><p>' + renderMarkdown(m.current_focus) + '</p></div>';
+      + '<div class="ms-content-block ms-content-block--focus">' + renderMissionRichBlock(m.current_focus) + '</div>';
   }
 
   if (m.success_criteria) {
     html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.successCriteria')) + '</div>'
-      + '<div class="ms-content-block"><p>' + renderMarkdown(m.success_criteria) + '</p></div>';
+      + '<div class="ms-content-block ms-content-block--success">' + renderMissionRichBlock(m.success_criteria) + '</div>';
   }
 
   if (m.notify_channels && m.notify_channels.length > 0) {
     html += '<div class="ms-section-title">Notify Channels</div>'
-      + '<div class="ms-content-block"><p>' + m.notify_channels.map(escapeHtml).join(', ') + '</p></div>';
+      + '<div class="ms-content-block">' + renderMissionRichBlock(m.notify_channels.map(escapeHtml).join(', ')) + '</div>';
   }
 
   if (m.approach_history && m.approach_history.length > 0) {
     html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.approachHistory')) + '</div>'
       + '<div class="ms-approach-list">';
     m.approach_history.forEach(function(a, i) {
-      var isLatest = i === m.approach_history.length - 1;
-      html += '<div class="ms-approach-entry' + (isLatest ? ' latest' : '') + '">'
-        + '<div class="ms-approach-run"><span>Run ' + (i + 1) + '</span></div>'
-        + '<div class="ms-approach-body">' + renderMarkdown(a) + '</div>'
-        + '</div>';
+      html += renderApproachHistoryCard(a, i, i === m.approach_history.length - 1);
     });
     html += '</div>';
   }
