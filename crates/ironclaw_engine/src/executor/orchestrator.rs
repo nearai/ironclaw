@@ -107,6 +107,10 @@ fn orchestrator_limits() -> ResourceLimits {
 /// Maximum consecutive failures before auto-rollback.
 const MAX_FAILURES_BEFORE_ROLLBACK: u64 = 3;
 
+/// Shared sentinel text for orchestrator retry-compaction notes.
+const RETRY_COMPACTION_NOTE_SENTINEL: &str =
+    "automatically compacted to fit within the context window";
+
 /// Well-known title for orchestrator failure tracking.
 const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
 const LEASE_REFRESH_WARN_INTERVAL_SECS: u64 = 60;
@@ -654,9 +658,19 @@ async fn handle_llm_complete(
             let retry_messages = compact_thread_messages_for_retry(&messages);
             let tokens_before = estimate_retry_tokens(&messages);
             let tokens_after = estimate_retry_tokens(&retry_messages);
-            if !has_explicit_messages
-                || (retry_messages.len() >= messages.len() && tokens_after >= tokens_before)
-            {
+            let reduced_payload =
+                retry_messages.len() < messages.len() || tokens_after < tokens_before;
+            if !reduced_payload {
+                debug!(
+                    used,
+                    limit,
+                    tokens_before,
+                    tokens_after,
+                    messages_before = messages.len(),
+                    messages_after = retry_messages.len(),
+                    has_explicit_messages,
+                    "overflow retry skipped: compaction did not reduce the transcript"
+                );
                 return ExtFunctionResult::Error(monty::MontyException::new(
                     monty::ExcType::RuntimeError,
                     Some(format!(
@@ -666,13 +680,14 @@ async fn handle_llm_complete(
                 ));
             }
 
-            tracing::warn!(
+            debug!(
                 used,
                 limit,
                 tokens_before,
                 tokens_after,
                 messages_before = messages.len(),
                 messages_after = retry_messages.len(),
+                has_explicit_messages,
                 "orchestrator llm call exceeded context window, compacting and retrying"
             );
 
@@ -685,7 +700,7 @@ async fn handle_llm_complete(
                     return ExtFunctionResult::Error(monty::MontyException::new(
                         monty::ExcType::RuntimeError,
                         Some(format!(
-                            "LLM call failed after compaction retry: {retry_err}"
+                            "LLM call failed after compaction retry: original overflow used={used} limit={limit}; retry failed: {retry_err}"
                         )),
                     ));
                 }
@@ -2364,28 +2379,30 @@ fn thread_messages_to_python_json(messages: &[ThreadMessage]) -> Vec<serde_json:
 
 /// Compact thread messages for a single retry after a context-overflow error.
 ///
-/// Keeps all `System` messages that appeared before the last `User` message,
-/// inserts a short note, then preserves the last `User` message and everything
-/// after it (the current turn's assistant/action-result context).
+/// Keeps all `System` messages that appeared before the preserved suffix,
+/// inserts a short note, then preserves the most recent retry-worthy slice of
+/// the current turn. When the latest `User` message was injected mid tool
+/// sequence, the preserved slice expands backwards to keep the preceding
+/// `Assistant(action_calls)` and `ActionResult` messages so no surviving
+/// `action_call_id` references are orphaned on retry.
 fn compact_thread_messages_for_retry(messages: &[ThreadMessage]) -> Vec<ThreadMessage> {
     let mut compacted = Vec::new();
     let last_user_idx = messages.iter().rposition(|m| m.role == MessageRole::User);
 
     if let Some(idx) = last_user_idx {
-        for msg in &messages[..idx] {
+        let preserved_start = retry_preserved_start(messages, idx);
+
+        for msg in messages.iter().take(preserved_start) {
             if msg.role == MessageRole::System {
                 compacted.push(msg.clone());
             }
         }
 
-        if idx > 0 {
-            compacted.push(ThreadMessage::system(
-                "[Note: Earlier conversation history was automatically compacted \
-                 to fit within the context window. The most recent exchange is preserved below.]",
-            ));
+        if preserved_start > 0 {
+            compacted.push(ThreadMessage::system(retry_compaction_note(true)));
         }
 
-        compacted.extend_from_slice(&messages[idx..]);
+        compacted.extend_from_slice(&messages[preserved_start..]);
     } else {
         for msg in messages {
             if msg.role == MessageRole::System {
@@ -2393,10 +2410,7 @@ fn compact_thread_messages_for_retry(messages: &[ThreadMessage]) -> Vec<ThreadMe
             }
         }
         if compacted.len() < messages.len() {
-            compacted.push(ThreadMessage::system(
-                "[Note: Earlier conversation history was automatically compacted \
-                 to fit within the context window.]",
-            ));
+            compacted.push(ThreadMessage::system(retry_compaction_note(false)));
         }
         for msg in messages {
             if msg.role != MessageRole::System {
@@ -2406,6 +2420,29 @@ fn compact_thread_messages_for_retry(messages: &[ThreadMessage]) -> Vec<ThreadMe
     }
 
     compacted
+}
+
+fn retry_preserved_start(messages: &[ThreadMessage], last_user_idx: usize) -> usize {
+    let mut start = last_user_idx;
+    while start > 0
+        && matches!(
+            messages[start - 1].role,
+            MessageRole::Assistant | MessageRole::ActionResult
+        )
+    {
+        start -= 1;
+    }
+    start
+}
+
+fn retry_compaction_note(include_recent_exchange: bool) -> String {
+    if include_recent_exchange {
+        format!(
+            "[Note: Earlier conversation history was {RETRY_COMPACTION_NOTE_SENTINEL}. The most recent exchange is preserved below.]"
+        )
+    } else {
+        format!("[Note: Earlier conversation history was {RETRY_COMPACTION_NOTE_SENTINEL}.]")
+    }
 }
 
 /// Rough token estimate for retry-compaction decisions.
@@ -2418,7 +2455,9 @@ fn estimate_retry_tokens(messages: &[ThreadMessage]) -> usize {
 
     let total_chars: usize = messages
         .iter()
-        .map(|m| m.content.len() + m.action_name.as_ref().map_or(0, |n| n.len()) + 4)
+        .map(|m| {
+            m.content.chars().count() + m.action_name.as_ref().map_or(0, |n| n.chars().count()) + 4
+        })
         .sum();
     total_chars.div_ceil(CHARS_PER_TOKEN)
 }
@@ -3468,9 +3507,7 @@ mod tests {
 
             let compacted = messages.iter().any(|msg| {
                 msg.role == MessageRole::System
-                    && msg
-                        .content
-                        .contains("automatically compacted to fit within the context window")
+                    && msg.content.contains(RETRY_COMPACTION_NOTE_SENTINEL)
             });
 
             if compacted {
@@ -3553,7 +3590,7 @@ mod tests {
             compacted.iter().any(|msg| msg["content"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("automatically compacted to fit within the context window")),
+                .contains(RETRY_COMPACTION_NOTE_SENTINEL)),
             "compaction note should be preserved for the retry"
         );
         assert_eq!(
@@ -3570,9 +3607,226 @@ mod tests {
         assert!(
             captured[1]
                 .iter()
-                .any(|msg| msg.content.contains("automatically compacted")),
+                .any(|msg| msg.content.contains(RETRY_COMPACTION_NOTE_SENTINEL)),
             "second call should receive the compacted retry transcript"
         );
+    }
+
+    #[tokio::test]
+    async fn llm_complete_retries_after_context_overflow_when_using_thread_message_fallback() {
+        let concrete = Arc::new(ContextOverflowRetryLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.messages = vec![
+            ThreadMessage::system("You are helpful."),
+            ThreadMessage::user("First question"),
+            ThreadMessage::assistant("First answer"),
+            ThreadMessage::user("Second question"),
+            ThreadMessage::assistant("Second answer"),
+            ThreadMessage::user("Current request"),
+        ];
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::Value::Null),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let response = match result {
+            ExtFunctionResult::Return(obj) => monty_to_json(&obj),
+            other => panic!("expected successful retry result, got {other:?}"),
+        };
+
+        assert_eq!(response["type"], "text");
+        let compacted = response["compacted_messages"]
+            .as_array()
+            .expect("compacted messages should be surfaced even on fallback retries");
+        assert!(
+            compacted.iter().any(|msg| msg["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(RETRY_COMPACTION_NOTE_SENTINEL)),
+            "fallback retries should still compact the transcript"
+        );
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 2, "LLM should be retried exactly once");
+    }
+
+    #[test]
+    fn compact_thread_messages_for_retry_keeps_inflight_tool_sequence_before_nested_user() {
+        let messages = vec![
+            ThreadMessage::system("You are helpful."),
+            ThreadMessage::user("Do the task"),
+            ThreadMessage::assistant_with_actions(
+                Some("Calling tools".to_string()),
+                vec![
+                    ActionCall {
+                        id: "call_a".to_string(),
+                        action_name: "tool_a".to_string(),
+                        parameters: serde_json::json!({"q": "one"}),
+                    },
+                    ActionCall {
+                        id: "call_b".to_string(),
+                        action_name: "tool_b".to_string(),
+                        parameters: serde_json::json!({"q": "two"}),
+                    },
+                ],
+            ),
+            ThreadMessage::action_result("call_a", "tool_a", "done a"),
+            ThreadMessage::user("Also include this detail"),
+            ThreadMessage::action_result("call_b", "tool_b", "done b"),
+            ThreadMessage::assistant("Finished"),
+        ];
+
+        let compacted = compact_thread_messages_for_retry(&messages);
+
+        let assistant_call_ids: std::collections::HashSet<String> = compacted
+            .iter()
+            .filter_map(|msg| msg.action_calls.as_ref())
+            .flatten()
+            .map(|call| call.id.clone())
+            .collect();
+        let result_call_ids: std::collections::HashSet<String> = compacted
+            .iter()
+            .filter(|msg| msg.role == MessageRole::ActionResult)
+            .filter_map(|msg| msg.action_call_id.clone())
+            .collect();
+
+        assert!(
+            assistant_call_ids.contains("call_b"),
+            "compaction should keep the assistant tool-call context for preserved action results"
+        );
+        assert!(
+            result_call_ids.is_subset(&assistant_call_ids),
+            "preserved action results should not be orphaned after compaction"
+        );
+        assert!(
+            compacted
+                .iter()
+                .any(|msg| msg.role == MessageRole::User
+                    && msg.content == "Also include this detail"),
+            "the nested user message should still be preserved"
+        );
+    }
+
+    #[test]
+    fn estimate_retry_tokens_counts_unicode_chars_not_utf8_bytes() {
+        let messages = vec![ThreadMessage::user("éééé")];
+        assert_eq!(estimate_retry_tokens(&messages), 2);
+    }
+
+    struct OverflowThenOtherErrorLlm {
+        calls: tokio::sync::Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for OverflowThenOtherErrorLlm {
+        fn model_name(&self) -> &str {
+            "overflow-then-other-error"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            _config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            let mut calls = self.calls.lock().await;
+            *calls += 1;
+            if *calls == 1 {
+                Err(EngineError::TokenLimitExceeded {
+                    used: 150_000,
+                    limit: 128_000,
+                })
+            } else {
+                Err(EngineError::Llm {
+                    reason: "retry exploded".to_string(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_retry_failure_includes_original_overflow_context() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(OverflowThenOtherErrorLlm {
+            calls: tokio::sync::Mutex::new(0),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are helpful."},
+            {"role": "User", "content": "First question"},
+            {"role": "Assistant", "content": "First answer"},
+            {"role": "User", "content": "Second question"},
+            {"role": "Assistant", "content": "Second answer"},
+            {"role": "User", "content": "Current request"}
+        ]);
+
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&messages),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let error_message = match result {
+            ExtFunctionResult::Error(err) => err.message().unwrap_or_default().to_string(),
+            other => panic!("expected retry failure, got {other:?}"),
+        };
+
+        assert!(error_message.contains("used=150000"));
+        assert!(error_message.contains("limit=128000"));
+        assert!(error_message.contains("retry exploded"));
     }
 
     struct StatefulOverflowOrchestratorLlm {
@@ -3595,9 +3849,7 @@ mod tests {
 
             let has_compaction_note = messages.iter().any(|msg| {
                 msg.role == MessageRole::System
-                    && msg
-                        .content
-                        .contains("automatically compacted to fit within the context window")
+                    && msg.content.contains(RETRY_COMPACTION_NOTE_SENTINEL)
             });
             let has_progress_message = messages
                 .iter()
