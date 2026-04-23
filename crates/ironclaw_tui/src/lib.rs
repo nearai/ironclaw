@@ -50,6 +50,6 @@ pub use event::{
 pub use layout::TuiLayout;
 pub use theme::Theme;
 pub use widgets::{
-    AppState, MemoryEntry, PlanState, PlanStatus, PlanStep, PlanStepStatus, SettingEntry,
-    SettingsState, SkillCategory, ToolCategory,
+    AppState, ExtensionBrowserItem, MemoryEntry, PlanState, PlanStatus, PlanStep, PlanStepStatus,
+    SettingEntry, SettingsState, SkillBrowserItem, SkillCategory, ToolCategory,
 };

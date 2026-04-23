@@ -360,6 +360,20 @@ impl SettingsWidget {
     }
 
     fn render_settings_list(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+        match state.settings.section {
+            SettingsSection::Skills => {
+                let focused = state.settings.focus == SettingsFocus::Entries;
+                super::browser::render_skill_list(&self.theme, area, buf, state, focused);
+                return;
+            }
+            SettingsSection::Extensions => {
+                let focused = state.settings.focus == SettingsFocus::Entries;
+                super::browser::render_extension_list(&self.theme, area, buf, state, focused);
+                return;
+            }
+            _ => {}
+        }
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.chrome_border_style())
@@ -419,6 +433,18 @@ impl SettingsWidget {
     }
 
     fn render_detail_panel(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+        match state.settings.section {
+            SettingsSection::Skills => {
+                super::browser::render_skill_detail(&self.theme, area, buf, state);
+                return;
+            }
+            SettingsSection::Extensions => {
+                super::browser::render_extension_detail(&self.theme, area, buf, state);
+                return;
+            }
+            _ => {}
+        }
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.chrome_border_style())
@@ -500,10 +526,21 @@ impl SettingsWidget {
                 Span::styled(entry.source.clone(), self.theme.bold_style()),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("Enter/e", self.theme.accent_style()),
-                Span::raw(" edit"),
-            ]));
+            if entry.path == "selected_model" {
+                lines.push(Line::from(vec![
+                    Span::styled("Enter", self.theme.accent_style()),
+                    Span::raw(" open model picker"),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("e", self.theme.accent_style()),
+                    Span::raw(" edit raw value"),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("Enter/e", self.theme.accent_style()),
+                    Span::raw(" edit"),
+                ]));
+            }
             lines.push(Line::from(vec![
                 Span::styled("r", self.theme.accent_style()),
                 Span::raw(" reset override"),

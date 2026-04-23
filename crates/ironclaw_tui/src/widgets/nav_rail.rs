@@ -37,6 +37,16 @@ fn badge_count(tab: ActiveTab, state: &AppState) -> usize {
     }
 }
 
+/// Row offset inside the nav-rail area where the first tab row is drawn.
+///
+/// Must stay in sync with the [`NavRailWidget::render`] line list:
+///   0: title (" IronClaw ") consumes the top border row
+///   1: " control room"
+///   2: " surfaces"
+///   3: blank spacer
+///   4: first tab (Chat)
+const NAV_FIRST_ROW_OFFSET: u16 = 4;
+
 pub(crate) fn nav_hit_areas(area: Rect) -> Vec<(ActiveTab, Rect)> {
     if area.height < 12 || area.width < 12 {
         return Vec::new();
@@ -46,11 +56,8 @@ pub(crate) fn nav_hit_areas(area: Rect) -> Vec<(ActiveTab, Rect)> {
         .iter()
         .enumerate()
         .map(|(index, (tab, _, _))| {
-            let y = area.y.saturating_add(2 + index as u16);
-            (
-                *tab,
-                Rect::new(area.x.saturating_add(1), y, area.width.saturating_sub(2), 1),
-            )
+            let y = area.y.saturating_add(NAV_FIRST_ROW_OFFSET + index as u16);
+            (*tab, Rect::new(area.x, y, area.width.saturating_sub(1), 1))
         })
         .collect()
 }
@@ -167,6 +174,22 @@ impl TuiWidget for NavRailWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_to_buffer(area: Rect, state: &AppState) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let widget = NavRailWidget::new(Theme::dark(), true, true);
+        terminal
+            .draw(|f| widget.render(area, f.buffer_mut(), state))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width).map(|x| buf[(x, y)].symbol()).collect()
+    }
 
     #[test]
     fn nav_rail_exposes_surface_order() {
@@ -185,13 +208,29 @@ mod tests {
         );
     }
 
+    /// Regression for a vertical drift between `nav_hit_areas` and the
+    /// actual rendered rows: clicking a nav label must hit the tab whose
+    /// text is drawn on that row.
     #[test]
-    fn nav_hit_areas_cover_settings_row() {
-        let areas = nav_hit_areas(Rect::new(0, 0, 18, 20));
-        assert!(
-            areas
+    fn nav_hit_areas_align_with_rendered_rows() {
+        let area = Rect::new(0, 0, 22, 24);
+        let state = AppState::default();
+        let buf = render_to_buffer(area, &state);
+        let areas = nav_hit_areas(area);
+        for (tab, rect) in areas {
+            let label = NAV_ITEMS
                 .iter()
-                .any(|(tab, rect)| { *tab == ActiveTab::Settings && rect.y == 8 })
-        );
+                .find_map(|(t, _, l)| (*t == tab).then_some(*l))
+                .expect("known tab");
+            let row = row_text(&buf, rect.y, area.width);
+            assert!(
+                row.contains(label),
+                "hit row y={} for {:?} should contain label {:?}, got {:?}",
+                rect.y,
+                tab,
+                label,
+                row,
+            );
+        }
     }
 }

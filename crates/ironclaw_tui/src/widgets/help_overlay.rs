@@ -22,8 +22,11 @@ const KEY_SECTIONS: &[KeySection] = &[
     KeySection {
         header: "Navigation",
         bindings: &[
-            ("Ctrl-L", "Cycle tabs"),
+            ("Ctrl-Tab / Alt-\u{2192}", "Next tab"),
+            ("Ctrl-Shift-Tab / Alt-\u{2190}", "Previous tab"),
+            ("Alt-1..5 / \u{2318}-1..5", "Jump to left tabs"),
             ("Ctrl-B", "Toggle dashboard"),
+            ("Ctrl-L", "Toggle logs"),
             ("Ctrl-F", "Search conversation"),
             ("PgUp / PgDn", "Scroll"),
         ],

@@ -6,6 +6,7 @@
 //! events.
 
 pub mod approval;
+pub mod browser;
 pub mod codeblock;
 pub mod command_palette;
 pub mod conversation;
@@ -78,6 +79,34 @@ impl ActiveTab {
             Self::Logs => "[Logs]",
             Self::Settings => "[Settings]",
         }
+    }
+
+    /// Ordered list of tabs as rendered in the nav rail.
+    /// Keep this in sync with `nav_rail::nav_hit_areas`.
+    pub const fn order() -> &'static [ActiveTab] {
+        &[
+            Self::Conversation,
+            Self::Workspace,
+            Self::Projects,
+            Self::Jobs,
+            Self::Missions,
+            Self::Logs,
+            Self::Settings,
+        ]
+    }
+
+    /// Next tab in nav-rail order, wrapping at the end.
+    pub fn next(self) -> Self {
+        let order = Self::order();
+        let idx = order.iter().position(|t| *t == self).unwrap_or(0);
+        order[(idx + 1) % order.len()]
+    }
+
+    /// Previous tab in nav-rail order, wrapping at the start.
+    pub fn prev(self) -> Self {
+        let order = Self::order();
+        let idx = order.iter().position(|t| *t == self).unwrap_or(0);
+        order[(idx + order.len() - 1) % order.len()]
     }
 }
 
@@ -309,6 +338,12 @@ pub struct AppState {
 
     /// Active plan state (inline checklist display).
     pub plan_state: Option<PlanState>,
+
+    /// Installed skills shown in the Settings → Skills browser.
+    pub skill_items: Vec<SkillBrowserItem>,
+
+    /// Installed extensions shown in the Settings → Extensions browser.
+    pub extension_items: Vec<ExtensionBrowserItem>,
 }
 
 /// Data for the Dashboard introspection tab.
@@ -383,6 +418,67 @@ impl SettingEntry {
     }
 }
 
+/// Read-only metadata for an installed skill, displayed in the Skills browser.
+///
+/// Mirrors the web `SkillInfo` DTO — we keep only the fields the TUI renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillBrowserItem {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub trust: String,
+    pub keywords: Vec<String>,
+    pub usage_hint: Option<String>,
+    pub has_requirements: bool,
+    pub has_scripts: bool,
+    pub install_source_url: Option<String>,
+}
+
+impl SkillBrowserItem {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: "0.0.0".to_string(),
+            description: description.into(),
+            trust: "Installed".to_string(),
+            keywords: Vec::new(),
+            usage_hint: None,
+            has_requirements: false,
+            has_scripts: false,
+            install_source_url: None,
+        }
+    }
+}
+
+/// Read-only metadata for an installed extension (WASM tool, WASM channel,
+/// or MCP server), displayed in the Extensions browser.
+///
+/// Mirrors the web `ExtensionInfo` DTO — only the fields the TUI renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionBrowserItem {
+    pub name: String,
+    pub kind: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub active: bool,
+    pub authenticated: bool,
+    pub tools: Vec<String>,
+}
+
+impl ExtensionBrowserItem {
+    pub fn new(name: impl Into<String>, kind: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            version: None,
+            description: None,
+            active: false,
+            authenticated: false,
+            tools: Vec::new(),
+        }
+    }
+}
+
 /// Settings sub-sections mirroring the web settings surface.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -449,6 +545,14 @@ pub struct SettingsState {
     pub focus: SettingsFocus,
     pub theme_selected: usize,
     pub active_theme: String,
+    /// Selection index into the Skills browser list.
+    pub skill_selected: usize,
+    /// Scroll offset for the Skills browser list.
+    pub skill_scroll: usize,
+    /// Selection index into the Extensions browser list.
+    pub extension_selected: usize,
+    /// Scroll offset for the Extensions browser list.
+    pub extension_scroll: usize,
 }
 
 impl Default for SettingsState {
@@ -464,6 +568,10 @@ impl Default for SettingsState {
             focus: SettingsFocus::default(),
             theme_selected: 0,
             active_theme: "dark".to_string(),
+            skill_selected: 0,
+            skill_scroll: 0,
+            extension_selected: 0,
+            extension_scroll: 0,
         }
     }
 }
@@ -531,6 +639,99 @@ impl SettingsState {
     pub fn page(&mut self, delta: isize) {
         let page = self.visible_rows.max(1) as isize;
         self.move_selection(delta.saturating_mul(page));
+    }
+
+    /// Move the Skills browser selection by `delta`, clamped to `total` items.
+    pub fn move_skill_selection(&mut self, delta: isize, total: usize) {
+        Self::move_browser_selection(
+            &mut self.skill_selected,
+            &mut self.skill_scroll,
+            self.visible_rows,
+            delta,
+            total,
+        );
+    }
+
+    /// Page the Skills browser selection by `delta` pages.
+    pub fn page_skills(&mut self, delta: isize, total: usize) {
+        let page = self.visible_rows.max(1) as isize;
+        self.move_skill_selection(delta.saturating_mul(page), total);
+    }
+
+    /// Move the Extensions browser selection by `delta`, clamped to `total` items.
+    pub fn move_extension_selection(&mut self, delta: isize, total: usize) {
+        Self::move_browser_selection(
+            &mut self.extension_selected,
+            &mut self.extension_scroll,
+            self.visible_rows,
+            delta,
+            total,
+        );
+    }
+
+    /// Page the Extensions browser selection by `delta` pages.
+    pub fn page_extensions(&mut self, delta: isize, total: usize) {
+        let page = self.visible_rows.max(1) as isize;
+        self.move_extension_selection(delta.saturating_mul(page), total);
+    }
+
+    /// Clamp browser selection/scroll when the item list changes size.
+    pub fn sync_skill_browser(&mut self, total: usize) {
+        Self::sync_browser_bounds(
+            &mut self.skill_selected,
+            &mut self.skill_scroll,
+            self.visible_rows,
+            total,
+        );
+    }
+
+    /// Clamp browser selection/scroll when the item list changes size.
+    pub fn sync_extension_browser(&mut self, total: usize) {
+        Self::sync_browser_bounds(
+            &mut self.extension_selected,
+            &mut self.extension_scroll,
+            self.visible_rows,
+            total,
+        );
+    }
+
+    fn move_browser_selection(
+        selected: &mut usize,
+        scroll: &mut usize,
+        visible_rows: usize,
+        delta: isize,
+        total: usize,
+    ) {
+        if total == 0 {
+            *selected = 0;
+            *scroll = 0;
+            return;
+        }
+        let max = total.saturating_sub(1) as isize;
+        *selected = (*selected as isize + delta).clamp(0, max) as usize;
+        Self::sync_browser_bounds(selected, scroll, visible_rows, total);
+    }
+
+    fn sync_browser_bounds(
+        selected: &mut usize,
+        scroll: &mut usize,
+        visible_rows: usize,
+        total: usize,
+    ) {
+        if total == 0 {
+            *selected = 0;
+            *scroll = 0;
+            return;
+        }
+        let rows = visible_rows.max(1);
+        *selected = (*selected).min(total.saturating_sub(1));
+        if *selected < *scroll {
+            *scroll = *selected;
+        } else if *selected >= *scroll + rows {
+            *scroll = selected.saturating_sub(rows.saturating_sub(1));
+        }
+        let max_scroll = total.saturating_sub(rows.min(total));
+        *scroll = (*scroll).min(max_scroll);
     }
 
     pub fn move_section(&mut self, delta: isize) {
@@ -1301,6 +1502,8 @@ impl Default for AppState {
             dashboard: DashboardData::default(),
             welcome_reveal_frame: 0,
             plan_state: None,
+            skill_items: Vec::new(),
+            extension_items: Vec::new(),
         }
     }
 }
@@ -1812,4 +2015,35 @@ pub trait TuiWidget: Send + Sync {
 
     /// Called on each tick for animations or time-based updates.
     fn tick(&mut self, _state: &AppState) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveTab;
+
+    #[test]
+    fn active_tab_next_wraps_from_last_to_first() {
+        assert_eq!(ActiveTab::Settings.next(), ActiveTab::Conversation);
+    }
+
+    #[test]
+    fn active_tab_prev_wraps_from_first_to_last() {
+        assert_eq!(ActiveTab::Conversation.prev(), ActiveTab::Settings);
+    }
+
+    #[test]
+    fn active_tab_next_walks_full_cycle() {
+        let mut tab = ActiveTab::Conversation;
+        for _ in 0..ActiveTab::order().len() {
+            tab = tab.next();
+        }
+        assert_eq!(tab, ActiveTab::Conversation);
+    }
+
+    #[test]
+    fn active_tab_prev_is_inverse_of_next() {
+        for tab in ActiveTab::order() {
+            assert_eq!(tab.next().prev(), *tab);
+        }
+    }
 }

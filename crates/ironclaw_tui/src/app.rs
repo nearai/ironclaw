@@ -92,6 +92,10 @@ pub struct TuiAppConfig {
     pub available_models: Vec<String>,
     /// Settings snapshot for the Settings tab.
     pub settings: Vec<crate::widgets::SettingEntry>,
+    /// Installed skills for the Skills browser under Settings.
+    pub skill_items: Vec<crate::widgets::SkillBrowserItem>,
+    /// Installed extensions for the Extensions browser under Settings.
+    pub extension_items: Vec<crate::widgets::ExtensionBrowserItem>,
 }
 
 /// Start the TUI application. Returns a handle for bi-directional communication.
@@ -183,6 +187,8 @@ async fn run_tui(
             state
         },
         work_sidebar_visible: config.layout.conversation.show_work_sidebar,
+        skill_items: config.skill_items,
+        extension_items: config.extension_items,
         ..AppState::default()
     };
 
@@ -630,6 +636,20 @@ async fn handle_event(
                         ActiveTab::Projects => ActiveTab::Conversation,
                         _ => ActiveTab::Projects,
                     };
+                }
+                InputAction::NextTab => {
+                    state.active_tab = state.active_tab.next();
+                    state.text_selection = None;
+                }
+                InputAction::PrevTab => {
+                    state.active_tab = state.active_tab.prev();
+                    state.text_selection = None;
+                }
+                InputAction::JumpToTab(index) => {
+                    if let Some(tab) = ActiveTab::order().get(index).copied() {
+                        state.active_tab = tab;
+                        state.text_selection = None;
+                    }
                 }
                 InputAction::ToggleWorkSidebar => {
                     state.work_sidebar_visible = !state.work_sidebar_visible;
@@ -1979,6 +1999,7 @@ async fn handle_settings_key(
         || state.expanded_dashboard_panel.is_some()
         || state.identity_file_modal.is_some()
         || state.command_palette.visible
+        || state.model_picker.visible
         || state.search.active
     {
         return false;
@@ -2052,7 +2073,15 @@ async fn handle_settings_key(
                     crate::widgets::SettingsFocus::Themes => state
                         .settings
                         .move_theme_selection(-1, Theme::preset_catalog().len()),
-                    crate::widgets::SettingsFocus::Entries => state.settings.move_selection(-1),
+                    crate::widgets::SettingsFocus::Entries => match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => state
+                            .settings
+                            .move_skill_selection(-1, state.skill_items.len()),
+                        crate::widgets::SettingsSection::Extensions => state
+                            .settings
+                            .move_extension_selection(-1, state.extension_items.len()),
+                        _ => state.settings.move_selection(-1),
+                    },
                 }
                 true
             }
@@ -2062,7 +2091,15 @@ async fn handle_settings_key(
                     crate::widgets::SettingsFocus::Themes => state
                         .settings
                         .move_theme_selection(1, Theme::preset_catalog().len()),
-                    crate::widgets::SettingsFocus::Entries => state.settings.move_selection(1),
+                    crate::widgets::SettingsFocus::Entries => match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => state
+                            .settings
+                            .move_skill_selection(1, state.skill_items.len()),
+                        crate::widgets::SettingsSection::Extensions => state
+                            .settings
+                            .move_extension_selection(1, state.extension_items.len()),
+                        _ => state.settings.move_selection(1),
+                    },
                 }
                 true
             }
@@ -2088,7 +2125,15 @@ async fn handle_settings_key(
             }
             (KeyCode::PageUp, _) => {
                 if state.settings.focus == crate::widgets::SettingsFocus::Entries {
-                    state.settings.page(-1);
+                    match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => {
+                            state.settings.page_skills(-1, state.skill_items.len())
+                        }
+                        crate::widgets::SettingsSection::Extensions => state
+                            .settings
+                            .page_extensions(-1, state.extension_items.len()),
+                        _ => state.settings.page(-1),
+                    }
                     true
                 } else {
                     false
@@ -2096,7 +2141,15 @@ async fn handle_settings_key(
             }
             (KeyCode::PageDown, _) => {
                 if state.settings.focus == crate::widgets::SettingsFocus::Entries {
-                    state.settings.page(1);
+                    match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => {
+                            state.settings.page_skills(1, state.skill_items.len())
+                        }
+                        crate::widgets::SettingsSection::Extensions => state
+                            .settings
+                            .page_extensions(1, state.extension_items.len()),
+                        _ => state.settings.page(1),
+                    }
                     true
                 } else {
                     false
@@ -2111,10 +2164,22 @@ async fn handle_settings_key(
                     crate::widgets::SettingsFocus::Themes => {
                         state.settings.theme_selected = 0;
                     }
-                    crate::widgets::SettingsFocus::Entries => {
-                        state.settings.selected = 0;
-                        state.settings.ensure_selected_visible();
-                    }
+                    crate::widgets::SettingsFocus::Entries => match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => {
+                            state.settings.skill_selected = 0;
+                            state.settings.sync_skill_browser(state.skill_items.len());
+                        }
+                        crate::widgets::SettingsSection::Extensions => {
+                            state.settings.extension_selected = 0;
+                            state
+                                .settings
+                                .sync_extension_browser(state.extension_items.len());
+                        }
+                        _ => {
+                            state.settings.selected = 0;
+                            state.settings.ensure_selected_visible();
+                        }
+                    },
                 }
                 true
             }
@@ -2128,17 +2193,32 @@ async fn handle_settings_key(
                         state.settings.theme_selected =
                             Theme::preset_catalog().len().saturating_sub(1);
                     }
-                    crate::widgets::SettingsFocus::Entries => {
-                        state.settings.selected =
-                            state.settings.visible_entry_count().saturating_sub(1);
-                        state.settings.ensure_selected_visible();
-                    }
+                    crate::widgets::SettingsFocus::Entries => match state.settings.section {
+                        crate::widgets::SettingsSection::Skills => {
+                            state.settings.skill_selected =
+                                state.skill_items.len().saturating_sub(1);
+                            state.settings.sync_skill_browser(state.skill_items.len());
+                        }
+                        crate::widgets::SettingsSection::Extensions => {
+                            state.settings.extension_selected =
+                                state.extension_items.len().saturating_sub(1);
+                            state
+                                .settings
+                                .sync_extension_browser(state.extension_items.len());
+                        }
+                        _ => {
+                            state.settings.selected =
+                                state.settings.visible_entry_count().saturating_sub(1);
+                            state.settings.ensure_selected_visible();
+                        }
+                    },
                 }
                 true
             }
             (KeyCode::Enter, KeyModifiers::NONE)
             | (KeyCode::Char('e'), KeyModifiers::NONE)
             | (KeyCode::Char('E'), KeyModifiers::SHIFT) => {
+                let picker_eligible = matches!(key.code, KeyCode::Enter);
                 match state.settings.focus {
                     crate::widgets::SettingsFocus::Sections => {
                         state.settings.focus = crate::widgets::SettingsFocus::Entries;
@@ -2174,7 +2254,17 @@ async fn handle_settings_key(
                             });
                         }
                     }
-                    crate::widgets::SettingsFocus::Entries => state.settings.start_editing(),
+                    crate::widgets::SettingsFocus::Entries => {
+                        let is_model_entry = state
+                            .settings
+                            .selected_entry()
+                            .is_some_and(|entry| entry.path == "selected_model");
+                        if picker_eligible && is_model_entry && state.model_picker.has_models() {
+                            state.model_picker.open("");
+                        } else {
+                            state.settings.start_editing();
+                        }
+                    }
                 }
                 true
             }
@@ -3907,6 +3997,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn alt_digit_shortcut_switches_to_workspace_tab() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Conversation,
+            ..AppState::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT)),
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Workspace);
+    }
+
+    #[tokio::test]
+    async fn super_digit_shortcut_switches_to_missions_tab() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Conversation,
+            ..AppState::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::SUPER)),
+        )
+        .await;
+
+        assert_eq!(state.active_tab, ActiveTab::Missions);
+    }
+
+    #[tokio::test]
     async fn settings_tab_edits_selected_setting_via_config_command() {
         let mut state = AppState {
             active_tab: ActiveTab::Settings,
@@ -3947,6 +4069,152 @@ mod tests {
                 .map(|entry| entry.value.as_str()),
             Some("80")
         );
+    }
+
+    #[tokio::test]
+    async fn settings_enter_on_selected_model_opens_model_picker() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("selected_model", "gpt-4o")]);
+        state.settings.section = crate::widgets::SettingsSection::Inference;
+        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+        state
+            .model_picker
+            .set_models(vec!["gpt-4o".to_string(), "claude-sonnet-4-6".to_string()]);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(
+            state.model_picker.visible,
+            "Enter on selected_model should open the model picker"
+        );
+        assert!(
+            !state.settings.editing,
+            "picker path should not also enter text-edit mode"
+        );
+        assert_eq!(state.model_picker.filter, "");
+    }
+
+    #[tokio::test]
+    async fn settings_char_e_on_selected_model_opens_text_edit_not_picker() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("selected_model", "gpt-4o")]);
+        state.settings.section = crate::widgets::SettingsSection::Inference;
+        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+        state.model_picker.set_models(vec!["gpt-4o".to_string()]);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(!state.model_picker.visible);
+        assert!(
+            state.settings.editing,
+            "'e' should always enter raw text edit as a fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_model_picker_submit_sends_model_command() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("selected_model", "gpt-4o")]);
+        state.settings.section = crate::widgets::SettingsSection::Inference;
+        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+        state
+            .model_picker
+            .set_models(vec!["gpt-4o".to_string(), "claude-sonnet-4-6".to_string()]);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+        assert!(state.model_picker.visible);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        )
+        .await;
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(!state.model_picker.visible);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "/model claude-sonnet-4-6");
+        assert_eq!(state.model, "claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn settings_enter_on_selected_model_without_models_falls_back_to_editing() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("selected_model", "gpt-4o")]);
+        state.settings.section = crate::widgets::SettingsSection::Inference;
+        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+        assert!(!state.model_picker.has_models());
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(!state.model_picker.visible);
+        assert!(
+            state.settings.editing,
+            "without a model list, Enter must still let the user type a value"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_enter_on_non_model_entry_still_starts_editing() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+        state.model_picker.set_models(vec!["gpt-4o".to_string()]);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(!state.model_picker.visible);
+        assert!(state.settings.editing);
     }
 
     #[tokio::test]

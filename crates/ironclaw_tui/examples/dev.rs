@@ -183,6 +183,8 @@ fn main() {
             ironclaw_tui::SettingEntry::new("agent.max_tool_iterations", "50"),
             ironclaw_tui::SettingEntry::new("heartbeat.enabled", "false"),
         ],
+        skill_items: Vec::new(),
+        extension_items: Vec::new(),
     };
 
     let handle = start_tui(config);

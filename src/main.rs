@@ -80,6 +80,50 @@ fn tui_setting_entries(settings: ironclaw::settings::Settings) -> Vec<ironclaw_t
         .collect()
 }
 
+#[cfg(feature = "tui")]
+const WORKSPACE_PREVIEW_CHAR_LIMIT: usize = 16 * 1024;
+
+#[cfg(feature = "tui")]
+fn workspace_preview_snippet(content: &str) -> String {
+    content.chars().take(WORKSPACE_PREVIEW_CHAR_LIMIT).collect()
+}
+
+#[cfg(feature = "tui")]
+fn workspace_memory_entry(doc: ironclaw::workspace::MemoryDocument) -> ironclaw_tui::MemoryEntry {
+    ironclaw_tui::MemoryEntry {
+        path: doc.path,
+        snippet: workspace_preview_snippet(&doc.content),
+        updated_at: Some(doc.updated_at),
+    }
+}
+
+#[cfg(feature = "tui")]
+async fn load_tui_memory_entries(
+    ws: &ironclaw::workspace::Workspace,
+    all_paths: &[String],
+    identity_names: &[&str],
+) -> Vec<ironclaw_tui::MemoryEntry> {
+    let mut entries = Vec::new();
+    for path in all_paths
+        .iter()
+        .filter(|p| {
+            !identity_names.contains(&p.as_str()) && *p != "HEARTBEAT.md" && *p != "MEMORY.md"
+        })
+        .take(50)
+    {
+        let entry = match ws.read(path).await {
+            Ok(doc) => workspace_memory_entry(doc),
+            Err(_) => ironclaw_tui::MemoryEntry {
+                path: path.clone(),
+                snippet: String::new(),
+                updated_at: None,
+            },
+        };
+        entries.push(entry);
+    }
+    entries
+}
+
 /// Synchronous entry point. Loads `.env` files before the Tokio runtime
 /// starts so that `std::env::set_var` is safe (no worker threads yet).
 fn main() -> anyhow::Result<()> {
@@ -599,21 +643,9 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Collect memory paths (excluding identity/system files), limit 50
-                let entries: Vec<ironclaw_tui::MemoryEntry> = all_paths
-                    .iter()
-                    .filter(|p| {
-                        !identity_names.contains(&p.as_str())
-                            && *p != "HEARTBEAT.md"
-                            && *p != "MEMORY.md"
-                    })
-                    .take(50)
-                    .map(|p| ironclaw_tui::MemoryEntry {
-                        path: p.clone(),
-                        snippet: String::new(),
-                        updated_at: None,
-                    })
-                    .collect();
+                // Collect memory paths (excluding identity/system files), limit 50.
+                // Read document content so the Workspace preview can render live file data.
+                let entries = load_tui_memory_entries(ws, &all_paths, &identity_names).await;
 
                 (count, found, contents, entries)
             } else {
@@ -680,6 +712,68 @@ async fn async_main() -> anyhow::Result<()> {
             tui_setting_entries(ironclaw::settings::Settings::default())
         };
 
+        let skill_items: Vec<ironclaw_tui::SkillBrowserItem> = if let Some(ref registry) =
+            components.skill_registry
+        {
+            let registry = registry.read().unwrap_or_else(|e| e.into_inner());
+            registry
+                .skills()
+                .iter()
+                .map(|s| {
+                    let trust = match s.trust {
+                        ironclaw_skills::SkillTrust::Trusted => "trusted",
+                        ironclaw_skills::SkillTrust::Installed => "installed",
+                    };
+                    let install_source_url = match &s.source {
+                        ironclaw_skills::SkillSource::Workspace(p)
+                        | ironclaw_skills::SkillSource::User(p)
+                        | ironclaw_skills::SkillSource::Installed(p)
+                        | ironclaw_skills::SkillSource::Bundled(p) => Some(p.display().to_string()),
+                    };
+                    let has_requirements = !s.manifest.requires.bins.is_empty()
+                        || !s.manifest.requires.env.is_empty()
+                        || !s.manifest.requires.config.is_empty();
+                    ironclaw_tui::SkillBrowserItem {
+                        name: s.manifest.name.clone(),
+                        version: s.manifest.version.clone(),
+                        description: s.manifest.description.clone(),
+                        trust: trust.to_string(),
+                        keywords: s.manifest.activation.keywords.clone(),
+                        usage_hint: None,
+                        has_requirements,
+                        has_scripts: false,
+                        install_source_url,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let extension_items: Vec<ironclaw_tui::ExtensionBrowserItem> =
+            if let Some(ref ext_mgr) = components.extension_manager {
+                match ext_mgr.list(None, false, &ext_user_id).await {
+                    Ok(list) => list
+                        .into_iter()
+                        .map(|e| ironclaw_tui::ExtensionBrowserItem {
+                            name: e.display_name.clone().unwrap_or_else(|| e.name.clone()),
+                            kind: e.kind.to_string(),
+                            version: e.version.clone(),
+                            description: e.description.clone(),
+                            active: e.active,
+                            authenticated: e.authenticated,
+                            tools: e.tools.clone(),
+                        })
+                        .collect(),
+                    Err(err) => {
+                        tracing::debug!("TUI extension snapshot unavailable: {}", err);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
         let tui_channel = ironclaw::channels::TuiChannel::new(
             config.owner_id.clone(),
             env!("CARGO_PKG_VERSION"),
@@ -697,7 +791,9 @@ async fn async_main() -> anyhow::Result<()> {
         .with_identity_file_contents(identity_file_contents)
         .with_memory_entries(memory_entries)
         .with_available_models(available_models)
-        .with_settings(settings);
+        .with_settings(settings)
+        .with_skill_items(skill_items)
+        .with_extension_items(extension_items);
 
         channels.add(Box::new(tui_channel)).await;
         channel_names.push("tui".to_string());
@@ -1664,6 +1760,35 @@ mod tests {
 
     /// Regression test for <https://github.com/nearai/ironclaw/issues/1840>:
     /// `--cli-only` must suppress webhook server and all non-CLI channels.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn workspace_memory_entry_uses_document_content_for_preview() {
+        let now = chrono::Utc::now();
+        let doc = ironclaw::workspace::MemoryDocument {
+            id: uuid::Uuid::new_v4(),
+            user_id: "user".to_string(),
+            agent_id: None,
+            path: "docs/spec.md".to_string(),
+            content: "# Title\n\n- alpha".to_string(),
+            created_at: now,
+            updated_at: now,
+            metadata: serde_json::json!({}),
+        };
+
+        let entry = workspace_memory_entry(doc);
+        assert_eq!(entry.path, "docs/spec.md");
+        assert_eq!(entry.snippet, "# Title\n\n- alpha");
+        assert_eq!(entry.updated_at, Some(now));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn workspace_preview_snippet_respects_limit() {
+        let input = "a".repeat(WORKSPACE_PREVIEW_CHAR_LIMIT + 32);
+        let snippet = workspace_preview_snippet(&input);
+        assert_eq!(snippet.chars().count(), WORKSPACE_PREVIEW_CHAR_LIMIT);
+    }
+
     #[test]
     fn cli_only_disables_non_cli_channels() {
         assert!(

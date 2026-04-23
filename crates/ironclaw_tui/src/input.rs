@@ -17,6 +17,12 @@ pub enum InputAction {
     ToggleDashboard,
     /// Toggle between Conversation and Logs tabs.
     ToggleLogs,
+    /// Cycle to the next tab in the nav rail.
+    NextTab,
+    /// Cycle to the previous tab in the nav rail.
+    PrevTab,
+    /// Jump directly to a specific tab index in nav-rail order.
+    JumpToTab(usize),
     /// Scroll conversation up.
     ScrollUp,
     /// Scroll conversation down.
@@ -97,6 +103,23 @@ pub enum InputAction {
     Forward,
 }
 
+fn tab_jump_index(digit: char) -> Option<usize> {
+    match digit {
+        '1' => Some(0),
+        '2' => Some(1),
+        '3' => Some(2),
+        '4' => Some(3),
+        '5' => Some(4),
+        _ => None,
+    }
+}
+
+fn is_tab_jump_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers == KeyModifiers::ALT
+        || modifiers == KeyModifiers::SUPER
+        || modifiers == (KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
 /// Map a key event to an action, considering active modal/context state.
 #[allow(clippy::too_many_arguments)]
 pub fn map_key(
@@ -143,6 +166,13 @@ pub fn map_key(
         return map_palette_key(key);
     }
 
+    if let KeyCode::Char(digit) = key.code
+        && let Some(index) = tab_jump_index(digit)
+        && is_tab_jump_modifier(key.modifiers)
+    {
+        return InputAction::JumpToTab(index);
+    }
+
     // Log level filter keys only in logs tab
     if logs_active && let Some(action) = map_log_filter_key(key) {
         return action;
@@ -157,6 +187,19 @@ pub fn map_key(
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::ClearOrQuit,
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => InputAction::ToggleDashboard,
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => InputAction::ToggleLogs,
+        // Tab cycling (left pane / nav rail).
+        // `Ctrl+Tab` / `Ctrl+Shift+Tab` only deliver in terminals that speak
+        // the Kitty keyboard protocol (iTerm2 in CSI u mode, Ghostty, etc.);
+        // `Alt+Right` / `Alt+Left` are the fallback that works everywhere.
+        (KeyCode::Tab, m)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            InputAction::PrevTab
+        }
+        (KeyCode::BackTab, m) if m.contains(KeyModifiers::CONTROL) => InputAction::PrevTab,
+        (KeyCode::Tab, KeyModifiers::CONTROL) => InputAction::NextTab,
+        (KeyCode::Right, KeyModifiers::ALT) => InputAction::NextTab,
+        (KeyCode::Left, KeyModifiers::ALT) => InputAction::PrevTab,
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => InputAction::SearchToggle,
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => InputAction::ExpandTool,
         (KeyCode::Char('v'), KeyModifiers::CONTROL) => InputAction::ClipboardPaste,
@@ -376,6 +419,54 @@ mod tests {
     fn ctrl_b_toggles_dashboard() {
         let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         assert_eq!(map_default(key), InputAction::ToggleDashboard);
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_next_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL);
+        assert_eq!(map_default(key), InputAction::NextTab);
+    }
+
+    #[test]
+    fn ctrl_shift_tab_cycles_prev_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(map_default(key), InputAction::PrevTab);
+    }
+
+    #[test]
+    fn ctrl_back_tab_cycles_prev_tab() {
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL);
+        assert_eq!(map_default(key), InputAction::PrevTab);
+    }
+
+    #[test]
+    fn alt_right_cycles_next_tab() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(map_default(key), InputAction::NextTab);
+    }
+
+    #[test]
+    fn alt_left_cycles_prev_tab() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(map_default(key), InputAction::PrevTab);
+    }
+
+    #[test]
+    fn alt_one_jumps_to_first_tab() {
+        let key = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT);
+        assert_eq!(map_default(key), InputAction::JumpToTab(0));
+    }
+
+    #[test]
+    fn super_five_jumps_to_fifth_tab() {
+        let key = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::SUPER);
+        assert_eq!(map_default(key), InputAction::JumpToTab(4));
+    }
+
+    #[test]
+    fn plain_tab_is_not_next_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_ne!(map_default(key), InputAction::NextTab);
     }
 
     #[test]

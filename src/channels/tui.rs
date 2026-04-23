@@ -372,6 +372,8 @@ pub struct TuiChannel {
     memory_entries: Vec<ironclaw_tui::MemoryEntry>,
     available_models: Vec<String>,
     settings: Vec<ironclaw_tui::SettingEntry>,
+    skill_items: Vec<ironclaw_tui::SkillBrowserItem>,
+    extension_items: Vec<ironclaw_tui::ExtensionBrowserItem>,
 }
 
 impl TuiChannel {
@@ -401,6 +403,8 @@ impl TuiChannel {
             memory_entries: Vec::new(),
             available_models: Vec::new(),
             settings: Vec::new(),
+            skill_items: Vec::new(),
+            extension_items: Vec::new(),
         }
     }
 
@@ -481,6 +485,18 @@ impl TuiChannel {
         self.settings = settings;
         self
     }
+
+    /// Set installed skills for the Settings > Skills browser.
+    pub fn with_skill_items(mut self, items: Vec<ironclaw_tui::SkillBrowserItem>) -> Self {
+        self.skill_items = items;
+        self
+    }
+
+    /// Set installed extensions for the Settings > Extensions browser.
+    pub fn with_extension_items(mut self, items: Vec<ironclaw_tui::ExtensionBrowserItem>) -> Self {
+        self.extension_items = items;
+        self
+    }
 }
 
 #[async_trait]
@@ -514,6 +530,8 @@ impl Channel for TuiChannel {
             memory_entries: self.memory_entries.clone(),
             available_models: self.available_models.clone(),
             settings: self.settings.clone(),
+            skill_items: self.skill_items.clone(),
+            extension_items: self.extension_items.clone(),
         };
 
         let ironclaw_tui::TuiAppHandle {

@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::layout::TuiSlot;
-use crate::render::{truncate, wrap_text};
+use crate::render::{render_markdown, truncate};
 use crate::theme::Theme;
 
 use super::{AppState, TuiWidget};
@@ -114,11 +114,9 @@ impl WorkspaceWidget {
 
         let content_width = width.saturating_sub(2) as usize;
         let preview_lines = match state.workspace.preview_mode {
-            super::WorkspacePreviewMode::Rendered => wrap_text(
-                &entry.snippet,
-                content_width.max(1),
-                Style::default().fg(self.theme.fg.to_color()),
-            ),
+            super::WorkspacePreviewMode::Rendered => {
+                render_markdown(&entry.snippet, content_width.max(1), &self.theme)
+            }
             super::WorkspacePreviewMode::Raw => entry
                 .snippet
                 .lines()
@@ -291,6 +289,36 @@ mod tests {
         assert!(text.contains("docs"));
         assert!(text.contains("spec.md"));
         assert!(text.contains("hello from preview pane"));
+    }
+
+    #[test]
+    fn workspace_rendered_preview_uses_markdown_renderer() {
+        let widget = WorkspaceWidget::new(Theme::dark());
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let state = AppState {
+            memory_entries: vec![MemoryEntry {
+                path: "docs/spec.md".to_string(),
+                snippet: "# Title\n\n- alpha\n- beta".to_string(),
+                updated_at: None,
+            }],
+            workspace: WorkspaceState {
+                selected_path: Some("docs/spec.md".to_string()),
+                preview_mode: WorkspacePreviewMode::Rendered,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Title"));
+        assert!(
+            text.contains("• alpha"),
+            "rendered mode should use markdown rendering for list items: {text}"
+        );
+        assert!(text.contains("• beta"));
     }
 
     #[test]
