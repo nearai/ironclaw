@@ -1198,6 +1198,18 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    struct EnvLockGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvLockGuard {
+        fn new() -> Self {
+            Self {
+                _guard: crate::config::helpers::lock_env(),
+            }
+        }
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         original: Option<String>,
@@ -1648,7 +1660,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_hides_secrets() {
-        let _env_lock = crate::config::helpers::lock_env();
+        let _env_lock = EnvLockGuard::new();
         // Set a fake secret in the current process environment.
         let secret_var = "IRONCLAW_TEST_SECRET_KEY";
         let _secret_guard = EnvVarGuard::set(secret_var, "super_secret_value_12345");
@@ -1707,7 +1719,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_common_secret_patterns() {
-        let _env_lock = crate::config::helpers::lock_env();
+        let _env_lock = EnvLockGuard::new();
         // Simulate common secret env vars that agents/tools might set
         let secrets = [
             ("OPENAI_API_KEY", "sk-test-fake-key-123"),
@@ -1841,7 +1853,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_custom_var_hidden() {
-        let _env_lock = crate::config::helpers::lock_env();
+        let _env_lock = EnvLockGuard::new();
         // Verify that arbitrary env vars from the parent process
         // are NOT visible to child commands (end-to-end, not just unit).
         let tool = ShellTool::new();

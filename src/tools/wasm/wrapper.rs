@@ -2850,12 +2850,23 @@ mod tests {
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
 
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+
         // The OAuth proxy URL is now SSRF-validated. The mock proxy below
         // binds to a loopback address, which is normally rejected; opt into
         // the loopback escape hatch so the test can exercise the proxy
         // refresh path end-to-end. The escape hatch only affects this
         // process and is not exposed to operators.
-        let _env_lock = crate::config::helpers::lock_env();
+        let _env_lock = EnvLockGuard::new();
         struct EnvGuard;
         impl Drop for EnvGuard {
             fn drop(&mut self) {

@@ -1925,7 +1925,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_bearer_token_session_beats_env_var() {
-        let _guard = crate::config::helpers::lock_env();
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Session token takes priority over NEARAI_API_KEY env var.
         // This prevents unexpected auth mode switches mid-run.
         let mut cfg = test_nearai_config("http://localhost:8318");
@@ -1961,7 +1972,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_bearer_token_config_beats_session_and_env() {
-        let _guard = crate::config::helpers::lock_env();
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Config API key should win even when session token AND env var are set.
         let cfg = test_nearai_config("http://localhost:8318");
         let session = test_session();

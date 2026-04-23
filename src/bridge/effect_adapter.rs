@@ -994,7 +994,9 @@ impl EffectBridgeAdapter {
                     context
                         .available_actions_snapshot
                         .as_deref()
-                        .map(|actions| ActionDiscovery::tool_info_from_actions(&parameters, actions))
+                        .map(|actions| {
+                            ActionDiscovery::tool_info_from_actions(&parameters, actions)
+                        })
                 });
             if let Some(snapshot_result) = snapshot_result {
                 match snapshot_result {

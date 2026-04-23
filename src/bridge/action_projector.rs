@@ -106,10 +106,8 @@ impl ActionProjector {
         }
 
         if let Some(registry) = capability_registry.as_ref() {
-            let mut seen: HashSet<String> = actions
-                .iter()
-                .map(|action| action.name.clone())
-                .collect();
+            let mut seen: HashSet<String> =
+                actions.iter().map(|action| action.name.clone()).collect();
             for lease in leases {
                 if lease.capability_name == "tools" {
                     continue;
@@ -361,10 +359,7 @@ mod tests {
         .await
         .expect("project should succeed");
 
-        actions
-            .into_iter()
-            .map(|action| action.name)
-            .collect()
+        actions.into_iter().map(|action| action.name).collect()
     }
 
     fn test_context() -> ThreadExecutionContext {

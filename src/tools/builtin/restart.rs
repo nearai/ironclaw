@@ -166,13 +166,27 @@ impl Tool for RestartTool {
 mod tests {
     use super::*;
 
+    struct EnvLockGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvLockGuard {
+        fn new() -> Self {
+            Self {
+                _guard: crate::config::helpers::lock_env(),
+            }
+        }
+    }
+
     struct DockerEnvGuard {
+        _lock: EnvLockGuard,
         original_in_docker: Option<String>,
         original_disable_restart: Option<String>,
     }
 
     impl DockerEnvGuard {
         fn enable() -> Self {
+            let lock = EnvLockGuard::new();
             let original_in_docker = std::env::var("IRONCLAW_IN_DOCKER").ok();
             let original_disable_restart = std::env::var("IRONCLAW_DISABLE_RESTART").ok();
             // SAFETY: Tests serialize env access with lock_env().
@@ -182,6 +196,7 @@ mod tests {
                 std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
             }
             Self {
+                _lock: lock,
                 original_in_docker,
                 original_disable_restart,
             }
@@ -245,7 +260,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_delay_parameter_validation() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -269,7 +283,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_delay_clamping() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -324,7 +337,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_boundary_values() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -359,7 +371,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_invalid_parameter_types() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -394,7 +405,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_output_structure() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -415,7 +425,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_extra_parameters_ignored() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -440,7 +449,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_negative_numbers() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -458,7 +466,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_very_large_numbers() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
@@ -475,7 +482,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_empty_object() {
-        let _env_lock = crate::config::helpers::lock_env();
         let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
