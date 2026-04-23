@@ -3096,6 +3096,114 @@ mod tests {
         ));
     }
 
+    // ── Stop / pause / cancel intent (mission lifecycle) ─────────
+
+    #[test]
+    fn signals_tool_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll stop the mission now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me pause the ticker.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll cancel the monitoring.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to halt the recurring task.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I will disable the mission.")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_stop_discussion() {
+        // "let me explain" is in EXCLUSIONS — blocks the entire text
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain how to stop the mission.")"#
+        ));
+        // Past tense should not trigger
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I already stopped the mission.")"#
+        ));
+    }
+
+    // ── Execution intent: stop / pause / cancel ────────────────
+
+    #[test]
+    fn signals_execution_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(r#"signals_execution_intent("stop it")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("pause the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("cancel that")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please stop the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please pause everything")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop() {
+        // Bare imperative commands — the exact user messages from #2808
+        assert!(eval_python_bool(r#"signals_execution_intent("stop")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging")"#
+        ));
+        assert!(eval_python_bool(r#"signals_execution_intent("pause")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("halt")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_no_false_positive_stop_in_sentence() {
+        // "stop" mid-sentence should NOT trigger — only at the start
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("I can't stop thinking about it")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("how do I stop a mission?")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_halt_disable_phrases() {
+        // "halt/disable" pronoun+article phrases and "please halt/disable"
+        assert!(eval_python_bool(r#"signals_execution_intent("halt that")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable it")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please disable the routine")"#
+        ));
+        // Bare "disable" command
+        assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop_with_punctuation() {
+        // Bare commands with trailing punctuation must still match
+        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging.")"#
+        ));
+    }
+
     // ── Skill activation: smart-quote / autocorrect resilience ───
     //
     // Regression for the ceo-setup non-activation report. iOS / macOS / most
