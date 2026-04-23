@@ -674,7 +674,7 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 
--- ==================== Budgets (V25 / issue #2843) ====================
+-- ==================== Budgets (V26 / issue #2843) ====================
 
 CREATE TABLE IF NOT EXISTS budgets (
     id TEXT PRIMARY KEY,
@@ -690,9 +690,22 @@ CREATE TABLE IF NOT EXISTS budgets (
     source TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    UNIQUE (scope_kind, scope_id, period_kind, period_unit, active)
+    created_by TEXT NOT NULL
 );
+
+-- "One active budget per scope+period" uniqueness. SQLite (like
+-- PostgreSQL) treats NULL as distinct in UNIQUE, so a table-level
+-- UNIQUE(..., period_unit, ...) would not prevent duplicates for
+-- periods that leave period_unit NULL (per_invocation / rolling_24h).
+-- Split into two partial unique indexes matching calendar vs
+-- non-calendar periods; both are partial on active = 1 so historical
+-- rows remain writable.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind, period_unit)
+    WHERE period_kind = 'calendar' AND active = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_non_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind)
+    WHERE period_kind <> 'calendar' AND active = 1;
 
 CREATE INDEX IF NOT EXISTS idx_budgets_scope
     ON budgets (scope_kind, scope_id)
@@ -720,6 +733,7 @@ CREATE TABLE IF NOT EXISTS budget_events (
     id TEXT PRIMARY KEY,
     budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
     thread_id TEXT,
+    reservation_id TEXT,
     event_kind TEXT NOT NULL,
     amount_usd TEXT,
     tokens INTEGER,
@@ -733,6 +747,9 @@ CREATE INDEX IF NOT EXISTS idx_budget_events_budget_created
 CREATE INDEX IF NOT EXISTS idx_budget_events_thread
     ON budget_events (thread_id)
     WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_budget_events_reservation
+    ON budget_events (reservation_id)
+    WHERE reservation_id IS NOT NULL;
 
 "#;
 
@@ -1053,11 +1070,11 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
 "#,
     ),
     (
-        25,
+        26,
         "budgets",
         // Cost-based budgets (issue #2843). Three tables — budgets,
         // budget_ledgers, budget_events — form the backing store for
-        // the BudgetEnforcer runtime. libSQL translation of the V25
+        // the BudgetEnforcer runtime. libSQL translation of the V26
         // PostgreSQL migration:
         //   UUID         -> TEXT
         //   TIMESTAMPTZ  -> TEXT (ISO-8601 via fmt_ts/get_ts helpers)
@@ -1078,9 +1095,15 @@ CREATE TABLE IF NOT EXISTS budgets (
     source TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    UNIQUE (scope_kind, scope_id, period_kind, period_unit, active)
+    created_by TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind, period_unit)
+    WHERE period_kind = 'calendar' AND active = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_non_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind)
+    WHERE period_kind <> 'calendar' AND active = 1;
 
 CREATE INDEX IF NOT EXISTS idx_budgets_scope
     ON budgets (scope_kind, scope_id)
@@ -1108,6 +1131,7 @@ CREATE TABLE IF NOT EXISTS budget_events (
     id TEXT PRIMARY KEY,
     budget_id TEXT NOT NULL REFERENCES budgets (id) ON DELETE CASCADE,
     thread_id TEXT,
+    reservation_id TEXT,
     event_kind TEXT NOT NULL,
     amount_usd TEXT,
     tokens INTEGER,
@@ -1121,6 +1145,9 @@ CREATE INDEX IF NOT EXISTS idx_budget_events_budget_created
 CREATE INDEX IF NOT EXISTS idx_budget_events_thread
     ON budget_events (thread_id)
     WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_budget_events_reservation
+    ON budget_events (reservation_id)
+    WHERE reservation_id IS NOT NULL;
 "#,
     ),
 ];

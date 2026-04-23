@@ -214,11 +214,15 @@ impl BudgetConfig {
             }
         }
 
-        if !(0.0 < self.warn_threshold && self.warn_threshold < 1.0) {
+        // Accept 0.0 so an operator can dial warnings down to "warn on
+        // any spend" during calibration; the upper bound stays strict
+        // because >=1.0 would fire the warn tier at the same point as
+        // the exhausted-USD denial.
+        if !(0.0..1.0).contains(&self.warn_threshold) {
             return Err(ConfigError::InvalidValue {
                 key: "BUDGET_WARN_THRESHOLD".into(),
                 message: format!(
-                    "must be in (0.0, 1.0), got {val}",
+                    "must be in [0.0, 1.0), got {val}",
                     val = self.warn_threshold
                 ),
             });
@@ -360,11 +364,25 @@ mod tests {
         };
         assert!(cfg.validate().is_err());
 
+        // Negative warn threshold stays rejected; 0.0 itself is now
+        // allowed (see below).
+        let cfg = BudgetConfig {
+            warn_threshold: -0.1,
+            ..BudgetConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_zero_warn_threshold() {
+        // "Warn on any spend" is a legitimate operator setting during
+        // calibration, so warn_threshold = 0.0 must not be rejected.
         let cfg = BudgetConfig {
             warn_threshold: 0.0,
             ..BudgetConfig::default()
         };
-        assert!(cfg.validate().is_err());
+        cfg.validate()
+            .expect("warn_threshold = 0.0 should be accepted");
     }
 
     #[test]

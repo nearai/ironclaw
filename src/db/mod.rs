@@ -1345,12 +1345,18 @@ pub trait BudgetStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 
     /// Record an audit row in `budget_events`.
+    ///
+    /// `reservation_id` is `Some` for reserve/reconcile/release events
+    /// and `None` for pure audit events (deny/approve/override), so a
+    /// reserve row can be stitched to its matching reconcile/release
+    /// row after the fact.
     #[allow(clippy::too_many_arguments)]
     async fn record_budget_event(
         &self,
         id: Uuid,
         budget_id: ironclaw_engine::types::budget::BudgetId,
         thread_id: Option<ironclaw_engine::ThreadId>,
+        reservation_id: Option<ironclaw_engine::types::budget::ReservationId>,
         event_kind: &str,
         amount_usd: Option<Decimal>,
         tokens: Option<u64>,

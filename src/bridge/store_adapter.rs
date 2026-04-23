@@ -2043,7 +2043,9 @@ impl Store for HybridStore {
             .load_budget(budget_id)
             .await
             .map_err(budget_db_err)?
-            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(
+                budget_id,
+            ))?;
         let (period_start, period_end) =
             crate::bridge::budget_periods::period_bounds(&budget.period, now);
         db.get_or_create_ledger_for_period(budget_id, period_start, period_end, now)
@@ -2066,7 +2068,9 @@ impl Store for HybridStore {
             .load_budget(budget_id)
             .await
             .map_err(budget_db_err)?
-            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(
+                budget_id,
+            ))?;
         let (period_start, period_end) =
             crate::bridge::budget_periods::period_bounds(&budget.period, now);
         let outcome = db
@@ -2106,7 +2110,9 @@ impl Store for HybridStore {
             .load_budget(budget_id)
             .await
             .map_err(budget_db_err)?
-            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(
+                budget_id,
+            ))?;
         let (period_start, _end) =
             crate::bridge::budget_periods::period_bounds(&budget.period, now);
         db.reconcile_reservation(
@@ -2134,7 +2140,9 @@ impl Store for HybridStore {
             .load_budget(budget_id)
             .await
             .map_err(budget_db_err)?
-            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(budget_id))?;
+            .ok_or(ironclaw_engine::types::budget::BudgetError::UnknownBudget(
+                budget_id,
+            ))?;
         let (period_start, _end) =
             crate::bridge::budget_periods::period_bounds(&budget.period, now);
         db.release_reservation(
@@ -2157,6 +2165,7 @@ impl Store for HybridStore {
             uuid::Uuid::new_v4(),
             event.budget_id,
             event.thread_id,
+            event.reservation_id,
             event.event_kind.as_str(),
             event.amount_usd,
             event.tokens,

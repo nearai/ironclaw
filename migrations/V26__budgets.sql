@@ -27,7 +27,9 @@ CREATE TABLE budgets (
     --   project    -> project uuid as string
     --   mission    -> mission uuid as string
     --   thread     -> thread uuid as string
-    --   background -> "<kind>:<correlation_id>" (e.g. "heartbeat:tick-42")
+    --   background -> "<kind>:<user_id>:<correlation_id>"
+    --                 (e.g. "heartbeat:alice:tick-42"; user_id is embedded
+    --                 because correlation_id alone is not globally unique)
     scope_id TEXT NOT NULL,
 
     -- Primary cap: USD. Zero means "no spend allowed" (hard gate).
@@ -54,15 +56,26 @@ CREATE TABLE budgets (
     created_at TIMESTAMPTZ NOT NULL,
 
     -- Audit: which user set this row. Equals user_id for 'default' rows.
-    created_by TEXT NOT NULL,
-
-    -- A given scope+period_unit combination can have at most one active row.
-    -- Active=FALSE rows are retained for audit (historical caps).
-    -- NOTE: PostgreSQL treats NULL as distinct, so two rows with NULL
-    -- period_unit (per_invocation/rolling_24h) can coexist if they have
-    -- different period_kind values; the partial index below tightens this.
-    UNIQUE (scope_kind, scope_id, period_kind, period_unit, active)
+    created_by TEXT NOT NULL
 );
+
+-- "One active budget per scope+period" uniqueness.
+--
+-- A table-level UNIQUE(..., period_unit, ...) would NOT enforce this,
+-- because PostgreSQL treats NULL as distinct inside UNIQUE constraints
+-- (per SQL standard). Periods that leave period_unit NULL
+-- (per_invocation, rolling_24h) could then be duplicated for the same
+-- scope. Two partial indexes carry the invariant:
+--   * calendar periods    — period_unit is non-NULL; include it in key
+--   * non-calendar periods — period_unit is NULL; key on period_kind only
+-- Both indexes are partial on `active IS TRUE` so historical (inactive)
+-- rows remain writable for audit.
+CREATE UNIQUE INDEX uq_budgets_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind, period_unit)
+    WHERE period_kind = 'calendar' AND active IS TRUE;
+CREATE UNIQUE INDEX uq_budgets_non_calendar_active
+    ON budgets (scope_kind, scope_id, period_kind)
+    WHERE period_kind <> 'calendar' AND active IS TRUE;
 
 CREATE INDEX idx_budgets_scope ON budgets (scope_kind, scope_id) WHERE active = TRUE;
 CREATE INDEX idx_budgets_user_active ON budgets (user_id) WHERE active = TRUE;
@@ -110,6 +123,13 @@ CREATE TABLE budget_events (
     -- for user-initiated overrides.
     thread_id UUID,
 
+    -- Reservation this event pertains to, when applicable. Set for
+    -- `reserve`, `reconcile`, `release`; NULL for pure audit events
+    -- (`deny`, `approve`, `override`). Lets auditors correlate a
+    -- reserve row with its matching reconcile/release row after the
+    -- fact — useful when diagnosing leaked `reserved_usd` headroom.
+    reservation_id UUID,
+
     -- 'reserve' | 'reconcile' | 'release' | 'deny' | 'approve' | 'override'
     event_kind TEXT NOT NULL,
 
@@ -134,3 +154,7 @@ CREATE INDEX idx_budget_events_budget_created
 CREATE INDEX idx_budget_events_thread
     ON budget_events (thread_id)
     WHERE thread_id IS NOT NULL;
+
+CREATE INDEX idx_budget_events_reservation
+    ON budget_events (reservation_id)
+    WHERE reservation_id IS NOT NULL;

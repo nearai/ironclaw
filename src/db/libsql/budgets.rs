@@ -342,6 +342,7 @@ impl BudgetStore for LibSqlBackend {
         id: Uuid,
         budget_id: BudgetId,
         thread_id: Option<ThreadId>,
+        reservation_id: Option<ReservationId>,
         event_kind: &str,
         amount_usd: Option<Decimal>,
         tokens: Option<u64>,
@@ -352,13 +353,14 @@ impl BudgetStore for LibSqlBackend {
         let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO budget_events (
-                id, budget_id, thread_id, event_kind, amount_usd, tokens,
-                reason, actor_user_id, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                id, budget_id, thread_id, reservation_id, event_kind,
+                amount_usd, tokens, reason, actor_user_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             libsql::params![
                 id.to_string(),
                 budget_id.0.to_string(),
                 thread_id.map(|t| t.0.to_string()),
+                reservation_id.map(|r| r.0.to_string()),
                 event_kind,
                 amount_usd.map(|d| d.to_string()),
                 tokens.map(|n| n as i64),
@@ -521,10 +523,23 @@ fn rehydrate_scope(
             }
         }
         "background" => {
-            // Format: "<kind>:<correlation_id>"
-            let (kind_str, corr) = scope_id
+            // Format: "<kind>:<user_id>:<correlation_id>". user_id is
+            // embedded for cross-tenant uniqueness (see BudgetScope
+            // docs); we already have it from the separate column so we
+            // just validate the middle segment matches and recover the
+            // correlation_id suffix. `correlation_id` may contain ':'
+            // so consume only the first two segments.
+            let (kind_str, rest) = scope_id
                 .split_once(':')
                 .ok_or_else(|| DatabaseError::Query("background scope malformed".into()))?;
+            let (embedded_user, corr) = rest
+                .split_once(':')
+                .ok_or_else(|| DatabaseError::Query("background scope missing user_id".into()))?;
+            if embedded_user != user_id {
+                return Err(DatabaseError::Query(format!(
+                    "background scope user mismatch: column={user_id} embedded={embedded_user}"
+                )));
+            }
             let bk = match kind_str {
                 "heartbeat" => ironclaw_engine::types::budget::BackgroundKind::Heartbeat,
                 "routine_lightweight" => {
@@ -877,10 +892,12 @@ mod tests {
         let budget = alice_user_budget(dec!(5.00));
         be.save_budget(&budget).await.unwrap();
 
+        let reservation_id = ReservationId::new();
         be.record_budget_event(
             Uuid::new_v4(),
             budget.id,
             None,
+            Some(reservation_id),
             "reserve",
             Some(dec!(0.10)),
             Some(100),
@@ -894,13 +911,16 @@ mod tests {
         let conn = be.connect().await.unwrap();
         let mut rows = conn
             .query(
-                "SELECT COUNT(*) FROM budget_events WHERE budget_id = ?1",
+                "SELECT COUNT(*), reservation_id FROM budget_events \
+                 WHERE budget_id = ?1 GROUP BY reservation_id",
                 libsql::params![budget.id.0.to_string()],
             )
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
+        let stored_reservation: String = row.get(1).unwrap();
         assert_eq!(count, 1);
+        assert_eq!(stored_reservation, reservation_id.0.to_string());
     }
 }

@@ -327,6 +327,29 @@ pub trait Store: Send + Sync {
     /// **Never** return `Ok(Some(..))` without having durably committed
     /// the `reserved_usd` increment — the caller will proceed to spend
     /// real money based on this return value.
+    ///
+    /// ## Reservation-lifetime persistence model (foundation PR)
+    ///
+    /// The pre-flight `reserved_usd` increment is durable, but the
+    /// *identity* of a live reservation (its `ReservationId` + original
+    /// reserved amount) is held in-memory by the caller between
+    /// `reserve_atomic` and `reconcile_reservation` / `release_reservation`.
+    /// The audit row written via [`Self::record_budget_event`] carries
+    /// the `reservation_id` for post-hoc correlation, but the ledger
+    /// only tracks the aggregate `reserved_usd`. That means:
+    ///
+    /// - A process crash between `reserve_atomic` and
+    ///   `reconcile_reservation` leaks `reserved_usd` headroom on the
+    ///   ledger — no automated release.
+    /// - Mid-cascade denial rollback is the caller's responsibility
+    ///   (they hold every earlier `original_reserved_usd` and must call
+    ///   `release_reservation` on each before bubbling the denial).
+    ///
+    /// A durable `budget_reservations` table that enumerates live
+    /// reservations — enabling crash-recovery release and preventing
+    /// permanent zombie `reserved_usd` — is an explicit follow-up
+    /// tracked under issue #2843's execution-loop-wiring milestone; the
+    /// contract here will extend (not change) when that lands.
     async fn reserve_atomic(
         &self,
         _budget_id: BudgetId,
@@ -398,6 +421,12 @@ pub struct AtomicReserveOutcome {
 pub struct BudgetEventRecord {
     pub budget_id: BudgetId,
     pub thread_id: Option<ThreadId>,
+    /// Reservation this event pertains to. `Some` for reserve /
+    /// reconcile / release; `None` for pure audit events (deny,
+    /// approve, override). Lets auditors stitch a reserve row to its
+    /// matching reconcile/release row when diagnosing leaked
+    /// `reserved_usd` headroom.
+    pub reservation_id: Option<ReservationId>,
     pub event_kind: BudgetEventKind,
     pub amount_usd: Option<Decimal>,
     pub tokens: Option<u64>,

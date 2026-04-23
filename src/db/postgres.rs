@@ -1923,6 +1923,7 @@ impl BudgetStore for PgBackend {
         id: Uuid,
         budget_id: ironclaw_engine::types::budget::BudgetId,
         thread_id: Option<ironclaw_engine::ThreadId>,
+        reservation_id: Option<ironclaw_engine::types::budget::ReservationId>,
         event_kind: &str,
         amount_usd: Option<Decimal>,
         tokens: Option<u64>,
@@ -1932,17 +1933,19 @@ impl BudgetStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         let tokens_i64: Option<i64> = tokens.map(|n| n as i64);
         let thread_uuid: Option<Uuid> = thread_id.map(|t| t.0);
+        let reservation_uuid: Option<Uuid> = reservation_id.map(|r| r.0);
         let client = self.pool().get().await?;
         client
             .execute(
                 "INSERT INTO budget_events (
-                    id, budget_id, thread_id, event_kind, amount_usd, tokens,
-                    reason, actor_user_id, created_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    id, budget_id, thread_id, reservation_id, event_kind,
+                    amount_usd, tokens, reason, actor_user_id, created_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &id,
                     &budget_id.0,
                     &thread_uuid,
+                    &reservation_uuid,
                     &event_kind,
                     &amount_usd,
                     &tokens_i64,
@@ -2047,9 +2050,20 @@ fn rehydrate_scope(
             ),
         },
         "background" => {
-            let (kind_str, corr) = scope_id
+            // Format: "<kind>:<user_id>:<correlation_id>". See the
+            // libSQL rehydrate for the invariant; correlation_id may
+            // contain ':' so only the first two segments are split.
+            let (kind_str, rest) = scope_id
                 .split_once(':')
                 .ok_or_else(|| DatabaseError::Query("background scope malformed".into()))?;
+            let (embedded_user, corr) = rest
+                .split_once(':')
+                .ok_or_else(|| DatabaseError::Query("background scope missing user_id".into()))?;
+            if embedded_user != user_id {
+                return Err(DatabaseError::Query(format!(
+                    "background scope user mismatch: column={user_id} embedded={embedded_user}"
+                )));
+            }
             let bk = match kind_str {
                 "heartbeat" => BackgroundKind::Heartbeat,
                 "routine_lightweight" => BackgroundKind::RoutineLightweight,

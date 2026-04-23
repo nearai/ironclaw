@@ -142,7 +142,15 @@ impl BudgetScope {
     /// - Project: the project uuid
     /// - Mission: the mission uuid
     /// - Thread: the thread uuid
-    /// - BackgroundInvocation: `"<kind>:<correlation_id>"`
+    /// - BackgroundInvocation: `"<kind>:<user_id>:<correlation_id>"`
+    ///
+    /// The `user_id` segment is embedded in the background scope_id
+    /// because `correlation_id` is a scheduler-local identifier (e.g.
+    /// `tick-42`, `run-7`) that is NOT globally unique. Two users'
+    /// heartbeat-tick-42 budgets must hash to different scope_ids so
+    /// the `uq_budgets_*_active` unique indexes don't collapse them,
+    /// and `list_active_budgets_for_scope(..)` doesn't return another
+    /// user's row.
     pub fn scope_id(&self) -> String {
         match self {
             Self::User { user_id } => user_id.clone(),
@@ -150,10 +158,10 @@ impl BudgetScope {
             Self::Mission { mission_id, .. } => mission_id.0.to_string(),
             Self::Thread { thread_id, .. } => thread_id.0.to_string(),
             Self::BackgroundInvocation {
+                user_id,
                 kind,
                 correlation_id,
-                ..
-            } => format!("{}:{}", kind.as_str(), correlation_id),
+            } => format!("{}:{}:{}", kind.as_str(), user_id, correlation_id),
         }
     }
 }
@@ -518,7 +526,26 @@ mod tests {
             correlation_id: "tick-42".into(),
         };
         assert_eq!(bg.kind_str(), "background");
-        assert_eq!(bg.scope_id(), "heartbeat:tick-42");
+        // user_id is embedded so that two users' heartbeat:tick-42
+        // budgets can't collide on the scope_id unique indexes.
+        assert_eq!(bg.scope_id(), "heartbeat:alice:tick-42");
+    }
+
+    #[test]
+    fn background_scope_ids_differ_across_users() {
+        let alice = BudgetScope::BackgroundInvocation {
+            user_id: "alice".into(),
+            kind: BackgroundKind::Heartbeat,
+            correlation_id: "tick-42".into(),
+        };
+        let bob = BudgetScope::BackgroundInvocation {
+            user_id: "bob".into(),
+            kind: BackgroundKind::Heartbeat,
+            correlation_id: "tick-42".into(),
+        };
+        // Same kind + correlation_id; different users must yield
+        // distinct scope_ids or the DB UNIQUE would shadow one.
+        assert_ne!(alice.scope_id(), bob.scope_id());
     }
 
     #[test]
