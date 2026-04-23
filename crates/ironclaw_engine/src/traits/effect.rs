@@ -37,8 +37,17 @@ pub struct ThreadExecutionContext {
     pub thread_goal: Option<String>,
     /// Snapshot of callable actions visible to the current step.
     ///
-    /// Populated by the orchestrator when an execution path needs on-demand
-    /// discovery parity (for example `tool_info`).
+    /// Populated by the orchestrator (`handle_execute_action` /
+    /// `handle_execute_actions_parallel`) and the bridge's gate-resume path
+    /// so that `execute_action_internal` can canonicalize hyphen/underscore
+    /// aliases and route discovery-aware `tool_info` requests.
+    ///
+    /// Paths that do not yet populate this fall back to registry-based name
+    /// resolution and the v1 `tool_info` tool. That is safe today because
+    /// host tools already normalize hyphens in `ToolRegistry::resolve_name`,
+    /// and no engine-native capability action requires approval; any future
+    /// caller that executes engine-native actions directly should populate
+    /// the snapshot to keep canonicalization consistent.
     pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
 }
 

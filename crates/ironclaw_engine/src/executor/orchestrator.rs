@@ -1034,16 +1034,14 @@ async fn handle_execute_action(
     };
 
     // 2. Check policy
-    let action_def = available_actions
-        .into_iter()
-        .find(|a| a.matches_name(&name));
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
 
     let canonical_name = action_def
         .as_ref()
         .map(|action| action.name.clone())
         .unwrap_or_else(|| name.clone());
 
-    if let Some(ref ad) = action_def {
+    if let Some(ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
             crate::capability::policy::PolicyDecision::Deny { reason } => {
                 let output = serde_json::json!({"error": format!("Denied: {reason}")});
@@ -1086,10 +1084,14 @@ async fn handle_execute_action(
                     &name,
                     &output,
                 );
+                // Persist the canonical name in the GatePaused outcome so the
+                // resume path can dispatch without a snapshot lookup. Mirrors
+                // `scripting.rs::preflight_action`. The event above keeps the
+                // original (possibly hyphenated) name for user-visible display.
                 let result = serde_json::json!({
                     "gate_paused": true,
                     "gate_name": "approval",
-                    "action_name": name,
+                    "action_name": canonical_name,
                     "call_id": call_id,
                     "parameters": params,
                     "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
@@ -1461,10 +1463,14 @@ async fn handle_execute_actions_parallel(
                     thread.events.push(ev);
                     thread.updated_at = chrono::Utc::now();
 
+                    // Persist the canonical name in the GatePaused outcome so the
+                    // resume path can dispatch without a snapshot lookup. Mirrors
+                    // `scripting.rs::preflight_action`. The event above keeps the
+                    // original (possibly hyphenated) name for user-visible display.
                     results_json.push(serde_json::json!({
                         "gate_paused": true,
                         "gate_name": "approval",
-                        "action_name": &pc.name,
+                        "action_name": &action_name,
                         "call_id": &pc.call_id,
                         "parameters": &pc.params,
                         "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {

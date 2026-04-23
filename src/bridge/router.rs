@@ -1071,7 +1071,7 @@ async fn execute_pending_gate_action(
             )
         })?;
 
-    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+    let mut exec_ctx = ironclaw_engine::ThreadExecutionContext {
         thread_id: pending.thread_id,
         thread_type: thread.thread_type,
         project_id: thread.project_id,
@@ -1087,6 +1087,27 @@ async fn execute_pending_gate_action(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
     };
+
+    // Populate the callable-action snapshot so that `execute_action_internal`
+    // can canonicalize hyphen/underscore aliases and honor the `tool_info`
+    // intercept on resume. Without this, an engine-native action paused with
+    // a hyphenated name (e.g. `mission-create`) would fail to dispatch because
+    // the mission handler uses exact-match on the canonical form.
+    let active_leases = state
+        .thread_manager
+        .leases
+        .active_for_thread(pending.thread_id)
+        .await;
+    let available_actions: Arc<[ironclaw_engine::ActionDef]> = {
+        use ironclaw_engine::EffectExecutor;
+        state
+            .effect_adapter
+            .available_actions(&active_leases, &exec_ctx)
+            .await
+            .unwrap_or_default()
+            .into()
+    };
+    exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
 
     state.effect_adapter.reset_call_count();
     match state

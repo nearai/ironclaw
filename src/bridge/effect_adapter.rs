@@ -988,6 +988,11 @@ impl EffectBridgeAdapter {
             && let Some(actions) = context.available_actions_snapshot.as_ref()
         {
             match ActionDiscovery::tool_info(&parameters, actions.as_ref()) {
+                // Success path bypasses `sanitize_tool_output` intentionally: the output is
+                // synthesized from trusted registry metadata (curated summaries, schemas,
+                // action names) and contains no user- or model-generated content that could
+                // carry an injection payload. The error branch below still sanitizes because
+                // `error` may echo caller-supplied parameter values.
                 Ok(Some(output)) => {
                     return Ok(ActionResult {
                         call_id: context
@@ -1002,7 +1007,7 @@ impl EffectBridgeAdapter {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                    let error_msg = format!("Tool tool_info failed: {error}");
                     let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
                     return Ok(ActionResult {
                         call_id: context
@@ -2741,6 +2746,82 @@ mod tests {
         assert_eq!(result.action_name, "mission_create");
         assert_eq!(
             result.output.get("status").and_then(|value| value.as_str()),
+            Some("created")
+        );
+    }
+
+    /// Regression: the router's gate-resume path previously built
+    /// `ThreadExecutionContext` with `available_actions_snapshot: None`,
+    /// which broke dispatch for engine-native actions paused under a
+    /// hyphenated alias (e.g. `mission-create`). The mission handler
+    /// exact-matches the canonical name (`mission_create`), so without a
+    /// snapshot to resolve the alias, `execute_resolved_pending_action`
+    /// falls through to the tool registry and fails. This test pins the
+    /// contract: the resume call site must supply a snapshot for
+    /// canonicalization to work, matching the forward path.
+    #[tokio::test]
+    async fn execute_resolved_pending_action_canonicalizes_hyphenated_name_via_snapshot() {
+        let adapter = make_adapter_with_missions().await;
+
+        let without_snapshot = adapter
+            .execute_resolved_pending_action(
+                "mission-create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_resume_no_snapshot"),
+                ),
+                true,
+            )
+            .await;
+        let failed_without_snapshot = match without_snapshot {
+            Err(_) => true,
+            Ok(ref r) => r.is_error,
+        };
+        assert!(
+            failed_without_snapshot,
+            "without a snapshot the hyphenated alias must not reach the mission handler; got {:?}",
+            without_snapshot
+        );
+
+        let mut resumed_ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_resume_with_snapshot"),
+        );
+        resumed_ctx.available_actions_snapshot =
+            Some(crate::bridge::engine_actions::mission_capability_actions().into());
+
+        let with_snapshot = adapter
+            .execute_resolved_pending_action(
+                "mission-create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &resumed_ctx,
+                true,
+            )
+            .await
+            .expect("resume with snapshot must dispatch the canonical engine-native action");
+
+        assert!(
+            !with_snapshot.is_error,
+            "got error: {}",
+            with_snapshot.output
+        );
+        assert_eq!(with_snapshot.action_name, "mission_create");
+        assert_eq!(
+            with_snapshot
+                .output
+                .get("status")
+                .and_then(|value| value.as_str()),
             Some("created")
         );
     }
