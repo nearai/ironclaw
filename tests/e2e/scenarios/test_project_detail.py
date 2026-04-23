@@ -10,9 +10,11 @@ from helpers import SEL
 from playwright.async_api import expect
 
 
-# ── Mock data ───────────────────────────────────────────────────
-
 MOCK_PROJECT_ID = "068f67da-49b6-4f6c-9463-8d243c2cff6c"
+FIRST_MISSION_ID = "m-001"
+FIRST_MISSION_NAME = "Daily AI Paper Monitoring"
+THREAD_DETAIL_ID = "t-002"
+THREAD_DETAIL_GOAL = "Analyze weekly research trends"
 
 MOCK_OVERVIEW = {
     "projects": [
@@ -71,8 +73,8 @@ MOCK_OVERVIEW = {
 MOCK_MISSIONS = {
     "missions": [
         {
-            "id": "m-001",
-            "name": "Daily AI Paper Monitoring",
+            "id": FIRST_MISSION_ID,
+            "name": FIRST_MISSION_NAME,
             "status": "Active",
             "cadence_type": "daily",
             "cadence_description": "Every day at 9:00 AM",
@@ -151,8 +153,8 @@ MOCK_THREADS = {
 
 MOCK_MISSION_DETAIL = {
     "mission": {
-        "id": "m-001",
-        "name": "Daily AI Paper Monitoring",
+        "id": FIRST_MISSION_ID,
+        "name": FIRST_MISSION_NAME,
         "status": "Active",
         "goal": "# Input\n- `query` — papers from the last 24h\n\n# Investigation Process\n1. Fetch papers\n2. Rank them\n3. Summarize notable work",
         "cadence_type": "daily",
@@ -173,8 +175,8 @@ MOCK_MISSION_DETAIL = {
 
 MOCK_THREAD_DETAIL = {
     "thread": {
-        "id": "t-002",
-        "goal": "Analyze weekly research trends",
+        "id": THREAD_DETAIL_ID,
+        "goal": THREAD_DETAIL_GOAL,
         "title": "Weekly synthesis — Week 15",
         "state": "Done",
         "thread_type": "mission_run",
@@ -191,129 +193,97 @@ MOCK_THREAD_DETAIL = {
 }
 
 
-# ── Route fixture helper ─────────────────────────────────────────
+def _json_route(body):
+    async def handler(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    return handler
+
+
+async def _open_project_detail(page):
+    await page.evaluate(
+        "() => {"
+        "  if (window.bootstrap) window.bootstrap.engineV2Enabled = true;"
+        "  engineV2Enabled = true;"
+        "  applyEngineModeToTabs();"
+        "}"
+    )
+    await page.locator(SEL["tab_button"].format(tab="projects")).click()
+    await page.locator(SEL["projects_cards"]).wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["projects_card"]).first.wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["projects_card_by_id"].format(id=MOCK_PROJECT_ID)).click()
+    await page.locator(SEL["projects_drill"]).wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["projects_drill_name"]).wait_for(state="visible", timeout=5000)
 
 
 async def _route_project_detail_fixtures(page):
     """Register all mock API routes needed for project detail tests."""
 
-    async def handle_overview(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(MOCK_OVERVIEW),
-        )
-
-    async def handle_mission_detail(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(MOCK_MISSION_DETAIL),
-        )
-
-    async def handle_missions(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(MOCK_MISSIONS),
-        )
-
-    async def handle_thread_detail(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(MOCK_THREAD_DETAIL),
-        )
-
-    async def handle_threads(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(MOCK_THREADS),
-        )
-
-    async def handle_widgets(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps([]),
-        )
-
-    await page.route("**/api/engine/projects/overview", handle_overview)
-    await page.route("**/api/engine/missions/m-*", handle_mission_detail)
-    await page.route("**/api/engine/missions*", handle_missions)
-    await page.route("**/api/engine/threads/t-*", handle_thread_detail)
-    await page.route("**/api/engine/threads*", handle_threads)
-    await page.route("**/api/engine/projects/*/widgets", handle_widgets)
+    await page.route("**/api/engine/projects/overview", _json_route(MOCK_OVERVIEW))
+    # Register specific detail routes before generic list routes because Playwright
+    # resolves overlapping routes in registration order.
+    await page.route(
+        f"**/api/engine/missions/{FIRST_MISSION_ID}",
+        _json_route(MOCK_MISSION_DETAIL),
+    )
+    await page.route("**/api/engine/missions*", _json_route(MOCK_MISSIONS))
+    await page.route(
+        f"**/api/engine/threads/{THREAD_DETAIL_ID}",
+        _json_route(MOCK_THREAD_DETAIL),
+    )
+    await page.route("**/api/engine/threads*", _json_route(MOCK_THREADS))
+    await page.route("**/api/engine/projects/*/widgets", _json_route([]))
 
 
-# ── Tests ────────────────────────────────────────────────────────
-
-
-async def test_project_detail_screenshot(page):
+async def test_project_detail_screenshot(page, tmp_path):
     """Navigate to projects tab, drill into a project, capture screenshot."""
 
     await _route_project_detail_fixtures(page)
+    await _open_project_detail(page)
 
-    # Enable engine v2 mode so the Projects tab is visible.
-    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
-
-    # Click the Projects tab.
-    await page.locator('.tab-bar button[data-tab="projects"]').click()
-    await page.locator("#cr-cards").wait_for(state="visible", timeout=5000)
-
-    # Wait for project cards to render.
-    await page.locator(".cr-card").first.wait_for(state="visible", timeout=5000)
-
-    # Drill into the AI Research Intelligence project.
-    await page.locator(
-        f'.cr-card[data-id="{MOCK_PROJECT_ID}"]'
-    ).click()
-
-    # Wait for drill-in view to render.
-    await page.locator("#cr-drill").wait_for(state="visible", timeout=5000)
-    await page.locator(".cr-drill-name").wait_for(state="visible", timeout=5000)
-
-    # Wait for missions to render.
-    await page.locator(".cr-mission-card").first.wait_for(
-        state="visible", timeout=5000
+    await expect(page.locator(SEL["projects_drill_name"])).to_have_text(
+        "AI Research Intelligence"
     )
+    await expect(page.locator(SEL["projects_mission_card"]).first).to_be_visible()
+    await expect(page.locator(SEL["projects_activity_row"]).first).to_be_visible()
 
-    # Take the screenshot.
-    await page.screenshot(path="project-detail.png")
+    await page.screenshot(path=str(tmp_path / "project-detail.png"))
 
 
 async def test_project_mission_card_opens_canonical_missions_view(page):
     """Mission card in Projects should switch to the Missions tab and open the mission dossier."""
     await _route_project_detail_fixtures(page)
-    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
-
-    await page.locator(SEL["tab_button"].format(tab="projects")).click()
-    await page.locator(f'.cr-card[data-id="{MOCK_PROJECT_ID}"]').click()
+    await _open_project_detail(page)
     await page.locator(SEL["projects_mission_card"]).first.click()
 
-    await expect(page.locator(SEL["tab_panel"].format(tab="missions"))).to_be_visible()
-    await expect(page.locator(SEL["mission_detail"])).to_be_visible()
-    await expect(page.locator(SEL["mission_detail_title"])).to_have_text(
-        "Daily AI Paper Monitoring"
+    await expect(page.locator(SEL["tab_button"].format(tab="missions"))).to_have_attribute(
+        "aria-selected", "true"
     )
-    assert await page.evaluate("currentTab") == "missions"
+    await expect(page.locator(SEL["tab_panel"].format(tab="projects"))).not_to_be_visible()
+    await expect(page.locator(SEL["tab_panel"].format(tab="missions"))).to_be_visible()
+    await expect(page.locator(SEL["missions_detail"])).to_be_visible()
+    await expect(page.locator(SEL["missions_detail_title"])).to_have_text(
+        FIRST_MISSION_NAME
+    )
 
 
 async def test_project_activity_row_opens_polished_thread_inspector(page):
     """Activity row in Projects should open the thread inspector inside Projects."""
     await _route_project_detail_fixtures(page)
-    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
+    await _open_project_detail(page)
+    await page.locator(SEL["projects_activity_row_by_id"].format(id=THREAD_DETAIL_ID)).click()
 
-    await page.locator(SEL["tab_button"].format(tab="projects")).click()
-    await page.locator(f'.cr-card[data-id="{MOCK_PROJECT_ID}"]').click()
-    await page.locator(SEL["projects_activity_row"]).nth(1).click()
-
+    await expect(page.locator(SEL["tab_button"].format(tab="projects"))).to_have_attribute(
+        "aria-selected", "true"
+    )
     await expect(page.locator(SEL["projects_detail"])).to_be_visible()
     await expect(page.locator(SEL["projects_thread_title"])).to_have_text(
-        "Analyze weekly research trends"
+        THREAD_DETAIL_GOAL
     )
     await expect(page.locator(SEL["projects_thread_meta"])).to_be_visible()
     await expect(page.locator(SEL["projects_thread_timeline"])).to_be_visible()
     await expect(page.locator(SEL["projects_thread_message"])).to_have_count(2)
-    assert await page.evaluate("currentTab") == "projects"
