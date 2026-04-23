@@ -5,19 +5,22 @@ set -euo pipefail
 # Exit 0 if all checks pass, exit 1 if any version wasn't bumped.
 
 ERRORS=0
+ALLOW_SKIP_VERSION_CHECK="${ALLOW_SKIP_VERSION_CHECK:-true}"
 
 # --- Skip mechanism -----------------------------------------------------------
 
-if [[ "${PR_LABELS:-}" == *"skip-version-check"* ]]; then
-    echo "skip-version-check label detected — skipping all version checks."
-    exit 0
-fi
+if [[ "${ALLOW_SKIP_VERSION_CHECK}" == "true" ]]; then
+    if [[ "${PR_LABELS:-}" == *"skip-version-check"* ]]; then
+        echo "skip-version-check label detected — skipping all version checks."
+        exit 0
+    fi
 
-# Check commit messages for [skip-version-check]
-if git log "origin/${GITHUB_BASE_REF:-main}...HEAD" --pretty=format:"%s %b" 2>/dev/null \
-    | grep -qF '[skip-version-check]'; then
-    echo "[skip-version-check] found in commit message — skipping all version checks."
-    exit 0
+    # Check commit messages for [skip-version-check]
+    if git log "origin/${GITHUB_BASE_REF:-main}...HEAD" --pretty=format:"%s %b" 2>/dev/null \
+        | grep -qF '[skip-version-check]'; then
+        echo "[skip-version-check] found in commit message — skipping all version checks."
+        exit 0
+    fi
 fi
 
 # --- Determine base branch and changed files ----------------------------------
