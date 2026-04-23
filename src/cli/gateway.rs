@@ -182,16 +182,17 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     let auth_token = gw.auth_token().to_string();
     let (bound_addr, server_handle) =
         gateway_router::start_server(addr, Arc::clone(&state), gw.auth().clone()).await?;
+    let base_url = format_http_base_url(&gw_config.host, bound_addr.port());
 
     let token_path = gateway_token_path();
     if let Err(e) = write_gateway_token_file(&token_path, &auth_token) {
         tracing::warn!("Failed to write token file {}: {e}", token_path.display());
     }
 
-    println!("Gateway running at http://{bound_addr}/");
+    println!("Gateway running at {base_url}/");
     if std::io::stdout().is_terminal() {
         println!("Auth token: {auth_token}");
-        println!("Web UI: http://{bound_addr}/?token={auth_token}");
+        println!("Web UI: {base_url}/?token={auth_token}");
     } else {
         println!("Auth token written to {}", token_path.display());
     }
@@ -382,6 +383,7 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
             "gateway start does not support port 0; set a fixed GATEWAY_PORT or use `gateway serve`"
         );
     }
+    let _validated_addr = parse_gateway_addr(&gw_config.host, gw_config.port)?;
 
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Cannot determine own executable path: {e}"))?;
@@ -428,8 +430,10 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
     println!("Gateway starting in background (PID {child_pid})...");
     println!("Log file: {}", log_path.display());
 
-    let health_host = normalize_probe_host(&gw_config.host);
-    let health_url = format!("http://{health_host}:{}/api/health", gw_config.port);
+    let health_url = format!(
+        "{}/api/health",
+        format_http_base_url(&gw_config.host, gw_config.port)
+    );
     let deadline = std::time::Instant::now() + START_HEALTH_TIMEOUT;
     let mut healthy = false;
     let http_client = reqwest::Client::builder()
@@ -463,7 +467,7 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
     }
 
     if healthy {
-        let base_url = format!("http://{}:{}", gw_config.host, gw_config.port);
+        let base_url = format_http_base_url(&gw_config.host, gw_config.port);
         println!("Gateway is running at {base_url}/");
 
         let token_path = gateway_token_path();
@@ -605,14 +609,15 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
         .as_ref()
         .and_then(|c| c.channels.gateway.as_ref())
         .map(|gw| {
-            let host = normalize_probe_host(&gw.host);
-            format!("{host}:{}", gw.port)
+            let addr = format_http_authority(&gw.host, gw.port);
+            let url = format_http_base_url(&gw.host, gw.port);
+            (addr, url)
         });
 
-    if let Some(ref addr) = probe_addr {
+    if let Some((addr, base_url)) = probe_addr {
         println!("Address: {addr}");
 
-        let url = format!("http://{addr}/api/health");
+        let url = format!("{base_url}/api/health");
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build();
@@ -679,13 +684,35 @@ fn normalize_probe_host(host: &str) -> &str {
     }
 }
 
+fn format_http_host(host: &str) -> String {
+    let normalized = normalize_probe_host(host);
+    let trimmed = normalized.trim_start_matches('[').trim_end_matches(']');
+    match trimmed.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{trimmed}]"),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn format_http_authority(host: &str, port: u16) -> String {
+    format!("{}:{port}", format_http_host(host))
+}
+
+fn format_http_base_url(host: &str, port: u16) -> String {
+    format!("http://{}", format_http_authority(host, port))
+}
+
 async fn probe_health(client: &reqwest::Client, url: &str) -> Result<bool, String> {
     let resp = client.get(url).send().await.map_err(|e| format!("{e}"))?;
     Ok(resp.status().is_success())
 }
 
 fn parse_gateway_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
-    format!("{host}:{port}")
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    let authority = match trimmed.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{trimmed}]:{port}"),
+        _ => format!("{trimmed}:{port}"),
+    };
+    authority
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid gateway address '{host}:{port}': {e}"))
 }
@@ -748,6 +775,23 @@ mod tests {
         assert_eq!(oauth_base_url("0.0.0.0", 3033), "http://localhost:3033");
         assert_eq!(oauth_base_url("::", 3033), "http://localhost:3033");
         assert_eq!(oauth_base_url("[::]", 3033), "http://localhost:3033");
+    }
+
+    #[test]
+    fn format_http_base_url_handles_ipv6_and_wildcards() {
+        assert_eq!(
+            format_http_base_url("0.0.0.0", 3000),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(format_http_base_url("::", 3000), "http://127.0.0.1:3000");
+        assert_eq!(format_http_base_url("::1", 3000), "http://[::1]:3000");
+        assert_eq!(format_http_base_url("[::1]", 3000), "http://[::1]:3000");
+    }
+
+    #[test]
+    fn parse_gateway_addr_accepts_bracketed_and_unbracketed_ipv6() {
+        assert!(parse_gateway_addr("::1", 3000).is_ok());
+        assert!(parse_gateway_addr("[::1]", 3000).is_ok());
     }
 
     #[test]

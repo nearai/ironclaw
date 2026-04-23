@@ -441,14 +441,14 @@ async fn resolve_gateway_params(
     let base_url = if let Some(url) = &cmd.url {
         url.trim_end_matches('/').to_string()
     } else if let Some(cfg) = &gw_config {
-        format!("http://{}:{}", cfg.host, cfg.port)
+        format_gateway_base_url(&cfg.host, cfg.port)
     } else {
         let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port: u16 = std::env::var("GATEWAY_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(3000);
-        format!("http://{}:{}", host, port)
+        format_gateway_base_url(&host, port)
     };
 
     // Token: --token flag > config TOML > env var.
@@ -489,6 +489,19 @@ async fn resolve_gateway_params(
 /// failure when it is missing, unreadable, or malformed.  When no path
 /// was given we fall back to env-only resolution and silently return
 /// `None` on failure so that `ironclaw logs` works without any config.
+fn format_gateway_base_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    let normalized = match trimmed {
+        "0.0.0.0" | "::" => "127.0.0.1",
+        other => other,
+    };
+    let display_host = match normalized.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{normalized}]"),
+        _ => normalized.to_string(),
+    };
+    format!("http://{display_host}:{port}")
+}
+
 async fn load_gateway_config(
     config_path: Option<&Path>,
 ) -> anyhow::Result<Option<crate::config::GatewayConfig>> {
@@ -767,5 +780,20 @@ mod tests {
         let lines = vec!["test".to_string()];
         let result = filter_lines(lines, "[invalid", false, 0);
         assert!(result.unwrap_err().to_string().contains("Invalid regex"));
+    }
+
+    #[test]
+    fn test_format_gateway_base_url_handles_ipv6_and_wildcards() {
+        assert_eq!(
+            format_gateway_base_url("127.0.0.1", 3000),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            format_gateway_base_url("0.0.0.0", 3000),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(format_gateway_base_url("::", 3000), "http://127.0.0.1:3000");
+        assert_eq!(format_gateway_base_url("::1", 3000), "http://[::1]:3000");
+        assert_eq!(format_gateway_base_url("[::1]", 3000), "http://[::1]:3000");
     }
 }
