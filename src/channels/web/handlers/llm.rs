@@ -310,13 +310,7 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
         _ => {
             // OpenAI-compatible, Anthropic, and NEAR AI all support GET /models.
             // NEAR AI private endpoints and Anthropic need a /v1 prefix.
-            let effective_base = if (req.adapter == "nearai" && is_nearai_private_endpoint(base))
-                || (req.adapter == "anthropic" && !base.ends_with("/v1") && !base.contains("/v1/"))
-            {
-                format!("{base}/v1")
-            } else {
-                base.to_string()
-            };
+            let effective_base = models_endpoint_base(&req.adapter, base);
             let url = format!("{effective_base}/models");
             let mut builder = client.get(&url);
             if req.adapter == "anthropic" {
@@ -528,6 +522,25 @@ async fn resolve_api_key_from_secrets(
     }
 }
 
+/// Compute the effective base URL for a provider's `/models` endpoint.
+///
+/// Adapters that expose `/models` under `/v1` (Anthropic, NEAR AI private)
+/// need a `/v1` segment injected — but only when the operator-supplied base
+/// URL doesn't already include one. Operators commonly configure the base
+/// with or without the suffix (`https://us.private-chat-stg.near.ai` vs
+/// `https://us.private-chat-stg.near.ai/v1`) and both shapes must resolve
+/// to the same `/v1/models` URL without producing `/v1/v1/models`.
+fn models_endpoint_base(adapter: &str, base: &str) -> String {
+    let has_v1 = base.ends_with("/v1") || base.contains("/v1/");
+    let requires_v1 = (adapter == "nearai" && is_nearai_private_endpoint(base))
+        || adapter == "anthropic";
+    if requires_v1 && !has_v1 {
+        format!("{base}/v1")
+    } else {
+        base.to_string()
+    }
+}
+
 /// Check if a base URL belongs to a NEAR AI private endpoint.
 ///
 /// Matches `private.near.ai` and `private-chat-stg.near.ai` exactly,
@@ -727,6 +740,79 @@ mod tests {
     #[test]
     fn test_nearai_private_non_near_ai_rejected() {
         assert!(!is_nearai_private_endpoint("https://private.evil.com/v1"));
+    }
+
+    // --- models_endpoint_base tests (URL-construction path in fetch_provider_models) ---
+    //
+    // These exercise the URL-construction gate the list-models handler uses,
+    // so a future refactor that drops the /v1 guard on the NEAR AI branch
+    // fails here — not just in the is_nearai_private_endpoint unit tests.
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_stg_adds_v1() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai"),
+            "https://us.private-chat-stg.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_stg_with_v1_suffix_no_double() {
+        // Regression: operators who include /v1 in the base URL must not get
+        // /v1/v1/models (404). Before the fix, the NEAR AI branch appended
+        // /v1 unconditionally for any private host.
+        assert_eq!(
+            models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai/v1"),
+            "https://us.private-chat-stg.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_exact_with_v1_no_double() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://private.near.ai/v1"),
+            "https://private.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_public_unchanged() {
+        // Public NEAR AI already embeds /v1 and doesn't need the private-host
+        // treatment at all.
+        assert_eq!(
+            models_endpoint_base("nearai", "https://cloud-api.near.ai/v1"),
+            "https://cloud-api.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_anthropic_adds_v1_when_missing() {
+        assert_eq!(
+            models_endpoint_base("anthropic", "https://api.anthropic.com"),
+            "https://api.anthropic.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_anthropic_with_v1_suffix_no_double() {
+        assert_eq!(
+            models_endpoint_base("anthropic", "https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_openai_compatible_unchanged() {
+        // OpenAI-compatible providers don't take the /v1 injection —
+        // operators configure the full base URL themselves.
+        assert_eq!(
+            models_endpoint_base("open_ai_completions", "https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            models_endpoint_base("open_ai_completions", "https://example.test"),
+            "https://example.test"
+        );
     }
 
     // --- interpret_chat_status tests ---
