@@ -547,7 +547,36 @@ async def test_paired_telegram_user_lists_owner_routines(
     )
     assert resp.status_code == 200
 
-    messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    try:
+        messages = await wait_for_sent_messages(fake_tg_url, min_count=1, timeout=60)
+    except TimeoutError as exc:
+        api_calls = await get_api_calls(fake_tg_url)
+        async with httpx.AsyncClient() as client:
+            threads_response = await client.get(
+                f"{base_url}/api/chat/threads",
+                headers=auth_headers(),
+                timeout=10,
+            )
+            threads_response.raise_for_status()
+            threads = threads_response.json().get("threads", [])
+            telegram_threads = [t for t in threads if t.get("channel") == "telegram"]
+            latest_telegram_thread = telegram_threads[0] if telegram_threads else None
+            latest_history = None
+            if latest_telegram_thread:
+                history_response = await client.get(
+                    f"{base_url}/api/chat/history",
+                    params={"thread_id": latest_telegram_thread["id"]},
+                    headers=auth_headers(),
+                    timeout=10,
+                )
+                history_response.raise_for_status()
+                latest_history = history_response.json()
+        raise AssertionError(
+            "Expected paired Telegram user to receive a reply after requesting "
+            f"owner routines; fake Telegram API calls were: {api_calls}; "
+            f"latest telegram thread: {latest_telegram_thread}; "
+            f"latest telegram history: {latest_history}"
+        ) from exc
     reply_text = "\n".join(m.get("text", "") for m in messages if m.get("chat_id") == PAIRED_USER_ID)
     assert routine_name in reply_text, (
         f"Expected paired Telegram user to see owner routine '{routine_name}', "

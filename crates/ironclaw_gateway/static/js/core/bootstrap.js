@@ -79,6 +79,7 @@ let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
 let currentThreadIsReadOnly = false;
+const threadChannelHints = new Map();
 let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
@@ -95,6 +96,18 @@ const JOB_EVENTS_MAX_JOBS = 50;
 const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+// Non-image attachments staged for the next /api/chat/send submission.
+// Shape matches SendMessageRequest::attachments: { mime_type, filename, data_base64 }.
+let stagedAttachments = [];
+// FileReader promises that have not yet resolved. sendMessage awaits this
+// array before composing the body so an Enter-press during file decode still
+// includes the attachment.
+const pendingAttachmentReads = [];
+// Reserved attachment budget for files accepted into FileReader but not yet
+// materialized in `stagedAttachments`. This closes race windows across rapid
+// repeated attach/drop actions before async reads complete.
+let pendingAttachmentBytes = 0;
+let pendingAttachmentCount = 0;
 let authFlowPending = false;
 // Tracks user messages sent but not yet persisted to DB (#2409).
 // When loadHistory() clears the DOM, pending messages are re-injected

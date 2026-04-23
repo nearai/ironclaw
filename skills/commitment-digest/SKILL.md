@@ -32,10 +32,10 @@ Compose a summary of the user's current commitments. Used both in-conversation (
 
 ## Gathering data
 
-1. `memory_tree("commitments/open/", depth=1)` — list all open commitment files (skip README.md)
+1. `memory_tree("projects/commitments/open/", depth=1)` — list all open commitment files (skip README.md)
 2. `memory_read` each file to extract frontmatter: status, urgency, due, delegated_to, resolution_path, stale_after, tags
-3. `memory_tree("commitments/signals/pending/", depth=1)` — count pending signals (skip README.md)
-4. `memory_tree("commitments/resolved/", depth=1)` — count recently resolved
+3. `memory_tree("projects/commitments/signals/pending/", depth=1)` — count pending signals (skip README.md)
+4. `memory_tree("projects/commitments/resolved/", depth=1)` — count recently resolved
 
 Use `memory_tree` and `memory_read` for digest assembly. Do not use CodeAct,
 shell commands, or creative-generation tools to count or summarize

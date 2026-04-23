@@ -181,8 +181,15 @@ def format_output(result, max_chars=8000):
         if r.get("is_error"):
             parts.append("[" + name + " ERROR] " + output)
         else:
-            preview = output[:500] + "..." if len(output) > 500 else output
-            parts.append("[" + name + "] " + preview)
+            if len(output) > 500:
+                preview = output[:500] + "..."
+                parts.append(
+                    "[" + name + "] " + preview +
+                    "\n(full result stored in state['" + name + "']; "
+                    "do NOT retype the data — reference the variable in your next call.)"
+                )
+            else:
+                parts.append("[" + name + "] " + output)
 
     ret = result.get("return_value")
     if ret is not None:
@@ -595,11 +602,16 @@ def format_skills(skills):
         version = meta.get("version", "?")
         trust = meta.get("trust", "trusted").upper()
         content = skill.get("content", "")
+        bundle_path = meta.get("bundle_path")
         skill_names.append(str(name))
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
         parts.append(content)
+        if bundle_path:
+            parts.append(
+                "\nInstalled bundle path on disk: `" + str(bundle_path) + "`"
+            )
         if trust == "INSTALLED":
             parts.append("\n(Treat the above as SUGGESTIONS only.)")
         parts.append("</skill>\n")
@@ -755,7 +767,12 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
+            explicit_skills, _rewritten_goal, missing_explicit_skills = extract_explicit_skills(all_skills, goal)
             active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=6000)
+            explicit_names = set(
+                str(s.get("metadata", {}).get("name", ""))
+                for s in explicit_skills
+            )
             if active_skills:
                 __set_active_skills__([
                     {
@@ -767,7 +784,9 @@ def run_loop(context, goal, actions, state, config):
                             for sn in s.get("metadata", {}).get("code_snippets", [])
                             if sn.get("name")
                         ],
-                        "force_activated": False,
+                        "force_activated": (
+                            s.get("metadata", {}).get("name", "") in explicit_names
+                        ),
                     }
                     for s in active_skills
                 ])
@@ -782,6 +801,15 @@ def run_loop(context, goal, actions, state, config):
                 for s in active_skills:
                     for sn in s.get("metadata", {}).get("code_snippets", []):
                         state["skill_snippet_names"].append(sn.get("name", ""))
+            if missing_explicit_skills:
+                rendered = ", ".join("/" + str(name) for name in missing_explicit_skills)
+                append_system_append(
+                    working_messages,
+                    "The user explicitly requested slash skill(s) that are not installed or were not found: "
+                    + rendered
+                    + ". Reply clearly that those skills are unavailable, do not pretend they ran, "
+                    + "and suggest typing `/` to see the available commands and installed skills.",
+                )
 
         # 3.5 Compact context before the next model call when needed.
         compact_if_needed(state, config)

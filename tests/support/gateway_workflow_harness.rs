@@ -15,9 +15,8 @@ use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::MultiAuthState;
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::web::server::{
-    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
-};
+use ironclaw::channels::web::platform::router::start_server;
+use ironclaw::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::config::{Config, RegistryProviderConfig, RoutineConfig};
@@ -217,6 +216,7 @@ impl GatewayWorkflowHarness {
             sse: Arc::new(SseManager::new()),
             workspace: components.workspace.clone(),
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: Some(Arc::clone(&agent_session_manager)),
             log_broadcaster: None,
             log_level_handle: None,
@@ -245,7 +245,7 @@ impl GatewayWorkflowHarness {
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
             active_config: Arc::new(tokio::sync::RwLock::new(
-                ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+                ironclaw::channels::web::platform::state::ActiveConfigSnapshot::default(),
             )),
             secrets_store: None,
             db_auth: None,

@@ -39,13 +39,59 @@ function loadHistory(before) {
 
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
+    const pending = !isPaginating ? _pendingUserMessages.get(currentThreadId) : null;
+    let freshPending = [];
+    let pendingByContent = null;
+
+    if (!isPaginating && pending && pending.length > 0) {
+      const now = Date.now();
+      freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+      if (freshPending.length > 0) {
+        pendingByContent = new Map();
+        freshPending.forEach((p) => {
+          const key = p.content;
+          if (!pendingByContent.has(key)) pendingByContent.set(key, []);
+          pendingByContent.get(key).push(p);
+        });
+      }
+    }
+
+    if (!isPaginating && currentThreadId && data.channel) {
+      threadChannelHints.set(currentThreadId, data.channel);
+    }
 
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
         if (turn.user_input) {
-          addMessage('user', turn.user_input);
+          let renderedPending = false;
+          const pendingQueue = pendingByContent && pendingByContent.get(turn.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          if (nextPending) {
+            let persistedAttachments = [];
+            if (typeof parseUserMessageContent === 'function') {
+              persistedAttachments = parseUserMessageContent(turn.user_input).attachments;
+            }
+            const hasPendingVisuals = (
+              (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+              || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+            );
+            if (hasPendingVisuals && persistedAttachments.length === 0) {
+              const div = addMessage('user', nextPending.content, {
+                attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+                copyText: nextPending.copyText || nextPending.content,
+              });
+              if (nextPending.images && nextPending.images.length > 0) {
+                appendImagesToMessage(div, nextPending.images);
+              }
+              renderedPending = true;
+            }
+            pendingQueue.shift();
+          }
+          if (!renderedPending) {
+            addMessage('user', turn.user_input);
+          }
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
@@ -71,52 +117,67 @@ function loadHistory(before) {
           addMessage('assistant', turn.response);
         }
       }
-      // Re-inject pending user messages not yet in DB (#2409)
-      const pending = _pendingUserMessages.get(currentThreadId);
-      let freshPending = [];
-      if (pending && pending.length > 0) {
-        const now = Date.now();
-        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
-        if (freshPending.length > 0) {
-          const dbContentsCounts = new Map();
-          data.turns
-            .map(t => t.user_input)
-            .filter(Boolean)
-            .forEach(content => {
-              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
+      // Show processing indicator if the last turn is still in-progress
+      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          const pendingQueue = pendingByContent && pendingByContent.get(data.in_progress.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          const hasPendingVisuals = nextPending && (
+            (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+            || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+          );
+          if (hasPendingVisuals) {
+            const div = addMessage('user', nextPending.content, {
+              attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+              copyText: nextPending.copyText || nextPending.content,
             });
-          for (const p of freshPending) {
-            const count = dbContentsCounts.get(p.content) || 0;
-            if (count > 0) {
-              dbContentsCounts.set(p.content, count - 1);
-            } else {
-              const div = addMessage('user', p.content);
-              if (p.images && p.images.length > 0) {
-                appendImagesToMessage(div, p.images);
-              }
+            if (nextPending.images && nextPending.images.length > 0) {
+              appendImagesToMessage(div, nextPending.images);
             }
+            pendingQueue.shift();
+          } else {
+            addMessage('user', data.in_progress.user_input);
           }
-          _pendingUserMessages.set(currentThreadId, freshPending);
-        } else {
-          _pendingUserMessages.delete(currentThreadId);
         }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const remainingPending = freshPending.length > 0 && pendingByContent
+        ? Array.from(pendingByContent.values()).flat()
+        : freshPending;
+      if (remainingPending.length > 0) {
+        for (const p of remainingPending) {
+          const div = addMessage('user', p.content, {
+            attachments: Array.isArray(p.attachments) ? p.attachments : [],
+            copyText: p.copyText || p.content,
+          });
+          if (p.images && p.images.length > 0) {
+            appendImagesToMessage(div, p.images);
+          }
+        }
+        _pendingUserMessages.set(currentThreadId, freshPending);
+      } else {
+        _pendingUserMessages.delete(currentThreadId);
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
       if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
-      // Show processing indicator if the last turn is still in-progress
-      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (data.in_progress) {
-        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
-        if (!sameLastTurn && data.in_progress.user_input) {
-          addMessage('user', data.in_progress.user_input);
-        }
-        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
-      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      const hintedChannel = currentThreadId
+        ? (data.channel || threadChannelHints.get(currentThreadId) || 'gateway')
+        : 'gateway';
+      currentThreadIsReadOnly = isReadOnlyChannel(hintedChannel);
+      if (currentThreadIsReadOnly) {
+        disableChatInputReadOnly();
+      } else {
+        enableChatInput();
       }
+
       if (data.pending_gate) {
         handleGateRequired({
           ...data.pending_gate,
@@ -187,7 +248,8 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
+function createMessageElement(role, content, options) {
+  const opts = options || {};
   const div = document.createElement('div');
   div.className = 'message ' + role;
 
@@ -199,8 +261,22 @@ function createMessageElement(role, content) {
   // Message content
   const contentEl = document.createElement('div');
   contentEl.className = 'message-content';
+  let copyText = opts.copyText || content;
+  let parsedAttachments = opts.attachments || null;
   if (role === 'user' || role === 'system') {
-    contentEl.textContent = content;
+    // User turns can carry an `<attachments>…</attachments>` payload appended
+    // by the backend. Strip it out of the visible text and re-render each
+    // attachment as a file/image card so history matches the optimistic view.
+    // When the caller passed `options.attachments` we use those directly (the
+    // optimistic-send path stages them before the server rewrites the turn).
+    if (!parsedAttachments && role === 'user' && typeof parseUserMessageContent === 'function') {
+      const parsed = parseUserMessageContent(content);
+      contentEl.textContent = parsed.text;
+      parsedAttachments = parsed.attachments;
+      copyText = opts.copyText || parsed.copyText;
+    } else {
+      contentEl.textContent = content;
+    }
   } else {
     div.setAttribute('data-raw', content);
     contentEl.innerHTML = renderMarkdown(content);
@@ -217,9 +293,18 @@ function createMessageElement(role, content) {
   }
   div.appendChild(contentEl);
 
+  if (
+    role === 'user'
+    && parsedAttachments
+    && parsedAttachments.length > 0
+    && typeof renderMessageAttachments === 'function'
+  ) {
+    renderMessageAttachments(div, parsedAttachments);
+  }
+
   if (role === 'assistant' || role === 'user') {
     div.classList.add('has-copy');
-    div.setAttribute('data-copy-text', content);
+    div.setAttribute('data-copy-text', copyText);
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-copy-btn';
     copyBtn.type = 'button';
@@ -392,17 +477,21 @@ function loadThreads() {
 
     activeWorkStore.rememberThreads(rememberedThreads);
 
-    // Restore thread from URL hash if pending (deferred from restoreFromHash)
+    // Restore thread from URL hash if pending (deferred from restoreFromHash).
+    // Switch even when the thread is not in the loaded sidebar list — the
+    // list is capped and older threads can age off, but the history API
+    // falls back to the DB by thread_id. Silently dropping the URL here was
+    // the #1 source of "my thread disappeared" reports.
     if (window._pendingThreadRestore) {
       var pendingId = window._pendingThreadRestore;
       window._pendingThreadRestore = null;
-      // Verify the thread exists in the loaded list
-      var found = (pendingId === assistantThreadId) ||
+      var inSidebar = (pendingId === assistantThreadId) ||
         threads.some(function(t) { return t.id === pendingId; });
-      if (found) {
-        switchThread(pendingId);
-        return;
+      if (!inSidebar && window.DEBUG_CHAT_RESTORE === true) {
+        console.warn('[chat] thread', pendingId, 'not in sidebar list; loading via history API');
       }
+      switchThread(pendingId);
+      return;
     }
 
     // Preserve the currently open thread even when it falls outside the
@@ -439,7 +528,10 @@ function loadThreads() {
       const currentThread = currentThreadId === assistantThreadId
         ? data.assistant_thread
         : threads.find(t => t.id === currentThreadId);
-      const ch = currentThread ? currentThread.channel : 'gateway';
+      const hintedChannel = currentThread
+        ? currentThread.channel
+        : threadChannelHints.get(currentThreadId);
+      const ch = hintedChannel || 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
         disableChatInputReadOnly();
@@ -704,6 +796,7 @@ function switchTab(tab) {
     // the Projects tab so widgets don't keep running in the background.
     crBackToOverview();
   }
+  if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -734,4 +827,3 @@ function updateTabIndicator() {
 window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---
-

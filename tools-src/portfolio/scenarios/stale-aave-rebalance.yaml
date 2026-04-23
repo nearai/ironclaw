@@ -1,0 +1,47 @@
+id: stale-aave-rebalance
+description: |
+  The bull-2024-03 portfolio has a below-floor Aave USDC position on
+  Base (3.2% APY) AND an above-floor Morpho Blue USDC position on Base
+  (5.4% APY). The M3 strategy engine should pick Morpho Blue as the
+  observed candidate (not the synthetic fallback) and produce a
+  rationale tagged `source: observed`.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xBU11000000000000000000000000000000000003"]
+      source: dune-replay
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          version: 1
+          kind: yield-floor
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+          # stablecoin yield floor
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      ready_proposals_min: 1
+      has_ready_proposal_matching_rationale: "source: observed"
+      first_strategy_id: stablecoin-yield-floor

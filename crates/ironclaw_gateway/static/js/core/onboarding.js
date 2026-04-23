@@ -358,6 +358,8 @@ function handleGateResolved(data) {
   ) {
     removeAuthCard();
     enableChatInput();
+  } else if (data.resolution === 'expired') {
+    enableChatInput();
   }
 }
 

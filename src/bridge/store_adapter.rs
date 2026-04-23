@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use ironclaw_engine::{
     CapabilityLease, ConversationId, ConversationSurface, DocId, DocType, EngineError, LeaseId,
@@ -54,7 +54,18 @@ const ORCHESTRATOR_PREFIX: &str = ".system/engine/orchestrator";
 /// Pre-#2049 orchestrator prefix; matched alongside the canonical prefix so
 /// fresh writes targeted at the legacy path still hit the protection check.
 const LEGACY_ORCHESTRATOR_PREFIX: &str = "engine/orchestrator";
+/// Engine-owned projects directory used for mission storage only. Project
+/// metadata lives under the user-facing `projects/<slug>/.project.json` —
+/// missions stay hidden here so the user's workspace view doesn't grow
+/// machine-managed mission JSON alongside their own docs.
 const PROJECTS_PREFIX: &str = ".system/engine/projects";
+/// User-facing project root. Writing a file under `projects/<slug>/...`
+/// is the gesture that declares a project exists — no separate schema,
+/// no `project_create` tool needed.
+const PROJECTS_ROOT: &str = "projects";
+/// Per-project metadata file (name, description, goals, metrics). Optional:
+/// absent means the project is named by its slug alone with empty metadata.
+const PROJECT_METADATA_FILENAME: &str = ".project.json";
 
 const THREADS_PREFIX: &str = ".system/engine/runtime/threads/active";
 const THREAD_ARCHIVE_PREFIX: &str = ".system/engine/runtime/threads/archive";
@@ -128,10 +139,12 @@ impl HybridStore {
         self.migrate_legacy_engine_paths(ws).await;
 
         self.load_knowledge_docs(ws).await;
-        self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
-            self.projects.write().await.insert(project.id, project);
-        })
-        .await;
+        // Migrate any project JSONs still at the legacy engine path into
+        // the user-facing `projects/<slug>/.project.json` layout, then
+        // load from the new location. Running migration first means a
+        // single subsequent scan sees all projects once.
+        self.migrate_legacy_project_jsons(ws).await;
+        self.load_projects_from_workspace(ws).await;
         self.load_map(
             ws,
             CONVERSATIONS_PREFIX,
@@ -632,6 +645,104 @@ impl HybridStore {
         }
     }
 
+    /// Load projects from `projects/<slug>/.project.json` in the
+    /// user-facing workspace. Any `projects/<slug>/` directory without a
+    /// metadata file is treated as a bare project: a stub Project struct
+    /// scoped to the workspace owner so `list_projects(user_id)` returns
+    /// it. Writing a file under `projects/foo/` is enough to declare the
+    /// project exists.
+    async fn load_projects_from_workspace(&self, ws: &Workspace) {
+        let entries = match ws.list(PROJECTS_ROOT).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries {
+            if !entry.is_directory {
+                continue;
+            }
+            let raw_slug = entry.name();
+            let meta_path = format!("{}/{PROJECT_METADATA_FILENAME}", entry.path);
+            let project = match ws.read(&meta_path).await {
+                Ok(doc) => match serde_json::from_str::<Project>(&doc.content) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(path = %meta_path, "failed to parse project metadata: {e}");
+                        continue;
+                    }
+                },
+                Err(_) => match synth_bare_project(raw_slug, ws.user_id()) {
+                    Some(p) => p,
+                    None => continue,
+                },
+            };
+            self.projects.write().await.insert(project.id, project);
+        }
+    }
+
+    /// One-shot migration of project JSONs that still live at the old
+    /// engine-internal path (`.system/engine/projects/<slug>/project.json`)
+    /// into the user-facing layout (`projects/<slug>/.project.json`).
+    /// Idempotent: projects already migrated are left alone.
+    ///
+    /// Unparseable JSON gets renamed to `project.broken.json` so a
+    /// corrupted file doesn't re-fail silently on every boot. The user
+    /// can recover it manually instead of the engine masking the loss.
+    async fn migrate_legacy_project_jsons(&self, ws: &Workspace) {
+        let project_dirs = match ws.list(PROJECTS_PREFIX).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in project_dirs {
+            if !entry.is_directory {
+                continue;
+            }
+            let legacy_path = format!("{}/project.json", entry.path);
+            let doc = match ws.read(&legacy_path).await {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            let project = match serde_json::from_str::<Project>(&doc.content) {
+                Ok(p) => p,
+                Err(e) => {
+                    let broken_path = format!("{}/project.broken.json", entry.path);
+                    warn!(
+                        path = %legacy_path,
+                        "legacy project metadata is unparseable: {e} — moving to {broken_path}"
+                    );
+                    if ws.read(&broken_path).await.is_err()
+                        && let Err(we) = ws.write(&broken_path, &doc.content).await
+                    {
+                        warn!("failed to write {broken_path}: {we}");
+                        continue;
+                    }
+                    if let Err(de) = ws.delete(&legacy_path).await {
+                        warn!("failed to remove legacy project path {legacy_path}: {de}");
+                    }
+                    continue;
+                }
+            };
+            let new_path = project_path(&project.name);
+            // Don't clobber a newer metadata file the user may have edited.
+            if ws.read(&new_path).await.is_ok() {
+                if let Err(e) = ws.delete(&legacy_path).await {
+                    warn!("failed to remove legacy project path {legacy_path}: {e}");
+                }
+                continue;
+            }
+            if let Err(e) = ws.write(&new_path, &doc.content).await {
+                warn!(
+                    legacy = %legacy_path,
+                    new = %new_path,
+                    "failed to migrate project metadata: {e}"
+                );
+                continue;
+            }
+            if let Err(e) = ws.delete(&legacy_path).await {
+                warn!("failed to remove legacy project path {legacy_path}: {e}");
+            }
+        }
+    }
+
     /// Load missions from within each project directory.
     ///
     /// Scans `.system/engine/projects/*/missions/*/mission.json`.
@@ -732,7 +843,14 @@ impl HybridStore {
         }
     }
 
-    /// Get the project slug for a project_id, falling back to a short UUID.
+    /// Engine-internal mission-path slug — UUID-suffixed, used only for
+    /// `.system/engine/projects/<slug>/missions/...` storage. Keeps
+    /// mission paths unique even if two projects share a name.
+    ///
+    /// NOT the user-facing project directory: that uses
+    /// [`project_slug_for_name`] (no UUID suffix) so the path
+    /// `projects/<slug>/` stays predictable. The two slug schemes address
+    /// disjoint paths — don't confuse them.
     async fn project_slug(&self, project_id: ProjectId) -> String {
         self.projects
             .read()
@@ -922,6 +1040,36 @@ fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
     doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
 }
 
+/// Build a stub Project for a `projects/<raw_slug>/` directory that has
+/// no `.project.json` yet. Normalizes the slug via `slugify_simple` so a
+/// bare directory and a later `Project::new` call for the same user+name
+/// collapse to the same `ProjectId`. Returns `None` if the slug is empty
+/// after normalization (e.g. a directory named `---`) — such dirs can't
+/// round-trip through workspace paths without colliding.
+///
+/// `user_id` is the owner of the workspace so the stub is scoped to that
+/// user; a bare project under `shared_owner_id` would be invisible to its
+/// real owner and globally visible to everyone else.
+fn synth_bare_project(raw_slug: &str, user_id: &str) -> Option<Project> {
+    let slug = ironclaw_engine::types::slugify_simple(raw_slug);
+    if slug.is_empty() {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    Some(Project {
+        id: ProjectId::from_slug(user_id, &slug),
+        user_id: user_id.to_string(),
+        name: slug,
+        description: String::new(),
+        goals: Vec::new(),
+        metrics: Vec::new(),
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        workspace_path: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 /// True for docs that are physically global (one file regardless of project).
 ///
 /// These docs live at well-known workspace paths (e.g.
@@ -963,13 +1111,31 @@ fn validate_orchestrator_content(doc: &MemoryDoc) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn project_dir(name: &str, project_id: ProjectId) -> String {
-    let slug = slugify(name, &project_id.0.to_string());
-    format!("{PROJECTS_PREFIX}/{slug}")
+/// Slug used to address a project on disk. Derived purely from the project
+/// name (no UUID suffix) so the user-facing path `projects/<slug>/` is
+/// predictable and doesn't churn when the project's ID changes.
+fn project_slug_for_name(name: &str) -> String {
+    let slug = ironclaw_engine::types::slugify_simple(name);
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
 }
 
-fn project_path(name: &str, project_id: ProjectId) -> String {
-    format!("{}/project.json", project_dir(name, project_id))
+/// User-facing project directory. Writing any file under this path is the
+/// declaration that the project exists — the engine store auto-registers
+/// it on `memory_write`.
+fn project_dir(name: &str) -> String {
+    format!("{PROJECTS_ROOT}/{}", project_slug_for_name(name))
+}
+
+/// Canonical metadata file for a project. Hidden by the dot prefix so it
+/// doesn't clutter the project's `memory_tree` view, but still lives
+/// inside the user-facing project directory so the model can reason
+/// about it through normal workspace APIs.
+fn project_path(name: &str) -> String {
+    format!("{}/{PROJECT_METADATA_FILENAME}", project_dir(name))
 }
 
 fn thread_path(thread_id: ThreadId) -> String {
@@ -1470,7 +1636,7 @@ impl Store for HybridStore {
             .write()
             .await
             .insert(project.id, project.clone());
-        self.persist_json(project_path(&project.name, project.id), project)
+        self.persist_json(project_path(&project.name), project)
             .await;
         Ok(())
     }
@@ -2407,6 +2573,110 @@ mod tests {
         );
     }
 
+    // ── Project slug / synth_bare_project / project paths ─────
+    //
+    // The review on #2533 flagged a divergent-ID bug: synth_bare_project
+    // used the raw directory name to derive the `ProjectId` while
+    // `Project::new` slugified internally, so any non-canonical slug
+    // would split one workspace directory into two in-memory projects.
+    // These tests pin the invariant: for every name shape, the two code
+    // paths must produce identical IDs so the workspace round-trips.
+
+    #[test]
+    fn project_slug_for_name_uses_slugify_simple() {
+        assert_eq!(project_slug_for_name("commitments"), "commitments");
+        assert_eq!(project_slug_for_name("My Project"), "my-project");
+        assert_eq!(project_slug_for_name("  Q4 2026 Plan!"), "q4-2026-plan");
+    }
+
+    #[test]
+    fn project_slug_for_name_fallbacks_on_empty_slug() {
+        // A name with no alphanumerics can't produce a directory — must
+        // fall back to a reserved string rather than return "".
+        assert_eq!(project_slug_for_name(""), "untitled");
+        assert_eq!(project_slug_for_name("---"), "untitled");
+        assert_eq!(project_slug_for_name("!!!"), "untitled");
+    }
+
+    #[test]
+    fn project_dir_and_path_are_deterministic() {
+        assert_eq!(project_dir("commitments"), "projects/commitments");
+        assert_eq!(project_dir("My Project"), "projects/my-project");
+        assert_eq!(
+            project_path("commitments"),
+            "projects/commitments/.project.json"
+        );
+        assert_eq!(
+            project_path("My Project"),
+            "projects/my-project/.project.json"
+        );
+    }
+
+    #[test]
+    fn synth_bare_project_normalizes_slug_like_project_new() {
+        // For every directory name shape, the stub's ID must equal the
+        // ID `Project::new` would compute for the same user+name. This
+        // is the core fix for the review's ID-fork finding.
+        let user = "alice";
+        let directory_names = [
+            "commitments",
+            "My Project",
+            "MY PROJECT",
+            "  my-project  ",
+            "my__project",
+            "my.project",
+            "café",
+            "emoji 🚀",
+            "-leading",
+            "trailing-",
+            "---chaos---",
+            "q4-2026-plan",
+        ];
+        for raw_slug in directory_names {
+            let Some(stub) = synth_bare_project(raw_slug, user) else {
+                // Only names that slugify to empty produce None; assert
+                // the helper and Project::new agree on emptiness too.
+                assert!(
+                    ironclaw_engine::types::slugify_simple(raw_slug).is_empty(),
+                    "synth_bare_project returned None for non-empty slug {raw_slug:?}"
+                );
+                continue;
+            };
+            let explicit = Project::new(user, raw_slug, "");
+            assert_eq!(
+                stub.id, explicit.id,
+                "synth_bare_project({raw_slug:?}) and Project::new({raw_slug:?}) must produce the same ProjectId"
+            );
+            // Stub name is the normalized slug — saving this stub via
+            // `save_project` lands at the same directory as the raw dir
+            // only if that raw dir is already canonical, which is the
+            // guarantee we want for workspace round-tripping.
+            assert_eq!(stub.name, ironclaw_engine::types::slugify_simple(raw_slug));
+        }
+    }
+
+    #[test]
+    fn synth_bare_project_rejects_unsluggable_directories() {
+        // A directory whose name has no alphanumerics can't produce a
+        // stable slug, so there's nothing to synthesize.
+        assert!(synth_bare_project("", "alice").is_none());
+        assert!(synth_bare_project("---", "alice").is_none());
+        assert!(synth_bare_project("!!!", "alice").is_none());
+        assert!(synth_bare_project(".", "alice").is_none());
+        assert!(synth_bare_project("..", "alice").is_none());
+    }
+
+    #[test]
+    fn synth_bare_project_isolates_users() {
+        // Same slug across two users must not collide — `list_projects`
+        // filters by user, so a shared ID would leak between tenants.
+        let alice = synth_bare_project("notes", "alice").unwrap();
+        let bob = synth_bare_project("notes", "bob").unwrap();
+        assert_ne!(alice.id, bob.id);
+        assert_eq!(alice.user_id, "alice");
+        assert_eq!(bob.user_id, "bob");
+    }
+
     #[test]
     fn archive_summary_handles_legacy_json_without_total_cost_usd_field() {
         // Craft JSON as it would have been written before this PR: no
@@ -2828,6 +3098,213 @@ mod migration_tests {
             !docs_other_user
                 .iter()
                 .any(|d| d.title == "Always validate input")
+        );
+    }
+
+    // ── Project auto-registration: load + migrate ─────────────
+
+    #[tokio::test]
+    async fn load_projects_picks_up_bare_directories() {
+        // Writing any file under `projects/<slug>/` declares the project.
+        // After load, the store must list that project for its owner.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/commitments/AGENTS.md", "# hi")
+            .await
+            .expect("seed bare project file");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "commitments");
+        // ID must match what Project::new(user, "commitments", "") produces.
+        assert_eq!(
+            projects[0].id,
+            Project::new(ws.user_id(), "commitments", "").id,
+            "bare-synth ID must equal Project::new ID for canonical slug"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_projects_prefers_metadata_over_synth() {
+        // When `.project.json` exists, use its stored identity rather
+        // than synthesizing a stub. A user who renamed their project
+        // (displayed name ≠ slug) must see the real name.
+        let (ws, _dir) = fresh_workspace().await;
+
+        let project = Project::new(ws.user_id(), "commitments", "Main exec project");
+        let json = serde_json::to_string(&project).expect("serialize");
+        ws.write("projects/commitments/.project.json", &json)
+            .await
+            .expect("seed .project.json");
+        ws.write("projects/commitments/AGENTS.md", "# hi")
+            .await
+            .expect("seed content");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let loaded = store
+            .load_project(project.id)
+            .await
+            .expect("load ok")
+            .expect("found");
+        assert_eq!(loaded.description, "Main exec project");
+    }
+
+    #[tokio::test]
+    async fn load_projects_skips_non_canonical_directories() {
+        // A workspace directory like `projects/My Project/` can't be
+        // auto-registered as-is — saving its metadata would land at
+        // `projects/my-project/.project.json`, forking the in-memory
+        // identity from the on-disk layout. Reject it cleanly.
+        //
+        // (We use a name that slugifies to empty; "My Project" does
+        // have a canonical slug and is still load-legal.)
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/---/file.md", "content")
+            .await
+            .expect("seed");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert!(
+            projects.is_empty(),
+            "unsluggable directories must not produce phantom projects: {projects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_projects_weird_slugs_collapse_onto_one_id() {
+        // Two directories that normalize to the same slug must collapse
+        // to a single in-memory project, not duplicate. This is the
+        // anti-fork invariant the PR #2533 review flagged.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write("projects/commitments/a.md", "a")
+            .await
+            .expect("seed canonical");
+        // Craft a second dir that slugifies to `commitments` — the
+        // workspace API is strict about slashes but allows any other
+        // characters in a segment name. A dir literally named "Commitments"
+        // slugifies identically to the canonical one.
+        ws.write("projects/Commitments/b.md", "b")
+            .await
+            .expect("seed non-canonical");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.load_projects_from_workspace(&ws).await;
+
+        let projects = store
+            .list_projects(ws.user_id())
+            .await
+            .expect("list_projects");
+        assert_eq!(
+            projects.len(),
+            1,
+            "two dirs with the same canonical slug must collapse to one project; got {projects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_moves_to_user_facing_path() {
+        // Legacy engine layout stored project metadata at
+        // `.system/engine/projects/<slug>/project.json`. Migration must
+        // copy it to `projects/<slug>/.project.json` and delete the old.
+        let (ws, _dir) = fresh_workspace().await;
+        let project = Project::new(ws.user_id(), "archived", "old project");
+        let legacy_json = serde_json::to_string(&project).expect("serialize");
+        ws.write(
+            ".system/engine/projects/archived/project.json",
+            &legacy_json,
+        )
+        .await
+        .expect("seed legacy");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        // New path exists, legacy is gone.
+        let migrated = ws
+            .read("projects/archived/.project.json")
+            .await
+            .expect("migrated file readable");
+        let parsed: Project = serde_json::from_str(&migrated.content).expect("parse");
+        assert_eq!(parsed.description, "old project");
+        assert!(
+            !ws.exists(".system/engine/projects/archived/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy path should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_preserves_user_edited_new_path() {
+        // If the user has already edited the new-path file, migration
+        // must not clobber it — but it should still clean up the legacy.
+        let (ws, _dir) = fresh_workspace().await;
+        let legacy_proj = Project::new(ws.user_id(), "ongoing", "stale legacy desc");
+        let legacy_json = serde_json::to_string(&legacy_proj).expect("serialize");
+        let fresh_proj = Project::new(ws.user_id(), "ongoing", "new user-edited desc");
+        let fresh_json = serde_json::to_string(&fresh_proj).expect("serialize");
+
+        ws.write(".system/engine/projects/ongoing/project.json", &legacy_json)
+            .await
+            .expect("seed legacy");
+        ws.write("projects/ongoing/.project.json", &fresh_json)
+            .await
+            .expect("seed new");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        let preserved = ws
+            .read("projects/ongoing/.project.json")
+            .await
+            .expect("new path readable");
+        let parsed: Project = serde_json::from_str(&preserved.content).expect("parse");
+        assert_eq!(parsed.description, "new user-edited desc");
+        assert!(
+            !ws.exists(".system/engine/projects/ongoing/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy duplicate must still be cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_project_json_moves_unparseable_aside() {
+        // A corrupted legacy project.json must not re-fail silently on
+        // every boot — move it aside so the user can recover and the
+        // next load run isn't dragging the bad file forward.
+        let (ws, _dir) = fresh_workspace().await;
+        ws.write(".system/engine/projects/broken/project.json", "{ not json")
+            .await
+            .expect("seed broken");
+
+        let store = HybridStore::new(Some(Arc::clone(&ws)));
+        store.migrate_legacy_project_jsons(&ws).await;
+
+        // Broken file parked at the .broken.json name.
+        let parked = ws
+            .read(".system/engine/projects/broken/project.broken.json")
+            .await
+            .expect("parked file readable");
+        assert_eq!(parked.content, "{ not json");
+        // Original legacy path cleared so migration doesn't keep tripping.
+        assert!(
+            !ws.exists(".system/engine/projects/broken/project.json")
+                .await
+                .unwrap_or(true),
+            "legacy path must be cleared after parking"
         );
     }
 

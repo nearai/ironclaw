@@ -384,6 +384,10 @@
   min-width: 0;
 }
 
+.ext-pairing:empty {
+  display: none;
+}
+
 .ext-onboarding {
   margin-top: 8px;
   border-top: 1px solid var(--border);
@@ -689,4 +693,3 @@
 .ext-install-form button:active {
   transform: scale(0.97);
 }
-

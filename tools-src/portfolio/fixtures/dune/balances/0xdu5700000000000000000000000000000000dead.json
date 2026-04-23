@@ -1,0 +1,31 @@
+{
+  "balances": [
+    {
+      "chain": "ethereum",
+      "address": "0x1111111111111111111111111111111111111111",
+      "symbol": "FAKE-AIRDROP",
+      "amount": "1000000000",
+      "value_usd": "0.00001",
+      "block_number": 19500000
+    },
+    {
+      "chain": "ethereum",
+      "address": "0x2222222222222222222222222222222222222222",
+      "symbol": "SCAM-USDC",
+      "amount": "999999",
+      "value_usd": "0",
+      "block_number": 19500000
+    },
+    {
+      "chain": "base",
+      "address": "0x3333333333333333333333333333333333333333",
+      "symbol": "TOTALLY-LEGIT-APY-TOKEN",
+      "amount": "42",
+      "value_usd": "0.002",
+      "protocol": "totally-unheard-of-protocol",
+      "protocol_metadata": {"supply_apy": 99.0},
+      "block_number": 12000000
+    }
+  ],
+  "blocks": {"ethereum": 19500000, "base": 12000000}
+}

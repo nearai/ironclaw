@@ -15,7 +15,7 @@ use crate::agent::routine::{
     routine_display_status_for_verification, routine_verification_status,
 };
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
 use crate::ownership::Owned;
@@ -360,8 +360,7 @@ pub async fn routines_delete_handler(
     }
 }
 
-#[allow(dead_code)] // Used by server.rs inline version; kept in sync here for future migration.
-pub async fn routines_runs_handler(
+pub(crate) async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,

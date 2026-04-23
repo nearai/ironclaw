@@ -1,0 +1,66 @@
+{
+  "quote_id": "q-bridge-2026-04-11-01",
+  "quote_version": "near-intents/1",
+  "legs": [
+    {
+      "id": "withdraw-eth-aave",
+      "kind": "withdraw",
+      "chain": "ethereum",
+      "near_intent_payload": {
+        "op": "withdraw",
+        "protocol": "aave_v3",
+        "asset": "USDC",
+        "amount": "5000"
+      },
+      "min_out": {
+        "symbol": "USDC",
+        "chain": "ethereum",
+        "amount": "5000",
+        "value_usd": "5000.00"
+      },
+      "quoted_by": "relay-solver/v1"
+    },
+    {
+      "id": "bridge-eth-to-base",
+      "kind": "bridge",
+      "chain": "base",
+      "near_intent_payload": {
+        "op": "bridge",
+        "from_chain": "ethereum",
+        "to_chain": "base",
+        "asset": "USDC",
+        "amount": "5000",
+        "route": "native-bridge"
+      },
+      "depends_on": "withdraw-eth-aave",
+      "min_out": {
+        "symbol": "USDC",
+        "chain": "base",
+        "amount": "4985",
+        "value_usd": "4985.00"
+      },
+      "quoted_by": "relay-solver/v1"
+    },
+    {
+      "id": "deposit-base-morpho",
+      "kind": "deposit",
+      "chain": "base",
+      "near_intent_payload": {
+        "op": "deposit",
+        "protocol": "morpho_blue",
+        "asset": "USDC",
+        "amount": "4985"
+      },
+      "depends_on": "bridge-eth-to-base",
+      "min_out": {
+        "symbol": "USDC",
+        "chain": "base",
+        "amount": "4985",
+        "value_usd": "4985.00"
+      },
+      "quoted_by": "relay-solver/v1"
+    }
+  ],
+  "total_cost_usd": "15.00",
+  "expires_at_unix": 1800000000
+}

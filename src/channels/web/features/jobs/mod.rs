@@ -12,7 +12,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::ownership::Owned;

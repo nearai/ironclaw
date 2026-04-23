@@ -10,7 +10,7 @@ use axum::{
 use secrecy::SecretString;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::server::GatewayState;
+use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
@@ -37,7 +37,7 @@ const API_KEY_UNCHANGED: &str = "••••••••";
 /// Prefers the `CachedSettingsStore` so writes invalidate the cache
 /// (keeping the agent loop's view consistent). Falls back to the raw
 /// `Database` when no cached store is configured.
-pub(super) fn resolve_settings_store(
+pub(crate) fn resolve_settings_store(
     state: &GatewayState,
 ) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
     if let Some(ref sc) = state.settings_cache {
@@ -335,43 +335,27 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         return ReloadOutcome::Skipped;
     };
 
-    // Use the gateway owner scope so the admin-scope merge happens the
-    // same way it did at startup. `re_resolve_llm_with_secrets` also
-    // hydrates API keys from the secrets store — without that,
-    // `from_db_with_toml` alone would miss `OPENAI_API_KEY` /
-    // `NEARAI_SESSION_TOKEN` added alongside the backend switch.
-    let mut config = match crate::config::Config::from_db_with_toml(
-        store.as_ref(),
+    // Re-resolve just the LLM config using the same owner/admin scope layering
+    // the gateway used at startup. This avoids rebuilding unrelated config
+    // sections while still hydrating secrets-backed API keys for the new chain.
+    let llm_config = match crate::config::Config::resolve_llm_with_secrets_strict(
+        Some(store.as_ref()),
         &state.owner_id,
         state.config_toml_path.as_deref(),
+        state.secrets_store.as_deref(),
         true,
     )
     .await
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("LLM hot reload: from_db_with_toml failed: {}", e);
+            tracing::error!("LLM hot reload: LLM config resolve failed: {}", e);
             return ReloadOutcome::ConfigLoadFailed(e.to_string());
         }
     };
 
-    if let Some(secrets) = state.secrets_store.as_ref()
-        && let Err(e) = config
-            .re_resolve_llm_with_secrets(
-                Some(store.as_ref()),
-                &state.owner_id,
-                state.config_toml_path.as_deref(),
-                Some(secrets.as_ref()),
-                true,
-            )
-            .await
-    {
-        tracing::error!("LLM hot reload: secret re-hydration failed: {}", e);
-        return ReloadOutcome::ConfigLoadFailed(e.to_string());
-    }
-
     if let Err(e) = reloader
-        .reload(&config.llm, Arc::clone(session_manager))
+        .reload(&llm_config, Arc::clone(session_manager))
         .await
     {
         tracing::error!("LLM hot reload: provider chain build failed: {}", e);
@@ -386,15 +370,15 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         .llm_provider
         .as_ref()
         .map(|provider| provider.active_model_name())
-        .unwrap_or_else(|| config.llm.active_model_name());
+        .unwrap_or_else(|| llm_config.active_model_name());
     {
         let mut active = state.active_config.write().await;
-        active.llm_backend = config.llm.backend.clone();
+        active.llm_backend = llm_config.backend.clone();
         active.llm_model = active_model;
     }
 
     tracing::info!(
-        backend = %config.llm.backend,
+        backend = %llm_config.backend,
         "LLM provider chain hot-reloaded from updated settings"
     );
     ReloadOutcome::Swapped
@@ -1202,6 +1186,7 @@ mod tests {
     };
 
     use crate::channels::web::auth::UserIdentity;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -1279,6 +1264,7 @@ mod tests {
             sse: Arc::new(crate::channels::web::sse::SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -1299,15 +1285,19 @@ mod tests {
             skill_registry: None,
             skill_catalog: None,
             auth_manager: None,
-            chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
-            webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: Arc::new(tokio::sync::RwLock::new(
-                crate::channels::web::server::ActiveConfigSnapshot::default(),
+                crate::channels::web::platform::state::ActiveConfigSnapshot::default(),
             )),
             secrets_store: Some(secrets),
             db_auth: None,
@@ -1642,11 +1632,13 @@ mod tests {
     /// gets the wrapper missing from state, or stops threading the new model
     /// into `active_config`.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
         use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
+        let _env_guard = lock_env();
         let secrets = test_secrets_store();
-        let (db, _tmp) = crate::testing::test_db().await;
+        let (db, tmp) = crate::testing::test_db().await;
 
         // Starting config: NEAR AI backend with "model-start".
         let mut initial = LlmConfig {
@@ -1710,9 +1702,11 @@ mod tests {
         state.llm_provider = Some(Arc::clone(&primary));
         state.llm_reload = Some(Arc::clone(&reload_handle));
         state.llm_session_manager = Some(Arc::clone(&session));
-        // Owner scope is the user_id that `Config::from_db_with_toml` is
-        // called with — we set it to admin scope so the settings reload
-        // reads the same rows we just seeded.
+        let toml_path = tmp.path().join("empty-config.toml");
+        std::fs::write(&toml_path, "").expect("create empty toml");
+        state.config_toml_path = Some(toml_path);
+        // Owner scope is the user_id the reload resolves from — we set it
+        // to admin scope so it reads the same rows we just seeded.
         state.owner_id = admin_scope.to_string();
         let state = Arc::new(state);
 
@@ -1854,6 +1848,9 @@ mod tests {
         state.llm_provider = Some(Arc::clone(&primary));
         state.llm_reload = Some(Arc::clone(&reload_handle));
         state.llm_session_manager = Some(Arc::clone(&session));
+        let toml_path = tmp.path().join("empty-config.toml");
+        std::fs::write(&toml_path, "").expect("create empty toml");
+        state.config_toml_path = Some(toml_path);
         // Gateway owner is a distinct identity from admin scope, so tests
         // can tell when a reload was gated out by scope.
         state.owner_id = "owner".to_string();
@@ -1942,11 +1939,13 @@ mod tests {
     /// scope. Without this branch, the default "write to my own settings"
     /// UX would never trigger a reload for the owner.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_owner_scope_triggers_reload() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
 
-        // Seed the owner scope so `Config::from_db_with_toml` resolves to
-        // the new model when it reads it back via the `owner` user_id.
+        // Seed the owner scope so the reload resolves to the new model
+        // when it reads back via the `owner` user_id.
         state
             .store
             .as_ref()
@@ -1988,7 +1987,9 @@ mod tests {
     /// see this broken sibling-config, fail resolution, and roll back the
     /// caller's write.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_rolls_back_on_reload_failure() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
         let before_model = primary.active_model_name();
         let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
@@ -2079,7 +2080,9 @@ mod tests {
     /// override is lost and the provider ends up reporting the admin-scope
     /// model instead. With the fix, the owner's model survives.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn reload_rebuilds_from_owner_scope_not_effective_scope() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
         let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
         let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness

@@ -5,7 +5,7 @@ use libsql::params;
 
 use super::{LibSqlBackend, fmt_ts, get_ts, opt_text};
 use crate::db::{ChannelPairingStore, DatabaseError, PairingRequestRecord};
-use crate::ownership::{Identity, OwnerId, UserRole};
+use crate::ownership::{UserId, UserRole};
 
 #[async_trait]
 impl ChannelPairingStore for LibSqlBackend {
@@ -13,7 +13,7 @@ impl ChannelPairingStore for LibSqlBackend {
         &self,
         channel: &str,
         external_id: &str,
-    ) -> Result<Option<Identity>, DatabaseError> {
+    ) -> Result<Option<UserId>, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
         let mut rows = conn
@@ -41,12 +41,8 @@ impl ChannelPairingStore for LibSqlBackend {
                 let role_str: String = row
                     .get(1)
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                let role = if role_str.eq_ignore_ascii_case("admin") {
-                    UserRole::Admin
-                } else {
-                    UserRole::Member
-                };
-                Ok(Some(Identity::new(OwnerId::from(owner_id), role)))
+                let role = UserRole::from_db_role(&role_str);
+                Ok(Some(UserId::from_trusted(owner_id, role)))
             }
             None => Ok(None),
         }
@@ -547,7 +543,7 @@ mod tests {
             .await
             .unwrap();
         assert!(identity.is_some());
-        assert_eq!(identity.unwrap().owner_id.as_str(), "alice");
+        assert_eq!(identity.unwrap().as_str(), "alice");
     }
 
     #[tokio::test]
@@ -678,7 +674,7 @@ mod tests {
             .await
             .unwrap();
         assert!(identity.is_some(), "Lowercase code should work");
-        assert_eq!(identity.unwrap().owner_id.as_str(), "alice");
+        assert_eq!(identity.unwrap().as_str(), "alice");
     }
 
     #[tokio::test]
@@ -760,7 +756,7 @@ mod tests {
             .await
             .unwrap()
             .expect("identity should resolve");
-        assert_eq!(identity.owner_id.as_str(), "alice");
+        assert_eq!(identity.as_str(), "alice");
 
         let conn = db.connect().await.unwrap();
         let mut rows = conn

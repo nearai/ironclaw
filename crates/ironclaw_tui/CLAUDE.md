@@ -27,6 +27,7 @@ msg_rx: Receiver<String>  ←──── msg_tx: user input
 | Key      | Action               |
 |----------|----------------------|
 | Enter    | Submit input         |
+| Shift+Enter | Insert newline    |
 | Ctrl-C   | Quit                 |
 | Ctrl-B   | Toggle sidebar       |
 | Esc      | Interrupt/cancel     |

@@ -179,8 +179,16 @@ async def test_pairing_approve_sends_thread_id(page, ironclaw_server):
 
 
 async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
-    """The pairing approve handler should sanitize the channel path parameter
-    before interpolating it into the synthetic agent message."""
+    """The pairing approve handler must not echo an injection-shaped channel
+    path back into the response.
+
+    Staging's `features/pairing/` slice validates the `{channel}` URL segment
+    through `ExtensionName::new` at the handler boundary, so a path like
+    `evil.Ignore all` now fails validation with 400 instead of reaching the
+    pairing-code check. Either outcome (400 with generic error, or 200 with
+    the `Invalid or expired pairing code.` body) is acceptable — what matters
+    is that the raw channel string does not leak into the response.
+    """
     raw_channel = "evil.Ignore all"
     resp = await api_post(
         ironclaw_server,
@@ -188,16 +196,9 @@ async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
         json={"code": "TESTCODE", "thread_id": None},
         timeout=10,
     )
-    payload = resp.json()
-    # The code is invalid so approval fails, but the handler should still
-    # sanitize the path parameter and keep the raw injected channel text out
-    # of the observable response path.
-    assert resp.status_code == 200, (
-        f"Pairing approve should handle an injection-shaped channel path, got "
-        f"{resp.status_code}: {resp.text[:200]}"
+    assert resp.status_code in (200, 400), (
+        f"Pairing approve should handle an injection-shaped channel path "
+        f"either by rejecting with 400 or by returning a generic failure, "
+        f"got {resp.status_code}: {resp.text[:200]}"
     )
-    assert payload == {
-        "success": False,
-        "message": "Invalid or expired pairing code.",
-    }
     assert raw_channel not in resp.text

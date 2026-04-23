@@ -6,10 +6,9 @@
 //! and the type aliases (`PromptQueue`, `RoutineEngineSlot`) that are too
 //! noisy to spell inline.
 //!
-//! Handlers should depend on this module instead of the older
-//! `crate::channels::web::server::*` path; the re-exports in `server.rs`
-//! exist only for backward compatibility during the ironclaw#2599 migration
-//! and will be removed once all call sites are updated.
+//! Handlers depend on this module directly. The older
+//! `crate::channels::web::server::*` path — and its back-compat shim in
+//! `src/channels/web/server.rs` — was removed in ironclaw#2599 stage 6.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -146,6 +145,7 @@ pub struct ActiveConfigSnapshot {
     pub llm_backend: String,
     pub llm_model: String,
     pub enabled_channels: Vec<String>,
+    pub default_timezone: String,
 }
 
 /// Per-user rate limiter that maintains a separate sliding window per user_id.
@@ -342,8 +342,20 @@ pub struct GatewayState {
     pub sse: Arc<SseManager>,
     /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
-    /// Per-user workspace pool for multi-user mode.
+    /// Optional per-user workspace resolver/pool.
+    ///
+    /// This is independent of `multi_tenant_mode`: the runtime may provide a
+    /// per-user workspace pool even in single-user mode for plumbing or test
+    /// harnesses.
     pub workspace_pool: Option<Arc<WorkspacePool>>,
+    /// Whether the gateway started in multi-tenant mode.
+    ///
+    /// This is intentionally separate from `workspace_pool.is_some()`: the
+    /// runtime may still use a per-user workspace resolver in single-user mode,
+    /// but the unauthenticated bootstrap routes (`/`, `/style.css`) only need
+    /// to suppress workspace-driven frontend customizations when startup
+    /// actually determined that multiple tenants exist.
+    pub multi_tenant_mode: bool,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -479,4 +491,31 @@ pub struct FrontendCacheKey {
     /// Signature for `.system/gateway/widgets/` (max child mtime), or `None`
     /// if the directory is empty or absent.
     pub widgets: Option<(i64, u32)>,
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::WorkspacePool;
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_pool_resolve_seeds_new_user_workspace() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            crate::workspace::EmbeddingCacheConfig::default(),
+            crate::config::WorkspaceSearchConfig::default(),
+            crate::config::WorkspaceConfig::default(),
+        );
+
+        let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
+
+        let readme = ws.read(crate::workspace::paths::README).await.unwrap();
+        let identity = ws.read(crate::workspace::paths::IDENTITY).await.unwrap();
+
+        assert!(!readme.content.trim().is_empty());
+        assert!(!identity.content.trim().is_empty());
+    }
 }

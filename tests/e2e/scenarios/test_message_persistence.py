@@ -134,7 +134,9 @@ async def _start_thread_and_wait_for_in_progress(
             "/api/chat/send",
             json={"content": content, "thread_id": last_thread_id},
         )
-        assert send_resp.status_code == 200, send_resp.text
+        # Gateway now returns 202 ACCEPTED (fire-and-forget) instead of the
+        # legacy 200; accept either so the fixture works with both shapes.
+        assert send_resp.status_code in (200, 202), send_resp.text
 
         payload = await _wait_for_in_progress_turn(base_url, last_thread_id)
         if payload is not None:

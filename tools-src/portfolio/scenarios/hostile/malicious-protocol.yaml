@@ -1,0 +1,47 @@
+id: hostile-malicious-protocol
+description: |
+  Dune returns a USDC position tagged with an unknown protocol
+  ("evilfinance_v999") claiming 30% APY. The analyzer must drop it
+  silently — we don't classify positions on protocols not in our
+  registry. The real Aave position (3.1% APY) must still flow through
+  normally and trigger the yield-floor strategy.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xBA1000000000000000000000000000000000BA1"]
+      source: dune-replay
+    expect:
+      positions_len: 1
+      first_position_protocol_id: aave-v3
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          kind: yield-floor
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+          # stablecoin yield floor
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      ready_proposals_min: 1

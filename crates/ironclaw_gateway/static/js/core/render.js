@@ -422,10 +422,10 @@ function appendImagesToMessage(messageDiv, dataUrls) {
   messageDiv.appendChild(wrap);
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, options) {
   const container = document.getElementById('chat-messages');
   maybeInsertTimeSeparator(container);
-  const div = createMessageElement(role, content);
+  const div = createMessageElement(role, content, options);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
   return div;

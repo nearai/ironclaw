@@ -796,8 +796,10 @@ impl Channel for ReplChannel {
                     eprintln!("    \x1b[90m\u{2192} {}: {display}\x1b[0m", d.tool_name);
                 }
             }
-            StatusUpdate::TurnCost { .. } => {
-                // Cost display is handled by the TUI channel
+            StatusUpdate::TurnCost { .. }
+            | StatusUpdate::ToolResultFull { .. }
+            | StatusUpdate::TurnMetrics { .. } => {
+                // Verbose debug events — only relevant for web gateway
             }
             StatusUpdate::JobStatus { .. }
             | StatusUpdate::JobResult { .. }

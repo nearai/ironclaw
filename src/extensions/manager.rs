@@ -16,9 +16,10 @@ use crate::auth::{
 };
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
+    LoadedChannel, RUNTIME_CONFIG_KEY_BOT_USERNAME, RUNTIME_CONFIG_KEY_WEBHOOK_SECRET,
+    RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
-    owner_id_from_capabilities,
+    owner_id_from_capabilities, setup::inject_wasm_channel_secret_config_mappings,
 };
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
@@ -280,31 +281,6 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
 }
 
 use crate::pairing::approval::build_runtime_config_updates as build_wasm_channel_runtime_config_updates;
-
-async fn inject_wasm_channel_secret_config_updates(
-    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
-    owner_id: &str,
-    channel_name: &str,
-    config_updates: &mut HashMap<String, serde_json::Value>,
-) {
-    let secret_config_mappings: &[(&str, &str)] = match channel_name {
-        "feishu" => &[
-            ("app_id", "feishu_app_id"),
-            ("app_secret", "feishu_app_secret"),
-            ("verification_token", "feishu_verification_token"),
-        ],
-        _ => return,
-    };
-
-    for &(config_key, secret_name) in secret_config_mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
-            config_updates.insert(
-                config_key.to_string(),
-                serde_json::Value::String(decrypted.expose().to_string()),
-            );
-        }
-    }
-}
 
 // Auth instructions come from the capabilities file's `prompt` field (single
 // source of truth). Post-activation pairing instructions live in
@@ -902,7 +878,13 @@ impl ExtensionManager {
         let rt_guard = self.channel_runtime.read().await;
         let rt = (*rt_guard).as_ref()?;
         rt.pairing_store
-            .external_id_for_owner(name, &crate::ownership::OwnerId::from(self.user_id.clone()))
+            .external_id_for_owner(
+                name,
+                &crate::ownership::UserId::from_trusted(
+                    self.user_id.clone(),
+                    crate::ownership::UserRole::Regular,
+                ),
+            )
             .await
             .ok()
             .flatten()
@@ -921,7 +903,10 @@ impl ExtensionManager {
                 .await
             && !username.trim().is_empty()
         {
-            overrides.insert("bot_username".to_string(), serde_json::json!(username));
+            overrides.insert(
+                RUNTIME_CONFIG_KEY_BOT_USERNAME.to_string(),
+                serde_json::json!(username),
+            );
         }
 
         overrides
@@ -5805,6 +5790,11 @@ impl ExtensionManager {
             .and_then(|f| f.capabilities.channel.as_ref())
             .and_then(|c| c.socket_mode.as_ref())
             .is_some();
+        let secret_config_mappings = loaded
+            .capabilities_file
+            .as_ref()
+            .map(|f| f.validated_secret_config_mappings())
+            .unwrap_or_default();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -5827,10 +5817,11 @@ impl ExtensionManager {
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
-            inject_wasm_channel_secret_config_updates(
-                self.secrets.as_ref(),
-                &self.user_id,
+            inject_wasm_channel_secret_config_mappings(
                 &channel_name,
+                &self.user_id,
+                self.secrets.as_ref(),
+                &secret_config_mappings,
                 &mut config_updates,
             )
             .await;
@@ -6075,6 +6066,10 @@ impl ExtensionManager {
         let hmac_secret_name = capabilities_file
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
+        let secret_config_mappings = capabilities_file
+            .as_ref()
+            .map(|f| f.validated_secret_config_mappings())
+            .unwrap_or_default();
 
         let owner_actor_id = self
             .current_channel_owner_actor_id(name)
@@ -6086,10 +6081,11 @@ impl ExtensionManager {
             owner_actor_id.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
-        inject_wasm_channel_secret_config_updates(
-            self.secrets.as_ref(),
-            &self.user_id,
+        inject_wasm_channel_secret_config_mappings(
             name,
+            &self.user_id,
+            self.secrets.as_ref(),
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;
@@ -6098,36 +6094,21 @@ impl ExtensionManager {
         let mut has_signature_key = false;
         let mut has_hmac_secret = false;
 
-        // Refresh webhook secret
-        if webhook_secret_managed_by_host {
-            match self
+        // Refresh webhook secret — only register with router if host-managed.
+        if webhook_secret_managed_by_host
+            && let Ok(secret) = self
                 .secrets
                 .get_decrypted(user_id, &webhook_secret_name)
                 .await
-            {
-                Ok(secret) => {
-                    let secret_value = secret.expose().to_string();
-                    router.update_secret(name, secret_value.clone()).await;
-                    config_updates.insert(
-                        "webhook_secret".to_string(),
-                        serde_json::Value::String(secret_value.clone()),
-                    );
-                    host_webhook_secret = Some(secret_value);
-                    should_rerun_on_start = true;
-                }
-                Err(e) => {
-                    if router.requires_secret(name).await {
-                        config_updates
-                            .insert("webhook_secret".to_string(), serde_json::Value::Null);
-                        should_rerun_on_start = true;
-                    }
-                    tracing::warn!(
-                        channel = %name,
-                        error = %e,
-                        "Webhook secret not found during refresh"
-                    );
-                }
-            }
+        {
+            let secret_value = secret.expose().to_string();
+            router.update_secret(name, secret_value.clone()).await;
+            config_updates.insert(
+                RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
+                serde_json::Value::String(secret_value.clone()),
+            );
+            host_webhook_secret = Some(secret_value);
+            should_rerun_on_start = true;
         }
 
         // Refresh signature key
@@ -6381,14 +6362,14 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one.
-        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // Delete any stale nonce before storing the new one. Best-effort
+        // delete of the legacy caller-scoped entry first so upgrade residue
+        // does not linger in the secrets table. The primary delete uses
+        // self.user_id (the gateway owner) — NOT the caller's user_id —
         // because the OAuth callback handler looks up the nonce under
-        // state.owner_id which matches self.user_id.
-        let _ = self.secrets.delete(&self.user_id, &state_key).await;
-        // Also best-effort delete any legacy caller-scoped entry so older
-        // per-user nonces don't remain in the secrets table after upgrading.
+        // state.owner_id, which matches self.user_id.
         let _ = self.secrets.delete(user_id, &state_key).await;
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
             .create(
                 &self.user_id,
@@ -7439,7 +7420,7 @@ impl ExtensionManager {
                     && !self.has_wasm_channel_pairing(&name).await;
 
                 if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
-                    let onboarding = crate::channels::web::handlers::extensions::derive_onboarding(
+                    let onboarding = crate::channels::web::features::extensions::derive_onboarding(
                         &name,
                         Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                     );
@@ -7484,7 +7465,7 @@ impl ExtensionManager {
                         None
                     },
                     onboarding: if needs_pairing {
-                        crate::channels::web::handlers::extensions::derive_onboarding(
+                        crate::channels::web::features::extensions::derive_onboarding(
                             &name,
                             Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
                         )
@@ -10218,7 +10199,7 @@ mod tests {
     #[tokio::test]
     async fn test_has_wasm_channel_pairing_reflects_db_backed_identities() -> Result<(), String> {
         use crate::db::{Database, UserStore};
-        use crate::ownership::{OwnerId, OwnershipCache};
+        use crate::ownership::{OwnershipCache, UserId, UserRole};
         use crate::pairing::PairingStore;
 
         let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
@@ -10322,7 +10303,11 @@ mod tests {
             .await
             .map_err(|e| format!("upsert_request failed: {e}"))?;
         pairing_store
-            .approve("telegram", &request.code, &OwnerId::from("owner-1921"))
+            .approve(
+                "telegram",
+                &request.code,
+                &UserId::from_trusted("owner-1921".into(), UserRole::Regular),
+            )
             .await
             .map_err(|e| format!("approve failed: {e}"))?;
 

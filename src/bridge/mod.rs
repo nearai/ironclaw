@@ -12,6 +12,7 @@ mod router;
 pub mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
+mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;
@@ -82,3 +83,6 @@ pub use router::engine_retrospectives_for_test;
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]
 pub(crate) use router::handle_mission_notification;
+
+#[cfg(test)]
+pub(crate) use router::test_support;

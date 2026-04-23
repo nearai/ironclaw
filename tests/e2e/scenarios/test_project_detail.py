@@ -189,7 +189,7 @@ async def test_project_detail_screenshot(page):
     await page.route("**/api/engine/projects/*/widgets", handle_widgets)
 
     # Enable engine v2 mode so the Projects tab is visible.
-    await page.evaluate("engineV2 = true; applyEngineModeToTabs();")
+    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
 
     # Click the Projects tab.
     await page.locator('.tab-bar button[data-tab="projects"]').click()

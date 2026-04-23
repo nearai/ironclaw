@@ -33,6 +33,8 @@ pub struct Attachment {
     pub source_url: Option<String>,
     /// Opaque key for host-side storage (e.g., after download/caching).
     pub storage_key: Option<String>,
+    /// Relative path to a project-local copy saved on disk, if persisted.
+    pub local_path: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
     /// Raw file bytes (for small files downloaded by the channel).
@@ -1118,6 +1120,7 @@ mod tests {
             size_bytes: size,
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: Vec::new(),
             duration_secs: None,

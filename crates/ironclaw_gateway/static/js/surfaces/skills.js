@@ -62,6 +62,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
+    setSlashSkillEntries((data && data.skills) || []);
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
@@ -390,4 +391,3 @@ document.getElementById('skill-search-input').addEventListener('keydown', functi
 });
 
 // --- Tool Permissions ---
-

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use crate::channels::web::server::{
+use crate::channels::web::platform::state::{
     ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
@@ -58,6 +58,7 @@ fn build_state(
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -356,7 +357,7 @@ mod workspace_pool {
 #[cfg(feature = "libsql")]
 mod jobs_isolation {
     use super::*;
-    use crate::channels::web::handlers::jobs::{
+    use crate::channels::web::features::jobs::{
         jobs_cancel_handler, jobs_prompt_handler, jobs_restart_handler, jobs_summary_handler,
     };
     // SandboxStore methods are accessed through the Database supertrait.
@@ -564,7 +565,7 @@ mod jobs_isolation {
 #[cfg(feature = "libsql")]
 mod routines_isolation {
     use super::*;
-    use crate::channels::web::handlers::routines::{
+    use crate::channels::web::features::routines::{
         routines_delete_handler, routines_detail_handler, routines_list_handler,
         routines_summary_handler, routines_toggle_handler,
     };
@@ -1264,6 +1265,7 @@ mod admin_tool_policy {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: Some(Arc::new(pool)),
+            multi_tenant_mode: true,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,

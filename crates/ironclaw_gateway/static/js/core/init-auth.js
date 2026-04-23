@@ -60,6 +60,7 @@ function initApp() {
     if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
+  refreshSlashSkillEntries();
   loadThreads();
   loadMemoryTree();
   loadJobs();
@@ -412,4 +413,3 @@ function updateRestartButtonVisibility() {
 }
 
 // --- SSE ---
-

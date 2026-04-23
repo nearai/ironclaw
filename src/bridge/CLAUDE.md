@@ -35,7 +35,7 @@ Every surface that needs an extension name for auth flow MUST call this free fun
 
 - `AuthManager::resolve_extension_name_for_auth_flow(...) -> ExtensionName` — delegates with `self.tools` and `self.extension_manager`. Used by `bridge::router`.
 - `bridge::router::resolve_auth_gate_extension_name(pending) -> Option<ExtensionName>` — used for `GateRequired` SSE and `send_pending_gate_status`.
-- `channels::web::server::pending_gate_extension_name(state, ...) -> Option<ExtensionName>` — used for `HistoryResponse.pending_gate` and rehydration. Calls the free function directly so the bare-test-harness path (no `AuthManager` built yet) still runs every branch, not a drift-prone subset.
+- `channels::web::features::chat::pending_gate_extension_name(state, ...) -> Option<ExtensionName>` — used for `HistoryResponse.pending_gate` and rehydration. Calls the free function directly so the bare-test-harness path (no `AuthManager` built yet) still runs every branch, not a drift-prone subset.
 
 Wrappers **delegate**; they must not duplicate the precedence rules, reconstruct names from credential prefixes, or fall back to `format!()`-built strings.
 

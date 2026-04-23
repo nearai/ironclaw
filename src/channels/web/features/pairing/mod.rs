@@ -135,7 +135,13 @@ pub(crate) async fn pairing_approve_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Pairing store not available".to_string(),
     ))?;
-    let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
+    // Bind to the authenticated user. `from_trusted` is appropriate: user.user_id
+    // came from the auth layer (DB-sourced). Role is irrelevant for approval —
+    // only the id is recorded on the pairing row.
+    let owner_id = crate::ownership::UserId::from_trusted(
+        user.user_id.clone(),
+        crate::ownership::UserRole::from_db_role(&user.role),
+    );
     let approval = match store.approve(&channel, &code, &owner_id).await {
         Ok(approval) => approval,
         Err(crate::error::DatabaseError::NotFound { .. }) => {
@@ -229,25 +235,47 @@ pub(crate) async fn pairing_approve_handler(
 
 #[cfg(test)]
 mod tests {
-    //! `parse_channel` is the boundary that turns an untrusted URL-path
-    //! segment into the lowercased pairing key. Every pairing handler
-    //! calls it as the first line, so an error here is what triggers the
-    //! 400 that the PR #2665 review (Copilot) asked to lock in. These
-    //! tests pin four contracts:
-    //!
-    //! 1. Accept the names pairing actually uses (lowercase, snake_case).
-    //! 2. Lowercase mixed-case URL paths.
-    //! 3. **Preserve hyphens** — `ExtensionName::new` canonicalizes `-`
-    //!    to `_`, but the pairing store keys off the un-folded name, so
-    //!    `slack-relay` (a real live WASM channel) must stay addressable.
-    //! 4. Reject shapes that can't correspond to a real channel (path
-    //!    traversal, invalid charset, edge/consecutive underscores,
-    //!    oversize) with `StatusCode::BAD_REQUEST`.
-    //!
-    //! If `ExtensionName`'s rules grow, or if `parse_channel`'s return
-    //! type is re-typed into an `ExtensionName`, this test module is the
-    //! first place the regression will surface.
+    use std::sync::Arc;
+
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
+    use uuid::Uuid;
+
+    use crate::channels::web::auth::UserIdentity;
+
+    use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
+
+    use crate::channels::web::platform::state::GatewayState;
+
+    use crate::channels::web::test_helpers::{
+        insert_test_user, test_gateway_state_with_dependencies,
+    };
+
+    use crate::db::Database;
+
     use super::*;
+
+    // `parse_channel` is the boundary that turns an untrusted URL-path
+    // segment into the lowercased pairing key. Every pairing handler
+    // calls it as the first line, so an error here is what triggers the
+    // 400 that the PR #2665 review (Copilot) asked to lock in. These
+    // tests pin four contracts:
+    //
+    // 1. Accept the names pairing actually uses (lowercase, snake_case).
+    // 2. Lowercase mixed-case URL paths.
+    // 3. **Preserve hyphens** — `ExtensionName::new` canonicalizes `-`
+    //    to `_`, but the pairing store keys off the un-folded name, so
+    //    `slack-relay` (a real live WASM channel) must stay addressable.
+    // 4. Reject shapes that can't correspond to a real channel (path
+    //    traversal, invalid charset, edge/consecutive underscores,
+    //    oversize) with `StatusCode::BAD_REQUEST`.
+    //
+    // If `ExtensionName`'s rules grow, or if `parse_channel`'s return
+    // type is re-typed into an `ExtensionName`, this test module is the
+    // first place the regression will surface.
 
     #[test]
     fn parse_channel_accepts_lowercase_snake_case() {
@@ -337,5 +365,366 @@ mod tests {
         let long = "a".repeat(ironclaw_common::MAX_NAME_LEN + 1);
         let (status, _msg) = parse_channel(long).expect_err("over length must fail");
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_pairing_test_state() -> (
+        Arc<GatewayState>,
+        Arc<dyn Database>,
+        Arc<crate::pairing::PairingStore>,
+        tempfile::TempDir,
+    ) {
+        let (db, tmp) = crate::testing::test_db().await;
+        insert_test_user(&db, "admin-1", "admin").await;
+        insert_test_user(&db, "member-1", "member").await;
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new(
+            Arc::clone(&db),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        ));
+        let state = test_gateway_state_with_dependencies(
+            None,
+            Some(Arc::clone(&db)),
+            None,
+            Some(Arc::clone(&pairing_store)),
+        );
+        (state, db, pairing_store, tmp)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_list_requires_admin_role() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        pairing_store
+            .upsert_request("telegram", "tg-user-1", None)
+            .await
+            .expect("create pairing request");
+
+        let app = Router::new()
+            .route("/api/pairing/{channel}", get(pairing_list_handler))
+            .with_state(state);
+
+        let mut member_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/pairing/telegram")
+            .body(Body::empty())
+            .expect("member request");
+        member_req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let member_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), member_req)
+            .await
+            .expect("member response");
+        assert_eq!(member_resp.status(), StatusCode::FORBIDDEN);
+
+        let mut admin_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/pairing/telegram")
+            .body(Body::empty())
+            .expect("admin request");
+        admin_req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-1".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let admin_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, admin_req)
+            .await
+            .expect("admin response");
+        assert_eq!(admin_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(admin_resp.into_body(), 1024 * 64)
+            .await
+            .expect("admin body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("pairing list json");
+        assert_eq!(
+            parsed["channel"],
+            serde_json::Value::String("telegram".to_string())
+        );
+        assert_eq!(parsed["requests"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            parsed["requests"][0]["sender_id"],
+            serde_json::Value::String("tg-user-1".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_claims_code_for_authenticated_user() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-claim", None)
+            .await
+            .expect("create pairing request");
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "code": request.code.to_ascii_lowercase() }).to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(true));
+
+        let identity = pairing_store
+            .resolve_identity("telegram", "tg-user-claim")
+            .await
+            .expect("resolve identity")
+            .expect("claimed identity");
+        assert_eq!(identity.as_str(), "member-1");
+        assert!(
+            pairing_store
+                .list_pending("telegram")
+                .await
+                .expect("pending list")
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_does_not_inject_followup_agent_turn_without_thread() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-no-followup", None)
+            .await
+            .expect("create pairing request");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "code": request.code }).to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            !matches!(recv, Ok(Some(_))),
+            "pairing approval should not inject a synthetic gateway follow-up turn"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_injects_ready_followup_for_active_thread() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-followup", None)
+            .await
+            .expect("create pairing request");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let thread_id = "gateway-thread-123";
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "code": request.code, "thread_id": thread_id }).to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let followup = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("follow-up timeout")
+            .expect("follow-up message");
+        assert_eq!(followup.channel, "gateway");
+        assert_eq!(followup.user_id, "member-1");
+        assert_eq!(
+            followup.thread_id.as_ref().map(|t| t.as_str()),
+            Some(thread_id)
+        );
+        assert!(
+            followup
+                .content
+                .contains("onboarding for 'telegram' is now fully complete and ready"),
+            "unexpected follow-up content: {}",
+            followup.content
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_dispatches_external_callback_for_pairing_gate_request() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-gate-followup", None)
+            .await
+            .expect("create pairing request");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let thread_id = "gateway-thread-456";
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "code": request.code,
+                    "thread_id": thread_id,
+                    "request_id": request_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let callback = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("callback timeout")
+            .expect("callback message");
+        let submission = callback
+            .structured_submission
+            .clone()
+            .expect("structured submission sideband");
+        assert!(matches!(
+            submission,
+            crate::agent::submission::Submission::ExternalCallback { request_id: rid }
+                if rid == request_id
+        ));
+        assert_eq!(callback.content, "[structured external callback]");
+        assert_eq!(
+            callback.thread_id.as_ref().map(|t| t.as_str()),
+            Some(thread_id)
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_rejects_blank_code() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, _pairing_store, _tmp) = make_pairing_test_state().await;
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "code": "   " }).to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(false));
+        assert_eq!(
+            parsed["message"],
+            serde_json::Value::String("Pairing code is required.".to_string())
+        );
     }
 }
