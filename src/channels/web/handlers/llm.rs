@@ -530,14 +530,20 @@ async fn resolve_api_key_from_secrets(
 
 /// Check if a base URL belongs to a NEAR AI private endpoint.
 ///
-/// Matches `private.near.ai` exactly or any subdomain of it
-/// (e.g. `us.private.near.ai`). Rejects lookalikes like
+/// Matches `private.near.ai` and `private-chat-stg.near.ai` exactly,
+/// or any subdomain of either (e.g. `us.private.near.ai`,
+/// `us.private-chat-stg.near.ai`). Rejects lookalikes like
 /// `private-evil.near.ai` or `myprivate.near.ai`.
 fn is_nearai_private_endpoint(base_url: &str) -> bool {
+    const PRIVATE_HOSTS: &[&str] = &["private.near.ai", "private-chat-stg.near.ai"];
     url::Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-        .is_some_and(|host| host == "private.near.ai" || host.ends_with(".private.near.ai"))
+        .is_some_and(|host| {
+            PRIVATE_HOSTS
+                .iter()
+                .any(|root| host == *root || host.ends_with(&format!(".{root}")))
+        })
 }
 
 #[cfg(test)]
@@ -688,6 +694,20 @@ mod tests {
     #[test]
     fn test_nearai_private_subdomain() {
         assert!(is_nearai_private_endpoint("https://us.private.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_private_stg_exact_match() {
+        assert!(is_nearai_private_endpoint(
+            "https://private-chat-stg.near.ai/"
+        ));
+    }
+
+    #[test]
+    fn test_nearai_private_stg_subdomain() {
+        assert!(is_nearai_private_endpoint(
+            "https://us.private-chat-stg.near.ai/v1"
+        ));
     }
 
     #[test]
