@@ -237,8 +237,22 @@ impl ExecutionLoop {
                 Vec::new()
             }
         };
+        let inventory = match self
+            .effects
+            .available_action_inventory(&active_leases, &prompt_context)
+            .await
+        {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                debug!(
+                    thread_id = %self.thread.id,
+                    "failed to load action inventory for system prompt refresh: {error}"
+                );
+                crate::types::capability::ActionInventory::default()
+            }
+        };
         let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
-            &[],
+            &inventory,
             &capabilities,
             system_docs,
             self.platform_info.as_ref(),
@@ -883,7 +897,9 @@ mod tests {
         }
 
         let bare_old_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
-            &[test_action()],
+            &crate::types::capability::ActionInventory {
+                inline: vec![test_action()],
+            },
             &[CapabilitySummary {
                 name: "telegram".into(),
                 display_name: Some("Telegram".into()),

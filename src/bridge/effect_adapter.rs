@@ -16,8 +16,9 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, CapabilitySummary,
-    EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionInventory, ActionResult, CapabilityLease, CapabilityRegistry,
+    CapabilitySummary, EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext,
+    WorkspaceMounts,
 };
 use ironclaw_skills::SkillRegistry;
 
@@ -984,55 +985,67 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if canonical_action_name == "tool_info"
-            && let Some(actions) = context.available_actions_snapshot.as_ref()
-        {
-            match ActionDiscovery::tool_info(&parameters, actions.as_ref()) {
-                Ok(Some(output)) => {
-                    return Ok(ActionResult {
-                        call_id: context
-                            .current_call_id
-                            .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
-                        action_name: canonical_action_name.to_string(),
-                        output: output.result,
-                        is_error: false,
-                        duration: start.elapsed(),
-                    });
-                }
-                Ok(None) => {
-                    let requested = parameters
-                        .get("name")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("<missing>");
-                    let error_msg = format!(
-                        "Tool tool_info failed: no callable action named '{requested}' is available in this execution context"
-                    );
-                    let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
-                    return Ok(ActionResult {
-                        call_id: context
-                            .current_call_id
-                            .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
-                        action_name: canonical_action_name.to_string(),
-                        output: serde_json::json!({"error": sanitized.content}),
-                        is_error: true,
-                        duration: start.elapsed(),
-                    });
-                }
-                Err(error) => {
-                    let error_msg = format!("Tool {} failed: {}", "tool_info", error);
-                    let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
-                    return Ok(ActionResult {
-                        call_id: context
-                            .current_call_id
-                            .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
-                        action_name: canonical_action_name.to_string(),
-                        output: serde_json::json!({"error": sanitized.content}),
-                        is_error: true,
-                        duration: start.elapsed(),
-                    });
+        if canonical_action_name == "tool_info" {
+            let snapshot_result = context
+                .available_action_inventory_snapshot
+                .as_deref()
+                .map(|inventory| ActionDiscovery::tool_info(&parameters, inventory))
+                .or_else(|| {
+                    context
+                        .available_actions_snapshot
+                        .as_deref()
+                        .map(|actions| {
+                            ActionDiscovery::tool_info_from_actions(&parameters, actions)
+                        })
+                });
+            if let Some(snapshot_result) = snapshot_result {
+                match snapshot_result {
+                    Ok(Some(output)) => {
+                        return Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                            action_name: canonical_action_name.to_string(),
+                            output: output.result,
+                            is_error: false,
+                            duration: start.elapsed(),
+                        });
+                    }
+                    Ok(None) => {
+                        let requested = parameters
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("<missing>");
+                        let error_msg = format!(
+                            "Tool tool_info failed: no callable action named '{requested}' is available in this execution context"
+                        );
+                        let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                        return Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                            action_name: canonical_action_name.to_string(),
+                            output: serde_json::json!({"error": sanitized.content}),
+                            is_error: true,
+                            duration: start.elapsed(),
+                        });
+                    }
+                    Err(error) => {
+                        let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                        let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                        return Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                            action_name: canonical_action_name.to_string(),
+                            output: serde_json::json!({"error": sanitized.content}),
+                            is_error: true,
+                            duration: start.elapsed(),
+                        });
+                    }
                 }
             }
         }
@@ -1639,12 +1652,23 @@ impl EffectExecutor for EffectBridgeAdapter {
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
+
+    async fn available_action_inventory(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
         let auth_manager = self.auth_manager.read().await.clone();
         let capability_registry = self.capability_registry.read().await.clone();
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        ActionProjector::project(
+        let actions = ActionProjector::project_actions(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -1652,7 +1676,9 @@ impl EffectExecutor for EffectBridgeAdapter {
             context,
             extensions.as_ref(),
         )
-        .await
+        .await?;
+
+        Ok(ActionInventory { inline: actions })
     }
 
     async fn available_capabilities(
@@ -2627,6 +2653,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 
@@ -2725,6 +2752,54 @@ mod tests {
                 .contains("no callable action named 'echo'"),
             "unexpected error output: {:?}",
             result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_action_inventory_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "github_search".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec!["query".to_string()],
+                        conditional_requirements: vec![],
+                        notes: vec!["Schema available through tool_info".to_string()],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }],
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve action inventory discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("github_search"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["query"])
         );
     }
 
@@ -3636,6 +3711,7 @@ mod tests {
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
             ),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3656,6 +3732,7 @@ mod tests {
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
             ),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3674,6 +3751,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3692,6 +3770,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3713,6 +3792,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -3732,6 +3812,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3955,6 +4036,7 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             }
         }
 
@@ -4237,6 +4319,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -4334,6 +4417,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4445,6 +4529,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4635,6 +4720,7 @@ mod tests {
         name: String,
         description: String,
         provider_extension: String,
+        parameters_schema: serde_json::Value,
     }
 
     struct ProviderFixture {
@@ -4653,7 +4739,7 @@ mod tests {
         }
 
         fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
+            self.parameters_schema.clone()
         }
 
         async fn execute(
@@ -4676,6 +4762,7 @@ mod tests {
         provider_name: &str,
         action_name: &str,
         capabilities: serde_json::Value,
+        parameters_schema: serde_json::Value,
     ) -> ProviderFixture {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
@@ -4709,6 +4796,7 @@ mod tests {
                 name: action_name.to_string(),
                 description: format!("{action_name} test action"),
                 provider_extension: provider_name.to_string(),
+                parameters_schema,
             }))
             .await;
 
@@ -4770,6 +4858,7 @@ mod tests {
                     }
                 }
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4796,6 +4885,7 @@ mod tests {
                     ]
                 }
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4815,6 +4905,7 @@ mod tests {
             serde_json::json!({
                 "description": "GitHub provider fixture"
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4824,6 +4915,59 @@ mod tests {
             .await
             .expect("actions");
         assert!(!actions.iter().any(|action| action.name == "github_search"));
+    }
+
+    #[tokio::test]
+    async fn available_action_inventory_keeps_provider_actions_inline_callable() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail",
+            serde_json::json!({
+                "description": "Gmail provider fixture"
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+        )
+        .await;
+
+        let base_ctx = exec_ctx(ironclaw_engine::ThreadId::new(), None);
+        let inventory = fixture
+            .adapter
+            .available_action_inventory(&[], &base_ctx)
+            .await
+            .expect("inventory");
+
+        assert!(
+            inventory.inline.iter().any(|action| action.name == "gmail"),
+            "provider action should stay inline-callable"
+        );
+        let gmail = inventory
+            .inline
+            .iter()
+            .find(|action| action.name == "gmail")
+            .expect("provider action should be inline");
+        assert_eq!(gmail.description, "gmail test action");
+        assert_eq!(
+            gmail.parameters_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &base_ctx)
+            .await
+            .expect("actions");
+        assert!(
+            actions.iter().any(|action| action.name == "gmail"),
+            "provider action must remain callable in the provider surface"
+        );
     }
 
     #[tokio::test]
@@ -4897,6 +5041,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let capabilities = adapter

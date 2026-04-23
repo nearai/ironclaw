@@ -568,7 +568,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_providers_returns_nearai_with_env_vars() {
-        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "test-key-123");
             std::env::set_var("NEARAI_MODEL", "test-model");
@@ -604,6 +605,7 @@ mod tests {
         assert_eq!(nearai.get("builtin").and_then(|v| v.as_bool()), Some(true));
 
         // Clean up
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::remove_var("NEARAI_API_KEY");
             std::env::remove_var("NEARAI_MODEL");

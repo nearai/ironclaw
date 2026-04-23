@@ -982,12 +982,16 @@ async fn handle_execute_action(
 
     let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
-        .available_actions(&active_leases, &exec_ctx)
-        .await
-        .unwrap_or_default()
-        .into();
+    let inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, &exec_ctx)
+            .await
+            .unwrap_or_default(),
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        inventory.inline.clone().into();
     exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+    exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1333,11 +1337,14 @@ async fn handle_execute_actions_parallel(
     let step_id = StepId::new();
     let actions_context = thread_execution_context(thread, step_id, None);
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
-        .available_actions(&active_leases, &actions_context)
-        .await
-        .unwrap_or_default()
-        .into();
+    let inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, &actions_context)
+            .await
+            .unwrap_or_default(),
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        inventory.inline.clone().into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1524,7 +1531,6 @@ async fn handle_execute_actions_parallel(
     let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
     let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
     let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
-
     // Separate runnable from errors
     let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
     for (idx, pf) in preflight.into_iter().enumerate() {
@@ -1556,6 +1562,7 @@ async fn handle_execute_actions_parallel(
             .unwrap_or_else(|| pc.name.clone());
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
         let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1591,6 +1598,7 @@ async fn handle_execute_actions_parallel(
             let lease = lease.clone();
             let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
             exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {

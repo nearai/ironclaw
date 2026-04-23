@@ -29,7 +29,7 @@ impl ActionProjector {
     /// instead of fetching from `auth_manager`. This allows the caller
     /// (typically `EffectBridgeAdapter`) to share a single fetch across
     /// both `ActionProjector` and `CapabilityProjector`.
-    pub(crate) async fn project(
+    pub(crate) async fn project_actions(
         tools: &ToolRegistry,
         auth_manager: Option<&AuthManager>,
         capability_registry: Option<Arc<CapabilityRegistry>>,
@@ -106,7 +106,8 @@ impl ActionProjector {
         }
 
         if let Some(registry) = capability_registry.as_ref() {
-            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            let mut seen: HashSet<String> =
+                actions.iter().map(|action| action.name.clone()).collect();
             for lease in leases {
                 if lease.capability_name == "tools" {
                     continue;
@@ -347,7 +348,7 @@ mod tests {
             .await;
 
         let extension_map = HashMap::from([(extension.name.clone(), extension)]);
-        let actions = ActionProjector::project(
+        let actions = ActionProjector::project_actions(
             tools.as_ref(),
             None,
             None,
@@ -358,7 +359,7 @@ mod tests {
         .await
         .expect("project should succeed");
 
-        actions.into_iter().map(|a| a.name).collect()
+        actions.into_iter().map(|action| action.name).collect()
     }
 
     fn test_context() -> ThreadExecutionContext {
@@ -373,6 +374,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 

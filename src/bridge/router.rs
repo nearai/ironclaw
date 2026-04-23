@@ -1086,6 +1086,7 @@ async fn execute_pending_gate_action(
             .and_then(ironclaw_engine::ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     state.effect_adapter.reset_call_count();

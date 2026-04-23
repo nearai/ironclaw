@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::types::capability::{ActionDef, CapabilityLease, CapabilitySummary};
+use crate::types::capability::{ActionDef, ActionInventory, CapabilityLease, CapabilitySummary};
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::step::{ActionResult, StepId};
@@ -40,6 +40,8 @@ pub struct ThreadExecutionContext {
     /// Populated by the orchestrator when an execution path needs on-demand
     /// discovery parity (for example `tool_info`).
     pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
+    /// Snapshot of the full action inventory visible to the current step.
+    pub available_action_inventory_snapshot: Option<Arc<ActionInventory>>,
 }
 
 /// Abstraction over capability action execution.
@@ -74,6 +76,19 @@ pub trait EffectExecutor: Send + Sync {
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError>;
+
+    /// List the full action inventory for the current set of active leases.
+    ///
+    /// The default implementation mirrors `available_actions()`.
+    async fn available_action_inventory(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
+        Ok(ActionInventory {
+            inline: self.available_actions(leases, context).await?,
+        })
+    }
 
     /// List capability background summaries given the current runtime state.
     async fn available_capabilities(

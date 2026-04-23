@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use ironclaw_engine::{ActionDef, ActionDiscoverySummary};
+use ironclaw_engine::{ActionDef, ActionDiscoverySummary, ActionInventory};
 
 use crate::tools::require_str;
 use crate::tools::{ToolError, ToolOutput};
@@ -39,6 +39,13 @@ pub(crate) struct ActionDiscovery;
 impl ActionDiscovery {
     pub(crate) fn tool_info(
         params: &serde_json::Value,
+        inventory: &ActionInventory,
+    ) -> Result<Option<ToolOutput>, ToolError> {
+        Self::tool_info_from_actions(params, &inventory.inline)
+    }
+
+    pub(crate) fn tool_info_from_actions(
+        params: &serde_json::Value,
         actions: &[ActionDef],
     ) -> Result<Option<ToolOutput>, ToolError> {
         let name = require_str(params, "name")?;
@@ -47,6 +54,10 @@ impl ActionDiscovery {
             return Ok(None);
         };
 
+        Ok(Some(Self::tool_output(action, detail)?))
+    }
+
+    fn tool_output(action: &ActionDef, detail: ActionInfoDetail) -> Result<ToolOutput, ToolError> {
         let schema = action.discovery_schema();
         let mut info = serde_json::json!({
             "name": action.discovery_name(),
@@ -72,7 +83,7 @@ impl ActionDiscovery {
             }
         }
 
-        Ok(Some(ToolOutput::success(info, Duration::from_millis(1))))
+        Ok(ToolOutput::success(info, Duration::from_millis(1)))
     }
 
     pub(crate) fn resolve<'a>(actions: &'a [ActionDef], name: &str) -> Option<&'a ActionDef> {
@@ -122,7 +133,9 @@ fn fallback_summary(schema: &serde_json::Value) -> ActionDiscoverySummary {
 #[cfg(test)]
 mod tests {
     use super::ActionDiscovery;
-    use ironclaw_engine::{ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary};
+    use ironclaw_engine::{
+        ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory,
+    };
 
     fn action(name: &str) -> ActionDef {
         ActionDef {
@@ -172,7 +185,9 @@ mod tests {
 
         let output = ActionDiscovery::tool_info(
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
-            &[action],
+            &ActionInventory {
+                inline: vec![action],
+            },
         )
         .expect("tool_info should succeed")
         .expect("action should resolve");
@@ -187,7 +202,9 @@ mod tests {
     fn tool_info_falls_back_to_required_fields_for_summary() {
         let output = ActionDiscovery::tool_info(
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
-            &[action("mission_create")],
+            &ActionInventory {
+                inline: vec![action("mission_create")],
+            },
         )
         .expect("tool_info should succeed")
         .expect("action should resolve");
@@ -196,5 +213,17 @@ mod tests {
             output.result["summary"]["always_required"],
             serde_json::json!(["id"])
         );
+    }
+
+    #[test]
+    fn tool_info_from_actions_reads_borrowed_snapshot() {
+        let output = ActionDiscovery::tool_info_from_actions(
+            &serde_json::json!({"name": "mission_create", "detail": "summary"}),
+            &[action("mission_create")],
+        )
+        .expect("tool_info should succeed")
+        .expect("action should resolve");
+
+        assert_eq!(output.result["name"], serde_json::json!("mission_create"));
     }
 }
