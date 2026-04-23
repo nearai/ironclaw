@@ -84,6 +84,59 @@ mod approval_trace_tests {
         }
     }
 
+    /// Test tool whose approval requirement is `Always` — the unbypassable
+    /// hard floor. Even an `allow-always` response must NOT auto-approve
+    /// subsequent calls of an `Always` tool. See dispatcher.rs:521-525 for
+    /// the design comment this guards.
+    struct AlwaysApprovalProbe {
+        executions: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysApprovalProbe {
+        fn new() -> (Arc<Self>, Arc<AtomicUsize>) {
+            let executions = Arc::new(AtomicUsize::new(0));
+            let tool = Arc::new(Self {
+                executions: executions.clone(),
+            });
+            (tool, executions)
+        }
+    }
+
+    #[async_trait]
+    impl Tool for AlwaysApprovalProbe {
+        fn name(&self) -> &str {
+            "always_approval_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool that always requires explicit approval (unbypassable)"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::success(
+                serde_json::json!({"ok": true, "echoed": params}),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
+        }
+    }
+
     /// Poll `captured_status_events` until an `ApprovalNeeded` is observed
     /// or the deadline elapses. Returns true on success.
     async fn wait_for_approval_needed(
@@ -245,6 +298,196 @@ mod approval_trace_tests {
             total_approval_needed
         );
 
+        rig.verify_trace_expects(&trace, &responses);
+        rig.shutdown();
+    }
+
+    /// `ApprovalRequirement::Always` is an unbypassable hard floor: an
+    /// `allow-always` response must NOT skip the pause on subsequent
+    /// calls of an `Always` tool. Two pauses for two calls.
+    #[tokio::test]
+    async fn always_requirement_ignores_allow_always_persistence() {
+        let trace = LlmTrace::from_file(fixture_path("approval_always_floor.json"))
+            .expect("failed to load approval_always_floor.json");
+        let (tool, executions) = AlwaysApprovalProbe::new();
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_extra_tools(vec![tool as Arc<dyn Tool>])
+            .with_auto_approve_tools(false)
+            .build()
+            .await;
+        rig.clear().await;
+
+        rig.send_message("Run the always-gated probe twice").await;
+
+        // First pause + resolve with "always".
+        assert!(
+            wait_for_approval_needed(&rig, TIMEOUT).await,
+            "expected first ApprovalNeeded"
+        );
+        rig.send_message("always").await;
+
+        // Second pause must still happen because Always is unbypassable.
+        assert!(
+            wait_for_approval_needed(&rig, TIMEOUT).await,
+            "second ApprovalNeeded must fire even after allow-always: \
+             ApprovalRequirement::Always is the hard floor"
+        );
+        rig.send_message("yes").await;
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let total_approval_needed = rig
+            .captured_status_events()
+            .iter()
+            .filter(|s| matches!(s, StatusUpdate::ApprovalNeeded { .. }))
+            .count();
+        assert_eq!(
+            total_approval_needed, 2,
+            "two Always-gated calls must produce exactly two ApprovalNeeded events"
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            2,
+            "both gated calls must run after individual approvals"
+        );
+        rig.verify_trace_expects(&trace, &responses);
+        rig.shutdown();
+    }
+
+    /// Slash-prefixed `/approve` is parsed as `Submission::ApprovalResponse`
+    /// even though bare "yes" downgrades to UserInput when nothing is
+    /// pending. This guards the divergent routing in submission.rs.
+    #[tokio::test]
+    async fn slash_approve_routes_as_approval_response() {
+        let trace = LlmTrace::from_file(fixture_path("approval_slash.json"))
+            .expect("failed to load approval_slash.json");
+        let (tool, executions) = NeedsApprovalProbe::new();
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_extra_tools(vec![tool as Arc<dyn Tool>])
+            .with_auto_approve_tools(false)
+            .build()
+            .await;
+        rig.clear().await;
+
+        rig.send_message("Run the gated probe").await;
+
+        assert!(
+            wait_for_approval_needed(&rig, TIMEOUT).await,
+            "expected ApprovalNeeded before /approve was sent"
+        );
+
+        rig.send_message("/approve").await;
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "tool must run after /approve"
+        );
+        rig.verify_trace_expects(&trace, &responses);
+        rig.shutdown();
+    }
+
+    /// Bare "yes" with no pending approval must downgrade to UserInput and
+    /// reach the LLM as a normal user message. The submission parser is
+    /// stateless, so the routing layer in agent_loop.rs is responsible
+    /// for the downgrade — this test pins that contract.
+    #[tokio::test]
+    async fn bare_yes_with_no_pending_approval_is_user_input() {
+        let trace = LlmTrace::from_file(fixture_path("approval_bare_yes_no_pending.json"))
+            .expect("failed to load approval_bare_yes_no_pending.json");
+        let (tool, executions) = NeedsApprovalProbe::new();
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_extra_tools(vec![tool as Arc<dyn Tool>])
+            .with_auto_approve_tools(false)
+            .build()
+            .await;
+        rig.clear().await;
+
+        rig.send_message("yes").await;
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        // The LLM must have been called with "yes" as a user message,
+        // proving the routing layer downgraded the bare keyword.
+        let captured = rig.captured_llm_requests();
+        assert!(
+            !captured.is_empty(),
+            "LLM must have been called — if zero calls, the routing layer \
+             incorrectly treated bare 'yes' as an approval response"
+        );
+        let last_user_yes = captured.iter().any(|msgs| {
+            msgs.iter().any(|m| {
+                matches!(m.role, ironclaw::llm::Role::User)
+                    && m.content.trim().eq_ignore_ascii_case("yes")
+            })
+        });
+        assert!(
+            last_user_yes,
+            "LLM conversation must include 'yes' as a user message"
+        );
+
+        // No approval gate should have been emitted — nothing was pending.
+        let approval_needed = rig
+            .captured_status_events()
+            .iter()
+            .filter(|s| matches!(s, StatusUpdate::ApprovalNeeded { .. }))
+            .count();
+        assert_eq!(
+            approval_needed, 0,
+            "no ApprovalNeeded should fire when nothing was pending"
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "probe tool must not run — LLM did not call it"
+        );
+        rig.verify_trace_expects(&trace, &responses);
+        rig.shutdown();
+    }
+
+    /// Agent-config `auto_approve_tools=true` is the master kill-switch: it
+    /// short-circuits the entire approval gate, so no `ApprovalNeeded` is
+    /// ever emitted, even for `UnlessAutoApproved` tools. Reuses the
+    /// approval_yes fixture and verifies the tool runs without any
+    /// resolution being sent.
+    #[tokio::test]
+    async fn config_auto_approve_bypasses_unless_auto_approved() {
+        let trace = LlmTrace::from_file(fixture_path("approval_yes.json"))
+            .expect("failed to load approval_yes.json");
+        let (tool, executions) = NeedsApprovalProbe::new();
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_extra_tools(vec![tool as Arc<dyn Tool>])
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+        rig.clear().await;
+
+        rig.send_message("Run the gated probe").await;
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "tool must run with auto_approve_tools=true and no resolution sent"
+        );
+        let approval_needed = rig
+            .captured_status_events()
+            .iter()
+            .filter(|s| matches!(s, StatusUpdate::ApprovalNeeded { .. }))
+            .count();
+        assert_eq!(
+            approval_needed, 0,
+            "no ApprovalNeeded should fire with auto_approve_tools=true"
+        );
         rig.verify_trace_expects(&trace, &responses);
         rig.shutdown();
     }

@@ -340,9 +340,12 @@ llm_traces/
     injection_in_echo.json  # Prompt injection in tool output
     memory_full_cycle.json  # Full memory write/search/read cycle
     status_events_tool_chain.json
-    approval_yes.json       # Approval round-trip: user approves -> tool runs
-    approval_no.json        # Approval round-trip: user denies -> tool skipped
-    approval_always.json    # Approval round-trip: allow-always persists across calls
+    approval_yes.json              # Approval round-trip: user approves -> tool runs
+    approval_no.json               # Approval round-trip: user denies -> tool skipped
+    approval_always.json           # Approval round-trip: allow-always persists across calls
+    approval_always_floor.json     # ApprovalRequirement::Always is unbypassable (allow-always does NOT skip subsequent pauses)
+    approval_slash.json            # /approve slash form routes as ApprovalResponse
+    approval_bare_yes_no_pending.json # Bare "yes" with no pending approval is treated as user input
   advanced/                 # Multi-step and edge-case scenarios
     long_tool_chain.json    # Many sequential tool calls
     tool_error_recovery.json # Failed tool call -> retry with valid path
