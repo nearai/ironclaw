@@ -713,6 +713,7 @@ impl Agent {
                     skill.manifest.activation.keywords.is_empty()
                         && skill.manifest.activation.patterns.is_empty()
                         && skill.manifest.activation.tags.is_empty()
+                        && skill.manifest.activation.exclude_keywords.is_empty()
                         && skill
                             .manifest
                             .activation
