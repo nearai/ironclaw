@@ -71,6 +71,10 @@ services:
       SANDBOX_ENABLED: ${SANDBOX_ENABLED:-true}
       SANDBOX_POLICY: ${SANDBOX_POLICY:-readonly}
       SANDBOX_ALLOW_FULL_ACCESS: "false"
+      # Auto-register the t3n-mcp sidecar as a unix-transport MCP server on
+      # first boot. The path must match the MCP_SOCKET_PATH below so both
+      # containers agree on where the socket lives.
+      T3N_MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
       # TODO(security): When the docker-socket-proxy TODO above is resolved,
       #   point DOCKER_HOST here at the proxy socket instead of the raw daemon,
       #   e.g. DOCKER_HOST: "unix:///var/run/docker-proxy.sock"
@@ -95,10 +99,23 @@ services:
     profiles: ["app"]
     user: "0:0"
     build:
+      # The main context is bastion-claw (for the bridge script). Trinity
+      # sources come in as named additional contexts so we can `COPY
+      # --from=<name> ...` in the Dockerfile. Check out ../trinity to
+      # whichever commit you want — that's the version that gets built.
+      #
+      # We point directly at the two leaf subdirectories we need instead of
+      # the trinity root because trinity's top-level .dockerignore has a
+      # blanket `**/config/` exclusion that silently strips
+      # src/shared/config/ from the context (Docker does not descend into
+      # excluded directories, so the later `!**/src/` cannot re-include
+      # it). By rooting each context inside client/ we bypass that
+      # .dockerignore entirely.
       context: .
       dockerfile: docker/t3n-mcp-sidecar.Dockerfile
-      args:
-        GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      additional_contexts:
+        trinity_mcp: ../trinity/client/mcp/t3n-mcp
+        trinity_shared: ../trinity/client/shared
     restart: unless-stopped
     environment:
       # Defaults to Trinity staging; override in .env when you need a different
@@ -108,7 +125,10 @@ services:
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
-      T3N_PROJECT_DIR: /app/node_modules/@terminal-3/t3n-mcp
+      # Source build from Trinity puts everything at /app (see Dockerfile).
+      # The npm-install layout at /app/node_modules/@terminal-3/t3n-mcp was only
+      # valid with the ccefae18 "from npm" approach.
+      T3N_PROJECT_DIR: /app
     volumes:
       - t3n_mcp_socket:/var/run/t3n-mcp
 
