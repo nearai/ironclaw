@@ -196,15 +196,18 @@ async def test_shell_mode_roundtrip_persists_across_reload(page, ironclaw_server
         )
 
 
-async def test_shell_mode_rejects_when_no_project(page, ironclaw_server):
-    """`!` without any active project must 409 rather than dispatching.
+async def test_shell_mode_falls_back_to_default_project(page, ironclaw_server):
+    """`!` with no active pointer dispatches against the user's `default` project.
 
-    The backend contract: shell mode requires a resolvable project
-    (per-thread override → active pointer → error). A regression that
-    ran shell commands against the gateway's own cwd would be a
-    silent security foot-gun.
+    Per commit 0323ead2 (`fix(gateway+tui): project selector refresh, shell
+    default project, TUI !-mode`), `resolve_thread_project` falls back to the
+    auto-created per-user `default` project when no per-thread or user-level
+    pointer is set. The security invariant — shell runs against a project's
+    workspace, not the gateway's cwd — still holds; the dispatch just doesn't
+    409 anymore. This test pins that contract so a future regression back to
+    409 (or, worse, to the gateway's cwd) fails immediately.
     """
-    # Explicitly clear any active project the prior tests may have set.
+    # Clear any user-level active pointer set by earlier scenarios.
     async with httpx.AsyncClient(timeout=15) as client:
         await client.post(
             f"{ironclaw_server}/api/engine/projects/active",
@@ -215,9 +218,13 @@ async def test_shell_mode_rejects_when_no_project(page, ironclaw_server):
     await page.reload(wait_until="domcontentloaded")
     await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=10000)
 
-    # Get a valid thread_id the page is currently bound to.
-    thread_id = await page.evaluate("() => window.currentThreadId || null")
-    assert thread_id, "test requires the UI to be bound to a thread"
+    # Thread binding happens async after loadThreads resolves — poll until
+    # the page exposes an id instead of racing against the fetch.
+    await page.wait_for_function(
+        "() => !!window.currentThreadId",
+        timeout=10000,
+    )
+    thread_id = await page.evaluate("() => window.currentThreadId")
 
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
@@ -229,8 +236,8 @@ async def test_shell_mode_rejects_when_no_project(page, ironclaw_server):
                 "mode": "shell",
             },
         )
-        assert r.status_code == 409, (
-            f"expected 409 for shell-mode without project, got: {r.status_code} {r.text}"
+        assert r.status_code == 202, (
+            f"expected 202 (default-project fallback), got: {r.status_code} {r.text}"
         )
 
 

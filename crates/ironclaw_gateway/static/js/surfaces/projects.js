@@ -1133,11 +1133,18 @@ function formatRelativeTime(isoString) {
   }
 
   function refreshCurrentThread() {
-    // Fetch history for the current thread; its ThreadInfo.project is
-    // already enriched by the backend. We don't need to round-trip —
-    // the history endpoint is the cheapest thing that returns it.
+    // Mirror the backend precedence for `resolve_thread_project`:
+    //   1. Per-thread override (ThreadInfo.project)
+    //   2. User-level active-project pointer
+    //   3. None
+    // The assistant/home thread never carries a thread-scoped project
+    // (by design — it spans all projects), so the active-project fallback
+    // is what surfaces the user's currently-selected coding project on
+    // the pinned thread.
     if (!currentThreadId) {
-      refreshChromeFromThread(null);
+      fetchActive()
+        .then((data) => refreshChromeFromThread((data && data.project) || null))
+        .catch(() => refreshChromeFromThread(null));
       return;
     }
     apiFetch('/api/chat/threads')
@@ -1146,7 +1153,14 @@ function formatRelativeTime(isoString) {
           .concat(data.assistant_thread ? [data.assistant_thread] : [])
           .concat(data.threads || []);
         const match = all.find((th) => th && th.id === currentThreadId);
-        refreshChromeFromThread((match && match.project) || null);
+        const threadProject = (match && match.project) || null;
+        if (threadProject) {
+          refreshChromeFromThread(threadProject);
+          return;
+        }
+        return fetchActive()
+          .then((active) => refreshChromeFromThread((active && active.project) || null))
+          .catch(() => refreshChromeFromThread(null));
       })
       .catch(() => { /* chrome stays in its last state */ });
   }
