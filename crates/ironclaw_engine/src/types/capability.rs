@@ -121,7 +121,7 @@ pub enum EffectType {
 // ── Action definition ───────────────────────────────────────
 
 /// Definition of a single action within a capability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionDef {
     /// Action name (e.g. "create_issue", "web_fetch").
     pub name: String,
@@ -133,6 +133,93 @@ pub struct ActionDef {
     pub effects: Vec<EffectType>,
     /// Whether this action requires user approval before execution.
     pub requires_approval: bool,
+    /// Optional discovery metadata used by `tool_info` and prompt guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ActionDiscoveryMetadata>,
+}
+
+/// Model-visible callable action inventory for a single execution step.
+///
+/// All actions in this inventory are callable. Richer schema/details remain
+/// available through `tool_info`, while non-callable runtime context belongs
+/// in capability background surfacing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionInventory {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline: Vec<ActionDef>,
+}
+
+/// Curated discovery guidance for a callable action.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoverySummary {
+    /// Parameters that are always required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    /// Conditional requirements or cross-field invariants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    /// Additional notes for correct tool selection/use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Optional structured examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
+/// Optional discovery metadata layered on top of an executable action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoveryMetadata {
+    /// Canonical discovery name shown to the model.
+    pub name: String,
+    /// Optional curated discovery guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ActionDiscoverySummary>,
+    /// Optional discovery schema when it differs from the callable schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_override: Option<serde_json::Value>,
+}
+
+impl ActionDef {
+    /// Canonical discovery name for this action.
+    pub fn discovery_name(&self) -> &str {
+        self.discovery
+            .as_ref()
+            .map(|metadata| metadata.name.as_str())
+            .unwrap_or(self.name.as_str())
+    }
+
+    /// Discovery schema, defaulting to the callable schema.
+    pub fn discovery_schema(&self) -> &serde_json::Value {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.schema_override.as_ref())
+            .unwrap_or(&self.parameters_schema)
+    }
+
+    /// Curated discovery summary, when one exists.
+    pub fn discovery_summary(&self) -> Option<&ActionDiscoverySummary> {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.summary.as_ref())
+    }
+
+    /// Checks whether the given name resolves to this action.
+    pub fn matches_name(&self, name: &str) -> bool {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let discovery_name = self.discovery_name();
+        if self.name == trimmed || discovery_name == trimmed {
+            return true;
+        }
+        if trimmed.contains('-') || self.name.contains('-') || discovery_name.contains('-') {
+            let normalized = trimmed.replace('-', "_");
+            return normalized == self.name.replace('-', "_")
+                || normalized == discovery_name.replace('-', "_");
+        }
+        false
+    }
 }
 
 /// Canonical model-visible status for capability background surfacing.
@@ -416,6 +503,57 @@ mod tests {
 
         lease.granted_actions = GrantedActions::Specific(vec!["list-prs".into()]);
         assert!(lease.covers_action("list_prs"));
+    }
+
+    #[test]
+    fn action_def_matches_exact_and_hyphenated_names() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
+        assert!(!action.matches_name("mission_resume"));
+        assert!(!action.matches_name(" "));
+    }
+
+    #[test]
+    fn action_def_matches_discovery_aliases() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: Some(ActionDiscoveryMetadata {
+                name: "mission-create".to_string(),
+                summary: None,
+                schema_override: None,
+            }),
+        };
+
+        assert!(action.matches_name("mission-create"));
+        assert!(action.matches_name("mission_create"));
+    }
+
+    #[test]
+    fn action_def_matches_hyphenated_canonical_names_from_underscore_input() {
+        let action = ActionDef {
+            name: "mission-create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
     }
 
     #[test]

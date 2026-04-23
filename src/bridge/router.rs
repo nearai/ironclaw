@@ -17,6 +17,7 @@ use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 use crate::agent::Agent;
 use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
+use crate::bridge::engine_actions::mission_capability_actions;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
@@ -1084,6 +1085,8 @@ async fn execute_pending_gate_action(
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     state.effect_adapter.reset_call_count();
@@ -1601,126 +1604,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     capabilities.register(Capability {
         name: "missions".into(),
         description: "Mission and routine lifecycle management".into(),
-        actions: vec![
-            ironclaw_engine::ActionDef {
-                name: "mission_create".into(),
-                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Short name for the mission/routine"},
-                        "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
-                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["name", "goal", "cadence"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_list".into(),
-                description: "List all missions and routines in the current project.".into(),
-                parameters_schema: serde_json::json!({"type": "object"}),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_get".into(),
-                description: "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_fire".into(),
-                description: "Manually trigger a mission or routine to run immediately.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to trigger"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_pause".into(),
-                description: "Pause a running mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to pause"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_resume".into(),
-                description: "Resume a paused mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to resume"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to update"},
-                        "name": {"type": "string", "description": "New name"},
-                        "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_complete".into(),
-                description: "Mark a mission or routine as completed (sets status to completed).".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-        ],
+        actions: mission_capability_actions(),
         knowledge: vec![],
         policies: vec![],
     });

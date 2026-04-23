@@ -84,47 +84,21 @@ impl CapabilityProjector {
         let mut summaries = BTreeMap::<String, PrioritizedSummary>::new();
         let mut registry_only = Vec::new();
         let mut installed_keys = HashSet::new();
+        let latent_provider_keys = latent_provider_keys(&snapshot.latent_actions);
 
         for extension in snapshot.extensions {
+            let normalized_key = normalized_capability_key(&extension.name);
             if extension.installed {
-                installed_keys.insert(normalized_capability_key(&extension.name));
+                installed_keys.insert(normalized_key.clone());
+                if latent_provider_keys.contains(&normalized_key) {
+                    continue;
+                }
                 if let Some(summary) = summarize_extension(&extension, &snapshot.channel_routes) {
                     upsert_summary(&mut summaries, summary, ProjectionSource::InstalledRuntime);
                 }
             } else {
                 registry_only.push(extension);
             }
-        }
-
-        for latent in unique_latent_providers(snapshot.latent_actions) {
-            let normalized_key = normalized_capability_key(&latent.provider_extension);
-            if installed_keys.contains(&normalized_key) || summaries.contains_key(&normalized_key) {
-                continue;
-            }
-
-            let assignment = assign_surface(SurfacePolicyInput {
-                kind: SurfaceSubjectKind::LatentProviderAction,
-                status: CapabilityStatus::Latent,
-                invocation_mode: InvocationMode::Direct,
-
-                leased_and_callable: false,
-            });
-            if !assignment.available_capabilities {
-                continue;
-            }
-
-            upsert_summary(
-                &mut summaries,
-                CapabilitySummary {
-                    name: latent.provider_extension.clone(),
-                    display_name: None,
-                    kind: CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::Latent,
-                    description: Some(latent.description),
-                    routing_hint: None,
-                },
-                ProjectionSource::LatentRuntime,
-            );
         }
 
         for extension in registry_only {
@@ -148,7 +122,6 @@ impl CapabilityProjector {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ProjectionSource {
     RegistryOnly,
-    LatentRuntime,
     InstalledRuntime,
 }
 
@@ -265,16 +238,11 @@ pub(crate) fn capability_status_for_extension(
     CapabilityStatus::Ready
 }
 
-fn unique_latent_providers(
-    latent_actions: Vec<LatentProviderAction>,
-) -> impl Iterator<Item = LatentProviderAction> {
-    let mut providers = BTreeMap::<String, LatentProviderAction>::new();
-    for latent in latent_actions {
-        providers
-            .entry(latent.provider_extension.clone())
-            .or_insert(latent);
-    }
-    providers.into_values()
+fn latent_provider_keys(latent_actions: &[LatentProviderAction]) -> HashSet<String> {
+    latent_actions
+        .iter()
+        .map(|latent| normalized_capability_key(&latent.provider_extension))
+        .collect()
 }
 
 pub(crate) const fn is_channel_extension_kind(kind: ExtensionKind) -> bool {
@@ -398,7 +366,7 @@ mod tests {
         assert_eq!(by_name["slack"].status, CapabilityStatus::NeedsAuth);
         assert_eq!(by_name["github"].status, CapabilityStatus::NeedsSetup);
         assert_eq!(by_name["notion"].status, CapabilityStatus::Inactive);
-        assert_eq!(by_name["gmail"].status, CapabilityStatus::Latent);
+        assert!(!by_name.contains_key("gmail"));
         assert_eq!(
             by_name["linear"].status,
             CapabilityStatus::AvailableNotInstalled
@@ -411,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_and_latent_entries_beat_registry_only_duplicates() {
+    fn installed_latent_entries_stay_out_of_capability_background() {
         let mut inactive = installed_extension("gmail", ExtensionKind::WasmTool);
         inactive.active = false;
 
@@ -422,9 +390,7 @@ mod tests {
         };
 
         let projected = CapabilityProjector::project_snapshot(snapshot, &[]);
-        assert_eq!(projected.len(), 1);
-        assert_eq!(projected[0].name, "gmail");
-        assert_eq!(projected[0].status, CapabilityStatus::Inactive);
+        assert!(projected.is_empty());
     }
 
     #[test]
