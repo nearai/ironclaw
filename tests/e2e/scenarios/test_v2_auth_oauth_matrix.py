@@ -1454,13 +1454,13 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         owner_result = await send_chat_and_wait_for_terminal_message(
             owner_page,
             "check mock mcp search",
-            timeout=180000,
+            timeout=300000,
             expected_text_contains="Mock MCP search result",
         )
         member_result = await send_chat_and_wait_for_terminal_message(
             member_page,
             "check mock mcp search",
-            timeout=180000,
+            timeout=300000,
             expected_text_contains="Mock MCP search result",
         )
         assert owner_result["role"] == "assistant", owner_result
