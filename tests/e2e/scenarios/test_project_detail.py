@@ -1,11 +1,13 @@
-"""Screenshot test for the project detail (drill-in) page.
+"""Tests for the project detail (drill-in) page.
 
 Seeds mock data via page.route() API interception, navigates to the
-projects tab, drills into a project, and captures a screenshot for
-PR documentation.
+projects tab, drills into a project, and asserts control-room behavior.
 """
 
 import json
+
+from helpers import SEL
+from playwright.async_api import expect
 
 
 # ── Mock data ───────────────────────────────────────────────────
@@ -147,14 +149,54 @@ MOCK_THREADS = {
     ],
 }
 
+MOCK_MISSION_DETAIL = {
+    "mission": {
+        "id": "m-001",
+        "name": "Daily AI Paper Monitoring",
+        "status": "Active",
+        "goal": "# Input\n- `query` — papers from the last 24h\n\n# Investigation Process\n1. Fetch papers\n2. Rank them\n3. Summarize notable work",
+        "cadence_type": "daily",
+        "cadence_description": "Every day at 9:00 AM",
+        "thread_count": 42,
+        "threads_today": 2,
+        "max_threads_per_day": 3,
+        "created_at": "2026-04-12T08:45:00Z",
+        "next_fire_at": "2026-04-13T09:00:00Z",
+        "current_focus": "Tighten filtering for papers with real-world impact.",
+        "success_criteria": "Return a concise digest with 3-5 papers and clear takeaways.",
+        "approach_history": [
+            "Expected: produce a daily digest\nObserved: arXiv query is still broad\nFix applied: narrow to ai + cs.LG\nNext focus: improve ranking"
+        ],
+        "threads": [],
+    }
+}
 
-# ── Test ────────────────────────────────────────────────────────
+MOCK_THREAD_DETAIL = {
+    "thread": {
+        "id": "t-002",
+        "goal": "Analyze weekly research trends",
+        "title": "Weekly synthesis — Week 15",
+        "state": "Done",
+        "thread_type": "mission_run",
+        "step_count": 6,
+        "total_tokens": 18234,
+        "total_cost_usd": 0.42,
+        "created_at": "2026-04-07T10:00:00Z",
+        "completed_at": "2026-04-07T10:45:00Z",
+        "messages": [
+            {"role": "System", "content": "# Mission\nInvestigate weekly research themes."},
+            {"role": "Assistant", "content": "## Findings\n- Agentic workflows are trending\n- Benchmarks remain noisy"},
+        ],
+    }
+}
 
 
-async def test_project_detail_screenshot(page):
-    """Navigate to projects tab, drill into a project, capture screenshot."""
+# ── Route fixture helper ─────────────────────────────────────────
 
-    # Intercept API calls to return mock data.
+
+async def _route_project_detail_fixtures(page):
+    """Register all mock API routes needed for project detail tests."""
+
     async def handle_overview(route):
         await route.fulfill(
             status=200,
@@ -162,11 +204,25 @@ async def test_project_detail_screenshot(page):
             body=json.dumps(MOCK_OVERVIEW),
         )
 
+    async def handle_mission_detail(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(MOCK_MISSION_DETAIL),
+        )
+
     async def handle_missions(route):
         await route.fulfill(
             status=200,
             content_type="application/json",
             body=json.dumps(MOCK_MISSIONS),
+        )
+
+    async def handle_thread_detail(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(MOCK_THREAD_DETAIL),
         )
 
     async def handle_threads(route):
@@ -184,9 +240,20 @@ async def test_project_detail_screenshot(page):
         )
 
     await page.route("**/api/engine/projects/overview", handle_overview)
+    await page.route("**/api/engine/missions/m-*", handle_mission_detail)
     await page.route("**/api/engine/missions*", handle_missions)
+    await page.route("**/api/engine/threads/t-*", handle_thread_detail)
     await page.route("**/api/engine/threads*", handle_threads)
     await page.route("**/api/engine/projects/*/widgets", handle_widgets)
+
+
+# ── Tests ────────────────────────────────────────────────────────
+
+
+async def test_project_detail_screenshot(page):
+    """Navigate to projects tab, drill into a project, capture screenshot."""
+
+    await _route_project_detail_fixtures(page)
 
     # Enable engine v2 mode so the Projects tab is visible.
     await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
@@ -214,3 +281,39 @@ async def test_project_detail_screenshot(page):
 
     # Take the screenshot.
     await page.screenshot(path="project-detail.png")
+
+
+async def test_project_mission_card_opens_canonical_missions_view(page):
+    """Mission card in Projects should switch to the Missions tab and open the mission dossier."""
+    await _route_project_detail_fixtures(page)
+    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
+
+    await page.locator(SEL["tab_button"].format(tab="projects")).click()
+    await page.locator(f'.cr-card[data-id="{MOCK_PROJECT_ID}"]').click()
+    await page.locator(SEL["projects_mission_card"]).first.click()
+
+    await expect(page.locator(SEL["tab_panel"].format(tab="missions"))).to_be_visible()
+    await expect(page.locator(SEL["mission_detail"])).to_be_visible()
+    await expect(page.locator(SEL["mission_detail_title"])).to_have_text(
+        "Daily AI Paper Monitoring"
+    )
+    assert await page.evaluate("currentTab") == "missions"
+
+
+async def test_project_activity_row_opens_polished_thread_inspector(page):
+    """Activity row in Projects should open the thread inspector inside Projects."""
+    await _route_project_detail_fixtures(page)
+    await page.evaluate("engineV2Enabled = true; applyEngineModeToTabs();")
+
+    await page.locator(SEL["tab_button"].format(tab="projects")).click()
+    await page.locator(f'.cr-card[data-id="{MOCK_PROJECT_ID}"]').click()
+    await page.locator(SEL["projects_activity_row"]).nth(1).click()
+
+    await expect(page.locator(SEL["projects_detail"])).to_be_visible()
+    await expect(page.locator(SEL["projects_thread_title"])).to_have_text(
+        "Analyze weekly research trends"
+    )
+    await expect(page.locator(SEL["projects_thread_meta"])).to_be_visible()
+    await expect(page.locator(SEL["projects_thread_timeline"])).to_be_visible()
+    await expect(page.locator(SEL["projects_thread_message"])).to_have_count(2)
+    assert await page.evaluate("currentTab") == "projects"

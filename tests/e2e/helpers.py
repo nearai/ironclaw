@@ -181,6 +181,17 @@ SEL = {
     "activity_thinking_text":   ".activity-thinking-text",
     # Thread processing indicator
     "thread_processing":        ".thread-processing",
+    # Projects control-room
+    "projects_drill":           "#cr-drill",
+    "projects_detail":          "#cr-detail",
+    "projects_mission_card":    ".cr-mission-card",
+    "projects_activity_row":    ".cr-activity-row",
+    "projects_thread_title":    ".cr-thread-title",
+    "projects_thread_meta":     ".cr-thread-meta-grid",
+    "projects_thread_timeline": ".cr-thread-timeline",
+    "projects_thread_message":  ".cr-thread-message",
+    "mission_detail":           "#mission-detail",
+    "mission_detail_title":     ".ms-detail-title",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]
