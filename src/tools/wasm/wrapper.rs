@@ -3085,16 +3085,26 @@ mod tests {
         // refresh path end-to-end. The escape hatch only affects this
         // process and is not exposed to operators.
         let _env_lock = EnvLockGuard::new();
-        struct EnvGuard;
+        struct EnvGuard {
+            original: Option<std::ffi::OsString>,
+        }
         impl Drop for EnvGuard {
             fn drop(&mut self) {
                 // SAFETY: Tests serialize env access with lock_env().
-                unsafe { std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK") };
+                unsafe {
+                    match &self.original {
+                        Some(value) => {
+                            std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", value)
+                        }
+                        None => std::env::remove_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK"),
+                    }
+                };
             }
         }
+        let original = std::env::var_os("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK");
         // SAFETY: Tests serialize env access with lock_env().
         unsafe { std::env::set_var("IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK", "1") };
-        let _proxy_loopback_guard = EnvGuard;
+        let _proxy_loopback_guard = EnvGuard { original };
 
         let proxy = MockProxyServer::start().await;
         let store = test_secrets_store();

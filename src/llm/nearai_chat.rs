@@ -1935,6 +1935,22 @@ mod tests {
                 }
             }
         }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
 
         let _guard = EnvLockGuard::new();
         // Session token takes priority over NEARAI_API_KEY env var.
@@ -1947,11 +1963,16 @@ mod tests {
             .await;
 
         // Set env var that should NOT be used when session token exists
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
         // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-api-key-should-not-win");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -1962,12 +1983,6 @@ mod tests {
             token, "oauth-token",
             "session token must take priority over env var"
         );
-
-        #[allow(unused_unsafe)]
-        // SAFETY: serialized via ENV_MUTEX.
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
     }
 
     #[tokio::test]
@@ -1982,6 +1997,22 @@ mod tests {
                 }
             }
         }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
 
         let _guard = EnvLockGuard::new();
         // Config API key should win even when session token AND env var are set.
@@ -1991,11 +2022,16 @@ mod tests {
             .set_token(secrecy::SecretString::from("session-tok".to_string()))
             .await;
 
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
         // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-key");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -2006,12 +2042,6 @@ mod tests {
             token, "test-key",
             "config api_key must win over session token and env var"
         );
-
-        #[allow(unused_unsafe)]
-        // SAFETY: serialized via ENV_MUTEX.
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
     }
 
     #[test]

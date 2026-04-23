@@ -1018,7 +1018,7 @@ impl EffectBridgeAdapter {
                             .and_then(|value| value.as_str())
                             .unwrap_or("<missing>");
                         let error_msg = format!(
-                            "Tool tool_info failed: no callable action named '{requested}' is available in this execution context"
+                            "tool_info: no callable action named '{requested}' in this execution context"
                         );
                         let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
                         return Ok(ActionResult {
