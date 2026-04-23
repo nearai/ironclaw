@@ -1,3 +1,4 @@
+pub mod extension;
 pub mod oauth;
 pub mod providers;
 
@@ -133,7 +134,9 @@ fn default_access_token_field() -> String {
     "access_token".to_string()
 }
 
-pub fn build_pending_oauth_launch(params: PendingOAuthLaunchParams) -> PendingOAuthLaunch {
+pub fn build_pending_oauth_launch(
+    params: PendingOAuthLaunchParams,
+) -> Result<PendingOAuthLaunch, oauth::OAuthUrlError> {
     let oauth_result = oauth::build_oauth_url(
         &params.authorization_url,
         &params.client_id,
@@ -141,7 +144,7 @@ pub fn build_pending_oauth_launch(params: PendingOAuthLaunchParams) -> PendingOA
         &params.scopes,
         params.use_pkce,
         &params.extra_params,
-    );
+    )?;
 
     let flow = crate::auth::oauth::PendingOAuthFlow {
         extension_name: params.extension_name,
@@ -168,11 +171,11 @@ pub fn build_pending_oauth_launch(params: PendingOAuthLaunchParams) -> PendingOA
         auto_activate_extension: params.auto_activate_extension,
     };
 
-    PendingOAuthLaunch {
+    Ok(PendingOAuthLaunch {
         auth_url: oauth_result.url,
         expected_state: oauth_result.state,
         flow,
-    }
+    })
 }
 
 async fn load_auth_descriptors(

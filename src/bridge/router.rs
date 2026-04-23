@@ -15,10 +15,11 @@ use ironclaw_common::AppEvent;
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
+use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
@@ -68,17 +69,54 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
 /// in the server-side logs and returns a short, user-facing summary
 /// derived from the error's shape.
 ///
+/// `sse_will_deliver_to_user` signals that the caller already broadcast
+/// an `AppEvent::Error` on a per-user SSE stream that the originating
+/// channel renders to the user (today: the web gateway). In that case
+/// returning `Respond(sanitized)` would double-render the same failed
+/// turn — once as the SSE error card and again as a normal `response`
+/// frame emitted by `GatewayChannel::respond()`. When set we return
+/// `NoResponse`; otherwise we return `Respond(sanitized)` so channels
+/// without an SSE-as-primary-surface (telegram, relay, cli) still
+/// deliver the sanitized failure to the user.
+///
 /// Extracted into a named function so the sanitization flow (log + map to
 /// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
 /// by unit tests without spinning up the full engine.
-fn bridge_outcome_for_failed_thread(error: &str, user_id: &str, channel: &str) -> BridgeOutcome {
+fn bridge_outcome_for_failed_thread(
+    error: &str,
+    debug_detail: Option<&str>,
+    user_id: &str,
+    channel: &str,
+    sse_will_deliver_to_user: bool,
+) -> BridgeOutcome {
+    // `warn!` carries only the size of `debug_detail`, not its contents —
+    // a full Python traceback or upstream HTTP body can be multi-KB and
+    // would flood higher-severity logs with internal text that's already
+    // available at `debug!` level. Operators who need the full detail
+    // flip `RUST_LOG=ironclaw::bridge::router=debug`. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`, and
+    // `debug_detail` is deliberately NOT broadcast on the SSE `error`
+    // event — that payload reaches every authenticated consumer.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
         error = %error,
+        debug_detail_bytes = debug_detail.map(|d| d.len()),
         "engine v2: thread failed; showing user-friendly summary",
     );
-    BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    if let Some(detail) = debug_detail {
+        tracing::debug!(
+            user_id = %user_id,
+            channel = %channel,
+            detail,
+            "engine v2: thread failure debug detail",
+        );
+    }
+    if sse_will_deliver_to_user {
+        BridgeOutcome::NoResponse
+    } else {
+        BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    }
 }
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
@@ -360,7 +398,7 @@ async fn resolve_extension_for_action(
     // test harness): delegate to the same canonical resolver used by the
     // auth-manager path so the extension-manager branch of the precedence
     // still runs instead of falling through to a stringly credential name.
-    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+    crate::auth::extension::resolve_auth_flow_extension_name(
         action_name,
         parameters,
         credential_fallback,
@@ -2571,8 +2609,17 @@ pub async fn resolve_gate(
                 )
                 .await;
 
+            // Word the deny message carefully: the resume handler treats
+            // certain imperative verb phrases ("execute it", "run it", "send
+            // it", …) as fresh execution intent and re-arms the
+            // require_action_attempt obligation, which then nudges the LLM
+            // to issue another tool call — exactly the opposite of what a
+            // denial should produce. Avoid every phrase in
+            // `crate::llm::user_signals_execution_intent`'s list (the
+            // helper is defined in `src/llm/reasoning.rs` and re-exported
+            // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
-                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                "User denied action '{}'. Do not retry; choose a different approach.{}",
                 pending.action_name,
                 reason
                     .as_deref()
@@ -3963,11 +4010,46 @@ async fn await_thread_outcome(
         ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(bridge_outcome_for_failed_thread(
-            &error,
-            &message.user_id,
-            &message.channel,
-        )),
+        ThreadOutcome::Failed {
+            error,
+            debug_detail,
+        } => {
+            // Emit the sanitized failure on SSE so the web gateway's
+            // chat surface (and the Debug Inspector) renders a structured
+            // error card with activity cleanup + input re-enable. The
+            // raw `debug_detail` is deliberately NOT broadcast — SSE
+            // error frames reach every authenticated consumer, so raw
+            // tracebacks and upstream HTTP bodies must stay server-side
+            // only (logged at `debug!` inside
+            // `bridge_outcome_for_failed_thread`).
+            //
+            // When the originating channel is the gateway itself, that
+            // SSE frame IS the user-visible surface — returning
+            // `Respond(sanitized)` on top of it would double-render the
+            // same failure. For non-gateway channels the SSE frame is
+            // only a secondary per-user stream, so we still return
+            // `Respond(sanitized)` so the primary channel (telegram,
+            // relay, …) delivers the sanitized failure.
+            let sanitized = crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+            let sse_will_deliver_to_user =
+                state.sse.is_some() && message.channel == GATEWAY_CHANNEL_NAME;
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: sanitized,
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            Ok(bridge_outcome_for_failed_thread(
+                &error,
+                debug_detail.as_deref(),
+                &message.user_id,
+                &message.channel,
+                sse_will_deliver_to_user,
+            ))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -4480,9 +4562,34 @@ async fn forward_event_to_channel(
     }
 }
 
-/// Convert a ThreadEvent to AppEvents for the web gateway SSE stream.
+/// Bridge engine-side `CodeExecutionFailure` to its wire mirror
+/// `CodeExecutionFailureCategory` in `ironclaw_common`.
 ///
-/// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
+/// Exhaustive on purpose: if the engine enum gains a variant, this must
+/// fail to compile so both enums stay in lockstep. Per
+/// `.claude/rules/types.md` "Wire-stable enums" — do not reach for
+/// `format!("{:?}", ...)` or `.to_string()` here; the serde rename rules
+/// on the two enums independently produce snake_case, and a `Debug`
+/// detour would silently drift.
+fn code_execution_category_to_wire(
+    category: &ironclaw_engine::CodeExecutionFailure,
+) -> ironclaw_common::CodeExecutionFailureCategory {
+    use ironclaw_common::CodeExecutionFailureCategory as Wire;
+    use ironclaw_engine::CodeExecutionFailure as Src;
+    match category {
+        Src::SyntaxError => Wire::SyntaxError,
+        Src::RuntimeError => Wire::RuntimeError,
+        Src::NameLookup => Wire::NameLookup,
+        Src::VmPanic => Wire::VmPanic,
+        Src::ResourceLimit => Wire::ResourceLimit,
+        Src::ToolError => Wire::ToolError,
+        Src::OsDenied => Wire::OsDenied,
+    }
+}
+
+/// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
+///
+/// Returns multiple events when needed (e.g., `ToolStarted` + `ToolCompleted`
 /// so the frontend creates the card then resolves it).
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
@@ -4578,12 +4685,116 @@ fn thread_event_to_app_events(
             child_thread_id: child_id.to_string(),
             goal: goal.clone(),
         }],
+        EventKind::ChildCompleted { child_id } => vec![AppEvent::ChildThreadCompleted {
+            parent_thread_id: thread_id.into(),
+            child_thread_id: child_id.to_string(),
+        }],
+        EventKind::StepFailed { error, .. } => vec![AppEvent::Error {
+            message: format!("Step failed: {error}"),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionFailed {
+            category,
+            error,
+            code_hash,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecutionFailed {
+            category: code_execution_category_to_wire(category),
+            error: error.clone(),
+            duration_ms: *duration_ms,
+            code_hash: code_hash.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
         }],
-        _ => vec![],
+        EventKind::LeaseGranted {
+            lease_id,
+            capability_name,
+        } => vec![AppEvent::LeaseGranted {
+            lease_id: lease_id.to_string(),
+            capability_name: capability_name.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseRevoked { lease_id, reason } => vec![AppEvent::LeaseRevoked {
+            lease_id: lease_id.to_string(),
+            reason: reason.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseExpired { lease_id } => vec![AppEvent::LeaseExpired {
+            lease_id: lease_id.to_string(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementStarted => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Started,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementComplete {
+            prompt_updated,
+            patterns_added,
+        } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Complete {
+                prompt_updated: *prompt_updated,
+                patterns_added: *patterns_added,
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementFailed { error } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Failed {
+                error: error.clone(),
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+        } => {
+            // `reason` originates from `format!("execution failed: {e}")`
+            // in the engine's rollback path, where `e: EngineError` can
+            // render DB connection strings, file paths, or raw upstream
+            // HTTP bodies. SSE error-adjacent frames reach every
+            // authenticated consumer, so the wire carries a classified
+            // operator-facing message and the raw text stays in the log.
+            tracing::debug!(
+                from_version = *from_version,
+                to_version = *to_version,
+                raw_reason = %reason,
+                "orchestrator rollback event"
+            );
+            vec![AppEvent::OrchestratorRollback {
+                from_version: *from_version,
+                to_version: *to_version,
+                reason: crate::bridge::user_facing_errors::user_facing_rollback_reason(reason)
+                    .to_string(),
+                thread_id: Some(thread_id.into()),
+            }]
+        }
+
+        // Temporarily-suppressed engine variants. These are NOT bridged
+        // to `AppEvent` today because equivalent gate events are still
+        // emitted directly by the gate manager, and forwarding them
+        // here as well would make the UI render the same state twice.
+        // Migration plan per #2792 Phase 1 PR 3:
+        //
+        // - `ApprovalRequested` / `ApprovalReceived` are suppressed
+        //   only until the gate manager stops broadcasting direct
+        //   `AppEvent::GateRequired` / `GateResolved` events.
+        // - Once that migration lands, this function remains the
+        //   bridge: map these engine variants to the corresponding
+        //   `AppEvent`s here (or remove the direct emits), rather
+        //   than treating them as permanently dropped.
+        EventKind::ApprovalRequested { .. } => vec![],
+        EventKind::ApprovalReceived { .. } => vec![],
+
+        // Forward-compat catch-all in the engine enum (see
+        // `#[serde(other)] Unknown` in `ironclaw_engine::EventKind`).
+        // Nothing useful to show; the unknown variant would have been
+        // written by a newer binary during a rolling deploy.
+        EventKind::Unknown => vec![],
     }
 }
 
@@ -4594,6 +4805,8 @@ fn thread_event_to_app_events(
 pub struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub thread_type: String,
     pub state: String,
     pub project_id: String,
@@ -4840,9 +5053,18 @@ fn describe_cron(expression: &str) -> Option<String> {
 }
 
 fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
+    // Fall back to a derived short label from `goal` for legacy threads
+    // persisted before the `title` field existed. Without this, frontend
+    // consumers of `EngineThreadInfo` (TUI, mission detail views) render
+    // a UUID prefix since the DTO lacks `turn_count`.
+    let title = t
+        .title
+        .clone()
+        .or_else(|| ironclaw_engine::Thread::derive_title_from_message(&t.goal));
     EngineThreadInfo {
         id: t.id.to_string(),
         goal: t.goal.clone(),
+        title,
         thread_type: format!("{:?}", t.thread_type),
         state: format!("{:?}", t.state),
         project_id: t.project_id.to_string(),
@@ -5473,6 +5695,27 @@ pub async fn reset_engine_state() {
     }
 }
 
+/// Test-only override for `EngineState::project_root`.
+///
+/// Attachment persistence resolves paths through the cached
+/// `bootstrap::ironclaw_base_dir()`; in tests that want to assert on a
+/// tempdir this override lets the test redirect writes to a known
+/// location after `init_engine` has populated `ENGINE_STATE`. Returns
+/// `true` if the override was applied.
+#[doc(hidden)]
+#[cfg(feature = "libsql")]
+pub async fn override_engine_project_root_for_test(path: PathBuf) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let mut guard = lock.write().await;
+    let Some(state) = guard.as_mut() else {
+        return false;
+    };
+    state.project_root = path;
+    true
+}
+
 /// Build retrospective `ExecutionTrace`s for every currently-known engine
 /// thread. Returns an empty vector when engine v2 is not initialized.
 ///
@@ -5712,7 +5955,16 @@ pub(crate) mod test_support {
             async fn available_actions(
                 &self,
                 _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
                 Ok(vec![])
             }
         }
@@ -5928,7 +6180,12 @@ mod tests {
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
-    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+    // Share the `test_support::ENGINE_STATE_TEST_LOCK` declared for the rest of
+    // the crate instead of a sibling copy — a private duplicate here would only
+    // serialize against tests in this module and would race against tests in
+    // other modules that already hold `test_support::ENGINE_STATE_TEST_LOCK`,
+    // letting concurrent tests overwrite the shared `ENGINE_STATE` `OnceLock`.
+    use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     // ──────────────────────────────────────────────────────────────────
@@ -5950,7 +6207,9 @@ mod tests {
              File \"orchestrator.py\", line 907, in  \
              File \"orchestrator.py\", line 548, in run_loop \
              RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        // Non-gateway channel: SSE is not the primary surface, so the
+        // user-visible delivery comes through `Respond(sanitized)`.
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -5967,8 +6226,13 @@ mod tests {
 
     #[test]
     fn failed_thread_outcome_maps_unknown_error_to_generic_message() {
-        let outcome =
-            bridge_outcome_for_failed_thread("some unexpected internal failure", "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(
+            "some unexpected internal failure",
+            None,
+            "alice",
+            "telegram",
+            false,
+        );
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -5982,13 +6246,29 @@ mod tests {
     #[test]
     fn failed_thread_outcome_maps_context_too_large() {
         let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
         assert!(
             text.starts_with("The request was too large"),
             "unexpected text: {text}"
+        );
+    }
+
+    /// When the SSE stream is already rendering the failure to the
+    /// originating channel (gateway web UI), the helper must return
+    /// `NoResponse` so `channel.respond()` does not broadcast a second
+    /// SSE `response` frame for the same turn. Regression fence for the
+    /// double-render bug flagged on PR #2753 by serrrfirat.
+    #[test]
+    fn failed_thread_outcome_is_no_response_when_sse_will_deliver() {
+        let raw = "Orchestrator error: Llm { reason: \"HTTP 502 Bad Gateway\" }";
+        let outcome =
+            bridge_outcome_for_failed_thread(raw, Some("debug only"), "alice", "gateway", true);
+        assert!(
+            matches!(outcome, BridgeOutcome::NoResponse),
+            "expected NoResponse to avoid double-rendering an SSE-delivered failure, got {outcome:?}",
         );
     }
 
@@ -6968,6 +7248,344 @@ mod tests {
     }
 
     #[test]
+    fn thread_event_to_app_events_bridges_step_failed_to_error() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::StepFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                error: "llm provider returned 502".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-step-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::Error { message, thread_id } = &app_events[0] else {
+            panic!("expected AppEvent::Error, got {:?}", app_events[0]);
+        };
+        assert!(
+            message.contains("llm provider returned 502"),
+            "error message should carry the engine error text, got {message:?}"
+        );
+        assert_eq!(thread_id.as_deref(), Some("thread-step-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_child_completed() {
+        let child = ironclaw_engine::ThreadId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ChildCompleted { child_id: child },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-parent");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::ChildThreadCompleted {
+            parent_thread_id,
+            child_thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::ChildThreadCompleted, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(parent_thread_id, "thread-parent");
+        assert_eq!(child_thread_id, &child.to_string());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_code_execution_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "NameError: 'foo' is not defined".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 42,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-codeact");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::CodeExecutionFailed {
+            category,
+            error,
+            duration_ms,
+            code_hash,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::CodeExecutionFailed, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(
+            *category,
+            ironclaw_common::CodeExecutionFailureCategory::RuntimeError
+        );
+        assert_eq!(error, "NameError: 'foo' is not defined");
+        assert_eq!(*duration_ms, 42);
+        assert_eq!(code_hash.as_deref(), Some("abc123"));
+        assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_granted() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseGranted {
+                lease_id: lease,
+                capability_name: "http_fetch".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-lease");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseGranted {
+            lease_id,
+            capability_name,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseGranted, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(capability_name, "http_fetch");
+        assert_eq!(thread_id.as_deref(), Some("thread-lease"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_revoked() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseRevoked {
+                lease_id: lease,
+                reason: "policy check failed".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-revoke");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseRevoked {
+            lease_id,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseRevoked, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(reason, "policy check failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-revoke"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_expired() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseExpired { lease_id: lease },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-expire");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseExpired {
+            lease_id,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseExpired, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(thread_id.as_deref(), Some("thread-expire"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_started() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementStarted,
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-start");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(phase, &ironclaw_common::SelfImprovementPhase::Started);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-start"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementFailed {
+                error: "diagnosis prompt timed out".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Failed { error } = phase else {
+            panic!("expected SelfImprovementPhase::Failed, got {phase:?}");
+        };
+        assert_eq!(error, "diagnosis prompt timed out");
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_complete() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementComplete {
+                prompt_updated: true,
+                patterns_added: 3,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Complete {
+            prompt_updated,
+            patterns_added,
+        } = phase
+        else {
+            panic!("expected SelfImprovementPhase::Complete, got {phase:?}");
+        };
+        assert!(*prompt_updated);
+        assert_eq!(*patterns_added, 3);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_orchestrator_rollback() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 7,
+                to_version: 6,
+                reason: "health probe failed after upgrade".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-rollback");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::OrchestratorRollback, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(*from_version, 7);
+        assert_eq!(*to_version, 6);
+        // Unknown-shape reasons collapse to the safe generic classification.
+        assert_eq!(reason, "execution failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-rollback"));
+    }
+
+    #[test]
+    fn orchestrator_rollback_does_not_leak_engine_error_detail() {
+        // Regression for PR #2844 review: the engine rollback path emits
+        // `format!("execution failed: {e}")` where `e: EngineError`.
+        // Variants like `Store { reason }` / `Llm { reason }` can render
+        // DB connection strings, file paths, and raw upstream HTTP bodies.
+        // The bridge must sanitize before broadcasting to SSE consumers.
+        let leaky = "execution failed: store error: connection string \
+            'postgres://bob:hunter2@db.internal:5432/ironclaw' refused: \
+            File \"/home/runner/.ironclaw/state.db\" not found";
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 3,
+                to_version: 2,
+                reason: leaky.to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-leak");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert!(
+            !reason.contains("postgres://"),
+            "leaked connection string: {reason}"
+        );
+        assert!(!reason.contains("hunter2"), "leaked password: {reason}");
+        assert!(
+            !reason.contains("/home/runner"),
+            "leaked filesystem path: {reason}"
+        );
+        assert!(
+            !reason.contains("store error"),
+            "leaked internal wrap: {reason}"
+        );
+        assert!(
+            !reason.contains("state.db"),
+            "leaked internal filename: {reason}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rollback_classifies_known_upstream_failures() {
+        // A 502 in the rollback reason should still render a classified
+        // operator-facing message, not the bare "execution failed" fallback.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 4,
+                to_version: 3,
+                reason: "execution failed: LLM error: Provider nearai request failed: \
+                     HTTP 502 Bad Gateway"
+                    .to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-502");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert_eq!(reason, "LLM provider unavailable");
+    }
+
+    #[test]
     fn resolved_call_id_legacy_fallback_uses_last_unresolved_parallel_call() {
         let mut thread = ironclaw_engine::Thread::new(
             "goal",
@@ -7381,7 +7999,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -7521,7 +8149,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -8846,7 +9484,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -9605,5 +10253,61 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn thread_to_info_carries_title_and_goal_separately() {
+        // Regression: mission-spawned threads put `mission.name` in
+        // `title` and the multi-paragraph meta-prompt in `goal`. The
+        // DTO must carry both through so UI callers can render the
+        // short label without reading the full goal.
+        let long_goal = "a".repeat(500);
+        let mut thread = ironclaw_engine::Thread::new(
+            &long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.title = Some("Daily summary".to_string());
+
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Daily summary"));
+        assert_eq!(info.goal.len(), 500);
+    }
+
+    #[test]
+    fn thread_to_info_derives_title_from_goal_when_absent() {
+        // Regression: legacy engine threads persisted before the `title`
+        // field existed deserialize as `title = None`. The DTO must
+        // derive a short label from `goal` so frontend consumers don't
+        // fall through `threadTitle()` to rendering a UUID prefix.
+        let thread = ironclaw_engine::Thread::new(
+            "plain goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("plain goal"));
+        assert_eq!(info.goal, "plain goal");
+    }
+
+    #[test]
+    fn thread_to_info_derives_from_first_line_of_long_goal() {
+        // Multi-paragraph meta-prompt (mission pattern without explicit
+        // title set): derive from first non-empty line, truncated to
+        // the helper's char limit.
+        let long_goal = format!("Short first line\n\n{}\n", "x".repeat(500));
+        let thread = ironclaw_engine::Thread::new(
+            long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Short first line"));
     }
 }

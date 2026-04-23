@@ -76,7 +76,7 @@ use self::types::AppEvent;
 
 fn build_gateway_auth_manager(
     state: &GatewayState,
-) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+) -> Option<Arc<crate::auth::extension::AuthManager>> {
     state
         .tool_registry
         .as_ref()
@@ -89,7 +89,7 @@ fn build_gateway_auth_manager(
                 .map(|em| Arc::clone(em.secrets()))
         })
         .map(|secrets| {
-            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            Arc::new(crate::auth::extension::AuthManager::new(
                 secrets,
                 state.skill_registry.clone(),
                 state.extension_manager.clone(),
@@ -627,10 +627,18 @@ impl GatewayChannel {
     }
 }
 
+/// Canonical channel name for the web gateway.
+///
+/// Exported so cross-module call sites (e.g. `bridge::router`) can
+/// compare against this constant instead of duplicating the string
+/// literal — the `Channel::name()` impl below references this same
+/// constant, so the value is compile-time-pinned in both places.
+pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
-        "gateway"
+        GATEWAY_CHANNEL_NAME
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

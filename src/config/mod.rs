@@ -477,13 +477,72 @@ impl Config {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
-        LlmConfig::resolve(&settings)
+        // Startup path (non-strict): fall back to NearAI if the user-configured
+        // backend is unusable. This prevents the #2514 crash-loop and keeps the
+        // instance runnable while the user fixes their provider configuration.
+        //
+        // Hot-reload path (strict): use pure `resolve` so a bad save fails the
+        // whole call and lets the caller roll back the triggering settings
+        // write. Silently falling back here would be worse UX — the user
+        // saved "openrouter", runtime would switch to NearAI, the UI would
+        // show NearAI, and the user would wonder where their selection went.
+        if strict_db_reads {
+            return LlmConfig::resolve(&settings);
+        }
+
+        let configured_backend = settings.llm_backend.clone();
+        let cfg = LlmConfig::resolve_with_fallback(&settings)?;
+
+        // If fallback demoted the backend, persist the effective backend to
+        // the DB so the UI, status endpoint, and any other consumers stay
+        // consistent with what is actually running. Without this, the user
+        // would see "Active: openrouter" in Settings while the runtime is
+        // quietly using NearAI.
+        if let Some(store) = store
+            && fallback_fired(configured_backend.as_deref(), &cfg.backend)
+        {
+            tracing::warn!(
+                configured = ?configured_backend,
+                active = %cfg.backend,
+                "Syncing llm_backend in DB to reflect post-fallback runtime state"
+            );
+            if let Err(e) = store
+                .set_setting(
+                    user_id,
+                    "llm_backend",
+                    &serde_json::Value::String(cfg.backend.clone()),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to persist post-fallback llm_backend to DB — UI may \
+                     display the previously-selected backend until next save"
+                );
+            }
+            // The previously-selected model is almost certainly wrong for
+            // the NearAI fallback (e.g. an OpenRouter model name). Clear
+            // it so resolve_model() picks NearAI's default on next load.
+            if settings.selected_model.is_some()
+                && let Err(e) = store.delete_setting(user_id, "selected_model").await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to clear selected_model after fallback"
+                );
+            }
+        }
+
+        Ok(cfg)
     }
 
     /// Resolve only the LLM configuration from the current source stack.
     ///
     /// This is used by hot reload paths that need the exact owner/admin merge
     /// semantics from startup without rebuilding unrelated config sections.
+    /// Non-strict mode: applies `resolve_with_fallback`, so an unusable user
+    /// backend downgrades to NearAI at startup instead of crash-looping
+    /// (#2514). Use [`resolve_llm_with_secrets_strict`] for hot-reload paths.
     pub(crate) async fn resolve_llm_with_secrets(
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
         user_id: &str,
@@ -497,6 +556,9 @@ impl Config {
 
     /// Resolve LLM configuration for hot reload paths that must fail closed on
     /// DB read errors so the caller can roll back the triggering settings write.
+    /// Strict mode also disables the NearAI fallback: a broken save produces
+    /// `Err` rather than a silent demotion, which is the signal the caller
+    /// needs to trigger rollback and preserve the user's explicit selection.
     pub(crate) async fn resolve_llm_with_secrets_strict(
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
         user_id: &str,
@@ -551,6 +613,63 @@ impl Config {
             relay: RelayConfig::from_env(),
         })
     }
+}
+
+/// Detect whether `resolve_with_fallback` demoted the user-configured backend
+/// to NearAI. Returns true when the user explicitly asked for something
+/// non-trivial (non-empty, not already nearai) and the resolver landed on a
+/// different backend. Aliases like `open_ai` → `openai` are not counted as a
+/// fallback — only cross-backend demotion is.
+fn fallback_fired(configured: Option<&str>, active: &str) -> bool {
+    let configured = match configured.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(c) => c,
+        None => return false,
+    };
+    // Normalize both sides so alias-only drift (e.g. open_ai → openai,
+    // near / near_ai → nearai) doesn't spuriously look like a fallback.
+    normalize_backend(configured) != normalize_backend(active)
+}
+
+/// Normalize a backend id to the canonical form that `LlmConfig::resolve`
+/// lands on after alias resolution. Must produce the same canonical id the
+/// resolver uses — otherwise `fallback_fired` will mis-fire on every restart
+/// for any DB value that's a known alias (e.g. `claude` → `anthropic`,
+/// `bigmodel` → `zai`, `github-copilot` → `github_copilot`) and trigger a
+/// spurious DB rewrite.
+///
+/// Two sources of aliases:
+/// 1. Registry-defined aliases — delegated to `ProviderRegistry::find`, which
+///    is the same lookup `resolve_registry_provider` uses.
+/// 2. Hardcoded aliases for the four "virtual" backends that are not in the
+///    registry (nearai / bedrock / gemini_oauth / openai_codex). These must
+///    stay in sync with the matching branches in `LlmConfig::resolve`.
+fn normalize_backend(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+
+    // (1) Virtual backends (not in the registry) — hardcoded alias list
+    // mirroring LlmConfig::resolve.
+    match lower.as_str() {
+        "nearai" | "near" | "near_ai" => return "nearai".to_string(),
+        "bedrock" | "aws" | "aws_bedrock" => return "bedrock".to_string(),
+        "gemini_oauth" | "gemini-oauth" => return "gemini_oauth".to_string(),
+        "openai_codex" | "openai-codex" | "codex" => return "openai_codex".to_string(),
+        _ => {}
+    }
+
+    // (2) Registry providers — any alias declared in `providers.json` is
+    // resolved by `ProviderRegistry::find` to its canonical `id`. This is the
+    // SAME canonicalization `LlmConfig::resolve_registry_provider` does, so
+    // DB values like `claude` / `bigmodel` / `github-copilot` / `open_ai`
+    // won't look like a fallback.
+    if let Some(def) = crate::llm::ProviderRegistry::load().find(&lower) {
+        return def.id.clone();
+    }
+
+    // Unknown backend — resolve() treats it as openai_compatible at runtime,
+    // but here we conservatively return the input as-is. A truly unknown id
+    // won't match the canonical `active` either way; the comparison in
+    // `fallback_fired` just has to be consistent between both sides.
+    lower
 }
 
 pub(crate) fn load_bootstrap_settings(
@@ -1372,5 +1491,87 @@ mod tests {
             Some("sk-existing"),
             "existing key should not be overwritten"
         );
+    }
+
+    // ── fallback_fired / normalize_backend tests ─────────────────────────
+    //
+    // These gate the post-fallback DB sync in re_resolve_llm_with_secrets,
+    // so wrong answers either (a) let stale user intent linger in the DB
+    // (UI shows openrouter, runtime uses NearAI) or (b) clobber the user's
+    // selection every startup even though nothing meaningfully changed.
+
+    #[test]
+    fn fallback_fired_detects_cross_backend_demotion() {
+        // The #2514 scenario: user picked openrouter, config was unusable,
+        // resolver demoted to NearAI. DB must be synced.
+        assert!(fallback_fired(Some("openrouter"), "nearai"));
+        assert!(fallback_fired(Some("anthropic"), "nearai"));
+        assert!(fallback_fired(Some("openai_compatible"), "nearai"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_alias_normalization() {
+        // `resolve` canonicalises backend aliases (near → nearai, open_ai →
+        // openai) but that is not a fallback and must not trigger a DB
+        // rewrite — doing so would churn the row on every startup.
+        //
+        // Virtual backends (not in the registry — alias set hardcoded in
+        // normalize_backend):
+        assert!(!fallback_fired(Some("near"), "nearai"));
+        assert!(!fallback_fired(Some("near_ai"), "nearai"));
+        assert!(!fallback_fired(Some("aws"), "bedrock"));
+        assert!(!fallback_fired(Some("aws_bedrock"), "bedrock"));
+        assert!(!fallback_fired(Some("codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("openai-codex"), "openai_codex"));
+        assert!(!fallback_fired(Some("gemini-oauth"), "gemini_oauth"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_registry_aliases() {
+        // Regression: `providers.json` declares aliases for many registry
+        // providers (e.g. `claude` → `anthropic`, `bigmodel` → `zai`,
+        // `github-copilot` → `github_copilot`, `open_ai` → `openai`).
+        // `resolve_registry_provider` canonicalises these to the registry's
+        // `id` field, so a DB value of `claude` produces `cfg.backend ==
+        // "anthropic"`. normalize_backend must delegate to the registry so
+        // this is recognised as alias drift, not a fallback. Otherwise the
+        // DB gets rewritten on every startup for users who happen to have
+        // the alias form saved.
+        assert!(!fallback_fired(Some("claude"), "anthropic"));
+        assert!(!fallback_fired(Some("bigmodel"), "zai"));
+        assert!(!fallback_fired(Some("github-copilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("githubcopilot"), "github_copilot"));
+        assert!(!fallback_fired(Some("open_ai"), "openai"));
+        assert!(!fallback_fired(
+            Some("openai-compatible"),
+            "openai_compatible"
+        ));
+        assert!(!fallback_fired(Some("compatible"), "openai_compatible"));
+        assert!(!fallback_fired(Some("open_router"), "openrouter"));
+    }
+
+    #[test]
+    fn fallback_fired_ignores_empty_or_unset_configured() {
+        // When the DB never had llm_backend set, the default of "nearai"
+        // resolves naturally — there is nothing to sync back.
+        assert!(!fallback_fired(None, "nearai"));
+        assert!(!fallback_fired(Some(""), "nearai"));
+        assert!(!fallback_fired(Some("   "), "nearai"));
+    }
+
+    #[test]
+    fn fallback_fired_treats_case_insensitively() {
+        // DB values can be lowercase or mixed-case; don't treat case-only
+        // drift as a meaningful change.
+        assert!(!fallback_fired(Some("NearAI"), "nearai"));
+        assert!(!fallback_fired(Some("OPENAI"), "openai"));
+    }
+
+    #[test]
+    fn fallback_fired_same_backend_no_sync() {
+        // A properly-configured backend must not trigger a DB rewrite.
+        assert!(!fallback_fired(Some("nearai"), "nearai"));
+        assert!(!fallback_fired(Some("anthropic"), "anthropic"));
+        assert!(!fallback_fired(Some("openrouter"), "openrouter"));
     }
 }
