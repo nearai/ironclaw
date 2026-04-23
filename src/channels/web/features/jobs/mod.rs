@@ -346,7 +346,9 @@ pub async fn jobs_detail_handler(
                 crate::context::JobState::Completed => {
                     result_event.as_ref().and_then(job_result_event_message)
                 }
-                crate::context::JobState::Failed | crate::context::JobState::Cancelled => store
+                crate::context::JobState::Failed
+                | crate::context::JobState::Cancelled
+                | crate::context::JobState::Stuck => store
                     .get_agent_job_failure_reason(job_id)
                     .await
                     .ok()
@@ -1353,6 +1355,49 @@ mod tests {
         assert_eq!(
             final_transition.reason.as_deref(),
             Some("Published release notes")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn jobs_detail_handler_surfaces_agent_stuck_summary_from_failure_reason() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let mut ctx =
+            crate::context::JobContext::with_user("alice", "Recover stuck job", "Run task");
+        let job_id = ctx.job_id;
+        ctx.transition_to(crate::context::JobState::InProgress, None)
+            .unwrap(); // safety: test
+        ctx.mark_stuck("Execution timeout").unwrap(); // safety: test
+        db.save_job(&ctx).await.unwrap(); // safety: test
+        db.update_job_status(
+            job_id,
+            crate::context::JobState::Stuck,
+            Some("Execution timeout"),
+        )
+        .await
+        .unwrap(); // safety: test
+        db.save_job_event(
+            job_id,
+            "result",
+            &serde_json::json!({
+                "status": "stuck",
+                "success": false,
+                "message": "Job stuck: Execution timeout",
+            }),
+        )
+        .await
+        .unwrap(); // safety: test
+
+        let response = fetch_job_detail(Arc::clone(&db), job_id).await;
+
+        let final_transition = response
+            .transitions
+            .last()
+            .expect("stuck job should have a synthesized terminal transition"); // safety: test
+        assert_eq!(final_transition.to, "stuck");
+        assert_eq!(
+            final_transition.reason.as_deref(),
+            Some("Execution timeout")
         );
     }
 }
