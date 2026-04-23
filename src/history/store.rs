@@ -2250,6 +2250,37 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically set `metadata.title` only when it's missing or empty.
+    ///
+    /// Returns `true` if the write actually landed (this caller "won" the
+    /// race), `false` if the title was already set or the conversation does
+    /// not exist. Expressed as a single conditional UPDATE so two concurrent
+    /// first-turn writes cannot both observe an empty title and race to
+    /// overwrite each other.
+    pub async fn set_conversation_title_if_empty(
+        &self,
+        id: Uuid,
+        title: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let patch = serde_json::json!({ "title": title });
+        let affected = conn
+            .execute(
+                "UPDATE conversations \
+                 SET metadata = COALESCE(metadata, '{}'::jsonb) || $2 \
+                 WHERE id = $1 \
+                   AND ( \
+                        metadata IS NULL \
+                        OR NOT (metadata ? 'title') \
+                        OR metadata->>'title' IS NULL \
+                        OR metadata->>'title' = '' \
+                   )",
+                &[&id, &patch],
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
     /// Read the metadata JSONB for a conversation.
     pub async fn get_conversation_metadata(
         &self,
@@ -3546,6 +3577,65 @@ mod tests {
         )
         .await
         .unwrap();
+        conn.execute(
+            "DELETE FROM conversations WHERE id = $1",
+            &[&conv_id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// PG regression for the atomic title write.
+    ///
+    /// Two concurrent callers both observe an empty title; exactly one
+    /// conditional UPDATE must land. Subsequent calls on an
+    /// already-titled conversation must be no-ops. Integration tier —
+    /// ignored by default. Run with:
+    ///
+    /// ```text
+    /// cargo test -p ironclaw --features integration --lib \
+    ///     history::store::tests::test_set_title_if_empty_is_atomic_pg -- --ignored
+    /// ```
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_set_title_if_empty_is_atomic_pg() {
+        use crate::config::Config;
+        use std::sync::Arc;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("load config");
+        let store = Arc::new(Store::new(&config.database).await.expect("connect"));
+        store.run_migrations().await.expect("migrate");
+
+        let conv_id = Uuid::new_v4();
+        let user_id = format!("pg-title-race-{}", Uuid::new_v4());
+        store
+            .ensure_conversation(conv_id, "gateway", &user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let s1 = Arc::clone(&store);
+        let s2 = Arc::clone(&store);
+        let (r1, r2) = tokio::join!(
+            async move { s1.set_conversation_title_if_empty(conv_id, "first").await },
+            async move { s2.set_conversation_title_if_empty(conv_id, "second").await }
+        );
+        let won1 = r1.unwrap();
+        let won2 = r2.unwrap();
+        assert!(
+            won1 ^ won2,
+            "exactly one concurrent setter must win, got ({won1}, {won2})"
+        );
+
+        // Third attempt on titled conv must be a no-op.
+        let won3 = store
+            .set_conversation_title_if_empty(conv_id, "third")
+            .await
+            .unwrap();
+        assert!(!won3, "must not overwrite an existing title");
+
+        let conn = store.conn().await.unwrap();
         conn.execute(
             "DELETE FROM conversations WHERE id = $1",
             &[&conv_id.to_string()],

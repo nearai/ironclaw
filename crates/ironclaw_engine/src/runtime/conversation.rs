@@ -189,6 +189,7 @@ impl ConversationManager {
     /// The per-conversation `Mutex` is held for the entire operation — from
     /// the active-thread check through `save_conversation`. This eliminates
     /// the TOCTOU double-spawn window present in the old 5-phase split.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         &self,
         conversation_id: ConversationId,
@@ -197,6 +198,7 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
         user_timezone: Option<&str>,
+        raw_content_for_title: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -324,7 +326,16 @@ impl ConversationManager {
         // The user entry is added here — after the thread operation succeeded — to
         // prevent orphaned entries if inject_message/resume_thread/spawn_thread_with_history
         // returned an error above.
-        conv.add_entry(ConversationEntry::user(content));
+        // Record the user entry with a separate `title_source` so downstream
+        // consumers deriving a conversation title use the raw user text
+        // instead of the attachment-augmented payload. `content` is still
+        // the LLM-facing string (augmented with `<attachments>` / extracted
+        // OCR); only the title-derivation surface changes.
+        let entry = match raw_content_for_title {
+            Some(raw) if raw != content => ConversationEntry::user_with_title_source(content, raw),
+            _ => ConversationEntry::user(content),
+        };
+        conv.add_entry(entry);
         match active_foreground {
             Some(ActiveForeground::Running(_)) => {
                 // No additional in-memory mutation needed beyond the user entry above.
@@ -847,6 +858,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -914,6 +926,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1014,6 +1027,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1063,6 +1077,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
         });
@@ -1073,6 +1088,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1150,6 +1166,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1160,6 +1177,96 @@ mod tests {
                 .iter()
                 .any(|m| m.role == MessageRole::Assistant && m.content == mission_output),
             "follow-up turn history should contain the mission output: {history_after:#?}"
+        );
+    }
+
+    /// Engine-v2 `handle_user_message` must preserve the raw user text
+    /// on the `ConversationEntry` as `title_source` metadata when the
+    /// caller supplies attachment-augmented content. This closes the
+    /// Issue 2 regression where the sidebar / downstream title derivation
+    /// would see the synthesized `<attachments>` block rather than the
+    /// user-typed text.
+    #[tokio::test]
+    async fn handle_user_message_records_raw_title_source() {
+        let (_tm, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("web", "user-raw")
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+
+        let raw = "Summarise the attached doc";
+        let augmented = "Summarise the attached doc\n<attachments>\n<attachment name=\"r.pdf\">Q3 rev $4.2M</attachment>\n</attachments>";
+
+        let _tid = cm
+            .handle_user_message(
+                conv_id,
+                augmented,
+                project,
+                "user-raw",
+                ThreadConfig::default(),
+                None,
+                Some(raw),
+            )
+            .await
+            .unwrap();
+
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        let user_entry = conv
+            .entries
+            .iter()
+            .find(|e| matches!(e.sender, crate::types::conversation::EntrySender::User))
+            .expect("user entry present");
+        // LLM-facing content stays augmented.
+        assert_eq!(user_entry.content, augmented);
+        // Title derivation surface is the raw user text.
+        let title_source = user_entry
+            .metadata
+            .get("title_source")
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            title_source,
+            Some(raw),
+            "title_source must be the raw user text, not the augmented payload"
+        );
+    }
+
+    /// Plain-text turns (no augmentation) must NOT stamp a redundant
+    /// `title_source` — `content` already is the title source.
+    #[tokio::test]
+    async fn handle_user_message_plain_text_has_no_title_source_metadata() {
+        let (_tm, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("web", "user-plain")
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+
+        let plain = "what's the weather";
+        let _tid = cm
+            .handle_user_message(
+                conv_id,
+                plain,
+                project,
+                "user-plain",
+                ThreadConfig::default(),
+                None,
+                Some(plain),
+            )
+            .await
+            .unwrap();
+
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        let user_entry = conv
+            .entries
+            .iter()
+            .find(|e| matches!(e.sender, crate::types::conversation::EntrySender::User))
+            .expect("user entry");
+        assert_eq!(user_entry.content, plain);
+        assert!(
+            user_entry.metadata.is_null(),
+            "plain-text turn must leave metadata unset, got {:?}",
+            user_entry.metadata
         );
     }
 

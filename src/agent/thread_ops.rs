@@ -666,6 +666,15 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
+            // Preserve the raw user text alongside the augmented payload so
+            // the no-DB / in-memory fallback in the threads endpoint can
+            // derive the sidebar title from the raw text instead of the
+            // synthesized `<attachments>` block. Only set when it differs
+            // from `user_input` — plain-text turns keep it `None` since
+            // `user_input` is already correct for title derivation.
+            if content != effective_content {
+                turn.raw_user_input = Some(content.to_string());
+            }
             let turn_number = turn.turn_number;
             let turn_started_at = turn.started_at;
             (thread.messages(), turn_number, turn_started_at)

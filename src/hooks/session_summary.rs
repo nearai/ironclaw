@@ -350,6 +350,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn set_conversation_title_if_empty(
+            &self,
+            _id: Uuid,
+            _title: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+
         async fn list_conversation_messages(
             &self,
             _conversation_id: Uuid,

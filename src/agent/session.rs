@@ -717,8 +717,16 @@ pub struct Turn {
     /// Persisted user message ID when this turn has been written to the DB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_message_id: Option<Uuid>,
-    /// User input that started this turn.
+    /// User input that started this turn. On the v1 attachment pipeline
+    /// this is the *augmented* payload (raw text + synthesized
+    /// `<attachments>` block) that is fed to the LLM.
     pub user_input: String,
+    /// Raw user-typed text for the turn, before attachment augmentation.
+    /// Used for sidebar / title derivation so that attachment-only or
+    /// augmented turns do not surface the synthesized attachment block as
+    /// the conversation title. `None` for turns that predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_user_input: Option<String>,
     /// Agent response (if completed).
     pub response: Option<String>,
     /// Tool calls made during this turn.
@@ -749,6 +757,7 @@ impl Turn {
             turn_number,
             user_message_id: None,
             user_input: user_input.into(),
+            raw_user_input: None,
             response: None,
             tool_calls: Vec::new(),
             state: TurnState::Processing,

@@ -753,19 +753,13 @@ pub(crate) async fn chat_threads_handler(
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
         .map(|t| {
+            // Derive the sidebar title from the raw user text when
+            // available. See `title_from_in_memory_turn` for rationale.
             let title = t
                 .turns
                 .first()
-                .map(|turn| {
-                    turn.user_input
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .chars()
-                        .take(100)
-                        .collect::<String>()
-                })
-                .filter(|s| !s.is_empty());
+                .and_then(title_from_in_memory_turn)
+                .filter(|s: &String| !s.is_empty());
             ThreadInfo {
                 id: t.id,
                 state: thread_state_label(t.state).to_string(),
@@ -1094,6 +1088,34 @@ fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InP
 
 pub(crate) const IN_PROGRESS_STALE_AFTER_MINUTES: i64 = 10;
 
+/// Derive a sidebar title for an in-memory `Turn`.
+///
+/// Prefers `raw_user_input` (the user-typed text) when populated, so
+/// attachment-carrying first turns don't surface the synthesized
+/// `<attachments>` block as the conversation title. `user_input` is the
+/// attachment-augmented payload fed to the LLM — only plain-text turns
+/// can safely use it as the title source. Mirrors the title-derivation
+/// rules used by the v1 DB path (`persist_user_message` /
+/// `set_title_if_missing`).
+fn title_from_in_memory_turn(turn: &crate::agent::session::Turn) -> Option<String> {
+    let source = turn
+        .raw_user_input
+        .as_deref()
+        .unwrap_or(turn.user_input.as_str());
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let title: String = trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect();
+    Some(title)
+}
+
 fn thread_state_label(state: crate::agent::session::ThreadState) -> &'static str {
     match state {
         crate::agent::session::ThreadState::Idle => "Idle",
@@ -1273,6 +1295,51 @@ mod tests {
         let message = engine_history_entry_to_message(thread_id, 0, &entry);
 
         assert!(message.is_none());
+    }
+
+    #[test]
+    fn test_title_from_in_memory_turn_prefers_raw_input() {
+        // When raw_user_input is populated (attachment-augmented turn),
+        // the title must come from the raw text — not the augmented
+        // `user_input` that contains the synthesized `<attachments>`
+        // block. Regression for Issue 1 of PR #2700.
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn(
+            "Summarise the attached report\n<attachments>\n<attachment name=\"r.pdf\">Q3 rev $4.2M</attachment>\n</attachments>",
+        );
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.raw_user_input = Some("Summarise the attached report".to_string());
+        }
+        let title = title_from_in_memory_turn(&thread.turns[0]).expect("title");
+        assert_eq!(title, "Summarise the attached report");
+    }
+
+    #[test]
+    fn test_title_from_in_memory_turn_falls_back_to_user_input() {
+        // Plain-text turns leave `raw_user_input` as None and `user_input`
+        // is already the raw text — the helper should use it.
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("what's the weather in Paris?");
+        let title = title_from_in_memory_turn(&thread.turns[0]).expect("title");
+        assert_eq!(title, "what's the weather in Paris?");
+    }
+
+    #[test]
+    fn test_title_from_in_memory_turn_none_for_empty_raw() {
+        // Attachment-only turn: raw_user_input == "" while user_input
+        // carries only the synthesized block. Returning None leaves the
+        // title unset so a later real-text turn can claim it, matching
+        // the v1 DB behaviour (`set_title_if_missing` skips empty input).
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn(
+            "<attachments>\n<attachment name=\"p.png\">[binary]</attachment>\n</attachments>",
+        );
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.raw_user_input = Some(String::new());
+        }
+        assert!(title_from_in_memory_turn(&thread.turns[0]).is_none());
     }
 
     #[test]

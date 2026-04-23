@@ -3609,6 +3609,12 @@ async fn handle_with_engine_inner(
             &message.user_id,
             thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
+            // Raw content for title derivation. `effective_content` is the
+            // attachment-augmented payload (synthesized `<attachments>`
+            // block / extracted OCR); the sidebar title must come from the
+            // raw user text, mirroring the v1 path in
+            // `thread_ops::persist_user_message`.
+            Some(content),
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;

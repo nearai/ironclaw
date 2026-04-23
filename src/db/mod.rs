@@ -478,6 +478,18 @@ pub trait ConversationStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError>;
+    /// Atomically set `metadata.title` only if it is currently missing or empty.
+    ///
+    /// Returns `true` if this call actually wrote the title, `false` if the
+    /// title was already set (or the conversation does not exist). Used to
+    /// close the check-then-update race in [`set_title_if_missing`] where
+    /// two concurrent writes could both observe an empty title and race to
+    /// write different values.
+    async fn set_conversation_title_if_empty(
+        &self,
+        id: Uuid,
+        title: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,
@@ -509,30 +521,26 @@ pub async fn set_title_if_missing(
         return;
     }
 
-    let has_title = match store.get_conversation_metadata(conversation_id).await {
-        Ok(Some(meta)) => meta
-            .get("title")
-            .and_then(|t| t.as_str())
-            .is_some_and(|s| !s.is_empty()),
-        Ok(None) => return,
-        Err(e) => {
-            tracing::debug!("failed to read metadata for title-set: {e}");
-            return;
-        }
-    };
+    let title_text: String = trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect();
 
-    if !has_title {
-        let title_text: String = trimmed
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(100)
-            .collect();
-        let title_val = serde_json::json!(title_text);
-        let _ = store
-            .update_conversation_metadata_field(conversation_id, "title", &title_val)
-            .await;
+    // Atomic conditional update. Both backends only write when
+    // `metadata.title` is NULL, missing, or an empty string, so two
+    // concurrent first-turn writes cannot race to overwrite each other —
+    // the first to commit wins, subsequent calls are no-ops.
+    match store
+        .set_conversation_title_if_empty(conversation_id, &title_text)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!("failed to atomically set title: {e}");
+        }
     }
 }
 

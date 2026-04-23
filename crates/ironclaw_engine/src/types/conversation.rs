@@ -86,6 +86,32 @@ impl ConversationEntry {
         }
     }
 
+    /// Create a user entry with a separate `title_source` — the raw
+    /// user-typed text before any attachment augmentation. `content`
+    /// remains the LLM-facing payload (augmented with attachment blocks /
+    /// extracted text); `title_source` is recorded in `metadata` so that
+    /// downstream consumers deriving a sidebar title use the raw text
+    /// rather than the synthesized attachment block.
+    pub fn user_with_title_source(
+        content: impl Into<String>,
+        title_source: impl Into<String>,
+    ) -> Self {
+        let title_source = title_source.into();
+        let metadata = if title_source.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({ "title_source": title_source })
+        };
+        Self {
+            id: EntryId::new(),
+            sender: EntrySender::User,
+            content: content.into(),
+            origin_thread_id: None,
+            timestamp: Utc::now(),
+            metadata,
+        }
+    }
+
     /// Create an agent entry from a thread.
     pub fn agent(thread_id: ThreadId, content: impl Into<String>) -> Self {
         Self {
