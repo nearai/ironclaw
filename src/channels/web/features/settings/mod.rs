@@ -421,8 +421,11 @@ fn is_valid_provider_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-/// Returns `Err(422)` if any provider has an invalid ID or unrecognised adapter.
+/// Returns `Err(422)` if any provider has an invalid ID, unrecognised adapter,
+/// or a base URL that fails SSRF validation.
 fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode> {
+    use crate::config::helpers::validate_operator_base_url;
+
     let providers = match value.as_array() {
         Some(arr) => arr,
         None => return Ok(()),
@@ -443,6 +446,14 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
         }
         if !VALID_ADAPTERS.contains(&adapter) {
             tracing::warn!(id = %id, adapter = %adapter, "Rejected unknown LLM adapter");
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        // Validate base_url at save time to reject SSRF-unsafe URLs early.
+        if let Some(base_url) = p.get("base_url").and_then(|v| v.as_str())
+            && !base_url.is_empty()
+            && let Err(e) = validate_operator_base_url(base_url, "base_url")
+        {
+            tracing::warn!(id = %id, base_url = %base_url, error = %e, "Rejected custom provider with invalid base URL");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
@@ -1564,6 +1575,52 @@ mod tests {
     #[test]
     fn test_validate_custom_providers_non_array_is_ok() {
         let input = serde_json::json!("not-an-array");
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_providers_rejects_unsafe_base_url() {
+        // Cloud metadata endpoint — must be rejected at save time.
+        let input = serde_json::json!([{
+            "id": "evil",
+            "adapter": "open_ai_completions",
+            "base_url": "https://169.254.169.254/latest/meta-data"
+        }]);
+        assert_eq!(
+            validate_custom_providers(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_providers_accepts_valid_base_url() {
+        // Use a URL that passes operator policy without DNS resolution
+        // (localhost is always allowed, even in sandboxed CI environments).
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": "http://localhost:8080/v1"
+        }]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_providers_allows_empty_base_url() {
+        // Empty base_url is accepted at save time so users can stage an
+        // incomplete config without losing it. It is NOT enforced during
+        // `LlmConfig::resolve_custom_provider` either (only a warning).
+        // What actually prevents such a config from being used at runtime:
+        //   1. Frontend activation guard (isProviderConfigured in
+        //      static/js/surfaces/config.js blocks the "Use" button).
+        //   2. Startup fallback in `LlmConfig::resolve_with_fallback`
+        //      (invoked from `Config::re_resolve_llm_with_secrets`) —
+        //      demotes unusable custom providers to NearAI rather than
+        //      crash-looping the instance (#2514).
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": ""
+        }]);
         assert!(validate_custom_providers(&input).is_ok());
     }
 

@@ -28,6 +28,7 @@ I18n.register('ko', {
   'restart.progressTitle': 'IronClaw 재시작 중',
   'restart.progressSubtitle': '프로세스가 재시작될 때까지 기다려 주세요...',
   'restart.checkLogs': '재시작이 완료된 후 자세한 내용은 로그 탭을 확인하세요.',
+  'restart.closeTooltip': '닫기',
 
   // 테마
   'theme.tooltipDark': '테마: 다크 (클릭하여 라이트로 변경)',
@@ -101,6 +102,7 @@ I18n.register('ko', {
   'status.reconnecting': '재연결 중...',
   'status.teeVerified': 'TEE 검증됨',
   'status.restart': '재시작',
+  'status.restartTooltip': '프로세스를 정상적으로 재시작합니다',
   'status.active': '활성',
   'status.installed': '설치됨',
   'status.awaitingPairing': '페어링 대기 중',
@@ -456,6 +458,10 @@ I18n.register('ko', {
   'config.builtin': '내장',
   'config.useProvider': '사용',
   'config.configureProvider': '구성',
+  'config.notConfigured': '미구성',
+  'config.configureToUse': '이 공급자를 사용하기 전에 API 키를 구성하세요.',
+  'config.baseUrlRequired': '베이스 URL이 필요합니다. 먼저 공급자를 구성하세요.',
+  'config.modelRequired': '이 공급자를 사용하기 전에 모델을 구성해야 합니다.',
   'config.providerConfigured': '공급자 "{name}"이(가) 구성되었습니다 (재시작 필요)',
   'config.currentModel': '모델: {model}',
   'config.providerName': '표시 이름',

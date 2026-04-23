@@ -126,6 +126,7 @@ def signals_tool_intent(text):
         "read the", "write the", "create", "run the", "execute",
         "query", "retrieve", "add it", "add the", "add this",
         "add that", "update the", "delete", "remove the", "look into",
+        "stop", "pause", "cancel", "halt", "disable",
     ]
 
     for prefix in PREFIXES:
@@ -161,10 +162,33 @@ def signals_execution_intent(text):
         "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
         "send it", "send that", "send the ",
         "fetch it", "fetch that", "fetch the ",
+        "stop it", "stop that", "stop this", "stop the ",
+        "pause it", "pause that", "pause this", "pause the ",
+        "cancel it", "cancel that", "cancel this", "cancel the ",
+        "halt it", "halt that", "halt this", "halt the ",
+        "disable it", "disable that", "disable this", "disable the ",
         "please run ", "please execute ", "please fetch ",
         "please send ", "please deploy ",
+        "please stop ", "please pause ", "please cancel ",
+        "please halt ", "please disable ",
     ]
-    return any(phrase in lower for phrase in EXEC_PHRASES)
+    if any(phrase in lower for phrase in EXEC_PHRASES):
+        return True
+
+    # Bare imperative commands at the start of the message.
+    # "stop pinging", "stop", "pause", "cancel" are unambiguous commands
+    # that don't match the "verb + pronoun/article" pattern above.
+    # Checking startswith avoids false positives like "I can't stop".
+    # Strip trailing punctuation so "Stop." and "cancel!" still match.
+    trimmed = lower.strip().rstrip(".,!?;:")
+    IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt ", "disable "]
+    BARE_COMMANDS = ["stop", "pause", "cancel", "halt", "disable"]
+    if trimmed in BARE_COMMANDS:
+        return True
+    if any(trimmed.startswith(s) for s in IMPERATIVE_STARTS):
+        return True
+
+    return False
 
 
 def format_output(result, max_chars=8000):
@@ -379,11 +403,26 @@ def score_skill(skill, message_lower, message_original):
         trimmed = word.strip(".,!?;:'\"()[]{}<>`~@#$%^&*-_=+/\\|")
         if trimmed:
             words.append(trimmed)
-    for kw in activation.get("keywords", []):
-        kw_lower = kw.lower()
-        if kw_lower in words:
+    # The skill's own name (and the hyphen->space-normalized form) counts
+    # as an implicit keyword. A user who writes "please use pikastream-
+    # video-meeting to prepare this call" is explicitly invoking the
+    # skill by name without the `/` prefix; `extract_explicit_skills`
+    # only picks up slash-prefixed mentions, so without this a manifest
+    # that omits `activation.keywords` would score 0 and never activate
+    # even when the user literally named it. Only count names ≥ 4 chars
+    # so short generic names (e.g. "code") don't match every prompt.
+    name = str(meta.get("name", "")).strip().lower()
+    implicit_keywords = []
+    if len(name) >= 4:
+        implicit_keywords.append(name)
+        normalized_name = name.replace("-", " ").replace("_", " ")
+        if normalized_name != name:
+            implicit_keywords.append(normalized_name)
+    declared = [kw.lower() for kw in activation.get("keywords", [])]
+    for kw in list(dict.fromkeys(declared + implicit_keywords)):
+        if kw in words:
             kw_score += 10
-        elif kw_lower in message_lower:
+        elif kw in message_lower:
             kw_score += 5
     score += min(kw_score, 30)
 

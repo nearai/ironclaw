@@ -432,7 +432,7 @@ pub async fn execute_code_with_skills(
     // resolves the name before calling it, and Undefined → NameError.
     let active_leases = leases.active_for_thread(thread.id).await;
     let mut known_actions: std::collections::HashSet<String> = effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, context)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -1147,7 +1147,7 @@ async fn preflight_action(
     };
 
     let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
+        .available_actions(std::slice::from_ref(&lease), context)
         .await
         .ok()
         .and_then(|actions| actions.into_iter().find(|a| a.name == action_name));
@@ -1593,7 +1593,7 @@ async fn handle_rlm_query(
                 crate::runtime::messaging::ThreadOutcome::Completed { response } => {
                     response.unwrap_or_default()
                 }
-                crate::runtime::messaging::ThreadOutcome::Failed { error } => {
+                crate::runtime::messaging::ThreadOutcome::Failed { error, .. } => {
                     format!("rlm_query child failed: {error}")
                 }
                 crate::runtime::messaging::ThreadOutcome::MaxIterations => {
@@ -1980,8 +1980,17 @@ mod tests {
         async fn available_actions(
             &self,
             _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 

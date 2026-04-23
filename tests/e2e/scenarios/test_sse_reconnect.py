@@ -170,18 +170,15 @@ async def _create_new_user_thread(page) -> str:
     """Click the "new thread" button and return the newly created thread's id.
 
     The wait condition must check that ``currentThreadId`` changed to a *new*
-    non-assistant value. Just checking ``currentThreadId !== assistantThreadId``
-    is not enough: prior tests in the session may have left the server's
-    ``active_thread`` pointing at a user-created thread, in which case the
-    initial page load sets ``currentThreadId`` to that stale thread and the
-    wait would pass immediately — before ``createNewThread()`` resolves.
+    value. Prior tests in the session may have left the server's
+    ``active_thread`` pointing at an older user-created thread, in which case
+    the initial page load already sets ``currentThreadId`` and a looser wait
+    would pass immediately — before ``createNewThread()`` resolves.
     """
     prev_thread_id = await page.evaluate("() => currentThreadId")
     await page.locator("#thread-new-btn").click()
     await page.wait_for_function(
-        """(prev) => !!currentThreadId
-            && currentThreadId !== assistantThreadId
-            && currentThreadId !== prev""",
+        """(prev) => !!currentThreadId && currentThreadId !== prev""",
         arg=prev_thread_id,
         timeout=15000,
     )
@@ -235,17 +232,38 @@ async def test_refresh_without_hash_reopens_active_thread_history(browser, manag
 
 async def test_refresh_skips_readonly_external_active_thread(page):
     """When the server active_thread is an external-channel (HTTP/Telegram) thread,
-    a refresh without a hash should fall through to the assistant thread with
-    the chat input enabled, not land on the read-only thread."""
+    a refresh without a hash should fall through to the writable gateway
+    conversation with the chat input enabled, not land on the read-only thread."""
 
-    # 1. Create a secondary thread and send a message so it becomes active_thread
+    # 1. Create a secondary thread and send a message so it becomes active_thread.
+    # Seed it through the API instead of waiting on a browser round-trip here;
+    # this test only cares that refresh sees a writable gateway thread with
+    # persisted history before we patch its reported channel to read-only.
     ext_thread_id = await _create_new_user_thread(page)
+    base_url = await page.evaluate("() => location.origin")
 
-    result = await send_chat_and_wait_for_terminal_message(
-        page,
-        "Readonly channel test message",
+    response = await api_post(
+        base_url,
+        "/api/chat/send",
+        json={
+            "thread_id": ext_thread_id,
+            "content": "Readonly channel test message",
+        },
     )
-    assert result["role"] == "assistant"
+    assert response.status_code == 202, response.text
+
+    deadline = asyncio.get_running_loop().time() + 15
+    while asyncio.get_running_loop().time() < deadline:
+        history_response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={ext_thread_id}",
+        )
+        assert history_response.status_code == 200, history_response.text
+        if history_response.json().get("turns"):
+            break
+        await asyncio.sleep(0.5)
+    else:
+        raise AssertionError("Timed out waiting for persisted history before refresh")
 
     # 2. Strip the URL hash so reload relies on active_thread
     await page.evaluate(
@@ -259,9 +277,14 @@ async def test_refresh_skips_readonly_external_active_thread(page):
     # with `page.unroute_all(behavior="ignoreErrors")` at test end to drain
     # in-flight callbacks, otherwise the cancelled fetch surfaces as a
     # TargetClosedError on the next test's Browser.new_context() call.
+    fallback_gateway_thread_id = None
+
     async def patch_threads_response(route):
+        nonlocal fallback_gateway_thread_id
         response = await route.fetch()
         body = await response.json()
+        assistant_thread = body.get("assistant_thread") or {}
+        fallback_gateway_thread_id = assistant_thread.get("id")
         for t in body.get("threads", []):
             if t["id"] == ext_thread_id:
                 t["channel"] = "http"
@@ -274,17 +297,22 @@ async def test_refresh_skips_readonly_external_active_thread(page):
     await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
     await _wait_for_connected(page, timeout=15000)
 
-    # 5. Assert we landed on the assistant thread, not the external one
+    # 5. Assert we landed on the writable gateway conversation, not the
+    # patched read-only external thread, and that the legacy pinned assistant
+    # chrome is gone from the DOM.
+    assert fallback_gateway_thread_id, "expected a gateway fallback thread id"
     await page.wait_for_function(
-        "() => currentThreadId === assistantThreadId",
+        "(expected) => currentThreadId === expected",
+        arg=fallback_gateway_thread_id,
         timeout=15000,
     )
+    assert await page.locator("#assistant-thread").count() == 0
 
     # 6. Chat input should be enabled (not disabled by read-only state)
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
     is_disabled = await chat_input.is_disabled()
-    assert not is_disabled, "Chat input should be enabled on the assistant thread"
+    assert not is_disabled, "Chat input should be enabled on the fallback gateway thread"
 
     # Drain in-flight route callbacks before the `page` fixture closes the
     # context (see the setup comment at step 3 for the root cause). The

@@ -86,6 +86,24 @@ pub struct AppBuilderFlags {
     pub no_db: bool,
 }
 
+/// Build an ephemeral in-memory secrets store backed by a freshly-generated
+/// master key.
+///
+/// Returns `Err` only if the crypto routine fails to initialize — which
+/// should not happen in practice, since the key is produced by the same
+/// generator used throughout the test suite. Propagated (rather than
+/// swallowed) so that a construction failure aborts startup at
+/// `init_secrets` instead of surfacing later as an unactionable
+/// "secrets store not initialized" error from `init_extensions`.
+fn build_ephemeral_secrets_store()
+-> Result<Arc<dyn SecretsStore + Send + Sync>, crate::secrets::SecretError> {
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+    let ephemeral_key =
+        secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+    let crypto = SecretsCrypto::new(ephemeral_key)?;
+    Ok(Arc::new(InMemorySecretsStore::new(Arc::new(crypto))))
+}
+
 /// Builder that orchestrates the 5 mechanical init phases.
 pub struct AppBuilder {
     config: Config,
@@ -227,6 +245,47 @@ impl AppBuilder {
         Ok(())
     }
 
+    /// Install an ephemeral in-memory secrets store so downstream WASM
+    /// tool/channel wiring can always rely on `self.secrets_store` being
+    /// `Some`.
+    ///
+    /// Used when persistent secrets construction fails (no master key, no DB
+    /// handle, crypto init failure). Without this fallback, WASM tool
+    /// credential injection silently does nothing on hosted TEE deployments
+    /// because the loader only wires a store when `self.secrets_store` is
+    /// `Some` — see #1537 ("WASM credential injection fails on hosted TEE").
+    ///
+    /// Tools that declare required credentials will then refuse to run via
+    /// the fail-closed branch in `resolve_host_credentials`, surfacing a
+    /// clear error instead of issuing unauthenticated HTTP requests.
+    ///
+    /// `reason` names the specific path that triggered the fallback — logged
+    /// at warn so operators diagnosing a TEE deployment can distinguish
+    /// "master key never resolved" from "master key resolved but no DB
+    /// handle" from "crypto init failed" without turning on debug logging.
+    ///
+    /// Returns the error from `build_ephemeral_secrets_store` so that a
+    /// genuinely broken crypto setup aborts startup here — otherwise a
+    /// downstream phase (e.g. `init_extensions`) would later fail with a
+    /// less actionable "secrets store not initialized" error.
+    fn install_ephemeral_secrets_store(&mut self, reason: &str) -> Result<(), anyhow::Error> {
+        let store = build_ephemeral_secrets_store().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to initialize ephemeral secrets store ({reason}): {e}. \
+                 This should not happen in practice; please report at \
+                 https://github.com/nearai/ironclaw/issues"
+            )
+        })?;
+        tracing::warn!(
+            reason = reason,
+            "Persistent secrets store unavailable; installing ephemeral in-memory fallback. \
+             Credentials saved via `ironclaw tool auth` will not persist across restarts. \
+             Run `ironclaw doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
+        );
+        self.secrets_store = Some(store);
+        Ok(())
+    }
+
     /// Phase 2: Create secrets store.
     ///
     /// Requires a master key and a backend-specific DB handle. After creating
@@ -259,6 +318,7 @@ impl AppBuilder {
                     );
                 }
 
+                self.install_ephemeral_secrets_store("master key resolution produced no key")?;
                 return Ok(());
             }
         };
@@ -268,6 +328,7 @@ impl AppBuilder {
             Err(e) => {
                 tracing::warn!("Failed to initialize secrets crypto: {}", e);
                 self.handles.take();
+                self.install_ephemeral_secrets_store("secrets crypto initialization failed")?;
                 return Ok(());
             }
         };
@@ -356,6 +417,53 @@ impl AppBuilder {
         }
 
         self.secrets_store = store;
+
+        // If no persistent store was created (e.g. master key resolved but no
+        // DB handle was available), fall back to an ephemeral in-memory store
+        // so downstream WASM tool/channel wiring still goes through the
+        // credential-injection code path. See `install_ephemeral_secrets_store`
+        // for the rationale (#1537).
+        if self.secrets_store.is_none() {
+            let has_libsql_handle = self
+                .handles
+                .as_ref()
+                .map(|h| {
+                    #[cfg(feature = "libsql")]
+                    {
+                        h.libsql_db.is_some()
+                    }
+                    #[cfg(not(feature = "libsql"))]
+                    {
+                        let _ = h;
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            let has_pg_handle = self
+                .handles
+                .as_ref()
+                .map(|h| {
+                    #[cfg(feature = "postgres")]
+                    {
+                        h.pg_pool.is_some()
+                    }
+                    #[cfg(not(feature = "postgres"))]
+                    {
+                        let _ = h;
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            let reason = if self.handles.is_none() {
+                "master key resolved but no database handles available (no_db mode or init_database did not run)"
+            } else if !has_libsql_handle && !has_pg_handle {
+                "master key resolved but neither libsql nor postgres handle is present (likely a feature-flag / backend mismatch)"
+            } else {
+                "master key resolved and DB handles present but create_secrets_store returned None (unexpected)"
+            };
+            self.install_ephemeral_secrets_store(reason)?;
+        }
+
         Ok(())
     }
 
@@ -600,6 +708,12 @@ impl AppBuilder {
     > {
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
+        // `McpSessionManager::new()` hardcodes the 1800s idle timeout
+        // (see `src/tools/mcp/session.rs`). There is no session-count
+        // cap yet — if that's needed for a large deployment, add a
+        // `max_sessions` field to the manager and a real knob here;
+        // a prior `MCP_MAX_SESSIONS` env var was wired in but never
+        // reached the struct and has been removed.
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
 
@@ -680,7 +794,6 @@ impl AppBuilder {
         let mcp_servers_future = {
             let secrets_store = self.secrets_store.clone();
             let db = self.db.clone();
-            let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
@@ -702,7 +815,6 @@ impl AppBuilder {
                         for server in enabled {
                             let mcp_sm = Arc::clone(&mcp_sm);
                             let secrets = secrets_store.clone();
-                            let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
                             let owner_id = owner_id.clone();
 
@@ -733,29 +845,18 @@ impl AppBuilder {
                                 match client.list_tools().await {
                                     Ok(mcp_tools) => {
                                         let tool_count = mcp_tools.len();
-                                        match client.create_tools().await {
-                                            Ok(tool_impls) => {
-                                                for tool in tool_impls {
-                                                    tools.register(tool).await;
-                                                }
-                                                tracing::debug!(
-                                                    "Loaded {} tools from MCP server '{}'",
-                                                    tool_count,
-                                                    server_name
-                                                );
-                                                return Some((
-                                                    server_name,
-                                                    Arc::new(client),
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to create tools from MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                            }
-                                        }
+                                        tracing::debug!(
+                                            "Connected to MCP server '{}' ({} tools); \
+                                             deferring wrapper registration until manager init",
+                                            server_name,
+                                            tool_count
+                                        );
+                                        // Tool wrappers need an `Arc<McpClientStore>` so
+                                        // dispatch can resolve the caller's client per user
+                                        // at execute time. The store is owned by the
+                                        // ExtensionManager, which isn't built yet — defer
+                                        // registration to `manager.inject_mcp_client` below.
+                                        return Some((server_name, Arc::new(client)));
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
@@ -853,19 +954,22 @@ impl AppBuilder {
             }
         }
 
-        // Create extension manager. Use ephemeral in-memory secrets if no
-        // persistent store is configured (listing/install/activate still work).
-        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
-            self.secrets_store
+        // Create extension manager. `init_secrets` guarantees
+        // `self.secrets_store` is Some — either a persistent store or an
+        // ephemeral in-memory fallback — so the extension manager, WASM tool
+        // loader, and WASM channel setup all share the same store instance.
+        // See #1537 for the hosted-TEE regression that motivated unconditional
+        // wiring.
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = match self
+            .secrets_store
+            .as_ref()
         {
-            Arc::clone(s)
-        } else {
-            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-            let ephemeral_key =
-                secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
-            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
-            Arc::new(InMemorySecretsStore::new(crypto))
+            Some(s) => Arc::clone(s),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "secrets store not initialized; call init_secrets() before init_extensions()"
+                ));
+            }
         };
         let extension_manager = {
             let mut em = ExtensionManager::new(
@@ -910,7 +1014,35 @@ impl AppBuilder {
                     "Injecting startup MCP clients into extension manager"
                 );
                 for (name, client) in startup_mcp_clients {
-                    manager.inject_mcp_client(name, client).await;
+                    // `name` here is the raw config row's `server.name`
+                    // captured before `create_client_from_config()`
+                    // normalized hyphens to underscores. The client
+                    // itself, the generated wrappers, and the session /
+                    // process managers all use the NORMALIZED name.
+                    // Using the raw `name` here would insert the client
+                    // into `McpClientStore` under `"my-mcp-server"`
+                    // while the wrappers look up `"my_mcp_server"` at
+                    // dispatch, silently failing every call with
+                    // "MCP server '…' is not active for this user"
+                    // until manual reactivation. Source the name from
+                    // the client's canonical field to guarantee the
+                    // insert key matches the dispatch-time lookup key.
+                    let normalized_name = client.server_name().to_string();
+                    let registered = manager
+                        .inject_mcp_client(normalized_name.clone(), &self.config.owner_id, client)
+                        .await;
+                    if name != normalized_name {
+                        tracing::debug!(
+                            raw_name = %name,
+                            normalized = %normalized_name,
+                            "Startup MCP server name normalized (hyphens -> underscores) for client-store injection"
+                        );
+                    }
+                    tracing::debug!(
+                        server = %normalized_name,
+                        count = registered.len(),
+                        "Registered tools for startup MCP server"
+                    );
                 }
             }
 
@@ -1446,6 +1578,35 @@ mod tests {
     use crate::hooks::{
         Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
     };
+
+    /// Regression for #1537 — WASM credential injection silently failed on
+    /// hosted TEE deployments because the ephemeral-store fallback was only
+    /// wired for `ExtensionManager`, not for `WasmToolLoader` or
+    /// `setup_wasm_channels`. `build_ephemeral_secrets_store` is the shared
+    /// construction path that `install_ephemeral_secrets_store` uses to
+    /// guarantee `AppBuilder::secrets_store` is always `Some` after
+    /// `init_secrets` — so every downstream consumer sees the same store.
+    #[tokio::test]
+    async fn ephemeral_secrets_store_is_constructible_and_usable() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = super::build_ephemeral_secrets_store()
+            .expect("ephemeral store construction must not fail with a freshly generated key");
+
+        store
+            .create(
+                "user-1",
+                CreateSecretParams::new("matrix_access_token", "tok-abc"),
+            )
+            .await
+            .expect("storing a credential in the ephemeral store must succeed");
+
+        let decrypted = store
+            .get_decrypted("user-1", "matrix_access_token")
+            .await
+            .expect("reading the credential back from the ephemeral store must succeed");
+        assert_eq!(decrypted.expose(), "tok-abc");
+    }
 
     struct SessionStartHook {
         tx: mpsc::UnboundedSender<(String, String)>,
