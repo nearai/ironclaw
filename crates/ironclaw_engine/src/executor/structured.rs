@@ -551,6 +551,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some(thread.goal.clone()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 

@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;
+pub(crate) mod schema_metrics;
 pub mod schema_validator;
 pub mod wasm;
 

@@ -9,6 +9,7 @@ use ironclaw_engine::{
 };
 
 use crate::auth::extension::AuthManager;
+use crate::bridge::action_inventory::InventoryCandidate;
 use crate::bridge::capability_projector::{
     capability_status_for_extension, capability_surface_subject_for_extension,
 };
@@ -29,14 +30,14 @@ impl ActionProjector {
     /// instead of fetching from `auth_manager`. This allows the caller
     /// (typically `EffectBridgeAdapter`) to share a single fetch across
     /// both `ActionProjector` and `CapabilityProjector`.
-    pub(crate) async fn project(
+    pub(crate) async fn project_candidates(
         tools: &ToolRegistry,
         auth_manager: Option<&AuthManager>,
         capability_registry: Option<Arc<CapabilityRegistry>>,
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
         prefetched_extensions: Option<&HashMap<String, InstalledExtension>>,
-    ) -> Result<Vec<ActionDef>, EngineError> {
+    ) -> Result<Vec<InventoryCandidate>, EngineError> {
         let tool_defs = tools.all().await;
         let owned_statuses;
         let extension_statuses: Option<&HashMap<String, InstalledExtension>> = if let Some(
@@ -102,11 +103,20 @@ impl ActionProjector {
                 }
             }
 
-            actions.push(project_tool_action(tool.as_ref()));
+            let projected = project_tool_action(tool.as_ref());
+            let candidate = if tool.provider_extension().is_some() {
+                InventoryCandidate::provider_backed(projected)
+            } else {
+                InventoryCandidate::builtin(projected)
+            };
+            actions.push(candidate);
         }
 
         if let Some(registry) = capability_registry.as_ref() {
-            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            let mut seen: HashSet<String> = actions
+                .iter()
+                .map(|candidate| candidate.action.name.clone())
+                .collect();
             for lease in leases {
                 if lease.capability_name == "tools" {
                     continue;
@@ -132,12 +142,12 @@ impl ActionProjector {
                     if !assignment.available_actions || !seen.insert(action.name.clone()) {
                         continue;
                     }
-                    actions.push(action.clone());
+                    actions.push(InventoryCandidate::engine_native(action.clone()));
                 }
             }
         }
 
-        actions.sort_by(|a, b| a.name.cmp(&b.name));
+        actions.sort_by(|a, b| a.action.name.cmp(&b.action.name));
         Ok(actions)
     }
 }
@@ -347,7 +357,7 @@ mod tests {
             .await;
 
         let extension_map = HashMap::from([(extension.name.clone(), extension)]);
-        let actions = ActionProjector::project(
+        let actions = ActionProjector::project_candidates(
             tools.as_ref(),
             None,
             None,
@@ -358,7 +368,10 @@ mod tests {
         .await
         .expect("project should succeed");
 
-        actions.into_iter().map(|a| a.name).collect()
+        actions
+            .into_iter()
+            .map(|candidate| candidate.action.name)
+            .collect()
     }
 
     fn test_context() -> ThreadExecutionContext {
@@ -373,6 +386,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 

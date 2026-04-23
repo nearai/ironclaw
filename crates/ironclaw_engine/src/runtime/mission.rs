@@ -2575,6 +2575,7 @@ async fn dispatch_protected_write(
         user_timezone: None,
         thread_goal: None,
         available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
 
     effects

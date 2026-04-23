@@ -183,6 +183,7 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("search the web".into()),
                 available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             },
         )
         .await
@@ -222,6 +223,7 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
                 available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             },
         )
         .await
@@ -257,6 +259,7 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some("hello".into()),
                 available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             },
         )
         .await

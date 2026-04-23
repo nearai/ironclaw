@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use ironclaw_engine::{ActionDef, ActionDiscoverySummary};
+use ironclaw_engine::{ActionDef, ActionDiscoverySummary, ActionInventory};
 
 use crate::tools::require_str;
 use crate::tools::{ToolError, ToolOutput};
@@ -39,11 +39,11 @@ pub(crate) struct ActionDiscovery;
 impl ActionDiscovery {
     pub(crate) fn tool_info(
         params: &serde_json::Value,
-        actions: &[ActionDef],
+        inventory: &ActionInventory,
     ) -> Result<Option<ToolOutput>, ToolError> {
         let name = require_str(params, "name")?;
         let detail = ActionInfoDetail::parse(params)?;
-        let Some(action) = Self::resolve(actions, name) else {
+        let Some(action) = Self::resolve_inventory(inventory, name) else {
             return Ok(None);
         };
 
@@ -77,6 +77,13 @@ impl ActionDiscovery {
 
     pub(crate) fn resolve<'a>(actions: &'a [ActionDef], name: &str) -> Option<&'a ActionDef> {
         actions.iter().find(|action| action.matches_name(name))
+    }
+
+    pub(crate) fn resolve_inventory<'a>(
+        inventory: &'a ActionInventory,
+        name: &str,
+    ) -> Option<&'a ActionDef> {
+        Self::resolve(&inventory.inline, name)
     }
 }
 
@@ -122,7 +129,9 @@ fn fallback_summary(schema: &serde_json::Value) -> ActionDiscoverySummary {
 #[cfg(test)]
 mod tests {
     use super::ActionDiscovery;
-    use ironclaw_engine::{ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary};
+    use ironclaw_engine::{
+        ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory,
+    };
 
     fn action(name: &str) -> ActionDef {
         ActionDef {
@@ -172,7 +181,9 @@ mod tests {
 
         let output = ActionDiscovery::tool_info(
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
-            &[action],
+            &ActionInventory {
+                inline: vec![action],
+            },
         )
         .expect("tool_info should succeed")
         .expect("action should resolve");
@@ -187,7 +198,9 @@ mod tests {
     fn tool_info_falls_back_to_required_fields_for_summary() {
         let output = ActionDiscovery::tool_info(
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
-            &[action("mission_create")],
+            &ActionInventory {
+                inline: vec![action("mission_create")],
+            },
         )
         .expect("tool_info should succeed")
         .expect("action should resolve");

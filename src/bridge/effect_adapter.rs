@@ -25,6 +25,7 @@ use ironclaw_skills::SkillRegistry;
 use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::action_discovery::ActionDiscovery;
+use crate::bridge::action_inventory::ActionInventoryPlanner;
 use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
@@ -995,10 +996,7 @@ impl EffectBridgeAdapter {
                         .available_actions_snapshot
                         .as_ref()
                         .cloned()
-                        .map(|actions| ActionInventory {
-                            callable: actions,
-                            deferred: Vec::new(),
-                        })
+                        .map(|actions| ActionInventory { inline: actions })
                 });
             if let Some(inventory) = inventory {
                 match ActionDiscovery::tool_info(&parameters, &inventory) {
@@ -1635,12 +1633,23 @@ impl EffectExecutor for EffectBridgeAdapter {
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(self
+            .available_action_inventory(leases, context)
+            .await?
+            .inline)
+    }
+
+    async fn available_action_inventory(
+        &self,
+        leases: &[CapabilityLease],
+        context: &ThreadExecutionContext,
+    ) -> Result<ActionInventory, EngineError> {
         let auth_manager = self.auth_manager.read().await.clone();
         let capability_registry = self.capability_registry.read().await.clone();
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        ActionProjector::project(
+        let candidates = ActionProjector::project_candidates(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -1648,7 +1657,9 @@ impl EffectExecutor for EffectBridgeAdapter {
             context,
             extensions.as_ref(),
         )
-        .await
+        .await?;
+
+        Ok(ActionInventoryPlanner::plan(candidates))
     }
 
     async fn available_capabilities(
@@ -2623,6 +2634,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 
@@ -2732,12 +2744,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_info_reads_deferred_action_inventory_snapshot() {
+    async fn tool_info_reads_action_inventory_snapshot() {
         let adapter = make_adapter();
         let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
         ctx.available_action_inventory_snapshot = Some(ActionInventory {
-            callable: vec![],
-            deferred: vec![ActionDef {
+            inline: vec![ActionDef {
                 name: "github_search".to_string(),
                 description: "Search GitHub".to_string(),
                 parameters_schema: serde_json::json!({
@@ -2754,7 +2765,7 @@ mod tests {
                     summary: Some(ironclaw_engine::ActionDiscoverySummary {
                         always_required: vec!["query".to_string()],
                         conditional_requirements: vec![],
-                        notes: vec!["Deferred until promoted".to_string()],
+                        notes: vec!["Schema available through tool_info".to_string()],
                         examples: vec![],
                     }),
                     schema_override: None,
@@ -2770,7 +2781,7 @@ mod tests {
                 &ctx,
             )
             .await
-            .expect("tool_info should resolve deferred discovery");
+            .expect("tool_info should resolve action inventory discovery");
 
         assert!(!result.is_error);
         assert_eq!(result.output["name"], serde_json::json!("github_search"));
@@ -3688,6 +3699,7 @@ mod tests {
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
             ),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3708,6 +3720,7 @@ mod tests {
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
             ),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3726,6 +3739,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3744,6 +3758,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3765,6 +3780,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -3784,6 +3800,7 @@ mod tests {
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4007,6 +4024,7 @@ mod tests {
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
             }
         }
 
@@ -4289,6 +4307,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -4386,6 +4405,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4497,6 +4517,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let result = adapter
@@ -4687,6 +4708,7 @@ mod tests {
         name: String,
         description: String,
         provider_extension: String,
+        parameters_schema: serde_json::Value,
     }
 
     struct ProviderFixture {
@@ -4705,7 +4727,7 @@ mod tests {
         }
 
         fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
+            self.parameters_schema.clone()
         }
 
         async fn execute(
@@ -4728,6 +4750,7 @@ mod tests {
         provider_name: &str,
         action_name: &str,
         capabilities: serde_json::Value,
+        parameters_schema: serde_json::Value,
     ) -> ProviderFixture {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
@@ -4761,6 +4784,7 @@ mod tests {
                 name: action_name.to_string(),
                 description: format!("{action_name} test action"),
                 provider_extension: provider_name.to_string(),
+                parameters_schema,
             }))
             .await;
 
@@ -4822,6 +4846,7 @@ mod tests {
                     }
                 }
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4848,6 +4873,7 @@ mod tests {
                     ]
                 }
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4867,6 +4893,7 @@ mod tests {
             serde_json::json!({
                 "description": "GitHub provider fixture"
             }),
+            serde_json::json!({"type": "object"}),
         )
         .await;
 
@@ -4876,6 +4903,59 @@ mod tests {
             .await
             .expect("actions");
         assert!(!actions.iter().any(|action| action.name == "github_search"));
+    }
+
+    #[tokio::test]
+    async fn available_action_inventory_keeps_provider_actions_inline_callable() {
+        let fixture = make_adapter_with_installed_provider_fixture(
+            "gmail",
+            "gmail",
+            serde_json::json!({
+                "description": "Gmail provider fixture"
+            }),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+        )
+        .await;
+
+        let base_ctx = exec_ctx(ironclaw_engine::ThreadId::new(), None);
+        let inventory = fixture
+            .adapter
+            .available_action_inventory(&[], &base_ctx)
+            .await
+            .expect("inventory");
+
+        assert!(
+            inventory.inline.iter().any(|action| action.name == "gmail"),
+            "provider action should stay inline-callable"
+        );
+        let gmail = inventory
+            .inline
+            .iter()
+            .find(|action| action.name == "gmail")
+            .expect("provider action should be inline");
+        assert_eq!(gmail.description, "gmail test action");
+        assert_eq!(
+            gmail.parameters_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+
+        let actions = fixture
+            .adapter
+            .available_actions(&[], &base_ctx)
+            .await
+            .expect("actions");
+        assert!(
+            actions.iter().any(|action| action.name == "gmail"),
+            "provider action must remain callable in the provider surface"
+        );
     }
 
     #[tokio::test]
@@ -4949,6 +5029,7 @@ mod tests {
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         };
 
         let capabilities = adapter

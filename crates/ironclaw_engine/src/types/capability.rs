@@ -121,7 +121,7 @@ pub enum EffectType {
 // ── Action definition ───────────────────────────────────────
 
 /// Definition of a single action within a capability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionDef {
     /// Action name (e.g. "create_issue", "web_fetch").
     pub name: String,
@@ -136,6 +136,17 @@ pub struct ActionDef {
     /// Optional discovery metadata used by `tool_info` and prompt guidance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<ActionDiscoveryMetadata>,
+}
+
+/// Model-visible callable action inventory for a single execution step.
+///
+/// All actions in this inventory are callable. Richer schema/details remain
+/// available through `tool_info`, while non-callable runtime context belongs
+/// in capability background surfacing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionInventory {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline: Vec<ActionDef>,
 }
 
 /// Curated discovery guidance for a callable action.
