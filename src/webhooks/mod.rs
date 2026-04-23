@@ -709,4 +709,201 @@ mod tests {
             .expect("response");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+
+    struct ParamCaptureTool {
+        captured: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for ParamCaptureTool {
+        fn name(&self) -> &str {
+            "capture_webhook"
+        }
+
+        fn description(&self) -> &str {
+            "captures params for testing"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            *self.captured.lock().await = Some(params);
+            Ok(ToolOutput::success(
+                serde_json::json!({"emit_events": []}),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+            Some(crate::tools::wasm::WebhookCapability {
+                secret_name: Some("capture_secret".to_string()),
+                secret_header: Some("x-webhook-secret".to_string()),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct EventEmittingTool;
+
+    #[async_trait]
+    impl Tool for EventEmittingTool {
+        fn name(&self) -> &str {
+            "emitting_webhook"
+        }
+
+        fn description(&self) -> &str {
+            "emits events for testing"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "emit_events": [
+                        {"source": "test", "event_type": "test.event", "payload": {}}
+                    ]
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+            Some(crate::tools::wasm::WebhookCapability {
+                secret_name: Some("emitting_secret".to_string()),
+                secret_header: Some("x-webhook-secret".to_string()),
+                ..Default::default()
+            })
+        }
+    }
+
+    // ── Test 1: body_raw is Some only when body is not valid JSON ─────────────
+
+    #[tokio::test]
+    async fn body_raw_only_when_body_is_not_json() {
+        let make_secrets = || {
+            let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
+                SecretsCrypto::new(secrecy::SecretString::from(
+                    "test-key-at-least-32-chars-long!!".to_string(),
+                ))
+                .expect("crypto"),
+            )));
+            futures::executor::block_on(
+                secrets.create("test", CreateSecretParams::new("capture_secret", "s3cret")),
+            )
+            .expect("secret create");
+            secrets
+        };
+
+        // ── Sub-case A: valid JSON body → body_json present, body_raw absent ──
+        let captured_a: Arc<tokio::sync::Mutex<Option<serde_json::Value>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let tool_a = Arc::new(ParamCaptureTool {
+            captured: Arc::clone(&captured_a),
+        });
+        let tools_a = Arc::new(ToolRegistry::new());
+        tools_a.register(tool_a).await;
+        let app_a = routes(ToolWebhookState {
+            tools: tools_a,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: Some(make_secrets()),
+        });
+
+        let req_a = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhook/tools/capture_webhook")
+            .header("content-type", "application/json")
+            .header("x-webhook-secret", "s3cret")
+            .body(Body::from(r#"{"ok":true}"#))
+            .expect("request");
+        let resp_a = ServiceExt::<axum::http::Request<Body>>::oneshot(app_a, req_a)
+            .await
+            .expect("response");
+        assert_eq!(resp_a.status(), StatusCode::ACCEPTED);
+
+        let params_a = captured_a.lock().await.clone().expect("params captured");
+        assert_eq!(params_a["webhook"]["body_json"], serde_json::json!({"ok": true}));
+        assert!(params_a["webhook"]["body_raw"].is_null());
+
+        // ── Sub-case B: non-JSON body → body_raw present, body_json absent ────
+        let captured_b: Arc<tokio::sync::Mutex<Option<serde_json::Value>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let tool_b = Arc::new(ParamCaptureTool {
+            captured: Arc::clone(&captured_b),
+        });
+        let tools_b = Arc::new(ToolRegistry::new());
+        tools_b.register(tool_b).await;
+        let app_b = routes(ToolWebhookState {
+            tools: tools_b,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: Some(make_secrets()),
+        });
+
+        let req_b = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhook/tools/capture_webhook")
+            .header("x-webhook-secret", "s3cret")
+            .body(Body::from("not-json"))
+            .expect("request");
+        let resp_b = ServiceExt::<axum::http::Request<Body>>::oneshot(app_b, req_b)
+            .await
+            .expect("response");
+        assert_eq!(resp_b.status(), StatusCode::ACCEPTED);
+
+        let params_b = captured_b.lock().await.clone().expect("params captured");
+        assert_eq!(params_b["webhook"]["body_raw"], "not-json");
+        assert!(params_b["webhook"]["body_json"].is_null());
+    }
+
+    // ── Test 2: SERVICE_UNAVAILABLE when events emitted but engine slot empty ──
+
+    #[tokio::test]
+    async fn returns_service_unavailable_when_events_emitted_but_engine_empty() {
+        let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
+            SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )));
+        secrets
+            .create("test", CreateSecretParams::new("emitting_secret", "s3cret"))
+            .await
+            .expect("secret create");
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(EventEmittingTool)).await;
+
+        let app = routes(ToolWebhookState {
+            tools,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: Some(secrets),
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhook/tools/emitting_webhook")
+            .header("content-type", "application/json")
+            .header("x-webhook-secret", "s3cret")
+            .body(Body::from(r#"{"trigger":true}"#))
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
