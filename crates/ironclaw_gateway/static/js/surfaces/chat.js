@@ -81,7 +81,7 @@ async function sendMessage() {
   }
   if (_sendCooldown) return;
   const content = input.value.trim();
-  if (!content && stagedImages.length === 0 && stagedAttachments.length === 0) return;
+  if (!content && stagedAttachments.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
@@ -115,10 +115,8 @@ async function sendMessage() {
     }
   }
 
-  // Snapshot attached images + attachments before the body block clears them,
-  // so the optimistic display, pending entry, and retry handler all see the
-  // same view the user pressed Enter on.
-  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
+  // Snapshot attachments before the body block clears them, so the optimistic
+  // display and retry handler both see the same staged payload the user sent.
   const pendingAttachmentsForDisplay = stagedAttachments.map(att => ({
     kind: att.kind || (att.mime_type && att.mime_type.startsWith('image/') ? 'image' : 'document'),
     filename: att.filename || 'attachment',
@@ -127,14 +125,10 @@ async function sendMessage() {
     preview_url: att.preview_url || null,
     preview_text: '',
   }));
-  const displayContent = content
-    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '(images attached)');
+  const displayContent = content || '(files attached)';
   const userMsg = addMessage('user', displayContent, {
     attachments: pendingAttachmentsForDisplay,
   });
-  if (attachedImageDataUrls.length > 0) {
-    appendImagesToMessage(userMsg, attachedImageDataUrls);
-  }
   pruneOldMessages();
   if (currentThreadId) {
     activeWorkStore.updateThread(currentThreadId, {
@@ -149,7 +143,7 @@ async function sendMessage() {
   let pendingId = null;
   const pendingThreadId = currentThreadId;
   if (currentThreadId) {
-    const displayContent = content || '(images attached)';
+    const displayContent = content || '(files attached)';
     if (!_pendingUserMessages.has(currentThreadId)) {
       _pendingUserMessages.set(currentThreadId, []);
     }
@@ -157,17 +151,11 @@ async function sendMessage() {
     _pendingUserMessages.get(currentThreadId).push({
       id: pendingId,
       content: displayContent,
-      images: attachedImageDataUrls,
       timestamp: Date.now(),
     });
   }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedImages.length > 0) {
-    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
-    stagedImages = [];
-    renderImagePreviews();
-  }
   // Clone attachments so the retry handler can restore them if send fails
   // without getting mutated by subsequent stagedAttachments clears.
   const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
@@ -222,8 +210,7 @@ async function sendMessage() {
         e.preventDefault();
         if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
         // Restore the attachments we just cleared so the retry carries the
-        // same payload the failed send attempted. `stagedImages` is kept
-        // separately by the existing preview machinery.
+        // same payload the failed send attempted.
         if (pendingAttachments.length > 0) {
           stagedAttachments = pendingAttachments.map(att => ({ ...att }));
           if (typeof renderAttachmentPreviews === 'function') {
@@ -248,63 +235,6 @@ function enableChatInput() {
   }
   if (btn) btn.disabled = false;
 }
-
-// --- Image Upload ---
-
-function renderImagePreviews() {
-  const strip = document.getElementById('image-preview-strip');
-  strip.innerHTML = '';
-  stagedImages.forEach((img, idx) => {
-    const container = document.createElement('div');
-    container.className = 'image-preview-container';
-
-    const preview = document.createElement('img');
-    preview.className = 'image-preview';
-    preview.src = img.dataUrl;
-    preview.alt = 'Attached image';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'image-preview-remove';
-    removeBtn.textContent = '\u00d7';
-    removeBtn.addEventListener('click', () => {
-      stagedImages.splice(idx, 1);
-      renderImagePreviews();
-    });
-
-    container.appendChild(preview);
-    container.appendChild(removeBtn);
-    strip.appendChild(container);
-  });
-}
-
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
-const MAX_STAGED_IMAGES = 5;
-
-function handleImageFiles(files) {
-  Array.from(files).forEach(file => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
-      return;
-    }
-    if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      const dataUrl = e.target.result;
-      const commaIdx = dataUrl.indexOf(',');
-      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
-      const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = meta.replace('data:', '').replace(';base64', '');
-      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
-      renderImagePreviews();
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 
 const chatMessagesEl = document.getElementById('chat-messages');
 chatMessagesEl.addEventListener('copy', (e) => {
@@ -674,7 +604,8 @@ function handleAttachmentFiles(files) {
 // replacement and avoids the silent "picker closes, nothing happens" failure.
 (function wireAttachmentUI() {
   document.addEventListener('click', (e) => {
-    const attachBtn = e.target && e.target.closest ? e.target.closest('#attach-btn') : null;
+    const eventTarget = e.target && e.target.nodeType === Node.TEXT_NODE ? e.target.parentElement : e.target;
+    const attachBtn = eventTarget && typeof eventTarget.closest === 'function' ? eventTarget.closest('#attach-btn') : null;
     if (!attachBtn) return;
     const input = document.getElementById('image-file-input');
     if (input && !input.disabled) input.click();

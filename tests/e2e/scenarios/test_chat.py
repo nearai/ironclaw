@@ -311,15 +311,67 @@ async def test_turn_cost_event_does_not_render_message_badge(page):
 
 
 async def test_gateway_image_picker_selection_stages_attachment_preview(page):
-    """Selecting an image via the chat file input should stage a unified attachment preview immediately."""
-    attachment_input = page.locator(SEL["attachment_input"])
+    """The paperclip should survive input replacement, handle text-node clicks, and stage only unified attachments."""
+    attach_btn = page.locator(SEL["attach_btn"])
 
     await page.wait_for_function(
         "() => typeof currentThreadId !== 'undefined' && !!currentThreadId",
         timeout=15000,
     )
 
-    await attachment_input.set_input_files(
+    text_target_click = await page.evaluate(
+        """
+        () => {
+          const attachBtn = document.getElementById('attach-btn');
+          const input = document.getElementById('image-file-input');
+          if (!attachBtn || !input) {
+            return { ready: false };
+          }
+          attachBtn.textContent = '';
+          const textNode = document.createTextNode('Attach');
+          attachBtn.appendChild(textNode);
+          let clickCount = 0;
+          const originalClick = input.click.bind(input);
+          input.click = () => {
+            clickCount += 1;
+          };
+          let threw = false;
+          try {
+            textNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          } catch (err) {
+            threw = true;
+          } finally {
+            input.click = originalClick;
+            attachBtn.textContent = '\uD83D\uDCCE';
+          }
+          return { ready: true, threw, clickCount };
+        }
+        """
+    )
+    assert text_target_click["ready"] is True, text_target_click
+    assert text_target_click["threw"] is False, text_target_click
+    assert text_target_click["clickCount"] == 1, text_target_click
+
+    await page.evaluate(
+        """
+        () => {
+          const oldInput = document.getElementById('image-file-input');
+          if (!oldInput) return false;
+          const replacement = oldInput.cloneNode(false);
+          replacement.id = oldInput.id;
+          replacement.accept = oldInput.accept;
+          replacement.multiple = oldInput.multiple;
+          replacement.style.display = oldInput.style.display;
+          oldInput.replaceWith(replacement);
+          return document.getElementById('image-file-input') === replacement;
+        }
+        """
+    )
+
+    async with page.expect_file_chooser() as chooser_info:
+        await attach_btn.click()
+    file_chooser = await chooser_info.value
+    await file_chooser.set_files(
         files=[
             {
                 "name": "preview.png",
@@ -341,7 +393,7 @@ async def test_gateway_image_picker_selection_stages_attachment_preview(page):
         """
         () => ({
           stagedAttachments: stagedAttachments.length,
-          stagedImages: stagedImages.length,
+          legacyStatePresent: typeof stagedImages !== 'undefined',
           attachmentPreviews: document.querySelectorAll('#image-preview-strip .attachment-preview-container').length,
           legacyImagePreviews: document.querySelectorAll('#image-preview-strip .image-preview-container').length,
         })
@@ -349,7 +401,7 @@ async def test_gateway_image_picker_selection_stages_attachment_preview(page):
     )
     assert preview_state["stagedAttachments"] == 1, preview_state
     assert preview_state["attachmentPreviews"] == 1, preview_state
-    assert preview_state["stagedImages"] == 0, preview_state
+    assert preview_state["legacyStatePresent"] is False, preview_state
     assert preview_state["legacyImagePreviews"] == 0, preview_state
 
 
