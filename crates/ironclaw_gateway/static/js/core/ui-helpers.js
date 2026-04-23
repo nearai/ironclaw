@@ -251,7 +251,6 @@ document.getElementById('restart-confirm-btn').addEventListener('click', () => c
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
-document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());

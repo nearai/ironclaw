@@ -4,7 +4,8 @@
 //! route through the engine instead of the existing agentic loop. All
 //! existing behavior is unchanged when the flag is off.
 
-pub mod auth_manager;
+mod action_projector;
+mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
@@ -12,6 +13,8 @@ mod router;
 pub mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
+mod tool_surface;
+mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;
@@ -78,6 +81,10 @@ pub use router::reset_engine_state;
 #[cfg(feature = "libsql")]
 #[doc(hidden)]
 pub use router::engine_retrospectives_for_test;
+
+#[cfg(feature = "libsql")]
+#[doc(hidden)]
+pub use router::override_engine_project_root_for_test;
 
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]

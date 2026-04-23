@@ -39,13 +39,59 @@ function loadHistory(before) {
 
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
+    const pending = !isPaginating ? _pendingUserMessages.get(currentThreadId) : null;
+    let freshPending = [];
+    let pendingByContent = null;
+
+    if (!isPaginating && pending && pending.length > 0) {
+      const now = Date.now();
+      freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+      if (freshPending.length > 0) {
+        pendingByContent = new Map();
+        freshPending.forEach((p) => {
+          const key = p.content;
+          if (!pendingByContent.has(key)) pendingByContent.set(key, []);
+          pendingByContent.get(key).push(p);
+        });
+      }
+    }
+
+    if (!isPaginating && currentThreadId && data.channel) {
+      threadChannelHints.set(currentThreadId, data.channel);
+    }
 
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
         if (turn.user_input) {
-          addMessage('user', turn.user_input);
+          let renderedPending = false;
+          const pendingQueue = pendingByContent && pendingByContent.get(turn.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          if (nextPending) {
+            let persistedAttachments = [];
+            if (typeof parseUserMessageContent === 'function') {
+              persistedAttachments = parseUserMessageContent(turn.user_input).attachments;
+            }
+            const hasPendingVisuals = (
+              (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+              || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+            );
+            if (hasPendingVisuals && persistedAttachments.length === 0) {
+              const div = addMessage('user', nextPending.content, {
+                attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+                copyText: nextPending.copyText || nextPending.content,
+              });
+              if (nextPending.images && nextPending.images.length > 0) {
+                appendImagesToMessage(div, nextPending.images);
+              }
+              renderedPending = true;
+            }
+            pendingQueue.shift();
+          }
+          if (!renderedPending) {
+            addMessage('user', turn.user_input);
+          }
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
@@ -71,52 +117,67 @@ function loadHistory(before) {
           addMessage('assistant', turn.response);
         }
       }
-      // Re-inject pending user messages not yet in DB (#2409)
-      const pending = _pendingUserMessages.get(currentThreadId);
-      let freshPending = [];
-      if (pending && pending.length > 0) {
-        const now = Date.now();
-        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
-        if (freshPending.length > 0) {
-          const dbContentsCounts = new Map();
-          data.turns
-            .map(t => t.user_input)
-            .filter(Boolean)
-            .forEach(content => {
-              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
+      // Show processing indicator if the last turn is still in-progress
+      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          const pendingQueue = pendingByContent && pendingByContent.get(data.in_progress.user_input);
+          const nextPending = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : null;
+          const hasPendingVisuals = nextPending && (
+            (Array.isArray(nextPending.attachments) && nextPending.attachments.length > 0)
+            || (Array.isArray(nextPending.images) && nextPending.images.length > 0)
+          );
+          if (hasPendingVisuals) {
+            const div = addMessage('user', nextPending.content, {
+              attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
+              copyText: nextPending.copyText || nextPending.content,
             });
-          for (const p of freshPending) {
-            const count = dbContentsCounts.get(p.content) || 0;
-            if (count > 0) {
-              dbContentsCounts.set(p.content, count - 1);
-            } else {
-              const div = addMessage('user', p.content);
-              if (p.images && p.images.length > 0) {
-                appendImagesToMessage(div, p.images);
-              }
+            if (nextPending.images && nextPending.images.length > 0) {
+              appendImagesToMessage(div, nextPending.images);
             }
+            pendingQueue.shift();
+          } else {
+            addMessage('user', data.in_progress.user_input);
           }
-          _pendingUserMessages.set(currentThreadId, freshPending);
-        } else {
-          _pendingUserMessages.delete(currentThreadId);
         }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const remainingPending = freshPending.length > 0 && pendingByContent
+        ? Array.from(pendingByContent.values()).flat()
+        : freshPending;
+      if (remainingPending.length > 0) {
+        for (const p of remainingPending) {
+          const div = addMessage('user', p.content, {
+            attachments: Array.isArray(p.attachments) ? p.attachments : [],
+            copyText: p.copyText || p.content,
+          });
+          if (p.images && p.images.length > 0) {
+            appendImagesToMessage(div, p.images);
+          }
+        }
+        _pendingUserMessages.set(currentThreadId, freshPending);
+      } else {
+        _pendingUserMessages.delete(currentThreadId);
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
       if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
-      // Show processing indicator if the last turn is still in-progress
-      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (data.in_progress) {
-        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
-        if (!sameLastTurn && data.in_progress.user_input) {
-          addMessage('user', data.in_progress.user_input);
-        }
-        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
-      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      const hintedChannel = currentThreadId
+        ? (data.channel || threadChannelHints.get(currentThreadId) || 'gateway')
+        : 'gateway';
+      currentThreadIsReadOnly = isReadOnlyChannel(hintedChannel);
+      if (currentThreadIsReadOnly) {
+        disableChatInputReadOnly();
+      } else {
+        enableChatInput();
       }
+
       if (data.pending_gate) {
         handleGateRequired({
           ...data.pending_gate,
@@ -328,38 +389,16 @@ function loadThreads() {
 
   apiFetch('/api/chat/threads').then((data) => {
     const rememberedThreads = [];
-    // Pinned assistant thread
-    if (data.assistant_thread) {
-      assistantThreadId = data.assistant_thread.id;
-      rememberedThreads.push({
-        threadId: data.assistant_thread.id,
-        meta: {
-          label: I18n.t('thread.assistant'),
-          source: 'chat',
-        },
-      });
-      const el = document.getElementById('assistant-thread');
-      const isActive = currentThreadId === assistantThreadId;
-      el.className = 'assistant-item' + (isActive ? ' active' : '');
-      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
-      const labelEl = document.getElementById('assistant-label');
-      if (labelEl) {
-        labelEl.textContent = I18n.t('thread.assistant');
-      }
-      const meta = document.getElementById('assistant-meta');
-      meta.textContent = relativeTime(data.assistant_thread.updated_at);
-      if (data.assistant_thread.state === 'Processing' && !isActive) {
-        const spinner = document.createElement('span');
-        spinner.className = 'thread-processing';
-        spinner.innerHTML = '<div class="spinner"></div>';
-        el.appendChild(spinner);
-      }
-    }
+    const threads = [];
+    // Render one conversation list. The backend may still expose the legacy
+    // assistant conversation separately, but the sidebar should treat it like
+    // any other conversation row instead of pinning it above the list.
+    if (data.assistant_thread) threads.push(data.assistant_thread);
+    if (Array.isArray(data.threads)) threads.push(...data.threads);
+    threads.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
-    // Regular threads
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
-    const threads = data.threads || [];
     for (const thread of threads) {
       rememberedThreads.push({
         threadId: thread.id,
@@ -424,8 +463,7 @@ function loadThreads() {
     if (window._pendingThreadRestore) {
       var pendingId = window._pendingThreadRestore;
       window._pendingThreadRestore = null;
-      var inSidebar = (pendingId === assistantThreadId) ||
-        threads.some(function(t) { return t.id === pendingId; });
+      var inSidebar = threads.some(function(t) { return t.id === pendingId; });
       if (!inSidebar && window.DEBUG_CHAT_RESTORE === true) {
         console.warn('[chat] thread', pendingId, 'not in sidebar list; loading via history API');
       }
@@ -442,32 +480,39 @@ function loadThreads() {
     // when the URL does not carry an explicit thread hash.
     if (!currentThreadId) {
       const activeThreadId = data.active_thread || null;
-      if (activeThreadId && activeThreadId === assistantThreadId) {
-        switchToAssistant();
-        return;
-      }
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
-        // Skip external-channel threads (e.g. HTTP, Telegram) — they are
-        // read-only in the web UI, so auto-switching to one would leave the
-        // chat input disabled.  Fall through to the assistant thread instead.
         const activeThread = threads.find(t => t.id === activeThreadId);
-        if (!isReadOnlyChannel(activeThread.channel)) {
+        if (activeThread && !isReadOnlyChannel(activeThread.channel)) {
           switchThread(activeThreadId);
           return;
         }
       }
-      if (assistantThreadId) {
-        switchToAssistant();
+
+      // Prefer a writable gateway-style thread for first load, but still show
+      // the newest read-only conversation if that's all the user has.
+      const fallbackThread = threads.find(t => !isReadOnlyChannel(t.channel)) || threads[0];
+      if (fallbackThread) {
+        switchThread(fallbackThread.id);
         return;
       }
+
+      currentThreadIsReadOnly = false;
+      enableChatInput();
+      const container = document.getElementById('chat-messages');
+      if (container) {
+        container.innerHTML = '';
+        showWelcomeCard();
+      }
+      return;
     }
 
     // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      const currentThread = currentThreadId === assistantThreadId
-        ? data.assistant_thread
-        : threads.find(t => t.id === currentThreadId);
-      const ch = currentThread ? currentThread.channel : 'gateway';
+      const currentThread = threads.find(t => t.id === currentThreadId);
+      const hintedChannel = currentThread
+        ? currentThread.channel
+        : threadChannelHints.get(currentThreadId);
+      const ch = hintedChannel || 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
         disableChatInputReadOnly();
@@ -486,24 +531,6 @@ function disableChatInputReadOnly() {
     input.placeholder = I18n.t('chat.readOnlyThread');
   }
   if (btn) btn.disabled = true;
-}
-
-function switchToAssistant() {
-  if (!assistantThreadId) return;
-  finalizeActivityGroup();
-  currentThreadId = assistantThreadId;
-  currentThreadIsReadOnly = false;
-  unreadThreads.delete(assistantThreadId);
-  hasMore = false;
-  oldestTimestamp = null;
-  loadHistory();
-  loadThreads();
-  updateHash();
-  if (window.innerWidth <= 768) {
-    const sidebar = document.getElementById('thread-sidebar');
-    sidebar.classList.remove('expanded-mobile');
-    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
-  }
 }
 
 function switchThread(threadId) {
@@ -763,4 +790,3 @@ function updateTabIndicator() {
 window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---
-

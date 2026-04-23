@@ -282,7 +282,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Audio transcription | ✅ | ❌ | P2 | |
 | Video support | ✅ | ❌ | P3 | |
 | PDF analysis tool | ✅ | ❌ | P2 | Native Anthropic/Gemini path with text/image extraction fallback |
-| PDF parsing | ✅ | ❌ | P2 | `pdfjs-dist` fallback path |
+| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments parse via `pdf-extract`; no `pdfjs-dist` fallback path |
 | MIME detection | ✅ | ❌ | P2 | |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding |
