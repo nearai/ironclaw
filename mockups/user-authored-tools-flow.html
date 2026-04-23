@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IronClaw — User-authored Tools Flow</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #09090b;
+      --bg-secondary: #0f0f11;
+      --bg-tertiary: #1a1a1e;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(255, 255, 255, 0.15);
+      --text: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #888;
+      --accent: #34d399;
+      --accent-hover: #2fc48d;
+      --accent-subtle: rgba(52, 211, 153, 0.15);
+      --accent-border-subtle: rgba(52, 211, 153, 0.3);
+      --success: #34d399;
+      --warning: #F5A623;
+      --danger: #E64C4C;
+      --warning-subtle: rgba(245, 166, 35, 0.15);
+      --danger-subtle: rgba(230, 76, 76, 0.15);
+      --tab-bg: rgba(9, 9, 11, 0.75);
+      --user-msg-bg: rgba(52, 211, 153, 0.08);
+      --user-msg-border: rgba(52, 211, 153, 0.2);
+      --code-bg: #111113;
+      --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+      --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.05);
+      --radius-sm: 6px;
+      --radius: 8px;
+      --radius-lg: 12px;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-6: 24px;
+      --text-xs: 11px;
+      --text-sm: 13px;
+      --text-base: 14px;
+      --text-lg: 16px;
+      --text-xl: 20px;
+      --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      height: 100%;
+    }
+
+    .tab-bar {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      background: var(--tab-bg);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 16px;
+      box-shadow: var(--surface-highlight);
+    }
+
+    .tab-bar button,
+    .tab-bar a {
+      padding: 10px 20px;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: default;
+      font: inherit;
+      font-size: var(--text-base);
+      text-decoration: none;
+    }
+
+    .tab-bar button.active {
+      color: var(--accent);
+      background: var(--accent-subtle);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+
+    .tab-bar .spacer { flex: 1; }
+
+    .status-chip {
+      margin-right: 8px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: var(--text-xs);
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+    }
+
+    .active-work-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 12px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg-secondary) 90%, var(--accent-subtle) 10%);
+      min-height: 34px;
+    }
+
+    .active-work-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border: 1px solid var(--accent-border-subtle);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--bg-secondary) 82%, var(--accent-subtle) 18%);
+      color: var(--text);
+      font-size: var(--text-xs);
+    }
+
+    .active-work-kind {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 280px minmax(720px, 1fr) 360px;
+      min-height: 0;
+    }
+
+    .thread-sidebar {
+      border-right: 1px solid var(--border);
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .threads-section-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: var(--text-sm);
+      font-weight: 600;
+    }
+
+    .thread-new-btn,
+    .thread-toggle-btn {
+      min-width: 28px;
+      height: 28px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font: inherit;
+    }
+
+    .thread-list {
+      padding: 10px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .thread-item {
+      padding: 12px;
+      border-radius: var(--radius-lg);
+      border: 1px solid transparent;
+      background: var(--bg);
+    }
+
+    .thread-item.active {
+      background: var(--accent-subtle);
+      border-color: var(--accent-border-subtle);
+    }
+
+    .thread-item-title {
+      font-size: var(--text-sm);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .thread-item-meta {
+      font-size: var(--text-xs);
+      color: var(--text-secondary);
+      line-height: 1.4;
+    }
+
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--bg);
+    }
+
+    .chat-stage-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+    }
+
+    .chat-stage-title {
+      font-size: var(--text-lg);
+      font-weight: 700;
+      margin: 0 0 4px;
+    }
+
+    .chat-stage-copy {
+      color: var(--text-secondary);
+      font-size: var(--text-sm);
+      line-height: 1.45;
+      margin: 0;
+    }
+
+    .messages {
+      flex: 1;
+      overflow: auto;
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .message {
+      max-width: 80%;
+      padding: 12px 14px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background: var(--bg-secondary);
+      box-shadow: var(--surface-highlight);
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user-msg-bg);
+      border-color: var(--user-msg-border);
+    }
+
+    .message-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .message-copy {
+      font-size: var(--text-sm);
+      line-height: 1.5;
+    }
+
+    .tool-builder-card,
+    .approval-card,
+    .auth-card,
+    .ready-card {
+      align-self: flex-start;
+      max-width: 80%;
+      background: var(--bg-secondary);
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      box-shadow: var(--surface-highlight);
+    }
+
+    .tool-builder-card {
+      background: color-mix(in srgb, var(--bg-secondary) 88%, var(--accent) 12%);
+      border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border) 55%);
+    }
+
+    .approval-card {
+      border: 1px solid var(--warning);
+    }
+
+    .auth-card {
+      border: 1px solid var(--accent-border-subtle);
+    }
+
+    .ready-card {
+      border: 1px solid rgba(52, 211, 153, 0.4);
+      background: color-mix(in srgb, var(--bg-secondary) 85%, var(--accent-subtle) 15%);
+    }
+
+    .tool-builder-header,
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-3);
+      align-items: center;
+    }
+
+    .card-kicker {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+    }
+
+    .approval-card .card-kicker { color: var(--warning); }
+    .tool-builder-card .card-kicker { color: var(--accent); }
+    .ready-card .card-kicker { color: var(--success); }
+
+    .card-title,
+    .tool-builder-title {
+      font-size: var(--text-base);
+      font-weight: 700;
+      color: var(--text);
+      margin-top: 2px;
+    }
+
+    .tool-builder-name,
+    .mono {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--text);
+    }
+
+    .card-copy,
+    .tool-builder-summary,
+    .tool-builder-notes {
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: capitalize;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      background: var(--bg-tertiary);
+      white-space: nowrap;
+    }
+
+    .badge.success { background: rgba(52, 211, 153, 0.15); color: var(--success); border-color: transparent; }
+    .badge.warning { background: rgba(245, 166, 35, 0.15); color: var(--warning); border-color: transparent; }
+    .badge.active { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent-border-subtle); }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .data-card {
+      display: flex;
+      flex-direction: column;
+      margin: 8px 0 0;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      border-left: 3px solid var(--accent);
+      overflow: hidden;
+    }
+
+    .data-card-row {
+      display: flex;
+      align-items: baseline;
+      gap: var(--space-3);
+      padding: 6px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .data-card-row:last-child { border-bottom: none; }
+
+    .data-card-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      min-width: 88px;
+      flex-shrink: 0;
+      text-transform: capitalize;
+    }
+
+    .data-card-value {
+      font-size: var(--text-sm);
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .data-card-value code,
+    .code-inline {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 1px 5px;
+      background: var(--bg-secondary);
+      border-radius: var(--radius-sm);
+    }
+
+    .manifest {
+      background: var(--code-bg);
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      font-size: 12px;
+      font-family: var(--font-mono);
+      line-height: 1.45;
+      overflow-x: auto;
+      color: var(--text-secondary);
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid var(--border);
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+
+    .action-btn {
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: var(--text-sm);
+      background: var(--bg-tertiary);
+      color: var(--text);
+      font: inherit;
+    }
+
+    .action-btn.primary {
+      background: var(--accent);
+      color: #09090b;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    .action-btn.warn {
+      border-color: rgba(245, 166, 35, 0.4);
+      color: var(--warning);
+      background: var(--warning-subtle);
+    }
+
+    .action-btn.danger {
+      border-color: rgba(230, 76, 76, 0.4);
+      color: var(--danger);
+      background: var(--danger-subtle);
+    }
+
+    .input-card {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .input-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: var(--text-sm);
+      font-weight: 600;
+    }
+
+    .input-help {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .fake-input {
+      height: 38px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-hover);
+      background: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+    }
+
+    .chat-input {
+      border-top: 1px solid var(--border);
+      padding: 14px 18px 18px;
+      background: var(--bg-secondary);
+    }
+
+    .chat-input-box {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--bg);
+      padding: 0 12px 0 16px;
+      color: var(--text-secondary);
+      font-size: var(--text-sm);
+    }
+
+    .send-btn {
+      padding: 9px 14px;
+      border-radius: var(--radius);
+      background: var(--accent);
+      color: #09090b;
+      font-weight: 700;
+      border: none;
+      font: inherit;
+    }
+
+    .inspector {
+      border-left: 1px solid var(--border);
+      background: var(--bg-secondary);
+      padding: 16px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .inspector-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      box-shadow: var(--surface-highlight);
+    }
+
+    .inspector-card h3 {
+      font-size: var(--text-base);
+      margin: 0 0 10px;
+    }
+
+    .inspector-card p,
+    .inspector-card li {
+      color: var(--text-secondary);
+      font-size: var(--text-sm);
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    .inspector-card ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .flow-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .flow-step {
+      width: 100%;
+      text-align: left;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .flow-step.active {
+      border-color: var(--accent-border-subtle);
+      background: var(--accent-subtle);
+      color: var(--text);
+    }
+
+    .flow-step strong {
+      display: block;
+      color: inherit;
+      font-size: var(--text-sm);
+      margin-bottom: 4px;
+    }
+
+    .flow-step span {
+      display: block;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .nav-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .nav-controls button {
+      flex: 1;
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .nav-controls button.primary {
+      background: var(--accent);
+      color: #09090b;
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+
+    .panel { display: none; }
+    .panel.active { display: contents; }
+
+    @media (max-width: 1280px) {
+      body { overflow: auto; }
+      .workspace {
+        grid-template-columns: 240px 1fr;
+      }
+      .inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border); }
+    }
+
+    @media (max-width: 900px) {
+      .workspace { grid-template-columns: 1fr; }
+      .thread-sidebar { display: none; }
+      .message, .tool-builder-card, .approval-card, .auth-card, .ready-card { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="tab-bar">
+      <button class="active">Chat</button>
+      <button>Workspace</button>
+      <button>Jobs</button>
+      <button>Settings</button>
+      <div class="spacer"></div>
+      <span class="status-chip">Design-system faithful mockup</span>
+    </div>
+
+    <div class="active-work-strip">
+      <div class="active-work-item">
+        <span class="active-work-kind">Builder</span>
+        <span>user-authored tool flow preview</span>
+      </div>
+    </div>
+
+    <div class="workspace">
+      <aside class="thread-sidebar">
+        <div class="threads-section-header">
+          <span>Conversations</span>
+          <div style="flex:1"></div>
+          <button class="thread-new-btn">+</button>
+          <button class="thread-toggle-btn">«</button>
+        </div>
+        <div class="thread-list">
+          <div class="thread-item active">
+            <div class="thread-item-title">Custom weather tool</div>
+            <div class="thread-item-meta">Current thread · user-authored tools</div>
+          </div>
+          <div class="thread-item">
+            <div class="thread-item-title">Slack docs thread</div>
+            <div class="thread-item-meta">Yesterday</div>
+          </div>
+          <div class="thread-item">
+            <div class="thread-item-title">Routine debugging</div>
+            <div class="thread-item-meta">2 days ago</div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="chat-container">
+        <div class="panel active" data-panel="0">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">1. Intent recognized inside normal chat</h2>
+              <p class="chat-stage-copy">The user never leaves the Chat tab. The builder flow is introduced through the conversation itself and a first progress card.</p>
+            </div>
+            <span class="badge active">builder engaged</span>
+          </div>
+          <div class="messages">
+            <div class="message user">
+              <div class="message-label">You</div>
+              <div class="message-copy">Build me a tool that checks current weather from our internal API and uses my API key.</div>
+            </div>
+            <div class="message">
+              <div class="message-label">IronClaw</div>
+              <div class="message-copy">Got it — I’ll build a small WASM tool, keep the manifest minimal, and show you the install approval before it registers.</div>
+            </div>
+            <div class="tool-builder-card">
+              <div class="tool-builder-header">
+                <div>
+                  <div class="card-kicker">Tool builder</div>
+                  <div class="tool-builder-title">Builder flow started</div>
+                </div>
+                <span class="badge active">scaffold</span>
+              </div>
+              <div class="tool-builder-summary">The assistant has switched into a structured creation flow, but the user is still in the same thread and can interrupt or refine it.</div>
+              <div class="data-card">
+                <div class="data-card-row"><span class="data-card-label">tool</span><span class="data-card-value"><code>weather_reader</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">runtime</span><span class="data-card-value"><code>wasm32-wasip2</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">install path</span><span class="data-card-value">Uses the existing <code class="code-inline">tool_install</code> flow later.</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">Message or / for commands… <button class="send-btn">Send</button></div></div>
+        </div>
+
+        <div class="panel" data-panel="1">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">2. Progress cards make the build visible</h2>
+              <p class="chat-stage-copy">The new primitive is the tool-builder card. Everything else stays within existing chat, card, and badge patterns.</p>
+            </div>
+            <span class="badge active">building</span>
+          </div>
+          <div class="messages">
+            <div class="tool-builder-card">
+              <div class="tool-builder-header">
+                <div>
+                  <div class="card-kicker">Tool builder</div>
+                  <div class="tool-builder-title">Scaffolding tool</div>
+                </div>
+                <span class="badge success">ready</span>
+              </div>
+              <div class="tool-builder-summary">Created Cargo.toml, bound the WIT interface, and prepared the first implementation skeleton.</div>
+            </div>
+            <div class="tool-builder-card">
+              <div class="tool-builder-header">
+                <div>
+                  <div class="card-kicker">Tool builder</div>
+                  <div class="tool-builder-title">Implementing fetch logic</div>
+                </div>
+                <span class="badge active">running</span>
+              </div>
+              <div class="tool-builder-summary">The builder is wiring a single allowlisted host and a single API-key secret into the draft manifest.</div>
+              <div class="data-card">
+                <div class="data-card-row"><span class="data-card-label">source dir</span><span class="data-card-value"><code>tools-src/weather_reader</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">artifact</span><span class="data-card-value"><code>target/wasm32-wasip2/release/weather_reader.wasm</code></span></div>
+              </div>
+            </div>
+            <div class="tool-builder-card">
+              <div class="tool-builder-header">
+                <div>
+                  <div class="card-kicker">Tool builder</div>
+                  <div class="tool-builder-title">Build artifact ready</div>
+                </div>
+                <span class="badge success">compiled</span>
+              </div>
+              <div class="tool-builder-summary">Compilation succeeded. The next visible checkpoint is the manifest preview before installation.</div>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">Builder is working… you can still type here if needed <button class="send-btn">Send</button></div></div>
+        </div>
+
+        <div class="panel" data-panel="2">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">3. Manifest preview is the “what this tool wants” moment</h2>
+              <p class="chat-stage-copy">Still in chat, but denser: the user sees the exact manifest that will be passed into install.</p>
+            </div>
+            <span class="badge warning">review manifest</span>
+          </div>
+          <div class="messages">
+            <div class="tool-builder-card">
+              <div class="tool-builder-header">
+                <div>
+                  <div class="card-kicker">Tool builder</div>
+                  <div class="tool-builder-title">Manifest ready for approval</div>
+                </div>
+                <span class="badge warning">manifest</span>
+              </div>
+              <div class="tool-builder-summary">The user can review the precise HTTP host, path prefix, and secret setup before the approval card appears.</div>
+              <pre class="manifest">{
+  "description": "Read current weather from the internal weather API",
+  "http": {
+    "allowlist": [
+      {
+        "host": "api.weather.internal",
+        "path_prefix": "/v1/current",
+        "methods": ["GET"]
+      }
+    ]
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "weather_api_key",
+        "prompt": "Paste the Weather API key from the internal developer portal."
+      }
+    ]
+  },
+  "auth": {
+    "provider": "Internal Weather",
+    "secret_name": "weather_api_key",
+    "instructions": "Create an API key in the internal portal and paste it into setup.",
+    "setup_url": "https://weather.internal/keys"
+  }
+}</pre>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">The user can reply: “tighten the allowlist first” <button class="send-btn">Send</button></div></div>
+        </div>
+
+        <div class="panel" data-panel="3">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">4. Existing approval card stays the security boundary</h2>
+              <p class="chat-stage-copy">No new approval framework in phase 1. The familiar install gate appears, now backed by the manifest the user just reviewed.</p>
+            </div>
+            <span class="badge warning">awaiting approval</span>
+          </div>
+          <div class="messages">
+            <div class="approval-card">
+              <div class="card-header">
+                <div>
+                  <div class="card-kicker">Approval needed</div>
+                  <div class="card-title">Install <span class="mono">weather_reader</span></div>
+                </div>
+                <span class="badge warning">tool_install</span>
+              </div>
+              <div class="card-copy">Register a new locally-built WASM tool from the provided artifact and manifest.</div>
+              <div class="data-card">
+                <div class="data-card-row"><span class="data-card-label">kind</span><span class="data-card-value"><code>wasm_tool</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">artifact</span><span class="data-card-value"><code>tools-src/weather_reader/target/wasm32-wasip2/release/weather_reader.wasm</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">manifest</span><span class="data-card-value">Included in the install payload and enforced by the runtime.</span></div>
+              </div>
+              <div class="actions">
+                <button class="action-btn primary">Approve install</button>
+                <button class="action-btn warn">Ask to edit manifest</button>
+                <button class="action-btn danger">Deny</button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">The user can still type “show me the manifest again” <button class="send-btn">Send</button></div></div>
+        </div>
+
+        <div class="panel" data-panel="4">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">5. Post-install setup resumes immediately</h2>
+              <p class="chat-stage-copy">The install doesn’t dead-end. If the manifest requires a secret, the current setup/auth pattern picks up right away.</p>
+            </div>
+            <span class="badge active">setup required</span>
+          </div>
+          <div class="messages">
+            <div class="auth-card">
+              <div class="card-header">
+                <div>
+                  <div class="card-kicker">Setup required</div>
+                  <div class="card-title">Provide credentials for <span class="mono">weather_reader</span></div>
+                </div>
+                <span class="badge active">resume gate</span>
+              </div>
+              <div class="card-copy">This is the existing secure credential-entry step, reused for a user-authored tool. No new auth subsystem is required.</div>
+              <div class="input-card">
+                <div class="input-label"><span>weather_api_key</span><span>Required</span></div>
+                <div class="input-help">Paste the API key from the internal developer portal. It remains in the secret store and is only injected for <code class="code-inline">api.weather.internal</code>.</div>
+                <div class="fake-input">sk_live_internal_••••••••••</div>
+              </div>
+              <div class="actions">
+                <button class="action-btn primary">Save and continue</button>
+                <button class="action-btn">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">Composer temporarily de-emphasized while setup is in focus <button class="send-btn">Locked</button></div></div>
+        </div>
+
+        <div class="panel" data-panel="5">
+          <div class="chat-stage-header">
+            <div>
+              <h2 class="chat-stage-title">6. The tool is ready in the same session</h2>
+              <p class="chat-stage-copy">The loop closes in-thread: installed, configured, active, and immediately usable without a restart.</p>
+            </div>
+            <span class="badge success">ready</span>
+          </div>
+          <div class="messages">
+            <div class="ready-card">
+              <div class="card-header">
+                <div>
+                  <div class="card-kicker">Tool ready</div>
+                  <div class="card-title"><span class="mono">weather_reader</span> is installed and active</div>
+                </div>
+                <span class="badge success">ready</span>
+              </div>
+              <div class="card-copy">The tool is registered, its API key is saved, and the runtime can call it now.</div>
+              <div class="data-card">
+                <div class="data-card-row"><span class="data-card-label">loaded tool</span><span class="data-card-value"><code>weather_reader</code></span></div>
+                <div class="data-card-row"><span class="data-card-label">capabilities</span><span class="data-card-value">1 host · 1 secret · GET only</span></div>
+              </div>
+            </div>
+            <div class="message user">
+              <div class="message-label">You</div>
+              <div class="message-copy">What is the weather in Berlin right now?</div>
+            </div>
+            <div class="message">
+              <div class="message-label">IronClaw</div>
+              <div class="message-copy">Calling <code class="code-inline">weather_reader</code> now… the response will come back through the tool you just approved.</div>
+            </div>
+          </div>
+          <div class="chat-input"><div class="chat-input-box">Ask another question, or refine the tool later in the same thread <button class="send-btn">Send</button></div></div>
+        </div>
+      </main>
+
+      <aside class="inspector">
+        <div class="inspector-card">
+          <h3>Flow</h3>
+          <div class="flow-nav" id="flowNav">
+            <button class="flow-step active" data-step="0"><strong>1. Intent recognized</strong><span>Builder starts inside normal chat.</span></button>
+            <button class="flow-step" data-step="1"><strong>2. Progress visible</strong><span>Structured builder cards track scaffold → build.</span></button>
+            <button class="flow-step" data-step="2"><strong>3. Manifest preview</strong><span>User sees the exact install manifest.</span></button>
+            <button class="flow-step" data-step="3"><strong>4. Approval gate</strong><span>Existing tool_install approval remains the boundary.</span></button>
+            <button class="flow-step" data-step="4"><strong>5. Setup resumes</strong><span>Required API keys are collected immediately.</span></button>
+            <button class="flow-step" data-step="5"><strong>6. Tool ready</strong><span>The tool is active in the same thread.</span></button>
+          </div>
+        </div>
+
+        <div class="inspector-card">
+          <h3>Design-system choices</h3>
+          <ul>
+            <li>Uses current theme tokens: dark neutrals + green accent.</li>
+            <li>Reuses chat messages, approval-card, auth-card, data-card, chips, and tab/sidebar composition.</li>
+            <li>Introduces only one new primitive: the <strong>tool-builder card</strong>.</li>
+          </ul>
+        </div>
+
+        <div class="inspector-card">
+          <h3>Phase-1 scope</h3>
+          <p>Single-user and hosted single-tenant only. Multi-tenant user-authored local installs stay blocked until per-user ToolRegistry isolation exists.</p>
+        </div>
+
+        <div class="inspector-card">
+          <h3>Controls</h3>
+          <div class="nav-controls">
+            <button id="prevBtn">Previous</button>
+            <button id="nextBtn" class="primary">Next</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const steps = [...document.querySelectorAll('.flow-step')];
+    const panels = [...document.querySelectorAll('.panel')];
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    let current = 0;
+
+    function render() {
+      steps.forEach((step, i) => step.classList.toggle('active', i === current));
+      panels.forEach((panel, i) => panel.classList.toggle('active', i === current));
+      prevBtn.disabled = current === 0;
+      nextBtn.disabled = current === steps.length - 1;
+      nextBtn.textContent = current === steps.length - 1 ? 'Done' : 'Next';
+    }
+
+    steps.forEach((step, i) => step.addEventListener('click', () => {
+      current = i;
+      render();
+    }));
+
+    prevBtn.addEventListener('click', () => {
+      current = Math.max(0, current - 1);
+      render();
+    });
+
+    nextBtn.addEventListener('click', () => {
+      current = Math.min(steps.length - 1, current + 1);
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

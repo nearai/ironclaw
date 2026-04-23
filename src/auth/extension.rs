@@ -995,6 +995,7 @@ mod tests {
             None,
             "test-user".to_string(),
             None,
+            false,
             vec![],
         ))
     }

@@ -58,6 +58,8 @@ mod tests {
             .install(
                 SERVER_NAME,
                 Some(&server.url),
+                None,
+                None,
                 Some(ExtensionKind::McpServer),
                 user_id,
             )
@@ -107,6 +109,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         );
         let server = McpServerConfig::new(SERVER_NAME, mock_server.mcp_url());
@@ -201,6 +204,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         );
         let server = McpServerConfig::new(SERVER_NAME, mock_server.mcp_url());
@@ -318,6 +322,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         ));
         let server = McpServerConfig::new(SERVER_NAME, mock_server.mcp_url());
@@ -342,6 +347,8 @@ mod tests {
                 .install(
                     SERVER_NAME,
                     Some(&server.url),
+                    None,
+                    None,
                     Some(ExtensionKind::McpServer),
                     USER_B,
                 )
@@ -421,6 +428,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         );
         let server = McpServerConfig::new(SERVER_NAME, mock_server.mcp_url());
@@ -520,6 +528,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         );
         let server_a = McpServerConfig::new(SERVER_NAME, mock_server_a.mcp_url());
@@ -538,6 +547,8 @@ mod tests {
             .install(
                 SERVER_NAME,
                 Some(&server_b.url),
+                None,
+                None,
                 Some(ExtensionKind::McpServer),
                 USER_B,
             )
@@ -628,6 +639,7 @@ mod tests {
             None,
             "owner".to_string(),
             Some(db),
+            false,
             Vec::new(),
         );
 
@@ -648,6 +660,8 @@ mod tests {
             .install(
                 SERVER_NAME,
                 Some(&server_b.url),
+                None,
+                None,
                 Some(ExtensionKind::McpServer),
                 USER_B,
             )

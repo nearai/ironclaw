@@ -1,0 +1,69 @@
+---
+title: User-authored WASM tools
+summary: Build a custom WASM tool, review its manifest at install time, and register it into IronClaw.
+---
+
+IronClaw can now install a **locally-built WASM tool** directly from chat through `tool_install`.
+
+## What ships in phase 1
+
+- Build a WASM tool locally with `cargo component build --release`
+- Install it with:
+  - `name`
+  - `kind: "wasm_tool"`
+  - `wasm_path`
+  - `manifest`
+- Review the manifest in the normal `tool_install` approval flow before the install runs
+- Use the built-in `tool-builder` skill to guide the agent through scaffold → build → manifest → install
+- See inline progress cards in the web chat when the assistant emits `tool-builder` progress blocks
+
+## Example install call
+
+```json
+{
+  "name": "weather_reader",
+  "kind": "wasm_tool",
+  "wasm_path": "tools-src/weather_reader/target/wasm32-wasip2/release/weather_reader.wasm",
+  "manifest": {
+    "description": "Read current weather from Example API",
+    "http": {
+      "allowlist": [
+        { "host": "api.example.com", "path_prefix": "/v1/", "methods": ["GET"] }
+      ]
+    }
+  }
+}
+```
+
+## Security model
+
+The **manifest** is the approval surface for phase 1.
+
+- The approval card shows the `tool_install` parameters, including the supplied manifest.
+- The manifest is written to `<tool>.capabilities.json` and enforced by the WASM runtime.
+- Keep manifests minimal: exact hosts, narrow path prefixes, and the fewest required secrets.
+
+## Current limitations
+
+### OAuth-heavy APIs
+
+User-authored tools are intended for APIs that work with **manual tokens or API keys**.
+
+If an API requires registering an OAuth client and sending the user through a browser OAuth flow, the `tool-builder` skill should stop and recommend the closest registry extension instead.
+
+### Multi-tenant deployments
+
+Phase 1 is **single-user / hosted-single-tenant only**.
+
+User-authored local artifact installs remain blocked in multi-tenant deployments until IronClaw has true per-user ToolRegistry isolation for WASM tools.
+
+## Files written during install
+
+The install flow copies:
+
+- `<name>.wasm`
+- `<name>.capabilities.json`
+
+into the configured WASM tools directory.
+
+If you are operating a hosted single-tenant deployment, make sure that directory is included in your normal persistence and backup strategy.

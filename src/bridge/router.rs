@@ -6762,6 +6762,7 @@ mod tests {
             None,
             "test".to_string(),
             None,
+            false,
             vec![],
         ));
         (ext_mgr, wasm_tools_dir, wasm_channels_dir)
