@@ -23,6 +23,12 @@ pub struct ThreadExecutionContext {
     pub user_id: String,
     pub step_id: StepId,
     pub current_call_id: Option<String>,
+    /// Names of the skills active for the currently executing thread step.
+    ///
+    /// This captures in-memory skill activation for the current turn so host
+    /// adapters do not need to reload stale thread state before the step is
+    /// committed.
+    pub active_skill_names: Vec<String>,
     /// The channel this thread's conversation originated from (e.g. "gateway", "repl").
     /// Used by mission_create to default `notify_channels` to the current channel.
     pub source_channel: Option<String>,

@@ -53,6 +53,10 @@ use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
     memory_write_handler,
 };
+use crate::channels::web::handlers::secrets::{
+    user_secrets_delete_handler, user_secrets_import_handler, user_secrets_list_handler,
+    user_secrets_put_handler,
+};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -302,6 +306,17 @@ pub async fn start_server(
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
         .route("/api/settings/import", post(settings_import_handler))
+        // User self-service secrets
+        .route("/api/secrets", get(user_secrets_list_handler))
+        .route("/api/secrets/import", post(user_secrets_import_handler))
+        .route(
+            "/api/secrets/{name}",
+            put(user_secrets_put_handler).delete(user_secrets_delete_handler),
+        )
+        .route(
+            "/api/secrets/{name}/approvals/revoke",
+            post(crate::channels::web::handlers::secrets::user_secret_approval_revoke_handler),
+        )
         // NOTE: These static routes intentionally shadow `/api/settings/{key}` when
         // key="tools". Axum resolves static routes before parameterized ones, so this
         // works correctly. Avoid adding a setting named literally "tools".

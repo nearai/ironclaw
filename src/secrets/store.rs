@@ -905,24 +905,33 @@ pub mod in_memory {
             let (encrypted_value, key_salt) = self.crypto.encrypt(plaintext)?;
 
             let now = Utc::now();
+            let key = (user_id.to_string(), params.name.clone());
+            let mut secrets = self.secrets.write().await;
+            let existing = secrets.get(&key).cloned();
             let secret = Secret {
-                id: Uuid::new_v4(),
+                id: existing
+                    .as_ref()
+                    .map(|secret| secret.id)
+                    .unwrap_or_else(Uuid::new_v4),
                 user_id: user_id.to_string(),
                 name: params.name.clone(),
                 encrypted_value,
                 key_salt,
                 provider: params.provider,
                 expires_at: params.expires_at,
-                last_used_at: None,
-                usage_count: 0,
-                created_at: now,
+                last_used_at: existing.as_ref().and_then(|secret| secret.last_used_at),
+                usage_count: existing
+                    .as_ref()
+                    .map(|secret| secret.usage_count)
+                    .unwrap_or(0),
+                created_at: existing
+                    .as_ref()
+                    .map(|secret| secret.created_at)
+                    .unwrap_or(now),
                 updated_at: now,
             };
 
-            self.secrets
-                .write()
-                .await
-                .insert((user_id.to_string(), params.name), secret.clone());
+            secrets.insert(key, secret.clone());
             Ok(secret)
         }
 

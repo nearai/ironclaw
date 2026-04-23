@@ -213,6 +213,79 @@ pub enum CredentialLocation {
     UrlPath { placeholder: String },
 }
 
+/// Which kind of artifact declared a secret binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialArtifactKind {
+    Skill,
+    WasmTool,
+}
+
+impl CredentialArtifactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::WasmTool => "wasm_tool",
+        }
+    }
+}
+
+/// Whether a declared binding auto-binds or needs first-use approval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialBindingPolicy {
+    /// Platform/operator-vetted artifacts may use the binding immediately.
+    #[default]
+    AutoBind,
+    /// User-authored or non-vetted artifacts require explicit approval first.
+    RequireApproval,
+}
+
+/// Provenance attached to a declared credential mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CredentialBindingProvenance {
+    pub artifact_kind: CredentialArtifactKind,
+    pub artifact_name: String,
+    /// Hash that changes when the artifact changes (skill content hash,
+    /// WASM binary hash, etc.). Approval is invalidated when this changes.
+    pub artifact_fingerprint: String,
+    #[serde(default)]
+    pub binding_policy: CredentialBindingPolicy,
+}
+
+impl CredentialBindingProvenance {
+    pub fn requires_user_approval(&self) -> bool {
+        self.binding_policy == CredentialBindingPolicy::RequireApproval
+    }
+}
+
+/// A specific binding awaiting or holding approval.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SecretBindingApproval {
+    pub secret_name: String,
+    pub artifact_kind: CredentialArtifactKind,
+    pub artifact_name: String,
+    pub artifact_fingerprint: String,
+    pub host: String,
+    pub location: CredentialLocation,
+    pub approved_at: DateTime<Utc>,
+}
+
+impl SecretBindingApproval {
+    pub fn approval_id(&self) -> String {
+        let payload = serde_json::json!({
+            "secret_name": self.secret_name,
+            "artifact_kind": self.artifact_kind,
+            "artifact_name": self.artifact_name,
+            "artifact_fingerprint": self.artifact_fingerprint,
+            "host": self.host,
+            "location": self.location,
+        });
+        let digest = blake3::hash(payload.to_string().as_bytes());
+        hex::encode(digest.as_bytes())
+    }
+}
+
 /// Mapping from a secret name to where it should be injected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialMapping {
@@ -229,6 +302,9 @@ pub struct CredentialMapping {
     /// silently downgraded to an unauthenticated request.
     #[serde(default)]
     pub optional: bool,
+    /// Optional provenance for approval-aware secret bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<CredentialBindingProvenance>,
 }
 
 impl CredentialMapping {
@@ -238,6 +314,7 @@ impl CredentialMapping {
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
             optional: false,
+            provenance: None,
         }
     }
 
@@ -254,8 +331,55 @@ impl CredentialMapping {
             },
             host_patterns: vec![host_pattern.into()],
             optional: false,
+            provenance: None,
         }
     }
+
+    pub fn with_provenance(mut self, provenance: CredentialBindingProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+
+    pub fn exact_host_match(&self, host: &str) -> bool {
+        self.host_patterns
+            .iter()
+            .any(|pattern| exact_host_matches_pattern(host, pattern))
+    }
+
+    pub fn approval_candidate_for_host(&self, host: &str) -> Option<SecretBindingApproval> {
+        let provenance = self.provenance.as_ref()?;
+        if !provenance.requires_user_approval() || !self.exact_host_match(host) {
+            return None;
+        }
+        Some(SecretBindingApproval {
+            secret_name: self.secret_name.clone(),
+            artifact_kind: provenance.artifact_kind,
+            artifact_name: provenance.artifact_name.clone(),
+            artifact_fingerprint: provenance.artifact_fingerprint.clone(),
+            host: host.to_string(),
+            location: self.location.clone(),
+            approved_at: Utc::now(),
+        })
+    }
+}
+
+/// Exact-host comparison for approval-gated bindings.
+///
+/// User-authored/non-vetted bindings must bind to exact hosts only. Wildcard
+/// patterns are intentionally excluded from approval matching.
+fn exact_host_matches_pattern(host: &str, pattern: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+
+    if let Some(pattern_host) = pattern.split(':').next()
+        && pattern.contains(':')
+        && pattern_host == host
+    {
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]

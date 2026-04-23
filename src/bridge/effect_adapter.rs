@@ -30,6 +30,8 @@ use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::secrets::SecretBindingApproval;
+use crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_GATE_NAME;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
@@ -162,6 +164,28 @@ impl EffectBridgeAdapter {
     /// installed skills into the v2 doc space.
     pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
         *self.engine_store.write().await = Some(store);
+    }
+
+    async fn active_skill_names(&self, thread_id: ironclaw_engine::ThreadId) -> Vec<String> {
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Vec::new();
+        };
+        match store.load_thread(thread_id).await {
+            Ok(Some(thread)) => thread
+                .active_skills()
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                debug!(thread_id = %thread_id, error = %error, "failed to load active skills");
+                Vec::new()
+            }
+        }
+    }
+
+    fn secret_binding_resume_output(approval: &SecretBindingApproval) -> serde_json::Value {
+        serde_json::json!({ "secret_binding_approval": approval })
     }
 
     /// Provide the v1 skill registry so `skill_install` can resolve the
@@ -1072,6 +1096,12 @@ impl EffectBridgeAdapter {
             }
         }
 
+        let active_skill_names = if context.active_skill_names.is_empty() {
+            self.active_skill_names(context.thread_id).await
+        } else {
+            context.active_skill_names.clone()
+        };
+
         {
             let has_mgr = self.auth_manager.read().await.is_some();
             let has_reg = self.tools.credential_registry().is_some();
@@ -1088,7 +1118,13 @@ impl EffectBridgeAdapter {
             && let Some(registry) = self.tools.credential_registry()
         {
             match auth_mgr
-                .check_action_auth(&lookup_name, &parameters, &context.user_id, registry)
+                .check_action_auth(
+                    &lookup_name,
+                    &parameters,
+                    &context.user_id,
+                    registry,
+                    &active_skill_names,
+                )
                 .await
             {
                 AuthCheckResult::MissingCredentials(missing) => {
@@ -1107,13 +1143,38 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Authentication {
                             credential_name: cred.credential_name.clone(),
                             instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
-                                format!("Provide your {} token", cred.credential_name)
+                                crate::auth::extension::default_secret_setup_instructions(
+                                    cred.credential_name.as_ref(),
+                                )
                             }),
                             auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
                         Some(lease.clone()),
                     ));
+                }
+                AuthCheckResult::BindingApprovalRequired(approval) => {
+                    debug!(
+                        secret_name = %approval.secret_name,
+                        host = %approval.host,
+                        tool = %lookup_name,
+                        user = %context.user_id,
+                        "Pre-flight secret binding approval required"
+                    );
+                    return Err(Self::gate_paused(
+                        SECRET_BINDING_APPROVAL_GATE_NAME,
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        Some(Self::secret_binding_resume_output(&approval)),
+                        Some(lease.clone()),
+                    ));
+                }
+                AuthCheckResult::BindingConfigurationError { message } => {
+                    return Err(EngineError::Effect { reason: message });
                 }
                 AuthCheckResult::Ready => {
                     debug!(tool = %lookup_name, "Pre-flight auth: credentials present");
@@ -1270,6 +1331,7 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
+        inject_active_skill_names_metadata(&mut job_ctx.metadata, &active_skill_names);
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.
@@ -1495,6 +1557,31 @@ impl EffectBridgeAdapter {
                 })
             }
             Err(e) => {
+                if let crate::error::Error::Tool(
+                    crate::error::ToolError::SecretBindingApprovalRequired { approval, .. },
+                ) = &e
+                    && self.is_known_secret_binding_approval(approval.as_ref())
+                {
+                    tracing::warn!(
+                        secret_name = %approval.secret_name,
+                        host = %approval.host,
+                        tool = %lookup_name,
+                        user = %context.user_id,
+                        "Secret binding approval required — returning GatePaused(approval)"
+                    );
+                    return Err(Self::gate_paused(
+                        SECRET_BINDING_APPROVAL_GATE_NAME,
+                        action_name,
+                        context.current_call_id.as_deref(),
+                        parameters,
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        Some(Self::secret_binding_resume_output(approval.as_ref())),
+                        Some(lease.clone()),
+                    ));
+                }
+
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
@@ -1515,7 +1602,10 @@ impl EffectBridgeAdapter {
                             credential_name: ironclaw_common::CredentialName::from_trusted(
                                 cred_name.clone(),
                             ),
-                            instructions: format!("Provide your {} token", cred_name),
+                            instructions:
+                                crate::auth::extension::default_secret_setup_instructions(
+                                    &cred_name,
+                                ),
                             auth_url: None,
                         },
                         None,
@@ -1555,6 +1645,25 @@ impl EffectBridgeAdapter {
             Some(registry) => registry.has_secret(credential_name),
             None => false,
         }
+    }
+
+    fn is_known_secret_binding_approval(&self, approval: &SecretBindingApproval) -> bool {
+        let Some(registry) = self.tools.credential_registry() else {
+            return false;
+        };
+
+        registry
+            .find_for_host(&approval.host)
+            .into_iter()
+            .any(|mapping| {
+                mapping.secret_name == approval.secret_name
+                    && mapping.location == approval.location
+                    && mapping.provenance.as_ref().is_some_and(|provenance| {
+                        provenance.artifact_kind == approval.artifact_kind
+                            && provenance.artifact_name == approval.artifact_name
+                            && provenance.artifact_fingerprint == approval.artifact_fingerprint
+                    })
+            })
     }
 }
 
@@ -2291,6 +2400,26 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
+fn inject_active_skill_names_metadata(
+    metadata: &mut serde_json::Value,
+    active_skill_names: &[String],
+) {
+    if active_skill_names.is_empty() {
+        return;
+    }
+
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "active_skill_names".to_string(),
+            serde_json::json!(active_skill_names),
+        );
+    }
+}
+
 pub(crate) fn is_v1_only_tool(name: &str) -> bool {
     // routine_* tools are surfaced in v2 too, but are intercepted by
     // `handle_mission_call`'s routine alias path *before* this check fires —
@@ -2373,6 +2502,136 @@ mod tests {
         assert!(!adapter.auto_approved.read().await.contains("shell"));
         adapter.auto_approve_tool("shell").await;
         assert!(adapter.auto_approved.read().await.contains("shell"));
+    }
+
+    #[test]
+    fn inject_active_skill_names_metadata_preserves_existing_entries() {
+        let mut metadata = serde_json::json!({
+            "trace_id": "trace-123",
+        });
+
+        inject_active_skill_names_metadata(&mut metadata, &["github".to_string()]);
+
+        assert_eq!(metadata["trace_id"], "trace-123");
+        assert_eq!(
+            metadata["active_skill_names"],
+            serde_json::json!(["github"])
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_secret_binding_approval_error_becomes_gate_pause() {
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialLocation, CredentialMapping,
+        };
+        use crate::testing::credentials::test_secrets_store;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        struct ApprovalRequiredTool;
+
+        #[async_trait]
+        impl Tool for ApprovalRequiredTool {
+            fn name(&self) -> &str {
+                "my{tool}"
+            }
+
+            fn description(&self) -> &str {
+                "approval required"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                let approval = SecretBindingApproval {
+                    secret_name: "github_token".to_string(),
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "fingerprint-v1".to_string(),
+                    host: "api.github.com".to_string(),
+                    location: CredentialLocation::AuthorizationBearer,
+                    approved_at: chrono::Utc::now(),
+                };
+                Err(ToolError::SecretBindingApprovalRequired {
+                    approval: Box::new(approval),
+                })
+            }
+        }
+
+        let cred_reg = Arc::new(SharedCredentialRegistry::new());
+        cred_reg.add_mappings(vec![
+            CredentialMapping::bearer("github_token", "api.github.com").with_provenance(
+                CredentialBindingProvenance {
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "fingerprint-v1".to_string(),
+                    binding_policy: CredentialBindingPolicy::RequireApproval,
+                },
+            ),
+        ]);
+
+        let tools = Arc::new(
+            ToolRegistry::new()
+                .with_credentials(Arc::clone(&cred_reg), Arc::new(test_secrets_store())),
+        );
+        tools.register(Arc::new(ApprovalRequiredTool)).await;
+
+        use ironclaw_safety::SafetyConfig;
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "my{tool}",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_typed_binding_approval"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                resume_output,
+                ..
+            }) => {
+                assert_eq!(gate_name, SECRET_BINDING_APPROVAL_GATE_NAME);
+                assert_eq!(action_name, "my{tool}");
+                assert!(matches!(
+                    *resume_kind,
+                    ironclaw_engine::ResumeKind::Approval {
+                        allow_always: false,
+                    }
+                ));
+                assert_eq!(
+                    resume_output
+                        .and_then(|value| value.get("secret_binding_approval").cloned())
+                        .and_then(
+                            |value| serde_json::from_value::<SecretBindingApproval>(value).ok()
+                        )
+                        .map(|approval| approval.secret_name),
+                    Some("github_token".to_string())
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2560,6 +2819,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
@@ -3439,6 +3699,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some(
@@ -3458,6 +3719,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some(
@@ -3477,6 +3739,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
@@ -3494,6 +3757,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
@@ -3514,6 +3778,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
@@ -3532,6 +3797,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
@@ -3754,6 +4020,7 @@ mod tests {
                 user_id: "test_user".to_string(),
                 step_id: ironclaw_engine::StepId::new(),
                 current_call_id: None,
+                active_skill_names: Vec::new(),
                 source_channel: Some("gateway".to_string()),
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
@@ -4035,6 +4302,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
@@ -4059,6 +4327,113 @@ mod tests {
                 panic!("Expected GatePaused for authentication preflight, got: {other:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_ignores_skill_scoped_mapping_without_active_skill_context() {
+        use crate::secrets::SecretsStore;
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialMapping,
+        };
+        use crate::testing::credentials::test_secrets_store;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        struct HttpOkTool;
+
+        #[async_trait]
+        impl Tool for HttpOkTool {
+            fn name(&self) -> &str {
+                "http"
+            }
+
+            fn description(&self) -> &str {
+                "Test HTTP tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" }
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({"ok": true}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let secrets = Arc::new(test_secrets_store());
+        secrets
+            .create(
+                "test_user",
+                crate::secrets::CreateSecretParams::new("github_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+
+        let cred_reg = Arc::new(SharedCredentialRegistry::new());
+        cred_reg.add_mappings(vec![
+            CredentialMapping::bearer("github_token", "api.github.com").with_provenance(
+                CredentialBindingProvenance {
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "skill-fingerprint-v1".to_string(),
+                    binding_policy: CredentialBindingPolicy::RequireApproval,
+                },
+            ),
+        ]);
+
+        let tools =
+            Arc::new(ToolRegistry::new().with_credentials(Arc::clone(&cred_reg), secrets.clone()));
+        tools.register(Arc::new(HttpOkTool)).await;
+
+        use ironclaw_safety::SafetyConfig;
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                None,
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .execute_action(
+                "http",
+                serde_json::json!({
+                    "url": "https://api.github.com/repos/nearai/ironclaw/issues",
+                    "method": "GET"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_http_scope_1")),
+            )
+            .await;
+
+        let result = result.expect(
+            "plain http calls must not inherit skill-scoped auth when no skill context is active",
+        );
+        assert!(
+            !result.is_error,
+            "fake http tool should run without auth gating"
+        );
     }
 
     #[tokio::test]
@@ -4131,6 +4506,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
@@ -4241,6 +4617,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_install".to_string()),
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
@@ -4514,6 +4891,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            active_skill_names: Vec::new(),
             source_channel: None,
             user_timezone: None,
             thread_goal: None,

@@ -26,7 +26,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
 | `features/pairing/` | `GET /api/pairing/{channel}` + `POST /api/pairing/{channel}/approve` — WASM channel pairing approvals. Validates the URL path through `ExtensionName::new` at the handler boundary so invalid channel names reject with 400 instead of silently routing to a lookup-miss. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
 | `features/status/` | `GET /api/gateway/status` — runtime snapshot for the admin dashboard (uptime, SSE/WS counts, cost / usage aggregates, active config). Owns the `GatewayStatusResponse` DTO. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
-| `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
+| `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. `handlers/secrets.rs` currently owns nine secret-management routes: admin `/api/admin/secrets/{user_id}` (GET), `/api/admin/secrets/{user_id}/{name}` (PUT+DELETE), `/api/admin/secrets/{user_id}/import` (POST), plus user `/api/secrets` (GET), `/api/secrets/{name}` (PUT+DELETE), `/api/secrets/import` (POST), and `/api/secrets/{name}/approvals/revoke` (POST). Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`web_incoming_message`, `build_turns_from_db_messages`, `images_to_attachments`, `truncate_preview`) |
 | `test_helpers.rs` | Always-compiled test utilities. `TestGatewayBuilder` (public) — the `tests/` crate's entry point for spinning up a `GatewayState` + optional Axum server on a random port. Plus seven `pub(crate)` `#[cfg(test)]`-gated cross-slice fixtures — `test_gateway_state(ext_mgr)`, `test_gateway_state_with_dependencies(ext_mgr, store, db_auth, pairing_store)`, `test_gateway_state_with_store_and_session_manager(store, session_manager)`, `insert_test_user`, `test_secrets_store`, `test_ext_mgr`, `test_ext_mgr_with_db` — landed in ironclaw#2599 stages 6a+6 so the chat / extensions / oauth / pairing / users slice test modules can share construction helpers without a central mega-tests block. |
@@ -112,6 +112,19 @@ subset that can later be replaced by a typed `Deps` alias.
 | POST | `/api/skills/search` | Search ClawHub registry + local skills |
 | POST | `/api/skills/install` | Install a skill from ClawHub or by URL/content |
 | DELETE | `/api/skills/{name}` | Remove an installed skill |
+
+### Secrets
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/secrets` | List the authenticated user's secrets and persisted binding approvals |
+| PUT | `/api/secrets/{name}` | Create or update one authenticated-user secret |
+| DELETE | `/api/secrets/{name}` | Delete one authenticated-user secret and revoke its stored approvals |
+| POST | `/api/secrets/import` | Bulk import authenticated-user secrets |
+| POST | `/api/secrets/{name}/approvals/revoke` | Revoke one persisted binding approval for an authenticated-user secret |
+| GET | `/api/admin/secrets/{user_id}` | Admin list for one user's secrets |
+| PUT | `/api/admin/secrets/{user_id}/{name}` | Admin create/update for one user's secret |
+| DELETE | `/api/admin/secrets/{user_id}/{name}` | Admin delete for one user's secret |
+| POST | `/api/admin/secrets/{user_id}/import` | Admin bulk import for one user's secrets |
 
 ### Extensions
 | Method | Path | Description |

@@ -18,7 +18,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 
 use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
-use crate::db::UserStore;
+use crate::db::{Database, UserStore};
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
@@ -622,6 +622,8 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Database for role-aware legacy default-scope credential fallback.
     role_lookup: Option<Arc<dyn UserStore>>,
+    /// Database for persisted secret-binding approvals.
+    database: Option<Arc<dyn Database>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
     /// Optional HTTP interceptor for testing — returns canned responses
@@ -884,6 +886,7 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             role_lookup: None,
+            database: None,
             oauth_refresh: None,
             http_interceptor: None,
         }
@@ -950,6 +953,12 @@ impl WasmToolWrapper {
     /// Set the role lookup for admin-only legacy default-scope fallback.
     pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
         self.role_lookup = Some(role_lookup);
+        self
+    }
+
+    /// Set the database for persisted secret-binding approvals.
+    pub fn with_database(mut self, database: Arc<dyn Database>) -> Self {
+        self.database = Some(database);
         self
     }
 
@@ -1323,6 +1332,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 role_lookup: None,
+                database: None,
                 oauth_refresh: None, // Already used above for pre-refresh
                 http_interceptor: self.http_interceptor.clone(),
             };
@@ -2569,6 +2579,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2616,6 +2627,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2664,6 +2676,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2702,6 +2715,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2746,6 +2760,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2806,6 +2821,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2849,6 +2865,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -2933,6 +2950,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -3044,6 +3062,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -3113,6 +3132,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
 
@@ -3509,6 +3529,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
         let caps = Capabilities {
@@ -3625,6 +3646,7 @@ mod tests {
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
                 optional: false,
+                provenance: None,
             },
         );
         Capabilities {

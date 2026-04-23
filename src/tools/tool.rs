@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::context::JobContext;
+use crate::secrets::SecretBindingApproval;
 
 /// How much approval a specific tool invocation requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +210,11 @@ pub enum ToolError {
 
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("Secret binding approval required")]
+    SecretBindingApprovalRequired {
+        approval: Box<SecretBindingApproval>,
+    },
 
     #[error("Timeout after {0:?}")]
     Timeout(Duration),

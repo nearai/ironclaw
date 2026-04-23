@@ -272,6 +272,7 @@ mod tests {
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec!["*.example.com".to_string()],
             optional: false,
+            provenance: None,
         }];
         let decider = DefaultPolicyDecider::new(allowlist, credentials);
 

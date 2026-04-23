@@ -26,6 +26,10 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
+use crate::secrets::SecretBindingApproval;
+use crate::secrets::binding_approvals::{
+    SECRET_BINDING_APPROVAL_GATE_NAME, approval_prompt_message, grant_binding_approval,
+};
 
 /// Typed outcome from a v2 bridge handler.
 ///
@@ -358,6 +362,15 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
         .display_parameters
         .clone()
         .unwrap_or_else(|| pending.parameters.clone())
+}
+
+fn secret_binding_approval_from_resume_output(
+    value: Option<&serde_json::Value>,
+) -> Option<SecretBindingApproval> {
+    value
+        .and_then(|value| value.get("secret_binding_approval"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 /// Resolve the owning extension name for a tool action, falling back to a
@@ -1077,6 +1090,11 @@ async fn execute_pending_gate_action(
         user_id: thread.user_id.clone(),
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some(resolved_call_id.clone()),
+        active_skill_names: thread
+            .active_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect(),
         source_channel: Some(pending.source_channel.clone()),
         user_timezone: thread
             .metadata
@@ -1138,6 +1156,23 @@ async fn execute_pending_gate_action(
                 .get(&action_name)
                 .await
                 .map(|tool| crate::tools::redact_params(&parameters, tool.sensitive_params()));
+            let description = if gate_name == SECRET_BINDING_APPROVAL_GATE_NAME {
+                secret_binding_approval_from_resume_output(resume_output.as_deref())
+                    .map(|approval| approval_prompt_message(&approval))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Tool '{}' requires {}.",
+                            action_name,
+                            resume_kind.kind_name()
+                        )
+                    })
+            } else {
+                format!(
+                    "Tool '{}' requires {}.",
+                    action_name,
+                    resume_kind.kind_name()
+                )
+            };
             let pending_gate = PendingGate {
                 request_id: uuid::Uuid::new_v4(),
                 gate_name,
@@ -1150,11 +1185,7 @@ async fn execute_pending_gate_action(
                 call_id,
                 parameters: *parameters,
                 display_parameters,
-                description: format!(
-                    "Tool '{}' requires {}.",
-                    action_name,
-                    resume_kind.kind_name()
-                ),
+                description,
                 resume_kind: *resume_kind,
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
@@ -2524,6 +2555,19 @@ pub async fn resolve_gate(
                 Err(e) => return Err(engine_err("load thread", e)),
             }
 
+            if pending.gate_name == SECRET_BINDING_APPROVAL_GATE_NAME
+                && let Some(approval) =
+                    secret_binding_approval_from_resume_output(pending.resume_output.as_ref())
+            {
+                let settings_store = agent
+                    .deps
+                    .settings_store
+                    .as_deref()
+                    .map(|store| store as &(dyn crate::db::SettingsStore + Send + Sync));
+                grant_binding_approval(settings_store, &pending.user_id, approval)
+                    .await
+                    .map_err(|error| engine_err("binding approval", error))?;
+            }
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -3928,7 +3972,9 @@ async fn await_thread_outcome(
                     .auth_manager
                     .as_ref()
                     .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
-                    .unwrap_or_else(|| format!("Provide your {} token", cred_name));
+                    .unwrap_or_else(|| {
+                        crate::auth::extension::default_secret_setup_instructions(&cred_name)
+                    });
 
                 let pending = PendingGate {
                     request_id: uuid::Uuid::new_v4(),

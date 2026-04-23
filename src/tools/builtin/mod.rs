@@ -33,6 +33,7 @@ pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};
 pub use file_history::{FileHistory, FileUndoTool, SharedFileHistory, shared_file_history};
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
+pub(crate) use http::dedup_credential_mappings;
 pub use http::{HttpTool, extract_host_from_params};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,

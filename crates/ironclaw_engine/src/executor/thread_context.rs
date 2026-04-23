@@ -16,6 +16,11 @@ pub(crate) fn thread_execution_context(
         user_id: thread.user_id.clone(),
         step_id,
         current_call_id,
+        active_skill_names: thread
+            .active_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect(),
         source_channel: thread
             .metadata
             .get("source_channel")

@@ -58,6 +58,7 @@
 //! let decrypted = store.get_decrypted("user_123", "openai_key").await?;
 //! ```
 
+pub mod binding_approvals;
 mod crypto;
 pub mod keychain;
 mod store;
@@ -70,8 +71,9 @@ pub use store::LibSqlSecretsStore;
 pub use store::PostgresSecretsStore;
 pub use store::{SecretConsumeResult, SecretsStore};
 pub use types::{
-    CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
-    SecretError, SecretRef,
+    CreateSecretParams, CredentialArtifactKind, CredentialBindingPolicy,
+    CredentialBindingProvenance, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
+    SecretBindingApproval, SecretError, SecretRef,
 };
 
 pub use store::in_memory::InMemorySecretsStore;

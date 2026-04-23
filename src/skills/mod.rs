@@ -34,13 +34,16 @@ pub mod bundled;
 // Re-export attenuation at the same path as before.
 pub use attenuation::{AttenuationResult, attenuate_tools};
 
-use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::secrets::{
+    CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+    CredentialLocation, CredentialMapping,
+};
 use crate::tools::wasm::OAuthRefreshConfig;
 use crate::{
     auth::{AuthDescriptor, AuthDescriptorKind, OAuthFlowDescriptor, upsert_auth_descriptor},
     db::SettingsStore,
 };
-use ironclaw_skills::{LoadedSkill, SkillCredentialLocation, SkillCredentialSpec};
+use ironclaw_skills::{LoadedSkill, SkillCredentialLocation, SkillCredentialSpec, SkillSource};
 
 /// Convert a skill credential location to the main crate's [`CredentialLocation`].
 fn convert_credential_location(loc: &SkillCredentialLocation) -> CredentialLocation {
@@ -69,7 +72,29 @@ pub fn credential_spec_to_mapping(spec: &SkillCredentialSpec) -> CredentialMappi
         // Skill credentials are required by default; the spec doesn't yet
         // expose an `optional` field, so we conservatively mark required.
         optional: false,
+        provenance: None,
     }
+}
+
+fn skill_binding_policy(skill: &LoadedSkill) -> CredentialBindingPolicy {
+    match &skill.source {
+        SkillSource::Bundled(_) => CredentialBindingPolicy::AutoBind,
+        SkillSource::Installed(_) | SkillSource::User(_) | SkillSource::Workspace(_) => {
+            CredentialBindingPolicy::RequireApproval
+        }
+    }
+}
+
+fn credential_spec_to_mapping_for_skill(
+    skill: &LoadedSkill,
+    spec: &SkillCredentialSpec,
+) -> CredentialMapping {
+    credential_spec_to_mapping(spec).with_provenance(CredentialBindingProvenance {
+        artifact_kind: CredentialArtifactKind::Skill,
+        artifact_name: skill.name().to_string(),
+        artifact_fingerprint: skill.content_hash.clone(),
+        binding_policy: skill_binding_policy(skill),
+    })
 }
 
 fn credential_spec_to_oauth_refresh(spec: &SkillCredentialSpec) -> Option<OAuthRefreshConfig> {
@@ -209,7 +234,7 @@ pub fn register_skill_credentials(
                 );
                 continue;
             }
-            let mapping = credential_spec_to_mapping(spec);
+            let mapping = credential_spec_to_mapping_for_skill(skill, spec);
             tracing::debug!(
                 skill = %skill.name(),
                 credential = %spec.name,

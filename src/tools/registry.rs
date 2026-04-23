@@ -11,7 +11,9 @@ use crate::extensions::ExtensionManager;
 use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::secrets::SecretsStore;
+use crate::secrets::{
+    CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance, SecretsStore,
+};
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
@@ -451,6 +453,9 @@ impl ToolRegistry {
         }
         if let Some(role_lookup) = &self.role_lookup {
             http = http.with_role_lookup(Arc::clone(role_lookup));
+        }
+        if let Some(db) = &self.db {
+            http = http.with_database(Arc::clone(db));
         }
         self.register_sync(Arc::new(http));
 
@@ -958,7 +963,16 @@ impl ToolRegistry {
             .capabilities
             .http
             .as_ref()
-            .map(|http| http.credentials.values().cloned().collect())
+            .map(|http| {
+                http.credentials
+                    .values()
+                    .cloned()
+                    .map(|mapping| match &reg.credential_provenance {
+                        Some(provenance) => mapping.with_provenance(provenance.clone()),
+                        None => mapping,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         let oauth_refresh = reg.oauth_refresh.clone();
 
@@ -983,6 +997,9 @@ impl ToolRegistry {
         }
         if let Some(oauth) = oauth_refresh.clone() {
             wrapper = wrapper.with_oauth_refresh(oauth);
+        }
+        if let Some(db) = &self.db {
+            wrapper = wrapper.with_database(Arc::clone(db));
         }
         if let Some(interceptor) = &self.http_interceptor {
             wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
@@ -1062,6 +1079,20 @@ impl ToolRegistry {
             secrets_store: self.secrets_store.clone(),
             role_lookup: self.role_lookup.clone(),
             oauth_refresh: None,
+            credential_provenance: Some(CredentialBindingProvenance {
+                artifact_kind: CredentialArtifactKind::WasmTool,
+                artifact_name: tool_with_binary.tool.name.clone(),
+                artifact_fingerprint: hex::encode(&tool_with_binary.binary_hash),
+                binding_policy: match tool_with_binary.tool.trust_level {
+                    crate::tools::wasm::storage::TrustLevel::System
+                    | crate::tools::wasm::storage::TrustLevel::Verified => {
+                        CredentialBindingPolicy::AutoBind
+                    }
+                    crate::tools::wasm::storage::TrustLevel::User => {
+                        CredentialBindingPolicy::RequireApproval
+                    }
+                },
+            }),
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -1111,6 +1142,8 @@ pub struct WasmToolRegistration<'a> {
     pub role_lookup: Option<Arc<dyn UserStore>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional provenance attached to credential mappings declared by this tool.
+    pub credential_provenance: Option<CredentialBindingProvenance>,
 }
 
 impl Default for ToolRegistry {
