@@ -1707,19 +1707,6 @@ impl Workspace {
     ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
-        // Inject current date/time so the model can answer time-related questions
-        // without guessing or intercepting them at the bot layer.
-        let now_str = match tz {
-            Some(t) => {
-                let dt = crate::timezone::now_in_tz(t);
-                format!("{} ({})", dt.format("%Y-%m-%d %H:%M"), t)
-            }
-            None => {
-                format!("{} (UTC)", Utc::now().format("%Y-%m-%d %H:%M"))
-            }
-        };
-        parts.push(format!("## Current Time\n\n{}", now_str));
-
         // Bootstrap ritual: inject FIRST when present (first-run only).
         // The agent must complete the ritual and then delete this file.
         //
