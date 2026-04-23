@@ -195,6 +195,52 @@ function renderCrDrillMissions(missions) {
   el.innerHTML = html;
 }
 
+function parseMissionRunGoal(goal) {
+  var text = String(goal || '').trim();
+  if (!text) return null;
+
+  var markdownMatch = text.match(/^#\s*Mission:\s*(.+?)\s+Goal:\s*([\s\S]+)$/i);
+  if (markdownMatch) {
+    return {
+      missionName: markdownMatch[1].trim(),
+      missionBrief: markdownMatch[2].trim(),
+    };
+  }
+
+  var plainMatch = text.match(/^Mission:\s*(.+?)\s+Goal:\s*([\s\S]+)$/i);
+  if (plainMatch) {
+    return {
+      missionName: plainMatch[1].trim(),
+      missionBrief: plainMatch[2].trim(),
+    };
+  }
+
+  return null;
+}
+
+function getCrThreadPresentation(t) {
+  var parsedMission = parseMissionRunGoal(t && t.goal);
+  var title = '';
+  var subtitle = '';
+  var brief = '';
+
+  if (parsedMission) {
+    title = parsedMission.missionName;
+    subtitle = 'Mission run';
+    brief = parsedMission.missionBrief;
+  } else {
+    title = (t && t.title) || (t && t.goal) || ('Thread ' + ((t && t.id) || '').slice(0, 8));
+    subtitle = (t && t.thread_type) ? t.thread_type.replace(/_/g, ' ') : 'Thread';
+    brief = (t && t.title && t.goal && t.title !== t.goal) ? t.goal : '';
+  }
+
+  return {
+    title: title,
+    subtitle: subtitle,
+    brief: brief,
+  };
+}
+
 function renderCrDrillActivity(threads, missions) {
   var el = document.getElementById('cr-drill-activity');
   if (!el) return;
@@ -212,7 +258,8 @@ function renderCrDrillActivity(threads, missions) {
     var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
       : t.state === 'Failed' ? 'failed'
       : t.state === 'Running' ? 'in_progress' : 'pending';
-    var label = t.title || t.goal || ('Thread ' + (t.id || '').slice(0, 8));
+    var presentation = getCrThreadPresentation(t);
+    var label = presentation.title;
     var time = formatRelativeTime(t.updated_at);
     html += '<button class="cr-activity-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
       + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
@@ -236,13 +283,13 @@ function crThreadMetaItem(label, value) {
     + '</div>';
 }
 
-function renderCrThreadSummary(t) {
+function renderCrThreadSummary(t, presentation) {
   var parts = [];
+  if (presentation.subtitle) {
+    parts.push('Context: ' + presentation.subtitle + '.');
+  }
   if (t.title && t.goal && t.title !== t.goal) {
     parts.push('Run label: ' + t.title + '.');
-  }
-  if (t.thread_type) {
-    parts.push('Type: ' + t.thread_type + '.');
   }
   if (t.step_count > 0) {
     parts.push(t.step_count + ' steps recorded.');
@@ -335,15 +382,26 @@ function crOpenEngineThread(threadId) {
     var t = data.thread;
     var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
       : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
-    var title = t.goal || t.title || ('Thread ' + (t.id || '').slice(0, 8));
+    var presentation = getCrThreadPresentation(t);
     var html = '<div class="cr-thread-inspector">'
       + '<div class="cr-detail-header">'
       + '<button class="cr-back" data-action="cr-close-detail">&larr; Back to project</button>'
-      + '<h2 class="cr-thread-title">' + escapeHtml(title) + '</h2>'
+      + '<div class="cr-thread-heading">'
+      + '<h2 class="cr-thread-title">' + escapeHtml(presentation.title) + '</h2>'
+      + (presentation.subtitle ? '<div class="cr-thread-subtitle">' + escapeHtml(presentation.subtitle) + '</div>' : '')
+      + '</div>'
       + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
       + '</div>'
-      + renderCrThreadSummary(t)
-      + '<div class="cr-thread-meta-grid">'
+      + renderCrThreadSummary(t, presentation);
+
+    if (presentation.brief) {
+      html += '<section class="cr-thread-brief">'
+        + '<div class="cr-thread-kicker">Mission brief</div>'
+        + '<div class="cr-thread-brief-copy">' + renderMarkdown(presentation.brief) + '</div>'
+        + '</section>';
+    }
+
+    html += '<div class="cr-thread-meta-grid">'
       + crThreadMetaItem('Type', t.thread_type || 'mission_run')
       + crThreadMetaItem('Steps', String(t.step_count || 0))
       + crThreadMetaItem('Tokens', (t.total_tokens || 0).toLocaleString())

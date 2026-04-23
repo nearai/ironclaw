@@ -14,7 +14,17 @@ MOCK_PROJECT_ID = "068f67da-49b6-4f6c-9463-8d243c2cff6c"
 FIRST_MISSION_ID = "m-001"
 FIRST_MISSION_NAME = "Daily AI Paper Monitoring"
 THREAD_DETAIL_ID = "t-002"
+THREAD_DETAIL_TITLE = "Daily Work Digest"
 THREAD_DETAIL_GOAL = "Analyze weekly research trends"
+MISSION_RUN_GOAL = (
+    "# Mission: Daily Work Digest Goal: Create and send a daily digest that reviews "
+    "my Google Calendar, Gmail, Notion, and GitHub to identify what I need to do that day. "
+    "Each run should: 1) look at today's Google Calendar events and summarize schedule and likely priorities; "
+    "2) review Gmail for recent unread or important messages that imply actions, deadlines, or follow-ups; "
+    "3) review Notion for tasks, meeting notes, pages, or items relevant to today, including due/urgent/open work when available; "
+    "4) review GitHub for my open PRs, issues assigned to me, and PRs requesting my review; "
+    "5) synthesize everything into one concise actionable morning briefing; 6) send the digest back to me in this conversation channel."
+)
 
 MOCK_OVERVIEW = {
     "projects": [
@@ -176,8 +186,8 @@ MOCK_MISSION_DETAIL = {
 MOCK_THREAD_DETAIL = {
     "thread": {
         "id": THREAD_DETAIL_ID,
-        "goal": THREAD_DETAIL_GOAL,
-        "title": "Weekly synthesis — Week 15",
+        "goal": MISSION_RUN_GOAL,
+        "title": "",
         "state": "Done",
         "thread_type": "mission_run",
         "step_count": 6,
@@ -282,7 +292,13 @@ async def test_project_activity_row_opens_polished_thread_inspector(page):
     )
     await expect(page.locator(SEL["projects_detail"])).to_be_visible()
     await expect(page.locator(SEL["projects_thread_title"])).to_have_text(
-        THREAD_DETAIL_GOAL
+        THREAD_DETAIL_TITLE
+    )
+    await expect(page.locator(SEL["projects_thread_subtitle"])).to_have_text(
+        "Mission run"
+    )
+    await expect(page.locator(SEL["projects_thread_brief"])).to_contain_text(
+        "Create and send a daily digest"
     )
     await expect(page.locator(SEL["projects_thread_meta"])).to_be_visible()
     await expect(page.locator(SEL["projects_thread_timeline"])).to_be_visible()

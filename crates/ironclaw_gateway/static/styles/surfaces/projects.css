@@ -306,8 +306,18 @@
 .cr-thread-inspector {
   max-width: 720px;
 }
+.cr-thread-heading {
+  flex: 1;
+  min-width: 0;
+}
 .cr-thread-title {
   max-width: 18ch;
+}
+.cr-thread-subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  letter-spacing: 0.02em;
 }
 .cr-thread-kicker {
   font-size: 10px;
@@ -330,6 +340,25 @@
   line-height: 1.55;
   color: var(--text-secondary);
 }
+.cr-thread-brief {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(52, 211, 153, 0.18);
+  background: linear-gradient(180deg, rgba(52,211,153,0.08), rgba(52,211,153,0)), var(--bg-secondary);
+}
+.cr-thread-brief-copy {
+  max-width: 68ch;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+.cr-thread-brief-copy > *:first-child { margin-top: 0; }
+.cr-thread-brief-copy > *:last-child { margin-bottom: 0; }
+.cr-thread-brief-copy p { margin: 0 0 12px; }
+.cr-thread-brief-copy ul,
+.cr-thread-brief-copy ol { margin: 0 0 12px 18px; padding: 0; }
+.cr-thread-brief-copy li { margin-bottom: 6px; }
 .cr-thread-meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

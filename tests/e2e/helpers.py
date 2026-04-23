@@ -192,6 +192,8 @@ SEL = {
     "projects_activity_row":    ".cr-activity-row",
     "projects_activity_row_by_id": '.cr-activity-row[data-id="{id}"]',
     "projects_thread_title":    ".cr-thread-title",
+    "projects_thread_subtitle": ".cr-thread-subtitle",
+    "projects_thread_brief":    ".cr-thread-brief",
     "projects_thread_meta":     ".cr-thread-meta-grid",
     "projects_thread_timeline": ".cr-thread-timeline",
     "projects_thread_message":  ".cr-thread-message",
