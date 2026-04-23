@@ -97,7 +97,7 @@ function drillIntoProject(projectId) {
   document.getElementById('cr-cards').style.display = 'none';
   var drill = document.getElementById('cr-drill');
   drill.style.display = '';
-  document.getElementById('cr-detail').style.display = 'none';
+  closeCrDetail();
 
   // Find project from cached overview.
   var proj = crOverview && crOverview.projects
@@ -145,8 +145,28 @@ function crBackToOverview() {
   crCurrentProjectId = null;
   destroyProjectWidgets();
   document.getElementById('cr-drill').style.display = 'none';
-  document.getElementById('cr-detail').style.display = 'none';
+  closeCrDetail();
   document.getElementById('cr-cards').style.display = '';
+}
+
+function setCrDetailOpen(isOpen) {
+  var shell = document.getElementById('cr-shell');
+  var detail = document.getElementById('cr-detail');
+  if (shell) shell.classList.toggle('cr-shell-detail-open', !!isOpen);
+  if (!detail) return;
+  detail.style.display = isOpen ? 'block' : 'none';
+  if (!isOpen) detail.innerHTML = '';
+}
+
+function closeCrDetail() {
+  setCrDetailOpen(false);
+}
+
+function openMissionFromProjects(missionId) {
+  if (!missionId) return;
+  closeCrDetail();
+  switchTab('missions');
+  openMissionDetail(missionId);
 }
 
 function renderCrDrillMissions(missions) {
@@ -162,7 +182,7 @@ function renderCrDrillMissions(missions) {
     var statusClass = m.status === 'Active' ? 'in_progress'
       : m.status === 'Completed' ? 'completed'
       : m.status === 'Paused' ? 'pending' : 'failed';
-    html += '<button class="cr-mission-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
+    html += '<button class="cr-mission-card" data-action="open-project-mission" data-id="' + escapeHtml(m.id) + '">'
       + '<div class="cr-mc-head">'
       + '<span class="cr-mc-name">' + escapeHtml(m.name) + '</span>'
       + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>'
@@ -205,8 +225,47 @@ function renderCrDrillActivity(threads, missions) {
 
 function crShowDetail(html) {
   var detail = document.getElementById('cr-detail');
-  detail.style.display = '';
   detail.innerHTML = html;
+  setCrDetailOpen(true);
+}
+
+function crThreadMetaItem(label, value) {
+  return '<div class="cr-thread-meta-card">'
+    + '<div class="cr-thread-meta-label">' + escapeHtml(label) + '</div>'
+    + '<div class="cr-thread-meta-value">' + escapeHtml(value || '\u2014') + '</div>'
+    + '</div>';
+}
+
+function renderCrThreadSummary(t) {
+  var parts = [];
+  if (t.title && t.goal && t.title !== t.goal) {
+    parts.push('Run label: ' + t.title + '.');
+  }
+  if (t.thread_type) {
+    parts.push('Type: ' + t.thread_type + '.');
+  }
+  if (t.step_count > 0) {
+    parts.push(t.step_count + ' steps recorded.');
+  }
+  if (t.completed_at) {
+    parts.push('Completed ' + formatRelativeTime(t.completed_at) + '.');
+  } else {
+    parts.push('Still active in the control room.');
+  }
+  return '<section class="cr-thread-summary">'
+    + '<div class="cr-thread-kicker">Thread Summary</div>'
+    + '<p>' + escapeHtml(parts.join(' ')) + '</p>'
+    + '</section>';
+}
+
+function renderCrThreadMessage(msg) {
+  var role = msg && msg.role ? msg.role : 'System';
+  var roleClass = role === 'Assistant' ? 'assistant'
+    : role === 'User' ? 'user' : 'system';
+  return '<article class="cr-thread-message cr-thread-message-' + roleClass + '">'
+    + '<div class="cr-thread-message-role">' + escapeHtml(role) + '</div>'
+    + '<div class="cr-thread-message-body">' + renderMarkdown((msg && msg.content) || '') + '</div>'
+    + '</article>';
 }
 
 // CR-specific mission detail: renders into the control-room cr-detail panel.
@@ -276,27 +335,33 @@ function crOpenEngineThread(threadId) {
     var t = data.thread;
     var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
       : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
-    var html = '<div class="cr-detail-header">'
-      + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
-      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
-      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span></div>';
-    html += '<div class="job-meta-grid">'
-      + metaItem('Type', t.thread_type) + metaItem('Steps', t.step_count)
-      + metaItem('Tokens', t.total_tokens.toLocaleString())
-      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '\u2014')
-      + metaItem('Created', formatDate(t.created_at))
-      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '\u2014')
-      + '</div>';
+    var title = t.goal || t.title || ('Thread ' + (t.id || '').slice(0, 8));
+    var html = '<div class="cr-thread-inspector">'
+      + '<div class="cr-detail-header">'
+      + '<button class="cr-back" data-action="cr-close-detail">&larr; Back to project</button>'
+      + '<h2 class="cr-thread-title">' + escapeHtml(title) + '</h2>'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+      + '</div>'
+      + renderCrThreadSummary(t)
+      + '<div class="cr-thread-meta-grid">'
+      + crThreadMetaItem('Type', t.thread_type || 'mission_run')
+      + crThreadMetaItem('Steps', String(t.step_count || 0))
+      + crThreadMetaItem('Tokens', (t.total_tokens || 0).toLocaleString())
+      + crThreadMetaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '\u2014')
+      + crThreadMetaItem('Created', t.created_at ? formatDate(t.created_at) : '\u2014')
+      + crThreadMetaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '\u2014')
+      + '</div>'
+      + '<div class="cr-thread-timeline">';
+
     if (t.messages && t.messages.length) {
-      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
       t.messages.forEach(function(msg) {
-        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
-        html += '<div class="thread-message thread-msg-' + roleClass + '">'
-          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
-          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div></div>';
+        html += renderCrThreadMessage(msg);
       });
-      html += '</div>';
+    } else {
+      html += '<div class="cr-thread-empty">No messages captured for this thread yet.</div>';
     }
+
+    html += '</div></div>';
     crShowDetail(html);
   }).catch(function(err) {
     console.error('[projects] Failed to load thread:', err);

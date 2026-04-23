@@ -333,7 +333,7 @@ document.addEventListener('click', function(e) {
       crBackToOverview();
       break;
     case 'cr-close-detail':
-      document.getElementById('cr-detail').style.display = 'none';
+      closeCrDetail();
       break;
     case 'cr-att-click':
       if (el.dataset.project) drillIntoProject(el.dataset.project);
@@ -341,12 +341,15 @@ document.addEventListener('click', function(e) {
     case 'cr-new-project':
       crNewProject();
       break;
+    case 'open-project-mission':
+      openMissionFromProjects(el.dataset.id);
+      break;
     case 'open-mission':
       openMissionDetail(el.dataset.id);
       break;
     case 'close-mission-detail':
       if (crCurrentProjectId) {
-        document.getElementById('cr-detail').style.display = 'none';
+        closeCrDetail();
       } else {
         closeMissionDetail();
       }
@@ -368,7 +371,7 @@ document.addEventListener('click', function(e) {
       break;
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
-      else document.getElementById('cr-detail').style.display = 'none';
+      else closeCrDetail();
       break;
     case 'open-active-work':
       if (el.dataset.kind === 'job') {
