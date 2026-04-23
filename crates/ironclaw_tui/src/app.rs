@@ -487,6 +487,35 @@ async fn handle_event(
 
             match action {
                 InputAction::Submit => {
+                    // Keyboard drilldown for Missions tab when input box is empty.
+                    if widgets.input_box.is_empty()
+                        && state.active_tab == ActiveTab::Missions
+                        && !state.model_picker.visible
+                        && !state.command_palette.visible
+                    {
+                        match state.missions_surface.view {
+                            crate::widgets::MissionsView::List => {
+                                if let Some(id) = state.missions_surface.selected_mission_id.clone()
+                                {
+                                    state.missions_surface.open_mission(id);
+                                }
+                            }
+                            crate::widgets::MissionsView::Detail => {
+                                if let Some(thread_id) = state
+                                    .missions_surface
+                                    .selected_activity_thread_id(&state.projects_overview)
+                                {
+                                    state.missions_surface.selected_thread_id =
+                                        Some(thread_id.clone());
+                                    let _ = msg_tx
+                                        .send(TuiUserMessage::open_engine_thread_detail(thread_id))
+                                        .await;
+                                }
+                            }
+                        }
+                        return;
+                    }
+
                     let selected_model = if state.model_picker.visible {
                         state.model_picker.selected_model().map(str::to_owned)
                     } else {
@@ -600,9 +629,15 @@ async fn handle_event(
                         state.jobs_surface.move_selection(-1, &state.jobs);
                     }
                     ActiveTab::Missions => {
-                        state
-                            .missions_surface
-                            .move_selection(-1, &state.projects_overview);
+                        if state.missions_surface.view == crate::widgets::MissionsView::Detail {
+                            state
+                                .missions_surface
+                                .move_activity_selection(-1, &state.projects_overview);
+                        } else {
+                            state
+                                .missions_surface
+                                .move_selection(-1, &state.projects_overview);
+                        }
                     }
                     ActiveTab::Settings => {
                         state.settings.page(-1);
@@ -626,9 +661,15 @@ async fn handle_event(
                         state.jobs_surface.move_selection(1, &state.jobs);
                     }
                     ActiveTab::Missions => {
-                        state
-                            .missions_surface
-                            .move_selection(1, &state.projects_overview);
+                        if state.missions_surface.view == crate::widgets::MissionsView::Detail {
+                            state
+                                .missions_surface
+                                .move_activity_selection(1, &state.projects_overview);
+                        } else {
+                            state
+                                .missions_surface
+                                .move_selection(1, &state.projects_overview);
+                        }
                     }
                     ActiveTab::Settings => {
                         state.settings.page(1);
@@ -641,13 +682,22 @@ async fn handle_event(
                     state.pinned_to_bottom = true;
                 }
                 InputAction::Interrupt => {
-                    let _ = msg_tx
-                        .send(
-                            TuiUserMessage::text_only("/interrupt")
-                                .with_thread_id(state.current_thread_id.clone()),
-                        )
-                        .await;
-                    state.status_text.clear();
+                    // Esc on Missions detail view navigates back to list without interrupting.
+                    if state.active_tab == ActiveTab::Missions
+                        && state.missions_surface.view == crate::widgets::MissionsView::Detail
+                    {
+                        state
+                            .missions_surface
+                            .back_to_list(&state.projects_overview);
+                    } else {
+                        let _ = msg_tx
+                            .send(
+                                TuiUserMessage::text_only("/interrupt")
+                                    .with_thread_id(state.current_thread_id.clone()),
+                            )
+                            .await;
+                        state.status_text.clear();
+                    }
                 }
                 InputAction::ApprovalUp => {
                     if let Some(ref mut ap) = state.pending_approval {
@@ -1146,9 +1196,15 @@ async fn handle_event(
                             .move_selection(delta as isize, &state.jobs);
                     }
                     ActiveTab::Missions => {
-                        state
-                            .missions_surface
-                            .move_selection(delta as isize, &state.projects_overview);
+                        if state.missions_surface.view == crate::widgets::MissionsView::Detail {
+                            state
+                                .missions_surface
+                                .move_activity_selection(delta as isize, &state.projects_overview);
+                        } else {
+                            state
+                                .missions_surface
+                                .move_selection(delta as isize, &state.projects_overview);
+                        }
                     }
                     ActiveTab::Settings => {
                         state.settings.move_selection(delta as isize);
@@ -4595,7 +4651,7 @@ mod tests {
             &mut state,
             TuiEvent::MouseClick {
                 column: main_area.x + 4,
-                row: main_area.y + 2,
+                row: main_area.y + 3,
             },
         )
         .await;
@@ -4657,7 +4713,7 @@ mod tests {
             &mut state,
             TuiEvent::MouseClick {
                 column: main_area.x + 4,
-                row: main_area.y + 9,
+                row: main_area.y + 10,
             },
         )
         .await;
@@ -4671,6 +4727,143 @@ mod tests {
             messages[0].ui_action.as_ref(),
             Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "thread-1"
         ));
+    }
+
+    fn missions_test_state() -> AppState {
+        let mut state = AppState {
+            active_tab: ActiveTab::Missions,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: String::new(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 1,
+                    cost_today_usd: "$0.10".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: vec![crate::widgets::ProjectMissionSummary {
+                        id: "mission-1".to_string(),
+                        name: "Theme migration".to_string(),
+                        status: "Active".to_string(),
+                        cadence: "manual".to_string(),
+                        thread_count: 2,
+                    }],
+                    recent_activity: vec![crate::widgets::ProjectActivitySummary {
+                        id: "thread-1".to_string(),
+                        label: "Refine tabs".to_string(),
+                        status: "Running".to_string(),
+                        updated_at: Some("now".to_string()),
+                    }],
+                }],
+            },
+            ..Default::default()
+        };
+        state
+            .missions_surface
+            .sync_from_overview(&state.projects_overview);
+        state
+    }
+
+    #[tokio::test]
+    async fn enter_key_on_missions_list_drills_into_detail() {
+        let mut state = missions_test_state();
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+        )
+        .await;
+
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::Detail,
+            "Enter on list should open detail view"
+        );
+        assert_eq!(
+            state.missions_surface.selected_mission_id.as_deref(),
+            Some("mission-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_key_on_missions_detail_returns_to_list() {
+        let mut state = missions_test_state();
+        state.missions_surface.open_mission("mission-1".to_string());
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::Detail
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Esc,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+        )
+        .await;
+
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::List,
+            "Esc on detail should return to list"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_on_missions_list_sends_interrupt_not_back_nav() {
+        let mut state = missions_test_state();
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::List
+        );
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Esc,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+        )
+        .await;
+
+        // Should still be on list (nothing to go back to) and send /interrupt
+        assert_eq!(
+            state.missions_surface.view,
+            crate::widgets::MissionsView::List
+        );
+        assert!(
+            !messages.is_empty(),
+            "Esc on list should still send /interrupt"
+        );
+    }
+
+    #[tokio::test]
+    async fn scroll_down_in_missions_detail_moves_activity_cursor() {
+        let mut state = missions_test_state();
+        state.missions_surface.open_mission("mission-1".to_string());
+        assert_eq!(state.missions_surface.activity_index, 0);
+
+        // Scroll down — there's only one activity, so cursor stays at 0 (clamped).
+        apply_event(
+            &mut state,
+            TuiEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::PageDown,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+        )
+        .await;
+
+        // One activity item, clamped to 0.
+        assert_eq!(state.missions_surface.activity_index, 0);
+        // list selection unchanged (we're in detail)
+        assert_eq!(state.missions_surface.selected_index, 0);
     }
 
     #[tokio::test]

@@ -768,6 +768,8 @@ pub struct MissionsState {
     pub selected_index: usize,
     pub selected_mission_id: Option<String>,
     pub selected_thread_id: Option<String>,
+    /// Index of the highlighted row in the mission-detail activity list.
+    pub activity_index: usize,
 }
 
 impl MissionsState {
@@ -782,6 +784,7 @@ impl MissionsState {
             self.selected_index = 0;
             self.selected_mission_id = None;
             self.selected_thread_id = None;
+            self.activity_index = 0;
             self.view = MissionsView::List;
             return;
         }
@@ -796,6 +799,11 @@ impl MissionsState {
         self.selected_mission_id = missions
             .get(self.selected_index)
             .map(|mission| mission.id.clone());
+
+        self.clamp_activity_to(Self::activity_len_for_selected(
+            data,
+            &self.selected_mission_id,
+        ));
     }
 
     pub fn move_selection(&mut self, delta: isize, data: &ProjectsOverviewData) {
@@ -815,18 +823,74 @@ impl MissionsState {
         self.selected_mission_id = missions
             .get(self.selected_index)
             .map(|mission| mission.id.clone());
+        self.activity_index = 0;
+    }
+
+    /// Move the activity cursor in the detail view. Returns `true` if the
+    /// highlighted row changed. Ignored outside detail view.
+    pub fn move_activity_selection(&mut self, delta: isize, data: &ProjectsOverviewData) -> bool {
+        if self.view != MissionsView::Detail {
+            return false;
+        }
+        let len = Self::activity_len_for_selected(data, &self.selected_mission_id);
+        if len == 0 {
+            self.activity_index = 0;
+            return false;
+        }
+        let max = len.saturating_sub(1) as isize;
+        let next = (self.activity_index as isize + delta).clamp(0, max) as usize;
+        let changed = next != self.activity_index;
+        self.activity_index = next;
+        changed
+    }
+
+    fn clamp_activity_to(&mut self, len: usize) {
+        if len == 0 {
+            self.activity_index = 0;
+        } else {
+            self.activity_index = self.activity_index.min(len - 1);
+        }
+    }
+
+    fn activity_len_for_selected(
+        data: &ProjectsOverviewData,
+        selected_mission_id: &Option<String>,
+    ) -> usize {
+        let Some(mission_id) = selected_mission_id.as_deref() else {
+            return 0;
+        };
+        data.projects
+            .iter()
+            .find(|project| project.missions.iter().any(|m| m.id == mission_id))
+            .map(|project| project.recent_activity.len())
+            .unwrap_or(0)
     }
 
     pub fn open_mission(&mut self, mission_id: String) {
         self.view = MissionsView::Detail;
         self.selected_mission_id = Some(mission_id);
         self.selected_thread_id = None;
+        self.activity_index = 0;
     }
 
     pub fn back_to_list(&mut self, data: &ProjectsOverviewData) {
         self.view = MissionsView::List;
         self.selected_thread_id = None;
+        self.activity_index = 0;
         self.sync_from_overview(data);
+    }
+
+    /// Returns the thread id of the activity row currently highlighted in detail view.
+    pub fn selected_activity_thread_id(&self, data: &ProjectsOverviewData) -> Option<String> {
+        let mission_id = self.selected_mission_id.as_deref()?;
+        let project = data
+            .projects
+            .iter()
+            .find(|p| p.missions.iter().any(|m| m.id == mission_id))?;
+        project
+            .recent_activity
+            .get(self.activity_index)
+            .map(|a| a.id.clone())
     }
 }
 

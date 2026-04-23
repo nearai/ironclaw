@@ -77,8 +77,10 @@ impl MissionsWidget {
             MissionsView::List => {
                 let first_row = area.y.saturating_add(4);
                 let index = row.checked_sub(first_row)? as usize;
+                // Each mission occupies 2 rows; map row to mission index.
+                let mission_index = index / 2;
                 self.flattened_missions(&state.projects_overview)
-                    .get(index)
+                    .get(mission_index)
                     .map(|entry| MissionsMouseAction::OpenMission(entry.mission.id.clone()))
             }
             MissionsView::Detail => {
@@ -87,19 +89,29 @@ impl MissionsWidget {
                 }
 
                 let entry = self.selected_mission(state)?;
-                if row == area.y.saturating_add(2) {
+                if row == area.y.saturating_add(3) {
                     return Some(MissionsMouseAction::OpenProject(
                         entry.project_id.to_string(),
                     ));
                 }
 
-                let activity_start = area.y.saturating_add(9);
+                let activity_start = area.y.saturating_add(10);
                 let activity_index = row.checked_sub(activity_start)? as usize;
                 entry
                     .recent_activity
                     .get(activity_index)
                     .map(|thread| MissionsMouseAction::OpenThreadDetail(thread.id.clone()))
             }
+        }
+    }
+
+    fn status_icon(status: &str) -> &'static str {
+        match status.to_lowercase().as_str() {
+            "active" | "running" => "●",
+            "paused" | "idle" => "○",
+            "done" | "completed" | "finished" => "✓",
+            "failed" | "error" => "✗",
+            _ => "·",
         }
     }
 
@@ -131,7 +143,10 @@ impl MissionsWidget {
                 Span::styled(format!("{active}"), self.theme.warning_style()),
                 Span::styled(" active", self.theme.dim_style()),
             ]),
-            Line::from(""),
+            Line::from(Span::styled(
+                "  ↑/↓ navigate   Enter open",
+                self.theme.dim_style(),
+            )),
         ];
 
         if missions.is_empty() {
@@ -142,21 +157,29 @@ impl MissionsWidget {
         } else {
             for (index, entry) in missions.iter().enumerate() {
                 let is_selected = index == state.missions_surface.selected_index;
+                let name_style = if is_selected {
+                    self.theme.accent_style().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.fg.to_color())
+                };
                 let marker_style = if is_selected {
                     self.theme.accent_style().add_modifier(Modifier::BOLD)
                 } else {
                     self.theme.dim_style()
                 };
+                let icon = Self::status_icon(&entry.mission.status);
                 lines.push(Line::from(vec![
                     Span::styled(if is_selected { "▶ " } else { "  " }, marker_style),
-                    Span::styled(entry.mission.name.clone(), marker_style),
+                    Span::styled(icon, self.theme.accent_style()),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(entry.mission.name.clone(), name_style),
                     Span::styled("  ·  ", self.theme.dim_style()),
                     Span::styled(entry.project_name.to_string(), self.theme.dim_style()),
                 ]));
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "   {} · {} threads",
-                        entry.mission.status, entry.mission.thread_count
+                        "   {} · {} · {} threads",
+                        entry.mission.status, entry.mission.cadence, entry.mission.thread_count
                     ),
                     self.theme.dim_style(),
                 )));
@@ -183,49 +206,86 @@ impl MissionsWidget {
             return;
         };
 
+        // Line 0: back nav
         let mut lines = vec![Line::from(vec![
             Span::styled(
                 "← Back",
                 self.theme.accent_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  ", self.theme.dim_style()),
-            Span::styled(entry.mission.name.clone(), self.theme.bold_style()),
+            Span::styled("  ·  Esc", self.theme.dim_style()),
         ])];
+
+        // Line 1: breadcrumb
         lines.push(Line::from(vec![
-            Span::styled("Project: ", self.theme.dim_style()),
+            Span::styled("Missions", self.theme.dim_style()),
+            Span::styled(" › ", self.theme.dim_style()),
+            Span::styled(entry.mission.name.clone(), self.theme.bold_style()),
+        ]));
+
+        // Line 2: blank
+        lines.push(Line::from(""));
+
+        // Line 3: project
+        lines.push(Line::from(vec![
+            Span::styled("Project  ", self.theme.dim_style()),
             Span::styled(entry.project_name.to_string(), self.theme.accent_style()),
             Span::styled("  · open project", self.theme.dim_style()),
         ]));
+
+        let status_icon = Self::status_icon(&entry.mission.status);
+        lines.push(Line::from(vec![
+            Span::styled("Status   ", self.theme.dim_style()),
+            Span::styled(
+                format!("{} {}", status_icon, entry.mission.status),
+                Style::default().fg(self.theme.fg.to_color()),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Cadence  ", self.theme.dim_style()),
+            Span::styled(
+                entry.mission.cadence.clone(),
+                Style::default().fg(self.theme.fg.to_color()),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Threads  ", self.theme.dim_style()),
+            Span::styled(
+                format!("{}", entry.mission.thread_count),
+                Style::default().fg(self.theme.fg.to_color()),
+            ),
+        ]));
+
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Status: {}", entry.mission.status)));
-        lines.push(Line::from(format!("Cadence: {}", entry.mission.cadence)));
-        lines.push(Line::from(format!(
-            "Spawned threads: {}",
-            entry.mission.thread_count
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Recent activity",
-            self.theme.bold_accent_style(),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled("Recent activity", self.theme.bold_accent_style()),
+            Span::styled("  ↑/↓ navigate   Enter open", self.theme.dim_style()),
+        ]));
+
         if entry.recent_activity.is_empty() {
             lines.push(Line::from(Span::styled("  none", self.theme.dim_style())));
         } else {
-            for thread in entry.recent_activity {
+            for (idx, thread) in entry.recent_activity.iter().enumerate() {
+                let is_selected = idx == state.missions_surface.activity_index;
+                let row_style = if is_selected {
+                    self.theme.accent_style().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.fg.to_color())
+                };
+                let bullet = if is_selected { "▶" } else { "•" };
                 let mut spans = vec![
-                    Span::styled("  • ", self.theme.dim_style()),
-                    Span::styled(
-                        thread.label.clone(),
-                        Style::default().fg(self.theme.fg.to_color()),
-                    ),
+                    Span::styled(format!("  {bullet} "), self.theme.dim_style()),
+                    Span::styled(thread.label.clone(), row_style),
                     Span::styled("  ·  ", self.theme.dim_style()),
-                    Span::styled(thread.status.clone(), self.theme.accent_style()),
+                    Span::styled(Self::status_icon(&thread.status), self.theme.accent_style()),
+                    Span::styled(format!(" {}", thread.status), self.theme.dim_style()),
                 ];
                 if let Some(updated_at) = &thread.updated_at {
                     spans.push(Span::styled("  ·  ", self.theme.dim_style()));
                     spans.push(Span::styled(updated_at.clone(), self.theme.dim_style()));
                 }
-                spans.push(Span::styled("  · open", self.theme.dim_style()));
+                if is_selected {
+                    spans.push(Span::styled("  · open", self.theme.accent_style()));
+                }
                 lines.push(Line::from(spans));
             }
         }
@@ -336,19 +396,53 @@ mod tests {
     }
 
     #[test]
-    fn mission_detail_renders_recent_activity() {
+    fn missions_list_shows_keyboard_hint() {
         let widget = MissionsWidget::new(Theme::dark());
-        let mut state = sample_state();
-        state.missions_surface.open_mission("mission-1".to_string());
+        let state = sample_state();
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
 
         widget.render(area, &mut buf, &state);
 
         let text = buffer_text(&buf, area);
-        assert!(text.contains("Back"));
-        assert!(text.contains("Refine tabs"));
-        assert!(text.contains("open project"));
+        assert!(text.contains("Enter"));
+    }
+
+    #[test]
+    fn mission_detail_renders_breadcrumb_and_activity() {
+        let widget = MissionsWidget::new(Theme::dark());
+        let mut state = sample_state();
+        state.missions_surface.open_mission("mission-1".to_string());
+        let area = Rect::new(0, 0, 100, 25);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Back"), "should show Back nav");
+        assert!(text.contains("Missions"), "should show breadcrumb root");
+        assert!(text.contains("Theme migration"), "should show mission name");
+        assert!(text.contains("Refine tabs"), "should show activity");
+        assert!(text.contains("open project"), "should show project link");
+    }
+
+    #[test]
+    fn mission_detail_highlights_selected_activity() {
+        let widget = MissionsWidget::new(Theme::dark());
+        let mut state = sample_state();
+        state.missions_surface.open_mission("mission-1".to_string());
+        state.missions_surface.activity_index = 0;
+        let area = Rect::new(0, 0, 100, 25);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        // Selected activity row should show the open prompt
+        assert!(
+            text.contains("open"),
+            "selected activity should show open cue"
+        );
     }
 
     #[test]
@@ -356,9 +450,9 @@ mod tests {
         let widget = MissionsWidget::new(Theme::dark());
         let mut state = sample_state();
         state.missions_surface.open_mission("mission-1".to_string());
-        let area = Rect::new(0, 0, 100, 20);
+        let area = Rect::new(0, 0, 100, 25);
 
-        let action = widget.action_at(area, &state, area.x + 4, area.y + 2);
+        let action = widget.action_at(area, &state, area.x + 4, area.y + 3);
 
         assert!(matches!(
             action,
@@ -371,13 +465,23 @@ mod tests {
         let widget = MissionsWidget::new(Theme::dark());
         let mut state = sample_state();
         state.missions_surface.open_mission("mission-1".to_string());
-        let area = Rect::new(0, 0, 100, 20);
+        let area = Rect::new(0, 0, 100, 25);
 
-        let action = widget.action_at(area, &state, area.x + 4, area.y + 9);
+        let action = widget.action_at(area, &state, area.x + 4, area.y + 10);
 
         assert!(matches!(
             action,
             Some(MissionsMouseAction::OpenThreadDetail(thread_id)) if thread_id == "thread-1"
         ));
+    }
+
+    #[test]
+    fn selected_activity_thread_id_returns_correct_id() {
+        let state = sample_state();
+        let thread_id = state
+            .missions_surface
+            .selected_activity_thread_id(&state.projects_overview);
+        // activity_index is 0, which maps to "thread-1"
+        assert_eq!(thread_id.as_deref(), Some("thread-1"));
     }
 }
