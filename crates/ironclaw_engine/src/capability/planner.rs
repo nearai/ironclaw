@@ -97,6 +97,7 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects,
             requires_approval,
+            discovery: None,
         }
     }
 

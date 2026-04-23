@@ -215,6 +215,7 @@ impl EffectExecutor for HttpMockEffects {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }])
     }
 
@@ -297,6 +298,7 @@ impl EffectExecutor for PausingHttpMockEffects {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }])
     }
 
@@ -601,6 +603,7 @@ FINAL(str(result))
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],
@@ -708,6 +711,7 @@ FINAL(str(result))
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],
@@ -851,6 +855,7 @@ async fn skill_prompt_context_survives_pause_and_resume() {
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],
@@ -972,6 +977,7 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
             parameters_schema: serde_json::json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],

@@ -89,6 +89,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![EffectType::WriteExternal, EffectType::CredentialedNetwork],
                     requires_approval: false,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "list_prs".into(),
@@ -96,6 +97,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![EffectType::ReadExternal, EffectType::CredentialedNetwork],
                     requires_approval: false,
+                    discovery: None,
                 },
             ],
             knowledge: vec!["When creating issues, always add labels.".into()],
@@ -144,6 +146,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],

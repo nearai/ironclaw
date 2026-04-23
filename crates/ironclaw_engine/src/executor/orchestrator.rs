@@ -980,7 +980,18 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, &exec_ctx)
+            .await
+            .unwrap_or_default(),
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        inventory.inline.clone().into();
+    exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+    exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1027,13 +1038,14 @@ async fn handle_execute_action(
     };
 
     // 2. Check policy
-    let action_def = effects
-        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-        .await
-        .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.name == name));
+    let action_def = available_actions.iter().find(|a| a.matches_name(&name));
 
-    if let Some(ref ad) = action_def {
+    let canonical_name = action_def
+        .as_ref()
+        .map(|action| action.name.clone())
+        .unwrap_or_else(|| name.clone());
+
+    if let Some(ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
             crate::capability::policy::PolicyDecision::Deny { reason } => {
                 let output = serde_json::json!({"error": format!("Denied: {reason}")});
@@ -1129,10 +1141,10 @@ async fn handle_execute_action(
     };
 
     // 4. Execute
-    let ps = summarize_params(&name, &params);
+    let ps = summarize_params(&canonical_name, &params);
     let execution_start = std::time::Instant::now();
     match effects
-        .execute_action(&name, params, &lease, &exec_ctx)
+        .execute_action(&canonical_name, params, &lease, &exec_ctx)
         .await
     {
         Ok(r) => {
@@ -1323,6 +1335,16 @@ async fn handle_execute_actions_parallel(
     }
 
     let step_id = StepId::new();
+    let actions_context = thread_execution_context(thread, step_id, None);
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, &actions_context)
+            .await
+            .unwrap_or_default(),
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        inventory.inline.clone().into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1369,12 +1391,16 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-            .await
-            .ok()
-            .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        let action_def = available_actions
+            .iter()
+            .find(|a| a.matches_name(&pc.name))
+            .cloned();
+        let action_name = action_def
+            .as_ref()
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
 
         if let Some(ref ad) = action_def {
             match policy.evaluate(ad, &lease, &[]) {
@@ -1386,7 +1412,7 @@ async fn handle_execute_actions_parallel(
                     });
                     let event = EventKind::ActionFailed {
                         step_id,
-                        action_name: pc.name.clone(),
+                        action_name: action_name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
                         duration_ms: 0,
@@ -1505,7 +1531,6 @@ async fn handle_execute_actions_parallel(
     let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
     let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
     let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
-
     // Separate runnable from errors
     let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
     for (idx, pf) in preflight.into_iter().enumerate() {
@@ -1530,11 +1555,18 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        let ps = summarize_params(&pc.name, &pc.params);
+        let action_name = available_actions
+            .iter()
+            .find(|action| action.matches_name(&pc.name))
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
+        let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
-            &pc.name,
+            &action_name,
             pc.params.clone(),
             &pc.call_id,
             &lease,
@@ -1555,12 +1587,18 @@ async fn handle_execute_actions_parallel(
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
         for (idx, lease) in runnable {
-            let pc_name = parsed[idx].name.clone();
+            let pc_name = available_actions
+                .iter()
+                .find(|action| action.matches_name(&parsed[idx].name))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| parsed[idx].name.clone());
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {

@@ -330,6 +330,7 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::ReadLocal],
             requires_approval,
+            discovery: None,
         }
     }
 

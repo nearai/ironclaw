@@ -266,6 +266,20 @@ impl ExecutionLoop {
                 Vec::new()
             }
         };
+        let inventory = match self
+            .effects
+            .available_action_inventory(&active_leases, &prompt_context)
+            .await
+        {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                debug!(
+                    thread_id = %self.thread.id,
+                    "failed to load action inventory for system prompt refresh: {error}"
+                );
+                crate::types::capability::ActionInventory::default()
+            }
+        };
 
         if (!system_docs_loaded || !capabilities_loaded)
             && self.has_engine_owned_system_prompt(checkpoint)
@@ -278,9 +292,8 @@ impl ExecutionLoop {
             );
             return;
         }
-
         let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
-            &[],
+            &inventory,
             &capabilities,
             system_docs,
             self.platform_info.as_ref(),
@@ -692,6 +705,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            discovery: None,
         }
     }
 
@@ -1791,6 +1805,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            discovery: None,
         };
 
         let llm = Arc::new(MockLlm::new(vec![
