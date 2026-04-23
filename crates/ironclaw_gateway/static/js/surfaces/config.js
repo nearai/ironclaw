@@ -259,9 +259,6 @@ function setActiveProvider(id) {
       renderProviders();
       loadInferenceSettings();
       scrollToProviders();
-      document.getElementById('config-restart-notice').style.display = 'flex';
-      var llmNotice = document.getElementById('llm-restart-notice');
-      if (llmNotice) llmNotice.style.display = 'flex';
       showToast(I18n.t('config.providerActivated', { name: id }));
     })
     .catch((e) => showToast(I18n.t('error.unknown') + ': ' + e.message, 'error'));
@@ -484,11 +481,6 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
         if (isActive) loadInferenceSettings();
         resetProviderForm();
         scrollToProviders();
-        if (isActive) {
-          document.getElementById('config-restart-notice').style.display = 'flex';
-          var llmNotice = document.getElementById('llm-restart-notice');
-          if (llmNotice) llmNotice.style.display = 'flex';
-        }
         showToast(I18n.t('config.providerConfigured', { name: id }));
       })
       .catch((e) => {
@@ -539,11 +531,6 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
       if (isActive) loadInferenceSettings();
       resetProviderForm();
       scrollToProviders();
-      if (isActive) {
-        document.getElementById('config-restart-notice').style.display = 'flex';
-        var llmNotice = document.getElementById('llm-restart-notice');
-        if (llmNotice) llmNotice.style.display = 'flex';
-      }
       showToast(I18n.t('config.providerUpdated', { name }));
     }).catch((e) => {
       _customProviders[idx] = original;
