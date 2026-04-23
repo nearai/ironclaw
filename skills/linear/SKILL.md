@@ -61,10 +61,10 @@ refreshed_at: 2026-04-21
 stale_after: 2026-05-21
 ---
 # Linear identity
-- user_id: 8a7f...-uuid
-- display_name: Tobias Holenstein
-- email: tobias@...
-- timezone: Europe/Zurich
+user_id: 8a7f...-uuid
+display_name: Tobias Holenstein
+email: tobias@...
+timezone: Europe/Zurich
 
 ## Teams
 - id: team-uuid-a, key: ENG, name: Engineering
