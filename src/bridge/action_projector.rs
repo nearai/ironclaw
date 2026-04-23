@@ -185,18 +185,20 @@ fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
             examples: summary.examples,
         });
     let schema_override = (discovery_schema != callable_schema).then_some(discovery_schema);
+    let discovery =
+        (summary.is_some() || schema_override.is_some()).then_some(ActionDiscoveryMetadata {
+            name: callable_name.clone(),
+            summary,
+            schema_override,
+        });
 
     ActionDef {
-        name: callable_name.clone(),
+        name: callable_name,
         description: tool.description().to_string(),
         parameters_schema: callable_schema,
         effects: vec![],
         requires_approval: false,
-        discovery: Some(ActionDiscoveryMetadata {
-            name: callable_name,
-            summary,
-            schema_override,
-        }),
+        discovery,
     }
 }
 
@@ -317,6 +319,7 @@ mod tests {
     }
 
     struct DiscoveryTool;
+    struct PlainTool;
 
     #[async_trait]
     impl crate::tools::Tool for DiscoveryTool {
@@ -350,6 +353,29 @@ mod tests {
                 notes: vec!["Use for mission inspection".to_string()],
                 examples: vec![],
             })
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!("not needed")
+        }
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for PlainTool {
+        fn name(&self) -> &str {
+            "plain_helper"
+        }
+
+        fn description(&self) -> &str {
+            "Plain helper"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {"id": {"type": "string"}}})
         }
 
         async fn execute(
@@ -459,6 +485,15 @@ mod tests {
             .schema_override
             .expect("discovery schema override");
         assert!(schema_override["properties"].get("mode").is_some());
+    }
+
+    #[test]
+    fn project_tool_action_omits_empty_discovery_metadata() {
+        let tool = std::sync::Arc::new(PlainTool);
+        let action = project_tool_action(tool.as_ref());
+
+        assert_eq!(action.description, "Plain helper");
+        assert!(action.discovery.is_none());
     }
 
     #[tokio::test]

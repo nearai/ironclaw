@@ -266,21 +266,6 @@ impl ExecutionLoop {
                 Vec::new()
             }
         };
-        let inventory = match self
-            .effects
-            .available_action_inventory(&active_leases, &prompt_context)
-            .await
-        {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                debug!(
-                    thread_id = %self.thread.id,
-                    "failed to load action inventory for system prompt refresh: {error}"
-                );
-                crate::types::capability::ActionInventory::default()
-            }
-        };
-
         if (!system_docs_loaded || !capabilities_loaded)
             && self.has_engine_owned_system_prompt(checkpoint)
         {
@@ -293,7 +278,6 @@ impl ExecutionLoop {
             return;
         }
         let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
-            &inventory,
             &capabilities,
             system_docs,
             self.platform_info.as_ref(),
@@ -561,8 +545,8 @@ mod tests {
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
     use crate::types::capability::{
-        ActionDef, CapabilityLease, CapabilityStatus, CapabilitySummary, CapabilitySummaryKind,
-        EffectType, GrantedActions,
+        ActionDef, ActionInventory, CapabilityLease, CapabilityStatus, CapabilitySummary,
+        CapabilitySummaryKind, EffectType, GrantedActions,
     };
     use crate::types::message::ThreadMessage;
     use crate::types::project::ProjectId;
@@ -1043,6 +1027,141 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn resume_refresh_does_not_fetch_action_inventory_for_system_prompt() {
+        struct CapturingLlm {
+            seen_messages: Mutex<Vec<Vec<ThreadMessage>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmBackend for CapturingLlm {
+            async fn complete(
+                &self,
+                messages: &[ThreadMessage],
+                _actions: &[ActionDef],
+                _config: &LlmCallConfig,
+            ) -> Result<LlmOutput, EngineError> {
+                self.seen_messages.lock().unwrap().push(messages.to_vec());
+                Ok(text_response("done"))
+            }
+
+            fn model_name(&self) -> &str {
+                "capturing"
+            }
+        }
+
+        struct NoInventoryRefreshEffects;
+
+        #[async_trait::async_trait]
+        impl EffectExecutor for NoInventoryRefreshEffects {
+            async fn execute_action(
+                &self,
+                _action_name: &str,
+                _parameters: serde_json::Value,
+                _lease: &CapabilityLease,
+                _context: &ThreadExecutionContext,
+            ) -> Result<ActionResult, EngineError> {
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })
+            }
+
+            async fn available_actions(
+                &self,
+                _leases: &[CapabilityLease],
+                _context: &ThreadExecutionContext,
+            ) -> Result<Vec<ActionDef>, EngineError> {
+                Ok(vec![test_action()])
+            }
+
+            async fn available_action_inventory(
+                &self,
+                _leases: &[CapabilityLease],
+                _context: &ThreadExecutionContext,
+            ) -> Result<ActionInventory, EngineError> {
+                panic!("system prompt refresh should not fetch action inventory");
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ThreadExecutionContext,
+            ) -> Result<Vec<CapabilitySummary>, EngineError> {
+                Ok(vec![CapabilitySummary {
+                    name: "slack".into(),
+                    display_name: Some("Slack".into()),
+                    kind: CapabilitySummaryKind::Provider,
+                    status: CapabilityStatus::NeedsAuth,
+                    description: Some("Slack workspace integration".into()),
+                    routing_hint: None,
+                }])
+            }
+        }
+
+        let old_prompt = legacy_prompt_with_step_zero_suffix();
+
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_id,
+            "test-user",
+            ThreadConfig::default(),
+        );
+        thread.state = ThreadState::Waiting;
+        thread.messages = vec![
+            ThreadMessage::system(old_prompt.clone()),
+            ThreadMessage::user("resume me"),
+        ];
+        if let Some(metadata) = thread.metadata.as_object_mut() {
+            metadata.insert(
+                RUNTIME_CHECKPOINT_METADATA_KEY.into(),
+                serde_json::json!({
+                    "persisted_state": {
+                        "working_messages": [
+                            {"role": "System", "content": old_prompt},
+                            {"role": "User", "content": "resume me"},
+                        ]
+                    }
+                }),
+            );
+        }
+
+        let llm = Arc::new(CapturingLlm {
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoInventoryRefreshEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
+
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm.clone(),
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+        );
+
+        let outcome = exec.run().await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "done"));
+
+        let seen = llm.seen_messages.lock().unwrap();
+        let system_prompt = &seen[0][0].content;
+        assert!(system_prompt.contains("`slack` [provider]"));
+        assert!(system_prompt.contains("needs_auth"));
     }
 
     #[tokio::test]
