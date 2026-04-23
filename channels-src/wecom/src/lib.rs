@@ -15,6 +15,7 @@ use aes::Aes256;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use cbc::Decryptor;
+use md5::Md5;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha1::{Digest, Sha1};
@@ -40,14 +41,22 @@ const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 const RECENT_MSG_IDS_PATH: &str = "recent_msg_ids";
 const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
+const WEBSOCKET_MEDIA_STATE_PATH: &str = "state/websocket_media_sends";
 
 const WECOM_WS_REPLY_CMD: &str = "aibot_respond_msg";
 const WECOM_WS_WELCOME_CMD: &str = "aibot_respond_welcome_msg";
+const WECOM_WS_SEND_MSG_CMD: &str = "aibot_send_msg";
+const WECOM_WS_UPLOAD_MEDIA_INIT_CMD: &str = "aibot_upload_media_init";
+const WECOM_WS_UPLOAD_MEDIA_CHUNK_CMD: &str = "aibot_upload_media_chunk";
+const WECOM_WS_UPLOAD_MEDIA_FINISH_CMD: &str = "aibot_upload_media_finish";
 
 const TEXT_CHUNK_LIMIT_BYTES: usize = 1800;
 const STREAM_CHUNK_LIMIT_BYTES: usize = 20_000;
+const WEBSOCKET_MEDIA_CHUNK_SIZE: usize = 512 * 1024;
+const MAX_WEBSOCKET_MEDIA_CHUNKS: usize = 100;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_OUTBOUND_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_WEBSOCKET_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_OUTBOUND_VOICE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OUTBOUND_VIDEO_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RECENT_MSG_IDS: usize = 256;
@@ -117,6 +126,16 @@ struct WecomWsFrame<T> {
 #[derive(Debug, Deserialize)]
 struct WecomWsHeaders {
     req_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WecomWsAckFrame {
+    headers: WecomWsHeaders,
+    errcode: i64,
+    #[serde(default)]
+    errmsg: String,
+    #[serde(default)]
+    body: JsonValue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +263,15 @@ impl OutboundMediaKind {
             Self::File => MAX_ATTACHMENT_BYTES,
         }
     }
+
+    fn websocket_max_bytes(self) -> usize {
+        match self {
+            Self::Image => MAX_WEBSOCKET_IMAGE_BYTES,
+            Self::Voice => MAX_OUTBOUND_VOICE_BYTES,
+            Self::Video => MAX_OUTBOUND_VIDEO_BYTES,
+            Self::File => MAX_ATTACHMENT_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +302,59 @@ struct WecomUploadMediaResponse {
     errmsg: String,
     #[serde(default)]
     media_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PendingWebsocketMediaState {
+    #[serde(default)]
+    sends: Vec<PendingWebsocketMediaSend>,
+    #[serde(default)]
+    batches: Vec<PendingWebsocketMediaBatch>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingWebsocketMediaBatch {
+    id: String,
+    chat_id: String,
+    #[serde(default)]
+    response_req_id: String,
+    #[serde(default)]
+    response_cmd: String,
+    final_text: String,
+    remaining_media: usize,
+    sent_media: usize,
+    failed_media: usize,
+    #[serde(default)]
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingWebsocketMediaSend {
+    id: String,
+    batch_id: String,
+    chat_id: String,
+    media_type: String,
+    filename: String,
+    data_base64: String,
+    total_size: usize,
+    total_chunks: usize,
+    next_chunk_index: usize,
+    init_req_id: String,
+    #[serde(default)]
+    chunk_req_id: Option<String>,
+    #[serde(default)]
+    finish_req_id: Option<String>,
+    #[serde(default)]
+    send_req_id: Option<String>,
+    #[serde(default)]
+    upload_id: Option<String>,
+    #[serde(default)]
+    media_id: Option<String>,
+}
+
+struct WebsocketMediaStartResult {
+    started: usize,
+    errors: Vec<String>,
 }
 
 fn default_api_base() -> String {
@@ -1025,44 +1106,614 @@ fn websocket_stream_id(req_id: &str) -> String {
     format!("stream-{req_id}")
 }
 
-fn build_websocket_stream_reply_payloads(
+fn build_websocket_stream_reply_payload(
     req_id: &str,
     reply_cmd: &str,
     content: &str,
+    finish: bool,
+    msg_items: Option<Vec<JsonValue>>,
+) -> Result<String, String> {
+    let mut stream = serde_json::json!({
+        "id": websocket_stream_id(req_id),
+        "content": content,
+        "finish": finish,
+    });
+    if let Some(items) = msg_items {
+        if !items.is_empty() {
+            stream["msg_item"] = JsonValue::Array(items);
+        }
+    }
+
+    let payload = serde_json::json!({
+        "cmd": reply_cmd,
+        "headers": {
+            "req_id": req_id,
+        },
+        "body": {
+            "msgtype": "stream",
+            "stream": stream,
+        }
+    });
+    serde_json::to_string(&payload)
+        .map_err(|e| format!("Failed to serialize WeCom websocket reply: {e}"))
+}
+
+fn build_websocket_text_stream_reply_payloads(
+    req_id: &str,
+    reply_cmd: &str,
+    content: &str,
+    finish_last_chunk: bool,
 ) -> Result<Vec<String>, String> {
     let mut payloads = Vec::new();
-    let stream_id = websocket_stream_id(req_id);
     let chunks = chunk_text(content, STREAM_CHUNK_LIMIT_BYTES);
     for (index, chunk) in chunks.iter().enumerate() {
-        let finish = index + 1 == chunks.len();
-        let payload = serde_json::json!({
-            "cmd": reply_cmd,
-            "headers": {
-                "req_id": req_id,
-            },
-            "body": {
-                "msgtype": "stream",
-                "stream": {
-                    "id": stream_id,
-                    "content": chunk,
-                    "finish": finish,
-                }
-            }
-        });
-        payloads.push(
-            serde_json::to_string(&payload)
-                .map_err(|e| format!("Failed to serialize WeCom websocket reply: {e}"))?,
-        );
+        let finish = finish_last_chunk && index + 1 == chunks.len();
+        let payload = build_websocket_stream_reply_payload(req_id, reply_cmd, chunk, finish, None)?;
+        payloads.push(payload);
     }
     Ok(payloads)
 }
 
-fn send_websocket_stream_reply(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
-    for payload in build_websocket_stream_reply_payloads(req_id, reply_cmd, content)? {
+fn websocket_media_md5_hex(data: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+fn send_websocket_response(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
+    let mut payloads =
+        build_websocket_text_stream_reply_payloads(req_id, reply_cmd, content, true)?;
+    if payloads.is_empty() {
+        payloads.push(build_websocket_stream_reply_payload(
+            req_id, reply_cmd, "", true, None,
+        )?);
+    }
+
+    for payload in payloads {
         channel_host::websocket_send_text(&payload)
             .map_err(|e| format!("Failed to send WeCom websocket reply: {e}"))?;
     }
     Ok(())
+}
+
+fn send_websocket_stream_reply(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
+    send_websocket_response(req_id, reply_cmd, content)
+}
+
+fn build_websocket_command_payload(
+    cmd: &str,
+    req_id: &str,
+    body: JsonValue,
+) -> Result<String, String> {
+    serde_json::to_string(&serde_json::json!({
+        "cmd": cmd,
+        "headers": {
+            "req_id": req_id,
+        },
+        "body": body,
+    }))
+    .map_err(|e| format!("Failed to serialize WeCom websocket command: {e}"))
+}
+
+fn websocket_control_req_id(cmd: &str, seed: &str) -> String {
+    let now = channel_host::now_millis();
+    let mut hasher = Sha1::new();
+    hasher.update(cmd.as_bytes());
+    hasher.update(seed.as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{cmd}_{now}_{}", &digest[..8])
+}
+
+fn websocket_media_batch_id(metadata: &WecomMessageMetadata) -> String {
+    let seed = metadata
+        .source_msg_id
+        .as_deref()
+        .or(metadata.ws_req_id.as_deref())
+        .unwrap_or("response");
+    websocket_control_req_id("ironclaw_wecom_media_batch", seed)
+}
+
+fn websocket_media_send_id(batch_id: &str, index: usize, attachment: &Attachment) -> String {
+    let seed = format!(
+        "{batch_id}:{index}:{}:{}:{}",
+        attachment.filename,
+        attachment.mime_type,
+        attachment.data.len()
+    );
+    websocket_control_req_id("ironclaw_wecom_media", &seed)
+}
+
+fn load_pending_websocket_media_state() -> PendingWebsocketMediaState {
+    let Some(raw) = channel_host::workspace_read(WEBSOCKET_MEDIA_STATE_PATH) else {
+        return PendingWebsocketMediaState::default();
+    };
+    if raw.trim().is_empty() {
+        return PendingWebsocketMediaState::default();
+    }
+    match serde_json::from_str(&raw) {
+        Ok(state) => state,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to parse pending WeCom websocket media state: {error}"),
+            );
+            PendingWebsocketMediaState::default()
+        }
+    }
+}
+
+fn persist_pending_websocket_media_state(state: &PendingWebsocketMediaState) -> Result<(), String> {
+    let json = serde_json::to_string(state)
+        .map_err(|e| format!("Failed to serialize pending WeCom websocket media state: {e}"))?;
+    channel_host::workspace_write(WEBSOCKET_MEDIA_STATE_PATH, &json)
+}
+
+fn websocket_media_target(metadata: &WecomMessageMetadata) -> Option<String> {
+    metadata
+        .ws_chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let to_user = metadata.to_user.trim();
+            (!to_user.is_empty()).then_some(to_user)
+        })
+        .map(str::to_string)
+}
+
+fn classify_websocket_media(att: &Attachment) -> OutboundMediaKind {
+    let preferred = preferred_outbound_media_kind(att);
+    if att.data.len() > preferred.websocket_max_bytes() {
+        OutboundMediaKind::File
+    } else {
+        preferred
+    }
+}
+
+fn validate_websocket_media_size(
+    media_kind: OutboundMediaKind,
+    size_bytes: usize,
+) -> Result<(), String> {
+    if size_bytes > media_kind.websocket_max_bytes() {
+        return Err(format!(
+            "WeCom websocket {} attachment exceeds {} bytes",
+            media_kind.as_api_type(),
+            media_kind.websocket_max_bytes()
+        ));
+    }
+    let total_chunks = size_bytes.div_ceil(WEBSOCKET_MEDIA_CHUNK_SIZE).max(1);
+    if total_chunks > MAX_WEBSOCKET_MEDIA_CHUNKS {
+        return Err(format!(
+            "WeCom websocket attachment requires {total_chunks} chunks; maximum is {MAX_WEBSOCKET_MEDIA_CHUNKS}"
+        ));
+    }
+    Ok(())
+}
+
+fn build_websocket_media_init_payload(send: &PendingWebsocketMediaSend) -> Result<String, String> {
+    let data = BASE64_STANDARD
+        .decode(&send.data_base64)
+        .map_err(|e| format!("Failed to decode pending WeCom media data: {e}"))?;
+    build_websocket_command_payload(
+        WECOM_WS_UPLOAD_MEDIA_INIT_CMD,
+        &send.init_req_id,
+        serde_json::json!({
+            "type": send.media_type,
+            "filename": send.filename,
+            "total_size": send.total_size,
+            "total_chunks": send.total_chunks,
+            "md5": websocket_media_md5_hex(&data),
+        }),
+    )
+}
+
+fn build_pending_websocket_media_send(
+    batch_id: &str,
+    chat_id: &str,
+    attachment: &Attachment,
+    index: usize,
+) -> Result<(PendingWebsocketMediaSend, String), String> {
+    if attachment.data.is_empty() {
+        return Err(format!(
+            "WeCom websocket attachment '{}' has no data",
+            attachment.filename
+        ));
+    }
+
+    let media_kind = classify_websocket_media(attachment);
+    validate_websocket_media_size(media_kind, attachment.data.len())?;
+    let total_chunks = attachment
+        .data
+        .len()
+        .div_ceil(WEBSOCKET_MEDIA_CHUNK_SIZE)
+        .max(1);
+    let id = websocket_media_send_id(batch_id, index, attachment);
+    let init_req_id = websocket_control_req_id(WECOM_WS_UPLOAD_MEDIA_INIT_CMD, &id);
+    let send = PendingWebsocketMediaSend {
+        id,
+        batch_id: batch_id.to_string(),
+        chat_id: chat_id.to_string(),
+        media_type: media_kind.as_api_type().to_string(),
+        filename: if attachment.filename.trim().is_empty() {
+            "attachment.bin".to_string()
+        } else {
+            attachment.filename.clone()
+        },
+        data_base64: BASE64_STANDARD.encode(&attachment.data),
+        total_size: attachment.data.len(),
+        total_chunks,
+        next_chunk_index: 0,
+        init_req_id,
+        chunk_req_id: None,
+        finish_req_id: None,
+        send_req_id: None,
+        upload_id: None,
+        media_id: None,
+    };
+    let payload = build_websocket_media_init_payload(&send)?;
+    Ok((send, payload))
+}
+
+fn build_websocket_media_chunk_payload(send: &PendingWebsocketMediaSend) -> Result<String, String> {
+    let upload_id = send
+        .upload_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "WeCom websocket media upload_id missing before chunk".to_string())?;
+    let data = BASE64_STANDARD
+        .decode(&send.data_base64)
+        .map_err(|e| format!("Failed to decode pending WeCom media data: {e}"))?;
+    let start = send.next_chunk_index * WEBSOCKET_MEDIA_CHUNK_SIZE;
+    let end = (start + WEBSOCKET_MEDIA_CHUNK_SIZE).min(data.len());
+    let chunk = data
+        .get(start..end)
+        .ok_or_else(|| "WeCom websocket media chunk range is invalid".to_string())?;
+    let req_id = send
+        .chunk_req_id
+        .as_deref()
+        .ok_or_else(|| "WeCom websocket media chunk req_id missing".to_string())?;
+    build_websocket_command_payload(
+        WECOM_WS_UPLOAD_MEDIA_CHUNK_CMD,
+        req_id,
+        serde_json::json!({
+            "upload_id": upload_id,
+            "chunk_index": send.next_chunk_index,
+            "base64_data": BASE64_STANDARD.encode(chunk),
+        }),
+    )
+}
+
+fn build_websocket_media_finish_payload(
+    send: &PendingWebsocketMediaSend,
+) -> Result<String, String> {
+    let upload_id = send
+        .upload_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "WeCom websocket media upload_id missing before finish".to_string())?;
+    let req_id = send
+        .finish_req_id
+        .as_deref()
+        .ok_or_else(|| "WeCom websocket media finish req_id missing".to_string())?;
+    build_websocket_command_payload(
+        WECOM_WS_UPLOAD_MEDIA_FINISH_CMD,
+        req_id,
+        serde_json::json!({ "upload_id": upload_id }),
+    )
+}
+
+fn build_websocket_active_media_payload(
+    send: &PendingWebsocketMediaSend,
+) -> Result<String, String> {
+    let media_id = send
+        .media_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "WeCom websocket media_id missing before send".to_string())?;
+    let req_id = send
+        .send_req_id
+        .as_deref()
+        .ok_or_else(|| "WeCom websocket media send req_id missing".to_string())?;
+    let media_type = send.media_type.as_str();
+    build_websocket_command_payload(
+        WECOM_WS_SEND_MSG_CMD,
+        req_id,
+        serde_json::json!({
+            "chatid": send.chat_id,
+            "msgtype": media_type,
+            media_type: { "media_id": media_id },
+        }),
+    )
+}
+
+fn build_websocket_active_markdown_payload(chat_id: &str, content: &str) -> Result<String, String> {
+    let req_id = websocket_control_req_id(WECOM_WS_SEND_MSG_CMD, content);
+    build_websocket_command_payload(
+        WECOM_WS_SEND_MSG_CMD,
+        &req_id,
+        serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": "markdown",
+            "markdown": {
+                "content": content,
+            },
+        }),
+    )
+}
+
+fn send_next_websocket_media_chunk(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+    let req_id = websocket_control_req_id(
+        WECOM_WS_UPLOAD_MEDIA_CHUNK_CMD,
+        &format!("{}:{}", send.id, send.next_chunk_index),
+    );
+    send.chunk_req_id = Some(req_id);
+    let payload = build_websocket_media_chunk_payload(send)?;
+    channel_host::websocket_send_text(&payload)
+        .map_err(|e| format!("Failed to send WeCom websocket media chunk: {e}"))
+}
+
+fn send_websocket_media_finish(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+    let req_id = websocket_control_req_id(WECOM_WS_UPLOAD_MEDIA_FINISH_CMD, &send.id);
+    send.finish_req_id = Some(req_id);
+    let payload = build_websocket_media_finish_payload(send)?;
+    channel_host::websocket_send_text(&payload)
+        .map_err(|e| format!("Failed to send WeCom websocket media finish: {e}"))
+}
+
+fn send_websocket_active_media(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+    let req_id = websocket_control_req_id(WECOM_WS_SEND_MSG_CMD, &send.id);
+    send.send_req_id = Some(req_id);
+    let payload = build_websocket_active_media_payload(send)?;
+    channel_host::websocket_send_text(&payload)
+        .map_err(|e| format!("Failed to send WeCom websocket media message: {e}"))
+}
+
+fn send_websocket_active_markdown(chat_id: &str, content: &str) -> Result<(), String> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Ok(());
+    }
+    let payload = build_websocket_active_markdown_payload(chat_id, content)?;
+    channel_host::websocket_send_text(&payload)
+        .map_err(|e| format!("Failed to send WeCom websocket markdown message: {e}"))
+}
+
+fn start_websocket_media_batch(
+    metadata: &WecomMessageMetadata,
+    response_req_id: &str,
+    response_cmd: &str,
+    content: &str,
+    attachments: &[Attachment],
+) -> WebsocketMediaStartResult {
+    let Some(chat_id) = websocket_media_target(metadata) else {
+        return WebsocketMediaStartResult {
+            started: 0,
+            errors: vec!["WeCom websocket media send requires chat_id or user_id".to_string()],
+        };
+    };
+
+    let batch_id = websocket_media_batch_id(metadata);
+    let mut sends = Vec::new();
+    let mut errors = Vec::new();
+    for (index, attachment) in attachments.iter().enumerate() {
+        match build_pending_websocket_media_send(&batch_id, &chat_id, attachment, index) {
+            Ok((send, payload)) => match channel_host::websocket_send_text(&payload) {
+                Ok(()) => sends.push(send),
+                Err(error) => errors.push(format!(
+                    "Failed to send WeCom websocket media init for '{}': {error}",
+                    attachment.filename
+                )),
+            },
+            Err(error) => errors.push(error),
+        }
+    }
+
+    let started = sends.len();
+    if started > 0 {
+        let mut state = load_pending_websocket_media_state();
+        state.batches.push(PendingWebsocketMediaBatch {
+            id: batch_id,
+            chat_id,
+            response_req_id: response_req_id.to_string(),
+            response_cmd: response_cmd.to_string(),
+            final_text: content.trim().to_string(),
+            remaining_media: started,
+            sent_media: 0,
+            failed_media: errors.len(),
+            errors: errors.clone(),
+        });
+        state.sends.extend(sends);
+        if let Err(error) = persist_pending_websocket_media_state(&state) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to persist WeCom websocket media state: {error}"),
+            );
+        }
+    }
+
+    WebsocketMediaStartResult { started, errors }
+}
+
+fn append_websocket_media_errors_to_text(content: &str, errors: &[String]) -> String {
+    let first_error = errors
+        .first()
+        .map(String::as_str)
+        .unwrap_or("unknown error");
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        format!("附件已生成，但发送失败：{first_error}")
+    } else {
+        format!("{trimmed}\n\n附件已生成，但发送失败：{first_error}")
+    }
+}
+
+fn pending_websocket_media_matches_req(send: &PendingWebsocketMediaSend, req_id: &str) -> bool {
+    send.init_req_id == req_id
+        || send.chunk_req_id.as_deref() == Some(req_id)
+        || send.finish_req_id.as_deref() == Some(req_id)
+        || send.send_req_id.as_deref() == Some(req_id)
+}
+
+fn json_body_string(body: &JsonValue, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn fail_pending_websocket_media(
+    state: &mut PendingWebsocketMediaState,
+    send: &PendingWebsocketMediaSend,
+    error: String,
+) {
+    channel_host::log(
+        channel_host::LogLevel::Warn,
+        &format!("WeCom websocket media send failed: {error}"),
+    );
+    complete_websocket_media_batch(state, &send.batch_id, Err(error));
+}
+
+fn complete_websocket_media_batch(
+    state: &mut PendingWebsocketMediaState,
+    batch_id: &str,
+    result: Result<(), String>,
+) {
+    let Some(pos) = state.batches.iter().position(|batch| batch.id == batch_id) else {
+        return;
+    };
+
+    let batch = &mut state.batches[pos];
+    if batch.remaining_media > 0 {
+        batch.remaining_media -= 1;
+    }
+    match result {
+        Ok(()) => batch.sent_media += 1,
+        Err(error) => {
+            batch.failed_media += 1;
+            batch.errors.push(error);
+        }
+    }
+
+    if batch.remaining_media > 0 {
+        return;
+    }
+
+    let batch = state.batches.remove(pos);
+    let final_text = if batch.failed_media > 0 {
+        append_websocket_media_errors_to_text(&batch.final_text, &batch.errors)
+    } else {
+        batch.final_text
+    };
+
+    if !batch.response_req_id.trim().is_empty() {
+        if !final_text.trim().is_empty() {
+            if let Err(error) = send_websocket_active_markdown(&batch.chat_id, &final_text) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to send WeCom websocket active final text after media: {error}"
+                    ),
+                );
+            }
+        }
+    } else if !final_text.trim().is_empty() {
+        if let Err(error) = send_websocket_active_markdown(&batch.chat_id, &final_text) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to send WeCom websocket active final text after media: {error}"),
+            );
+        }
+    }
+}
+
+fn advance_pending_websocket_media(
+    mut send: PendingWebsocketMediaSend,
+    ack: &WecomWsAckFrame,
+) -> Result<Option<PendingWebsocketMediaSend>, String> {
+    let req_id = ack.headers.req_id.as_str();
+
+    if send.init_req_id == req_id {
+        let upload_id = json_body_string(&ack.body, "upload_id")
+            .ok_or_else(|| "WeCom websocket upload init ack missing upload_id".to_string())?;
+        send.upload_id = Some(upload_id);
+        send.next_chunk_index = 0;
+        send_next_websocket_media_chunk(&mut send)?;
+        return Ok(Some(send));
+    }
+
+    if send.chunk_req_id.as_deref() == Some(req_id) {
+        send.next_chunk_index += 1;
+        if send.next_chunk_index < send.total_chunks {
+            send_next_websocket_media_chunk(&mut send)?;
+        } else {
+            send_websocket_media_finish(&mut send)?;
+        }
+        return Ok(Some(send));
+    }
+
+    if send.finish_req_id.as_deref() == Some(req_id) {
+        let media_id = json_body_string(&ack.body, "media_id")
+            .ok_or_else(|| "WeCom websocket upload finish ack missing media_id".to_string())?;
+        send.media_id = Some(media_id);
+        send_websocket_active_media(&mut send)?;
+        return Ok(Some(send));
+    }
+
+    if send.send_req_id.as_deref() == Some(req_id) {
+        return Ok(None);
+    }
+
+    Ok(Some(send))
+}
+
+fn parse_websocket_ack_frame(frame: &str) -> Option<WecomWsAckFrame> {
+    let value: JsonValue = serde_json::from_str(frame).ok()?;
+    value.get("errcode")?.as_i64()?;
+    serde_json::from_value(value).ok()
+}
+
+fn handle_websocket_ack_frame(ack: WecomWsAckFrame) {
+    let mut state = load_pending_websocket_media_state();
+    let Some(pos) = state
+        .sends
+        .iter()
+        .position(|send| pending_websocket_media_matches_req(send, &ack.headers.req_id))
+    else {
+        return;
+    };
+
+    let send = state.sends.remove(pos);
+    let batch_id = send.batch_id.clone();
+    if ack.errcode != 0 {
+        let error = format!(
+            "req_id={} errcode={} errmsg={}",
+            ack.headers.req_id, ack.errcode, ack.errmsg
+        );
+        fail_pending_websocket_media(&mut state, &send, error);
+    } else {
+        match advance_pending_websocket_media(send, &ack) {
+            Ok(Some(next)) => state.sends.push(next),
+            Ok(None) => {
+                complete_websocket_media_batch(&mut state, &batch_id, Ok(()));
+            }
+            Err(error) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to advance WeCom websocket media send: {error}"),
+                );
+                complete_websocket_media_batch(&mut state, &batch_id, Err(error));
+            }
+        }
+    }
+
+    if let Err(error) = persist_pending_websocket_media_state(&state) {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!("Failed to persist WeCom websocket media state: {error}"),
+        );
+    }
 }
 
 fn websocket_fallback_target(sender_id: &str, chat_type: Option<&str>) -> String {
@@ -1483,11 +2134,21 @@ fn process_websocket_event_queue() {
                     ),
                 }
             }
-            Some(other) => channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Ignoring WeCom websocket control frame: {other}"),
-            ),
-            None => {}
+            Some(other) => {
+                if let Some(ack) = parse_websocket_ack_frame(&frame) {
+                    handle_websocket_ack_frame(ack);
+                } else {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!("Ignoring WeCom websocket control frame: {other}"),
+                    );
+                }
+            }
+            None => {
+                if let Some(ack) = parse_websocket_ack_frame(&frame) {
+                    handle_websocket_ack_frame(ack);
+                }
+            }
         }
     }
 }
@@ -1799,38 +2460,48 @@ impl Guest for WecomChannel {
                 .ws_reply_cmd
                 .as_deref()
                 .unwrap_or(WECOM_WS_REPLY_CMD);
+
+            if !response.attachments.is_empty() {
+                let media = start_websocket_media_batch(
+                    &metadata,
+                    req_id,
+                    reply_cmd,
+                    &response.content,
+                    &response.attachments,
+                );
+                if media.started > 0 {
+                    return Ok(());
+                }
+
+                let content =
+                    append_websocket_media_errors_to_text(&response.content, &media.errors);
+                send_websocket_stream_reply(req_id, reply_cmd, &content)?;
+                return Ok(());
+            }
+
             if !response.content.trim().is_empty() {
                 send_websocket_stream_reply(req_id, reply_cmd, &response.content)?;
             }
-            for attachment in &response.attachments {
-                if metadata.to_user.trim().is_empty() {
-                    return Err(
-                        "WeCom websocket attachment fallback requires a direct-message sender"
-                            .to_string(),
-                    );
-                }
-                send_media_message(&metadata.to_user, attachment)?;
-            }
             return Ok(());
-        }
-
-        if !response.content.trim().is_empty() {
-            send_text_message(&metadata.to_user, &response.content)?;
         }
 
         for attachment in &response.attachments {
             send_media_message(&metadata.to_user, attachment)?;
         }
 
+        if !response.content.trim().is_empty() {
+            send_text_message(&metadata.to_user, &response.content)?;
+        }
+
         Ok(())
     }
 
     fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
-        if !response.content.trim().is_empty() {
-            send_text_message(&user_id, &response.content)?;
-        }
         for attachment in &response.attachments {
             send_media_message(&user_id, attachment)?;
+        }
+        if !response.content.trim().is_empty() {
+            send_text_message(&user_id, &response.content)?;
         }
         Ok(())
     }
@@ -1903,9 +2574,13 @@ mod tests {
     #[test]
     fn websocket_stream_reply_payloads_chunk_content_and_reuse_req_id() {
         let content = "a".repeat(STREAM_CHUNK_LIMIT_BYTES + 17);
-        let payloads =
-            build_websocket_stream_reply_payloads("req-123", WECOM_WS_REPLY_CMD, &content)
-                .expect("payloads");
+        let payloads = build_websocket_text_stream_reply_payloads(
+            "req-123",
+            WECOM_WS_REPLY_CMD,
+            &content,
+            true,
+        )
+        .expect("payloads");
 
         assert_eq!(payloads.len(), 2);
         let first: serde_json::Value = serde_json::from_str(&payloads[0]).expect("first payload");
@@ -1933,6 +2608,119 @@ mod tests {
             17
         );
         assert_eq!(second["body"]["stream"]["finish"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn websocket_empty_stream_reply_finishes_original_request() {
+        let payload =
+            build_websocket_stream_reply_payload("req-123", WECOM_WS_REPLY_CMD, "", true, None)
+                .expect("payload");
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("payload json");
+
+        assert_eq!(value["cmd"], serde_json::json!(WECOM_WS_REPLY_CMD));
+        assert_eq!(value["headers"]["req_id"], serde_json::json!("req-123"));
+        assert_eq!(value["body"]["stream"]["content"], serde_json::json!(""));
+        assert_eq!(value["body"]["stream"]["finish"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn websocket_media_upload_payloads_match_aibot_sdk_shape() {
+        let mut send = PendingWebsocketMediaSend {
+            id: "send-1".to_string(),
+            batch_id: "batch-1".to_string(),
+            chat_id: "ZhangSan".to_string(),
+            media_type: "image".to_string(),
+            filename: "cat.jpg".to_string(),
+            data_base64: BASE64_STANDARD.encode(b"abc"),
+            total_size: 3,
+            total_chunks: 1,
+            next_chunk_index: 0,
+            init_req_id: "init-1".to_string(),
+            chunk_req_id: Some("chunk-1".to_string()),
+            finish_req_id: Some("finish-1".to_string()),
+            send_req_id: Some("send-req-1".to_string()),
+            upload_id: Some("upload-1".to_string()),
+            media_id: Some("media-1".to_string()),
+        };
+
+        let init: serde_json::Value =
+            serde_json::from_str(&build_websocket_media_init_payload(&send).expect("init"))
+                .expect("init json");
+        assert_eq!(
+            init["cmd"],
+            serde_json::json!(WECOM_WS_UPLOAD_MEDIA_INIT_CMD)
+        );
+        assert_eq!(init["body"]["type"], serde_json::json!("image"));
+        assert_eq!(init["body"]["filename"], serde_json::json!("cat.jpg"));
+        assert_eq!(init["body"]["total_size"], serde_json::json!(3));
+        assert_eq!(
+            init["body"]["md5"],
+            serde_json::json!("900150983cd24fb0d6963f7d28e17f72")
+        );
+
+        let chunk: serde_json::Value =
+            serde_json::from_str(&build_websocket_media_chunk_payload(&send).expect("chunk"))
+                .expect("chunk json");
+        assert_eq!(
+            chunk["cmd"],
+            serde_json::json!(WECOM_WS_UPLOAD_MEDIA_CHUNK_CMD)
+        );
+        assert_eq!(chunk["body"]["upload_id"], serde_json::json!("upload-1"));
+        assert_eq!(chunk["body"]["chunk_index"], serde_json::json!(0));
+        assert_eq!(chunk["body"]["base64_data"], serde_json::json!("YWJj"));
+
+        let finish: serde_json::Value =
+            serde_json::from_str(&build_websocket_media_finish_payload(&send).expect("finish"))
+                .expect("finish json");
+        assert_eq!(
+            finish["cmd"],
+            serde_json::json!(WECOM_WS_UPLOAD_MEDIA_FINISH_CMD)
+        );
+        assert_eq!(finish["body"]["upload_id"], serde_json::json!("upload-1"));
+
+        send.media_id = Some("media-2".to_string());
+        let media: serde_json::Value =
+            serde_json::from_str(&build_websocket_active_media_payload(&send).expect("send media"))
+                .expect("media json");
+        assert_eq!(media["cmd"], serde_json::json!(WECOM_WS_SEND_MSG_CMD));
+        assert_eq!(media["body"]["chatid"], serde_json::json!("ZhangSan"));
+        assert_eq!(media["body"]["msgtype"], serde_json::json!("image"));
+        assert_eq!(
+            media["body"]["image"]["media_id"],
+            serde_json::json!("media-2")
+        );
+    }
+
+    #[test]
+    fn websocket_media_ack_accepts_numeric_created_at() {
+        let ack = parse_websocket_ack_frame(
+            r#"{"headers":{"req_id":"finish-1"},"errcode":0,"errmsg":"ok","body":{"type":"image","media_id":"media-1","created_at":1776832851}}"#,
+        )
+        .expect("ack");
+
+        assert_eq!(ack.headers.req_id, "finish-1");
+        assert_eq!(ack.errcode, 0);
+        assert_eq!(
+            json_body_string(&ack.body, "media_id").as_deref(),
+            Some("media-1")
+        );
+    }
+
+    #[test]
+    fn websocket_media_target_prefers_chat_id_over_user_id() {
+        let metadata = WecomMessageMetadata {
+            to_user: "ZhangSan".to_string(),
+            source_msg_id: Some("msg-1".to_string()),
+            ws_req_id: Some("req-1".to_string()),
+            ws_chat_id: Some("wr-chat".to_string()),
+            ws_chat_type: Some("group".to_string()),
+            ws_reply_cmd: Some(WECOM_WS_REPLY_CMD.to_string()),
+        };
+
+        assert_eq!(
+            websocket_media_target(&metadata).as_deref(),
+            Some("wr-chat")
+        );
     }
 
     #[test]

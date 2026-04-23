@@ -3,11 +3,11 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "wecom",
-  "description": "WeCom bot-first channel with bot WebSocket sessions plus optional self-built app fallback for proactive send and callback inbound",
+  "description": "WeCom bot-first channel with bot WebSocket sessions, direct Bot media sends, and optional self-built app fallback for proactive send and callback inbound",
   "auth": {
     "secret_name": "wecom_bot_id",
     "display_name": "WeCom",
-    "instructions": "Create a WeCom intelligent bot and collect Bot ID and Bot Secret for the primary websocket session path. Optionally configure a self-built app with Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey for Agent API fallback and callback inbound.",
+    "instructions": "Create a WeCom intelligent bot and collect Bot ID and Bot Secret for the primary websocket session and media-send path. Optionally configure a self-built app with Corp ID, Corp Secret, Agent ID, callback Token, and callback EncodingAESKey for Agent API fallback and callback inbound.",
     "secret_config_mappings": [
       { "config_key": "corp_id", "secret_name": "wecom_corp_id" },
       { "config_key": "corp_secret", "secret_name": "wecom_corp_secret" },

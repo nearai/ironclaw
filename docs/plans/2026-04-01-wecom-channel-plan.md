@@ -17,7 +17,8 @@ Reasons:
 Reference implementations and docs indicate a split model:
 
 - WeCom Bot WebSocket as the primary inbound / in-conversation reply path
-- WeCom Agent API as the proactive send / media fallback path
+- WeCom Agent API as the optional self-built-app supplement for callback-only
+  deployments and app-scoped proactive sends
 
 Useful references:
 - OpenClaw WeCom guide
@@ -50,7 +51,8 @@ Now that the callback + Agent API path exists, the next phase should move
 IronClaw toward the same model used by OpenClaw and the community plugin:
 
 - WeCom Bot WebSocket as the primary inbound and in-conversation reply path
-- WeCom Agent API as the proactive send and media fallback path
+- WeCom Agent API as the optional self-built-app supplement for callback-only
+  deployments and app-scoped proactive sends
 - self-built app callback as an optional parallel inbound path, not the only
   primary transport
 
@@ -74,6 +76,20 @@ The repository now has the first slice of this Bot-first phase in place:
 - the `wecom` channel now consumes websocket callback frames in `on-poll`
   and can send text replies over the Bot websocket path in `on-respond`
 - Bot passive replies now use the WeCom SDK-aligned `stream` reply shape
+- generated-image tool results are delivered as response attachments for
+  `wecom-aibot`: the host stages them from the `ImageGenerated` status path and
+  also falls back to the final turn tool result before outbound delivery, so the
+  DB/tool-result data URL remains the source of truth while any `/tmp` file is
+  only a short-lived channel-send bridge
+- the `wecom` channel no longer depends on self-built app credentials to send
+  Bot-session images: it runs the AI Bot media flow over the generic websocket
+  sender (`aibot_upload_media_init` -> `aibot_upload_media_chunk` ->
+  `aibot_upload_media_finish` -> `aibot_send_msg`)
+- Bot media sends are ack-driven inside the channel's `on-poll` state machine;
+  generated images are sent first with active Bot media messages, then response
+  text is sent as an active markdown message. The channel does not send an
+  empty stream-finish frame after media because the WeCom client renders that as
+  a visible blank bubble.
 - websocket inbound coverage now includes core Bot message shapes beyond plain
   text, including `image`, `voice`, `file`, `video`, `mixed`, and quoted-text
   context passthrough
@@ -81,18 +97,22 @@ The repository now has the first slice of this Bot-first phase in place:
   event mapping for template-card and feedback callbacks
 - the self-built app / Agent API path is still active and currently serves as:
   - proactive send path
-  - attachment/media fallback path
+  - optional callback-only reply path
+  - fallback/supplement for deployments that intentionally configure a
+    self-built app
   - optional callback inbound path
 - local real-world validation has already covered:
   - gateway web chat request flow
   - real WeCom Bot single-DM inbound
   - real WeCom Bot passive text reply
+  - direct AI Bot media upload + image send to a real user, without
+    `corp_id` / `agent_id` / app secret
 
 Still pending after this slice:
 
-- richer Bot reply coverage such as markdown/card/media-specific reply helpers
-- stronger req_id / ack tracking and any needed serialized reply queueing per
-  conversation
+- richer Bot reply coverage such as cards and more media-specific validation
+- stronger serialized reply queueing per conversation, especially for multiple
+  overlapping media batches
 - explicit failure UX for provider / turn errors so the user gets a visible
   reply instead of a silent or long-lived processing state
 - more complete event coverage and end-to-end validation against real WeCom Bot
@@ -104,9 +124,10 @@ Still pending after this slice:
 Important real boundaries on the current implementation:
 
 - single-DM Bot text chat is the primary supported path right now
-- group chat text should work over Bot WS, but group attachment reply behavior
-  is not complete yet because the current attachment fallback path still depends
-  on Agent API direct-recipient routing
+- Bot-session image replies no longer require app credentials; the channel uses
+  Bot WebSocket media upload/send directly
+- group chat text and Bot media replies use the Bot websocket `chatid` when
+  present, but group-chat safety policy is still incomplete
 - group-chat safety hardening is not complete yet:
   - current sender admission is evaluated per sender identity
   - but WeCom group chats do not yet have a dedicated DM-only guard for
@@ -118,10 +139,10 @@ Important real boundaries on the current implementation:
 - Bot websocket voice handling currently consumes the provided text content
   field; this branch does not yet introduce a raw audio transcoding pipeline for
   AMR / SILK voice payloads
-- Agent API remains required for:
-  - proactive sends
-  - attachment sends
-  - callback-only deployments
+- Agent API remains useful for:
+  - self-built-app callback-only deployments
+  - app-scoped proactive sends
+  - future enterprise app features that are not exposed through AI Bot
 
 ## Recommended Scope
 
@@ -285,8 +306,8 @@ Keep secrets owner-scoped like other WASM channels.
 Practical setup posture:
 
 - Bot-only should be enough for a minimal chat bot experience
-- Agent credentials should remain optional but strongly recommended for media and
-  proactive sends
+- Agent credentials should remain optional; Bot-only should cover the minimal
+  chat experience including generated-image replies
 - callback credentials should be optional when users want parallel self-built app
   inbound
 
@@ -375,6 +396,8 @@ Current completed pieces of Phase 2:
 - `wecom-aibot` websocket capability config
 - WeCom Bot inbound parsing in `on-poll`
 - WeCom Bot text reply path in `on-respond`
+- WeCom Bot media upload/send path in `on-poll` / `on-respond`
+- generated-image replies over Bot WS without app credentials
 - Agent API preserved as fallback / supplement
 - callback inbound preserved as optional parallel path
 
@@ -385,9 +408,9 @@ Recommended Phase 2 implementation order:
    - do not emit pairing codes in group chats
    - reject approval-required tools in group chats and direct users to DM
    - avoid rendering approval prompts back into shared chats
-2. harden req_id / ack handling and any serialized reply queueing needed for Bot conversations
-3. expand richer Bot reply shapes beyond plain stream text
-4. close the group-chat attachment / fallback gap
+2. harden serialized reply queueing for overlapping Bot conversations
+3. expand richer Bot reply shapes beyond stream text and active media sends
+4. validate group-chat attachment replies against real traffic
 5. improve provider-failure reply behavior and turn-finalization UX
 6. extend event coverage and real-traffic validation
 7. revisit raw voice / transcription pipeline only if WeCom-provided text is not sufficient
@@ -423,9 +446,9 @@ Potential domains will depend on the final WeCom endpoints, but keep them tightl
    - sender allowlist checks in group chats
    - no pairing-code replies in shared chats
    - no approval-required tools in shared chats
-2. Harden req_id / ack tracking for Bot replies
-3. Add richer Bot outbound reply shapes (`markdown`, card, richer media reply strategy)
-4. Close group-chat attachment reply limitations
+2. Harden serialized reply queueing for overlapping Bot media batches
+3. Add richer Bot outbound reply shapes (cards, richer markdown handling)
+4. Validate group-chat attachment reply behavior with real traffic
 5. Improve failure handling so provider / turn errors surface as explicit user-visible replies
 6. Expand real WeCom group / media / event fixtures and end-to-end validation
 7. Revisit merge window after runtime timing support
@@ -450,17 +473,20 @@ Current verified coverage on this branch includes:
 - protocol parsing for `wecom-aibot`
 - host websocket sender injection into `on-respond`
 - WeCom Bot passive reply payload construction
+- WeCom Bot media upload/send payload construction and numeric `created_at`
+  upload-finish ack parsing
 - callback crypto / dedupe / event-ignore behavior
 - outbound media classification
 - local live gateway chat validation
 - real WeCom Bot single-DM inbound + passive text reply validation
+- real WeCom Bot direct image send validation without self-built app credentials
 
 Still worth adding:
 
 - assertions that WeCom group chats deny approval-required tools and avoid
   group-visible pairing / approval prompts
 - real group-chat validation
-- richer media / reply-shape validation
+- richer media / reply-shape validation beyond image
 - explicit failure-path assertions for provider errors and stuck turns
 
 ## Docs / Tracking

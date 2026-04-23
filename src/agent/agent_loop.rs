@@ -48,6 +48,11 @@ pub(crate) enum HandleOutcome {
     Shutdown,
     /// Send this content via the channel, then emit terminal `Done`.
     Respond(String),
+    /// Send this content plus file attachments, then emit terminal `Done`.
+    RespondWithAttachments {
+        content: String,
+        attachments: Vec<String>,
+    },
     /// No response to send, but the turn is complete — emit `Done` only.
     NoResponse,
     /// Turn is paused (awaiting approval/auth/etc). Do not emit `Done`.
@@ -384,7 +389,11 @@ impl Agent {
         message: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let staged_generated_attachments = response.attachments.clone();
         let respond_result = self.channels.respond(message, response).await;
+        crate::generated_images::remove_staged_generated_image_attachments(
+            &staged_generated_attachments,
+        );
         // Always emit Done regardless of whether respond succeeded, so the
         // client knows the turn is over even when the response delivery fails.
         if let Err(e) = self
@@ -1175,51 +1184,17 @@ impl Agent {
 
             match self.handle_message(&message).await {
                 Ok(HandleOutcome::Respond(response)) => {
-                    // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
-                    let event = crate::hooks::HookEvent::Outbound {
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        content: response.clone(),
-                        thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
-                    };
-                    match self.hooks().run(&event).await {
-                        Err(err) => {
-                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                            // Still send Done so the client knows the turn is complete
-                            // even though the response was suppressed by the hook.
-                            self.send_done(&message).await;
-                        }
-                        Ok(crate::hooks::HookOutcome::Continue {
-                            modified: Some(new_content),
-                        }) => {
-                            if let Err(e) = self
-                                .respond_then_done(&message, OutgoingResponse::text(new_content))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                        _ => {
-                            if let Err(e) = self
-                                .respond_then_done(&message, OutgoingResponse::text(response))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                    }
+                    self.send_handle_response(&message, response, Vec::new())
+                        .await;
+                }
+                Ok(HandleOutcome::RespondWithAttachments {
+                    content,
+                    attachments,
+                }) => {
+                    self.send_handle_response(&message, content, attachments)
+                        .await;
                 }
                 Ok(HandleOutcome::NoResponse) => {
-                    // Empty response (e.g. routine consumed the message, silent reply).
-                    // Send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1228,10 +1203,6 @@ impl Agent {
                     self.send_done(&message).await;
                 }
                 Ok(HandleOutcome::Pending) => {
-                    // Turn paused awaiting user action (approval, auth, etc).
-                    // Do NOT emit Done — the thread is not in a terminal state.
-                    // The relevant ApprovalNeeded/AuthRequired status was already
-                    // sent by the inner handler before returning.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1239,7 +1210,6 @@ impl Agent {
                     );
                 }
                 Ok(HandleOutcome::Shutdown) => {
-                    // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::debug!("Shutdown command received, exiting...");
                     break;
                 }
@@ -1304,6 +1274,55 @@ impl Agent {
         self.channels.shutdown_all().await?;
 
         Ok(())
+    }
+
+    async fn send_handle_response(
+        &self,
+        message: &IncomingMessage,
+        response: String,
+        attachments: Vec<String>,
+    ) {
+        let original_attachments = attachments.clone();
+        let mut response_payload = OutgoingResponse::text(response.clone());
+        response_payload.attachments = attachments;
+
+        // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+        let event = crate::hooks::HookEvent::Outbound {
+            user_id: message.user_id.clone(),
+            channel: message.channel.clone(),
+            content: response,
+            thread_id: message.thread_id.as_ref().map(|t| t.as_str().to_string()),
+        };
+        match self.hooks().run(&event).await {
+            Err(err) => {
+                tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                crate::generated_images::remove_staged_generated_image_attachments(
+                    &original_attachments,
+                );
+                self.send_done(message).await;
+            }
+            Ok(crate::hooks::HookOutcome::Continue {
+                modified: Some(new_content),
+            }) => {
+                response_payload.content = new_content;
+                if let Err(e) = self.respond_then_done(message, response_payload).await {
+                    tracing::error!(
+                        channel = %message.channel,
+                        error = %e,
+                        "Failed to send response to channel"
+                    );
+                }
+            }
+            _ => {
+                if let Err(e) = self.respond_then_done(message, response_payload).await {
+                    tracing::error!(
+                        channel = %message.channel,
+                        error = %e,
+                        "Failed to send response to channel"
+                    );
+                }
+            }
+        }
     }
 
     /// Store extracted document text in workspace memory for future search/recall.
@@ -1814,7 +1833,11 @@ impl Agent {
                 // - `Error`: soft error — draining more messages after an error
                 //    would produce confusing interleaved output
                 // - `Err(_)`: hard error
-                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                while let Ok(SubmissionResult::Response {
+                    content: outgoing,
+                    attachments,
+                }) = &result
+                {
                     let merged = {
                         let mut sess = session.lock().await;
                         sess.threads
@@ -1845,7 +1868,15 @@ impl Agent {
                     //   message. This is acceptable for the current
                     //   single-user-per-thread model.
                     if let Err(e) = self
-                        .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
+                        .respond_then_done(
+                            message,
+                            OutgoingResponse {
+                                content: outgoing.clone(),
+                                thread_id: None,
+                                attachments: attachments.clone(),
+                                metadata: serde_json::Value::Null,
+                            },
+                        )
                         .await
                     {
                         tracing::warn!(
@@ -1900,7 +1931,7 @@ impl Agent {
                         .handle_reasoning_command(&args, &session, thread_id)
                         .await;
                     return match result {
-                        SubmissionResult::Response { content } => {
+                        SubmissionResult::Response { content, .. } => {
                             Ok(HandleOutcome::Respond(content))
                         }
                         SubmissionResult::Ok { message } => Ok(HandleOutcome::from_legacy(message)),
@@ -2022,7 +2053,11 @@ impl Agent {
                         )
                         .await;
 
-                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    while let Ok(SubmissionResult::Response {
+                        content: outgoing,
+                        attachments,
+                    }) = &result
+                    {
                         let merged = {
                             let mut sess = session.lock().await;
                             sess.threads
@@ -2034,7 +2069,15 @@ impl Agent {
                         };
 
                         if let Err(e) = self
-                            .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
+                            .respond_then_done(
+                                message,
+                                OutgoingResponse {
+                                    content: outgoing.clone(),
+                                    thread_id: None,
+                                    attachments: attachments.clone(),
+                                    metadata: serde_json::Value::Null,
+                                },
+                            )
                             .await
                         {
                             tracing::warn!(
@@ -2105,7 +2148,10 @@ impl Agent {
 
         // Convert SubmissionResult to a HandleOutcome.
         match result? {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
                 // Suppress silent replies (e.g. from group chat "nothing to say" responses).
                 // Silent replies exit single-message REPL invocations.
                 if crate::llm::is_silent_reply(&content) {
@@ -2114,7 +2160,14 @@ impl Agent {
                 } else if content.is_empty() {
                     Ok(HandleOutcome::NoResponse)
                 } else {
-                    Ok(HandleOutcome::Respond(content))
+                    if attachments.is_empty() {
+                        Ok(HandleOutcome::Respond(content))
+                    } else {
+                        Ok(HandleOutcome::RespondWithAttachments {
+                            content,
+                            attachments,
+                        })
+                    }
                 }
             }
             SubmissionResult::Ok {

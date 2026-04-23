@@ -515,6 +515,8 @@ pub enum SubmissionResult {
     Response {
         /// The agent's response.
         content: String,
+        /// File paths to deliver with the response.
+        attachments: Vec<String>,
     },
 
     /// Need approval before continuing.
@@ -555,6 +557,15 @@ impl SubmissionResult {
     pub fn response(content: impl Into<String>) -> Self {
         Self::Response {
             content: content.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Create a response result with file attachments.
+    pub fn response_with_attachments(content: impl Into<String>, attachments: Vec<String>) -> Self {
+        Self::Response {
+            content: content.into(),
+            attachments,
         }
     }
 

@@ -52,6 +52,10 @@ use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::generated_images::{
+    is_staged_generated_image_path, remove_staged_generated_image_attachments,
+    stage_generated_image_data_url,
+};
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 use crate::tools::wasm::credential_injector::{
@@ -804,6 +808,10 @@ pub struct WasmChannel {
     /// Telegram's "typing..." indicator expires after ~5s, so we refresh it.
     typing_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
 
+    /// Generated images staged from status updates until the final channel
+    /// response can deliver them together with the assistant's text.
+    pending_generated_image_attachments: Arc<Mutex<HashMap<String, Vec<String>>>>,
+
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
 
@@ -1106,6 +1114,7 @@ impl WasmChannel {
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
+            pending_generated_image_attachments: Arc::new(Mutex::new(HashMap::new())),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             callback_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2762,6 +2771,24 @@ impl WasmChannel {
         }
     }
 
+    async fn stash_generated_image_attachment(&self, metadata: &serde_json::Value, path: String) {
+        let key = generated_image_delivery_key(metadata);
+        self.pending_generated_image_attachments
+            .lock()
+            .await
+            .entry(key)
+            .or_default()
+            .push(path);
+    }
+
+    async fn take_generated_image_attachments(&self, metadata: &serde_json::Value) -> Vec<String> {
+        self.pending_generated_image_attachments
+            .lock()
+            .await
+            .remove(&generated_image_delivery_key(metadata))
+            .unwrap_or_default()
+    }
+
     /// Handle a status update, managing the typing repeat timer.
     ///
     /// On Thinking: fires on_status once, then spawns a background task
@@ -2866,6 +2893,34 @@ impl WasmChannel {
             }
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
+            }
+            StatusUpdate::ImageGenerated { data_url, .. }
+                if uses_wecom_aibot_protocol(&self.capabilities) =>
+            {
+                // WeCom AI Bot stream replies are updated by req_id/stream id.
+                // Sending the image as its own final frame before the assistant's
+                // final text lets the text response overwrite the image. Stage
+                // it and deliver it with the final on_respond payload instead.
+                self.cancel_typing_task().await;
+
+                match stage_generated_image_data_url(data_url) {
+                    Ok(path) => {
+                        tracing::debug!(
+                            channel = %self.name,
+                            path = %path,
+                            "Staged generated image for final channel response"
+                        );
+                        self.stash_generated_image_attachment(metadata, path).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %self.name,
+                            error = %e,
+                            "Failed to stage generated image for channel delivery"
+                        );
+                        let _ = self.call_on_status(&status, metadata).await;
+                    }
+                }
             }
             StatusUpdate::ApprovalNeeded { .. } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
@@ -3638,15 +3693,35 @@ impl Channel for WasmChannel {
         ) {
             self.update_broadcast_metadata(&metadata_json).await;
         }
-        self.call_on_respond(
-            msg.id,
-            &response.content,
-            response.thread_id.as_ref().map(|t| t.as_str()),
-            &metadata_json,
-            &response.attachments,
-        )
-        .await
-        .map_err(|e| ChannelError::SendFailed {
+
+        let generated_image_attachments =
+            self.take_generated_image_attachments(&msg.metadata).await;
+        let mut attachments = response.attachments.clone();
+        let response_already_has_generated_image = attachments
+            .iter()
+            .any(|path| is_staged_generated_image_path(path));
+        if response_already_has_generated_image {
+            tracing::debug!(
+                channel = %self.name,
+                skipped = generated_image_attachments.len(),
+                "Skipping status-staged generated images because the final response already carries generated-image attachments"
+            );
+        } else {
+            attachments.extend(generated_image_attachments.iter().cloned());
+        }
+
+        let result = self
+            .call_on_respond(
+                msg.id,
+                &response.content,
+                response.thread_id.as_ref().map(|t| t.as_str()),
+                &metadata_json,
+                &attachments,
+            )
+            .await;
+        remove_staged_generated_image_attachments(&generated_image_attachments);
+
+        result.map_err(|e| ChannelError::SendFailed {
             name: self.name.clone(),
             reason: e.to_string(),
         })?;
@@ -3857,6 +3932,13 @@ impl WebsocketRuntimeConfig {
             WebsocketProtocolConfig::WecomAibot(_) => WebsocketProtocolKind::WecomAibot,
         }
     }
+}
+
+fn uses_wecom_aibot_protocol(capabilities: &ChannelCapabilities) -> bool {
+    matches!(
+        WebsocketRuntimeConfig::from_capabilities(capabilities).map(|config| config.protocol),
+        Some(WebsocketProtocolConfig::WecomAibot(_))
+    )
 }
 
 fn normalize_websocket_protocol_name(protocol: &str) -> Option<&'static str> {
@@ -5569,6 +5651,21 @@ fn mime_from_extension(path: &str) -> String {
         .to_string()
 }
 
+fn generated_image_delivery_key(metadata: &serde_json::Value) -> String {
+    if let Some(req_id) = metadata.get("ws_req_id").and_then(|v| v.as_str())
+        && !req_id.is_empty()
+    {
+        return format!("wecom-ws:{req_id}");
+    }
+    if let Some(msg_id) = metadata.get("source_msg_id").and_then(|v| v.as_str())
+        && !msg_id.is_empty()
+    {
+        return format!("wecom-source:{msg_id}");
+    }
+
+    serde_json::to_string(metadata).unwrap_or_default()
+}
+
 /// Read attachment files from disk and build WIT attachment records.
 ///
 /// Validates total size against `MAX_TOTAL_ATTACHMENT_BYTES`.
@@ -5748,7 +5845,7 @@ mod tests {
             )
             .await
             .expect("prepare wecom wasm");
-        let capabilities = ChannelCapabilities::for_channel("wecom").with_path("/webhook/wecom");
+        let capabilities = wecom_websocket_capabilities().with_path("/webhook/wecom");
 
         Some(WasmChannel::new(
             runtime,
@@ -7520,6 +7617,122 @@ mod tests {
             serde_json::json!("hello from test")
         );
         assert_eq!(parsed["body"]["stream"]["finish"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_image_generated_status_defers_until_wecom_final_response() {
+        use crate::channels::IncomingMessage;
+
+        let Some(channel) = create_wecom_component_test_channel().await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *channel.websocket_outbound_tx.write().await = Some(tx);
+
+        let metadata = serde_json::json!({
+            "to_user": "ZhangSan",
+            "source_msg_id": "msg-1",
+            "ws_req_id": "req-img",
+            "ws_chat_id": null,
+            "ws_chat_type": "single",
+            "ws_reply_cmd": "aibot_respond_msg",
+        });
+
+        channel
+            .send_status(
+                crate::channels::StatusUpdate::ImageGenerated {
+                    event_id: "image-call-1".to_string(),
+                    data_url: "data:image/png;base64,YWJj".to_string(),
+                    path: None,
+                },
+                &metadata,
+            )
+            .await
+            .expect("generated image status should stage");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "generated image status should wait for the final response"
+        );
+
+        let msg = IncomingMessage::new("wecom", "ZhangSan", "generate an image")
+            .with_metadata(metadata.clone());
+        channel
+            .respond(
+                &msg,
+                crate::channels::OutgoingResponse::text("generated caption"),
+            )
+            .await
+            .expect("wecom websocket respond should succeed");
+
+        let payload = rx.try_recv().expect("websocket payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("json websocket payload");
+        assert_eq!(parsed["cmd"], serde_json::json!("aibot_upload_media_init"));
+        assert_eq!(parsed["body"]["type"], serde_json::json!("image"));
+        assert_eq!(
+            parsed["body"]["md5"],
+            serde_json::json!("900150983cd24fb0d6963f7d28e17f72")
+        );
+        assert!(rx.try_recv().is_err(), "only one image upload should start");
+    }
+
+    #[tokio::test]
+    async fn test_final_generated_image_attachment_dedupes_status_staged_wecom_image() {
+        use crate::channels::IncomingMessage;
+        use crate::generated_images::{
+            remove_staged_generated_image_attachments, stage_generated_image_data_url,
+        };
+
+        let Some(channel) = create_wecom_component_test_channel().await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *channel.websocket_outbound_tx.write().await = Some(tx);
+
+        let metadata = serde_json::json!({
+            "to_user": "ZhangSan",
+            "source_msg_id": "msg-2",
+            "ws_req_id": "req-img-dedupe",
+            "ws_chat_id": null,
+            "ws_chat_type": "single",
+            "ws_reply_cmd": "aibot_respond_msg",
+        });
+
+        channel
+            .send_status(
+                crate::channels::StatusUpdate::ImageGenerated {
+                    event_id: "image-call-2".to_string(),
+                    data_url: "data:image/png;base64,YWJj".to_string(),
+                    path: None,
+                },
+                &metadata,
+            )
+            .await
+            .expect("generated image status should stage");
+
+        let final_attachment =
+            stage_generated_image_data_url("data:image/png;base64,YWJj").expect("stage image");
+        let msg = IncomingMessage::new("wecom", "ZhangSan", "generate an image")
+            .with_metadata(metadata.clone());
+        let mut response = crate::channels::OutgoingResponse::text("generated caption");
+        response.attachments = vec![final_attachment.clone()];
+
+        channel
+            .respond(&msg, response)
+            .await
+            .expect("wecom websocket respond should succeed");
+
+        let payload = rx.try_recv().expect("websocket payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("json websocket payload");
+        assert_eq!(parsed["cmd"], serde_json::json!("aibot_upload_media_init"));
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate image upload should be skipped"
+        );
+
+        remove_staged_generated_image_attachments(&[final_attachment]);
     }
 
     #[tokio::test]
