@@ -108,7 +108,7 @@ http(method="POST", url="https://api.linear.app/graphql", body={"query": "{ issu
 ### List Issues Assigned to the User (uses identity cache)
 
 ```
-http(method="POST", url="https://api.linear.app/graphql", body={"query": "query($uid: ID!) { issues(filter: { assignee: { id: { eq: $uid } }, state: { type: { nin: [\"completed\", \"canceled\"] } } }, first: 50, orderBy: updatedAt) { nodes { id identifier title state { name type } priority priorityLabel url updatedAt } } }", "variables": {"uid": "<cached user_id>"}})
+http(method="POST", url="https://api.linear.app/graphql", body={"query": "query($uid: ID!) { issues(filter: { assignee: { id: { eq: $uid } }, state: { type: { nin: [completed, canceled] } } }, first: 50, orderBy: updatedAt) { nodes { id identifier title state { name type } priority priorityLabel url updatedAt } } }", "variables": {"uid": "<cached user_id>"}})
 ```
 
 Never pass `viewer.id` inline from a fresh round-trip when the cache is valid — consult `context/intel/linear-identity.md`.
