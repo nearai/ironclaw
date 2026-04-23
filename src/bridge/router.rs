@@ -5972,7 +5972,7 @@ pub(crate) mod test_support {
         let project_id = threads
             .first()
             .map(|thread| thread.project_id)
-            .unwrap_or_else(ProjectId::new);
+            .unwrap_or_default();
 
         let store = Arc::new(ThreadTestStore::new());
         for thread in threads {
