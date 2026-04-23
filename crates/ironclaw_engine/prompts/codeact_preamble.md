@@ -56,7 +56,7 @@ print(info)
 `detail` accepts:
 - `"summary"` — curated notes, examples, required-field rules (preferred — concise, ready to paste).
 - `"schema"` — full JSON schema (only when you need exact parameter types).
-- `"names"` — every registered tool name (use sparingly; prefer recalling the few core tools you need).
+- `"names"` — parameter names for the selected tool (default). Use `tool_list` if you need every registered tool name.
 
 Don't blast `tool_info(detail="schema")` for every tool up front — fetch the summary on demand for the one you're about to call. If the summary already answered your question, don't follow up with the schema.
 

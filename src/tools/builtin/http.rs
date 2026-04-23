@@ -1104,15 +1104,15 @@ impl Tool for HttpTool {
                 "Use for raw JSON/HTTP APIs — returns status, headers, parsed JSON body when applicable".into(),
                 "For HTML pages you want to read as text, prefer web_fetch (handles Readability extraction)".into(),
                 "Outbound requests go through the network proxy; targets must be permitted by policy".into(),
-                "Pass headers as a JSON object; use the 'json' field for request bodies to set Content-Type automatically".into(),
+                "Pass headers as a list of {name, value} objects; use the 'body' field with a JSON object/array for request bodies to set Content-Type automatically".into(),
             ],
             examples: vec![
                 serde_json::json!({"method": "GET", "url": "https://api.example.com/v1/status"}),
                 serde_json::json!({
                     "method": "POST",
                     "url": "https://api.example.com/v1/items",
-                    "json": {"name": "example"},
-                    "headers": {"Authorization": "Bearer ..."}
+                    "body": {"name": "example"},
+                    "headers": [{"name": "Authorization", "value": "Bearer ..."}]
                 }),
             ],
             ..Default::default()

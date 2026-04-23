@@ -1173,11 +1173,11 @@ impl Tool for ShellTool {
                 "Prefer dedicated tools when one fits: read_file, write_file, apply_patch, list_dir, glob, grep, http, web_fetch".into(),
                 "Reserve shell for operations with no equivalent dedicated tool (build, test, version control, process management)".into(),
                 "Commands run through a sandbox; network and filesystem access depend on the configured SandboxPolicy".into(),
-                "Avoid long-running interactive commands; pass explicit timeout_secs and non-interactive flags (-y, --no-input, etc.)".into(),
+                "Avoid long-running interactive commands; pass an explicit timeout and non-interactive flags (-y, --no-input, etc.)".into(),
             ],
             examples: vec![
                 serde_json::json!({"command": "cargo test -p ironclaw tools::builtin::file"}),
-                serde_json::json!({"command": "git status --short", "timeout_secs": 10}),
+                serde_json::json!({"command": "git status --short", "timeout": 10}),
             ],
             ..Default::default()
         })
