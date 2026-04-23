@@ -38,6 +38,7 @@ jobs:
       has_web_risk: ${{ steps.non_diff.outputs.has_web_risk || steps.diff.outputs.has_web_risk }}
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
+      has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
       has_platform_build_risk: ${{ steps.non_diff.outputs.has_platform_build_risk || steps.diff.outputs.has_platform_build_risk }}
     steps:
       - id: non_diff
@@ -56,6 +57,7 @@ jobs:
           echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
+          echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_platform_build_risk=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -120,6 +122,12 @@ jobs:
             echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(channels-src/slack/|tests/slack_auth_integration\.rs$|\.github/workflows/test\.yml$)'; then
+            echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
           if has_match '^(Dockerfile$|Dockerfile\.worker$|crates/Dockerfile\.sandbox$|infra/runner/|wix/|scripts/build-all\.sh$|scripts/test-ci-artifact-naming\.sh$|\.github/workflows/docker\.yml$|\.github/workflows/release\.yml$|\.github/workflows/release-plz\.yml$|\.github/workflows/rebuild-release-image\.yml$|build\.rs$|\.github/workflows/test\.yml$)'; then
@@ -207,10 +215,49 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
-      - name: Run Telegram thread-scope regression test
+
+  telegram-integration-tests:
+    name: Telegram Integration Tests (${{ matrix.partition }})
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_runtime_heavy_risk == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        partition:
+          - 1/2
+          - 2/2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: telegram-integration-${{ matrix.partition }}
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+      - name: Build Telegram WASM channel
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+      - name: Run Telegram integration tests
+        env:
+          NEXTEST_PROFILE: ci
         run: |
-          timeout --signal=INT --kill-after=30s 10m \
-            cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo nextest run \
+              --profile ci \
+              --features integration \
+              --test telegram_auth_integration \
+              --partition hash:${{ matrix.partition }}
 
   replay-required:
     name: Replay Required
@@ -259,6 +306,33 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+
+  slack-tests:
+    name: Slack Channel Tests
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_slack_risk == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: slack-integration
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+      - name: Build Slack WASM channel
+        run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
+      - name: Run Slack integration tests
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --features integration --test slack_auth_integration -- --nocapture
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
@@ -433,10 +507,12 @@ jobs:
       - matrix-config
       - tests
       - heavy-integration-tests
+      - telegram-integration-tests
       - replay-required
       - web-e2e-smoke
       - web-e2e-full
       - telegram-tests
+      - slack-tests
       - wasm-wit-compat
       - docker-build
       - windows-build
@@ -466,6 +542,7 @@ jobs:
 
           if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
             require_success "heavy-integration-tests" "${{ needs.heavy-integration-tests.result }}"
+            require_success "telegram-integration-tests" "${{ needs.telegram-integration-tests.result }}"
           fi
 
           if [[ "$event" != "push" && ( "$event" == "workflow_call" || "${{ needs.changes.outputs.has_engine_replay_risk }}" == "true" ) ]]; then
@@ -482,6 +559,10 @@ jobs:
 
           if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_telegram_risk }}" == "true" ]]; then
             require_success "telegram-tests" "${{ needs.telegram-tests.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
+            require_success "slack-tests" "${{ needs.slack-tests.result }}"
           fi
 
           if [[ "$event" != "pull_request" || ( "${{ github.base_ref }}" != "main" && "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ) ]]; then
