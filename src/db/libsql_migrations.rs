@@ -1004,7 +1004,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
         r#"
 DELETE FROM settings
 WHERE key = 'wasm.default_fuel_limit'
-  AND CAST(value AS INTEGER) <= 10000000;
+  AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
 "#,
     ),
 ];

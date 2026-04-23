@@ -4,4 +4,4 @@
 -- Delete the stale row so the code default takes effect.
 DELETE FROM settings
 WHERE key = 'wasm.default_fuel_limit'
-  AND CAST(value AS BIGINT) <= 10000000;
+  AND (value#>>'{}')::BIGINT = 10000000;
