@@ -532,8 +532,8 @@ async fn resolve_api_key_from_secrets(
 /// to the same `/v1/models` URL without producing `/v1/v1/models`.
 fn models_endpoint_base(adapter: &str, base: &str) -> String {
     let has_v1 = base.ends_with("/v1") || base.contains("/v1/");
-    let requires_v1 = (adapter == "nearai" && is_nearai_private_endpoint(base))
-        || adapter == "anthropic";
+    let requires_v1 =
+        (adapter == "nearai" && is_nearai_private_endpoint(base)) || adapter == "anthropic";
     if requires_v1 && !has_v1 {
         format!("{base}/v1")
     } else {
