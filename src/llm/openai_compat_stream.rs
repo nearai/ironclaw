@@ -116,8 +116,13 @@ impl OpenAiCompatStreamingProvider {
             let retry_after = Some(crate::llm::retry::parse_retry_after(
                 response.headers().get("retry-after"),
             ));
-            let text = response.text().await.unwrap_or_default();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read error body: {}>", e));
             let truncated = crate::agent::truncate_for_preview(&text, 512);
+            let lower = text.to_ascii_lowercase();
+
             return Err(match code {
                 401 | 403 => LlmError::AuthFailed {
                     provider: "openai_compat".to_string(),
@@ -126,6 +131,42 @@ impl OpenAiCompatStreamingProvider {
                     provider: "openai_compat".to_string(),
                     retry_after,
                 },
+                413 => {
+                    let (used, limit) =
+                        crate::llm::rig_adapter::parse_token_counts(&lower);
+                    LlmError::ContextLengthExceeded { used, limit }
+                }
+                400 => {
+                    const CONTEXT_PATTERNS: &[&str] = &[
+                        "context_length_exceeded",
+                        "maximum context length",
+                        "too many tokens",
+                        "payload too large",
+                    ];
+                    if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
+                        let (used, limit) =
+                            crate::llm::rig_adapter::parse_token_counts(&lower);
+                        LlmError::ContextLengthExceeded { used, limit }
+                    } else {
+                        LlmError::RequestFailed {
+                            provider: "openai_compat".to_string(),
+                            reason: format!("HTTP 400: {}", truncated),
+                        }
+                    }
+                }
+                500..=599 => {
+                    tracing::debug!(
+                        provider = "openai_compat",
+                        status = code,
+                        body_preview = truncated.as_str(),
+                        "openai_compat streaming upstream 5xx response",
+                    );
+                    LlmError::BadGateway {
+                        provider: "openai_compat".to_string(),
+                        status: code,
+                        retry_after,
+                    }
+                }
                 _ => LlmError::RequestFailed {
                     provider: "openai_compat".to_string(),
                     reason: format!("HTTP {}: {}", status, truncated),
@@ -416,7 +457,7 @@ impl LlmProvider for OpenAiCompatStreamingProvider {
         // Match RigAdapter behavior: rewrite orphaned tool_result messages as
         // user messages so OpenAI-compatible endpoints do not reject the
         // request with 400 "messages with role 'tool' must be a response to
-        // a preceeding message with 'tool_calls'".
+        // a preceding message with 'tool_calls'".
         sanitize_tool_messages(&mut req.messages);
         let messages = messages_to_json(&req.messages);
 
