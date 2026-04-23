@@ -19,13 +19,13 @@ use md5::Md5;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha1::{Digest, Sha1};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use subtle::ConstantTimeEq;
 use xmlparser::{ElementEnd, Token, Tokenizer};
 
 use exports::near::agent::channel::{
     AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusUpdate,
+    OutgoingHttpResponse, PollConfig, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
@@ -44,6 +44,9 @@ const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 const RECENT_MSG_IDS_PATH: &str = "recent_msg_ids";
 const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_MEDIA_STATE_PATH: &str = "state/websocket_media_sends";
+const PENDING_INBOUND_PATH: &str = "state/pending_inbound_bundles";
+const INBOUND_MERGE_WINDOW_MS_PATH: &str = "state/inbound_merge_window_ms";
+const PENDING_ATTACHMENT_BLOBS_PREFIX: &str = "state/pending_attachment_blobs";
 
 const WECOM_WS_REPLY_CMD: &str = "aibot_respond_msg";
 const WECOM_WS_WELCOME_CMD: &str = "aibot_respond_welcome_msg";
@@ -62,6 +65,9 @@ const MAX_WEBSOCKET_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_OUTBOUND_VOICE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OUTBOUND_VIDEO_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RECENT_MSG_IDS: usize = 256;
+const DEFAULT_INBOUND_MERGE_WINDOW_MS: u64 = 5_000;
+const MAX_INBOUND_MERGE_WINDOW_MS: u64 = 60_000;
+const WECOM_POLL_INTERVAL_MS: u32 = 1_000;
 
 type Aes256CbcDec = Decryptor<Aes256>;
 
@@ -76,6 +82,7 @@ struct WecomConfig {
     owner_id: Option<String>,
     dm_policy: Option<String>,
     allow_from: Option<Vec<String>>,
+    inbound_merge_window_ms: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -363,6 +370,53 @@ struct PendingWebsocketMediaSend {
     media_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct StoredInboundAttachment {
+    id: String,
+    mime_type: String,
+    filename: Option<String>,
+    size_bytes: Option<u64>,
+    extracted_text: Option<String>,
+}
+
+impl From<InboundAttachment> for StoredInboundAttachment {
+    fn from(value: InboundAttachment) -> Self {
+        Self {
+            id: value.id,
+            mime_type: value.mime_type,
+            filename: value.filename,
+            size_bytes: value.size_bytes,
+            extracted_text: value.extracted_text,
+        }
+    }
+}
+
+impl From<StoredInboundAttachment> for InboundAttachment {
+    fn from(value: StoredInboundAttachment) -> Self {
+        Self {
+            id: value.id,
+            mime_type: value.mime_type,
+            filename: value.filename,
+            size_bytes: value.size_bytes,
+            source_url: None,
+            storage_key: None,
+            extracted_text: value.extracted_text,
+            extras_json: "{}".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct PendingInboundBundle {
+    user_id: String,
+    user_name: Option<String>,
+    thread_id: String,
+    metadata_json: String,
+    content: String,
+    attachments: Vec<StoredInboundAttachment>,
+    flush_at_ms: u64,
+}
+
 struct WebsocketMediaStartResult {
     started: usize,
     errors: Vec<String>,
@@ -370,6 +424,246 @@ struct WebsocketMediaStartResult {
 
 fn default_api_base() -> String {
     "https://qyapi.weixin.qq.com".to_string()
+}
+
+fn inbound_merge_window_ms() -> u64 {
+    channel_host::workspace_read(INBOUND_MERGE_WINDOW_MS_PATH)
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_INBOUND_MERGE_WINDOW_MS)
+        .min(MAX_INBOUND_MERGE_WINDOW_MS)
+}
+
+fn merge_inbound_text(existing: &str, incoming: &str) -> String {
+    let existing = existing.trim();
+    let incoming = incoming.trim();
+    match (existing.is_empty(), incoming.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => incoming.to_string(),
+        (false, true) => existing.to_string(),
+        (false, false) => format!("{existing}\n\n{incoming}"),
+    }
+}
+
+fn next_inbound_flush_deadline(now_ms: u64, merge_window_ms: u64) -> u64 {
+    now_ms.saturating_add(merge_window_ms)
+}
+
+fn pending_attachment_blob_path(attachment_id: &str) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(attachment_id.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{PENDING_ATTACHMENT_BLOBS_PREFIX}/{digest}.b64")
+}
+
+fn persist_pending_attachment_blob(attachment_id: &str, data: &[u8]) -> Result<(), String> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let encoded = BASE64_STANDARD.encode(data);
+    channel_host::workspace_write(&pending_attachment_blob_path(attachment_id), &encoded)
+        .map_err(|e| format!("Failed to persist pending WeCom attachment blob: {e}"))
+}
+
+fn load_pending_attachment_blob(attachment_id: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(raw) = channel_host::workspace_read(&pending_attachment_blob_path(attachment_id))
+    else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    BASE64_STANDARD
+        .decode(trimmed)
+        .map(Some)
+        .map_err(|e| format!("Failed to decode pending WeCom attachment blob: {e}"))
+}
+
+fn clear_pending_attachment_blob(attachment_id: &str) {
+    let _ = channel_host::workspace_write(&pending_attachment_blob_path(attachment_id), "");
+}
+
+fn load_pending_inbound_bundles() -> HashMap<String, PendingInboundBundle> {
+    let Some(raw) = channel_host::workspace_read(PENDING_INBOUND_PATH) else {
+        return HashMap::new();
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return HashMap::new();
+    }
+    match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to parse WeCom pending inbound bundles: {error}"),
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn persist_pending_inbound_bundles(
+    pending: &HashMap<String, PendingInboundBundle>,
+) -> Result<(), String> {
+    let serialized = serde_json::to_string(pending)
+        .map_err(|e| format!("Failed to serialize WeCom pending inbound bundles: {e}"))?;
+    channel_host::workspace_write(PENDING_INBOUND_PATH, &serialized)
+        .map_err(|e| format!("Failed to persist WeCom pending inbound bundles: {e}"))
+}
+
+fn take_due_pending_inbound_bundles(
+    pending: &mut HashMap<String, PendingInboundBundle>,
+    now_ms: u64,
+) -> Vec<PendingInboundBundle> {
+    let due_keys: Vec<String> = pending
+        .iter()
+        .filter_map(|(key, bundle)| (bundle.flush_at_ms <= now_ms).then_some(key.clone()))
+        .collect();
+    due_keys
+        .into_iter()
+        .filter_map(|key| pending.remove(&key))
+        .collect()
+}
+
+fn process_pending_inbound_bundle(
+    pending: &mut HashMap<String, PendingInboundBundle>,
+    key: &str,
+    mut bundle: PendingInboundBundle,
+    now_ms: u64,
+    merge_window_ms: u64,
+) -> Vec<PendingInboundBundle> {
+    let bundle_has_text = !bundle.content.trim().is_empty();
+    let bundle_has_attachments = !bundle.attachments.is_empty();
+
+    if let Some(mut existing) = pending.remove(key) {
+        existing.content = merge_inbound_text(&existing.content, &bundle.content);
+        existing.attachments.extend(bundle.attachments);
+        existing.user_id = bundle.user_id;
+        existing.user_name = bundle.user_name;
+        existing.thread_id = bundle.thread_id;
+        existing.metadata_json = bundle.metadata_json;
+
+        let has_text = !existing.content.trim().is_empty();
+        let has_attachments = !existing.attachments.is_empty();
+        if has_text || merge_window_ms == 0 {
+            return vec![existing];
+        }
+        if has_attachments {
+            existing.flush_at_ms = next_inbound_flush_deadline(now_ms, merge_window_ms);
+            pending.insert(key.to_string(), existing);
+        }
+        return Vec::new();
+    }
+
+    if bundle_has_attachments && !bundle_has_text && merge_window_ms > 0 {
+        bundle.flush_at_ms = next_inbound_flush_deadline(now_ms, merge_window_ms);
+        pending.insert(key.to_string(), bundle);
+        Vec::new()
+    } else {
+        vec![bundle]
+    }
+}
+
+fn emit_pending_inbound_bundle(bundle: PendingInboundBundle) {
+    let was_buffered = bundle.flush_at_ms > 0;
+    let mut attachments: Vec<InboundAttachment> =
+        bundle.attachments.into_iter().map(Into::into).collect();
+    let attachment_ids: Vec<String> = attachments.iter().map(|att| att.id.clone()).collect();
+    if was_buffered {
+        let mut hydrated = Vec::with_capacity(attachments.len());
+        for mut attachment in attachments {
+            if let Err(error) = rehydrate_pending_inbound_attachment_data(&mut attachment) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Dropping buffered WeCom attachment '{}' because rehydrate failed: {}",
+                        attachment.id, error
+                    ),
+                );
+                continue;
+            }
+            hydrated.push(attachment);
+        }
+        attachments = hydrated;
+    }
+
+    if bundle.content.trim().is_empty() && attachments.is_empty() {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            "Skipping buffered WeCom message because both content and attachments are empty after rehydrate",
+        );
+        for attachment_id in attachment_ids {
+            clear_pending_attachment_blob(&attachment_id);
+        }
+        return;
+    }
+
+    channel_host::emit_message(&EmittedMessage {
+        user_id: bundle.user_id,
+        user_name: bundle.user_name,
+        content: bundle.content,
+        thread_id: Some(bundle.thread_id),
+        metadata_json: bundle.metadata_json,
+        attachments,
+    });
+    for attachment_id in attachment_ids {
+        clear_pending_attachment_blob(&attachment_id);
+    }
+}
+
+fn emit_or_buffer_incoming_user_message(
+    user_id: String,
+    user_name: Option<String>,
+    content: String,
+    thread_id: String,
+    metadata_json: String,
+    attachments: Vec<InboundAttachment>,
+) {
+    let now_ms = channel_host::now_millis();
+    let mut pending = load_pending_inbound_bundles();
+    let mut emitted = take_due_pending_inbound_bundles(&mut pending, now_ms);
+    let key = thread_id.clone();
+    emitted.extend(process_pending_inbound_bundle(
+        &mut pending,
+        &key,
+        PendingInboundBundle {
+            user_id,
+            user_name,
+            content,
+            thread_id,
+            metadata_json,
+            attachments: attachments.into_iter().map(Into::into).collect(),
+            flush_at_ms: 0,
+        },
+        now_ms,
+        inbound_merge_window_ms(),
+    ));
+
+    if let Err(error) = persist_pending_inbound_bundles(&pending) {
+        channel_host::log(channel_host::LogLevel::Warn, &error);
+    }
+
+    for bundle in emitted {
+        emit_pending_inbound_bundle(bundle);
+    }
+}
+
+fn flush_due_pending_inbound_bundles() {
+    let now_ms = channel_host::now_millis();
+    let mut pending = load_pending_inbound_bundles();
+    let due = take_due_pending_inbound_bundles(&mut pending, now_ms);
+    if due.is_empty() {
+        return;
+    }
+
+    if let Err(error) = persist_pending_inbound_bundles(&pending) {
+        channel_host::log(channel_host::LogLevel::Warn, &error);
+    }
+
+    for bundle in due {
+        emit_pending_inbound_bundle(bundle);
+    }
 }
 
 fn text_response(status: u16, body: &str) -> OutgoingHttpResponse {
@@ -1256,6 +1550,7 @@ fn download_inbound_media(
 
     channel_host::store_attachment_data(media_id, &response.body)
         .map_err(|e| format!("Failed to store inbound media data: {e}"))?;
+    persist_pending_attachment_blob(media_id, &response.body)?;
 
     Ok(InboundAttachment {
         id: media_id.to_string(),
@@ -1267,6 +1562,52 @@ fn download_inbound_media(
         extracted_text: None,
         extras_json: "{}".to_string(),
     })
+}
+
+fn infer_inbound_media_kind_from_attachment(attachment: &InboundAttachment) -> InboundMediaKind {
+    let mime = attachment.mime_type.to_ascii_lowercase();
+    if mime.starts_with("image/") {
+        InboundMediaKind::Image
+    } else if mime.starts_with("audio/") {
+        InboundMediaKind::Voice
+    } else {
+        InboundMediaKind::File
+    }
+}
+
+fn rehydrate_pending_inbound_attachment_data(
+    attachment: &mut InboundAttachment,
+) -> Result<(), String> {
+    if let Some(data) = load_pending_attachment_blob(&attachment.id)? {
+        channel_host::store_attachment_data(&attachment.id, &data)
+            .map_err(|e| format!("Failed to restore pending WeCom attachment data: {e}"))?;
+        if attachment.size_bytes.is_none() {
+            attachment.size_bytes = Some(data.len() as u64);
+        }
+        return Ok(());
+    }
+
+    if attachment.id.contains(':') {
+        return Err(
+            "Pending websocket attachment blob is missing; cannot restore inline data".to_string(),
+        );
+    }
+
+    let media_kind = infer_inbound_media_kind_from_attachment(attachment);
+    let refreshed = download_inbound_media(&attachment.id, media_kind)?;
+    if attachment.mime_type.trim().is_empty() {
+        attachment.mime_type = refreshed.mime_type;
+    }
+    if attachment.filename.is_none() {
+        attachment.filename = refreshed.filename;
+    }
+    if attachment.size_bytes.is_none() {
+        attachment.size_bytes = refreshed.size_bytes;
+    }
+    if attachment.extracted_text.is_none() {
+        attachment.extracted_text = refreshed.extracted_text;
+    }
+    Ok(())
 }
 
 fn extract_filename_from_content_disposition(header: &str) -> Option<String> {
@@ -1424,6 +1765,7 @@ fn hydrate_websocket_binary_attachment_data(
 
     channel_host::store_attachment_data(&attachment.id, &data)
         .map_err(|e| format!("Failed to store websocket attachment data: {e}"))?;
+    persist_pending_attachment_blob(&attachment.id, &data)?;
 
     let (fallback_mime, _) = websocket_default_mime_and_extension(msg_type);
     let mut mime_type = header_value_case_insensitive(&headers, "content-type")
@@ -2412,14 +2754,14 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
     let conversation_scope =
         wecom_conversation_scope(&sender_id, body.chatid.as_deref(), body.chattype.as_deref());
 
-    channel_host::emit_message(&EmittedMessage {
-        user_id: sender_id,
-        user_name: None,
+    emit_or_buffer_incoming_user_message(
+        sender_id,
+        None,
         content,
-        thread_id: Some(conversation_scope),
+        conversation_scope,
         metadata_json,
         attachments,
-    });
+    );
 }
 
 fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
@@ -2685,14 +3027,14 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
         }
     };
 
-    channel_host::emit_message(&EmittedMessage {
-        user_id: sender_id,
-        user_name: None,
-        content: parsed.text.unwrap_or_default(),
-        thread_id: Some(conversation_scope),
+    emit_or_buffer_incoming_user_message(
+        sender_id,
+        None,
+        parsed.text.unwrap_or_default(),
+        conversation_scope,
         metadata_json,
         attachments,
-    });
+    );
 }
 
 fn handle_callback_event(event: ParsedCallbackEvent) {
@@ -2759,6 +3101,15 @@ impl Guest for WecomChannel {
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
+        let inbound_merge_window_ms = config
+            .inbound_merge_window_ms
+            .map(u64::from)
+            .unwrap_or(DEFAULT_INBOUND_MERGE_WINDOW_MS)
+            .min(MAX_INBOUND_MERGE_WINDOW_MS);
+        let _ = channel_host::workspace_write(
+            INBOUND_MERGE_WINDOW_MS_PATH,
+            &inbound_merge_window_ms.to_string(),
+        );
 
         if channel_host::workspace_read(CORP_ID_PATH).is_some()
             && channel_host::workspace_read(CORP_SECRET_PATH).is_some()
@@ -2789,7 +3140,10 @@ impl Guest for WecomChannel {
             } else {
                 Vec::new()
             },
-            poll: None,
+            poll: Some(PollConfig {
+                interval_ms: WECOM_POLL_INTERVAL_MS,
+                enabled: true,
+            }),
         })
     }
 
@@ -2874,6 +3228,7 @@ impl Guest for WecomChannel {
 
     fn on_poll() {
         process_websocket_event_queue();
+        flush_due_pending_inbound_bundles();
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
@@ -3195,6 +3550,131 @@ mod tests {
             wecom_conversation_scope("zhangsan", None, Some("private")),
             "wecom:dm:zhangsan"
         );
+    }
+
+    fn make_pending_bundle(
+        thread_id: &str,
+        content: &str,
+        attachment_count: usize,
+    ) -> PendingInboundBundle {
+        PendingInboundBundle {
+            user_id: "zhangsan".to_string(),
+            user_name: None,
+            thread_id: thread_id.to_string(),
+            metadata_json: r#"{"to_user":"zhangsan"}"#.to_string(),
+            content: content.to_string(),
+            attachments: (0..attachment_count)
+                .map(|idx| StoredInboundAttachment {
+                    id: format!("att-{idx}"),
+                    mime_type: "image/jpeg".to_string(),
+                    filename: Some(format!("att-{idx}.jpg")),
+                    size_bytes: Some(3),
+                    extracted_text: None,
+                })
+                .collect(),
+            flush_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn stored_inbound_attachment_strips_transport_sensitive_fields() {
+        let inbound = InboundAttachment {
+            id: "msg-1:image".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            filename: Some("pic.jpg".to_string()),
+            size_bytes: Some(3),
+            source_url: Some("https://openws.work.weixin.qq.com/file".to_string()),
+            storage_key: Some("tmp-key".to_string()),
+            extracted_text: None,
+            extras_json: r#"{"aeskey":"secret","wecom_ws_msgtype":"image"}"#.to_string(),
+        };
+
+        let stored = StoredInboundAttachment::from(inbound);
+        let stored_json = serde_json::to_string(&stored).expect("stored json");
+        assert!(!stored_json.contains("source_url"));
+        assert!(!stored_json.contains("storage_key"));
+        assert!(!stored_json.contains("aeskey"));
+
+        let restored: InboundAttachment = stored.into();
+        assert_eq!(restored.source_url, None);
+        assert_eq!(restored.storage_key, None);
+        assert_eq!(restored.extras_json, "{}");
+    }
+
+    #[test]
+    fn pending_attachment_blob_path_uses_hashed_identifier() {
+        let path = pending_attachment_blob_path("msg-1:image");
+        assert!(path.starts_with("state/pending_attachment_blobs/"));
+        assert!(path.ends_with(".b64"));
+        assert!(!path.contains("msg-1:image"));
+    }
+
+    #[test]
+    fn process_pending_inbound_bundle_buffers_attachment_only_message() {
+        let mut pending = HashMap::new();
+        let emitted = process_pending_inbound_bundle(
+            &mut pending,
+            "wecom:dm:zhangsan",
+            make_pending_bundle("wecom:dm:zhangsan", "", 1),
+            100,
+            5_000,
+        );
+
+        assert!(emitted.is_empty());
+        let stored = pending
+            .get("wecom:dm:zhangsan")
+            .expect("attachment-only message should be buffered");
+        assert_eq!(stored.attachments.len(), 1);
+        assert_eq!(stored.flush_at_ms, 5_100);
+    }
+
+    #[test]
+    fn process_pending_inbound_bundle_merges_buffered_attachment_with_follow_up_text() {
+        let mut pending = HashMap::new();
+        let _ = process_pending_inbound_bundle(
+            &mut pending,
+            "wecom:dm:zhangsan",
+            make_pending_bundle("wecom:dm:zhangsan", "", 1),
+            100,
+            5_000,
+        );
+
+        let emitted = process_pending_inbound_bundle(
+            &mut pending,
+            "wecom:dm:zhangsan",
+            make_pending_bundle("wecom:dm:zhangsan", "请看这张图", 0),
+            150,
+            5_000,
+        );
+        assert_eq!(emitted.len(), 1);
+        assert!(pending.is_empty());
+        assert_eq!(emitted[0].content, "请看这张图");
+        assert_eq!(emitted[0].attachments.len(), 1);
+    }
+
+    #[test]
+    fn take_due_pending_inbound_bundles_only_returns_expired_entries() {
+        let mut pending = HashMap::from([
+            (
+                "wecom:dm:zhangsan".to_string(),
+                PendingInboundBundle {
+                    flush_at_ms: 200,
+                    ..make_pending_bundle("wecom:dm:zhangsan", "", 1)
+                },
+            ),
+            (
+                "wecom:dm:lisi".to_string(),
+                PendingInboundBundle {
+                    flush_at_ms: 400,
+                    ..make_pending_bundle("wecom:dm:lisi", "", 1)
+                },
+            ),
+        ]);
+
+        let due = take_due_pending_inbound_bundles(&mut pending, 250);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].thread_id, "wecom:dm:zhangsan");
+        assert!(pending.contains_key("wecom:dm:lisi"));
     }
 
     #[test]

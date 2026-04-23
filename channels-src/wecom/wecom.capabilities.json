@@ -94,7 +94,7 @@
     },
     "channel": {
       "allowed_paths": ["/webhook/wecom"],
-      "allow_polling": false,
+      "allow_polling": true,
       "workspace_prefix": "channels/wecom/",
       "callback_timeout_secs": 45,
       "emit_rate_limit": {
@@ -114,6 +114,7 @@
     "callback_token": null,
     "callback_encoding_aes_key": null,
     "api_base": "https://qyapi.weixin.qq.com",
+    "inbound_merge_window_ms": 5000,
     "owner_id": null,
     "dm_policy": "pairing",
     "allow_from": []
