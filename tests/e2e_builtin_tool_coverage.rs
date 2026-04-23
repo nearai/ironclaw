@@ -46,6 +46,28 @@ mod tests {
         }
     }
 
+    fn hinted_finish_job_step(summary: &str, last_user_message_contains: &str) -> TraceStep {
+        TraceStep {
+            request_hint: Some(RequestHint {
+                last_user_message_contains: Some(last_user_message_contains.to_string()),
+                min_message_count: None,
+            }),
+            response: TraceResponse::ToolCalls {
+                tool_calls: vec![TraceToolCall {
+                    id: "call_finish_job".to_string(),
+                    name: "finish_job".to_string(),
+                    arguments: serde_json::json!({
+                        "status": "completed",
+                        "summary": summary,
+                    }),
+                }],
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            expected_tool_results: Vec::new(),
+        }
+    }
+
     fn extract_job_id(response: &str) -> Option<Uuid> {
         response
             .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
@@ -794,9 +816,10 @@ mod tests {
             vec![
                 text_step(""),
                 text_step(""),
-                hinted_text_step("", "valid arguments"),
+                hinted_text_step("", "valid `status` and `summary` arguments"),
                 text_step(""),
-                hinted_text_step("", "Do not call any more tools in the next reply."),
+                hinted_text_step("", "must either call valid tool(s)"),
+                hinted_text_step("", "must either call valid tool(s)"),
             ],
         );
 
@@ -826,8 +849,7 @@ mod tests {
             .expect("get_agent_job_failure_reason should succeed")
             .expect("failed job should persist a failure reason");
         assert!(
-            failure_reason
-                .contains("repeatedly returned empty or malformed tool-completion responses"),
+            failure_reason.contains("repeatedly returned invalid autonomous responses"),
             "unexpected failure reason: {failure_reason}"
         );
         assert!(
@@ -837,7 +859,7 @@ mod tests {
 
         assert_eq!(
             rig.llm_call_count(),
-            5,
+            6,
             "worker should stop after the bounded recovery flow"
         );
         assert!(
@@ -847,12 +869,12 @@ mod tests {
 
         let requests = rig.captured_llm_requests();
         assert!(
-            requests_contain(&requests, "call it now with valid arguments"),
+            requests_contain(&requests, "valid `status` and `summary` arguments"),
             "expected targeted tool-mode recovery nudge in worker requests"
         );
         assert!(
-            requests_contain(&requests, "Do not call any more tools in the next reply."),
-            "expected forced text-only recovery prompt in worker requests"
+            requests_contain(&requests, "must either call valid tool(s)"),
+            "expected strict tool recovery prompt in worker requests"
         );
 
         rig.clear().await;
@@ -868,22 +890,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8b: command_job_text_recovery_can_complete
+    // Test 8b: command_job_empty_completion_recovery_can_finish_job
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn command_job_text_recovery_can_complete() {
+    async fn command_job_empty_completion_recovery_can_finish_job() {
         let trace = LlmTrace::single_turn(
             "test-empty-tool-recovery-success",
             "(worker only)",
             vec![
                 text_step(""),
                 text_step(""),
-                hinted_text_step("", "valid arguments"),
+                hinted_text_step("", "valid `status` and `summary` arguments"),
                 text_step(""),
-                hinted_text_step(
-                    "The job is complete. I finished the requested work and there is nothing left to do.",
-                    "Do not call any more tools in the next reply.",
+                hinted_finish_job_step(
+                    "Recovered after empty tool completions",
+                    "must either call valid tool(s)",
                 ),
             ],
         );
@@ -915,12 +937,12 @@ mod tests {
 
         let requests = rig.captured_llm_requests();
         assert!(
-            requests_contain(&requests, "call it now with valid arguments"),
+            requests_contain(&requests, "valid `status` and `summary` arguments"),
             "expected targeted tool-mode recovery nudge in worker requests"
         );
         assert!(
-            requests_contain(&requests, "Do not call any more tools in the next reply."),
-            "expected forced text-only recovery prompt in worker requests"
+            requests_contain(&requests, "must either call valid tool(s)"),
+            "expected strict tool recovery prompt in worker requests"
         );
 
         rig.clear().await;

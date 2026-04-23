@@ -131,27 +131,10 @@ impl Worker {
         self.deps.use_planning
     }
 
-    /// Fire-and-forget persistence of job status.
-    fn persist_status(&self, status: JobState, reason: Option<String>) {
-        if let Some(store) = self.store() {
-            let store = store.clone();
-            let job_id = self.job_id;
-            tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_job_status(job_id, status, reason.as_deref())
-                    .await
-                {
-                    tracing::warn!("Failed to persist status for job {}: {}", job_id, e);
-                }
-            });
-        }
-    }
-
-    /// Fire-and-forget persistence of a job event and SSE broadcast.
-    fn log_event(&self, event_type: &str, data: serde_json::Value) {
+    /// Fire-and-forget persistence of a non-terminal job event.
+    fn persist_event_fire_and_forget(&self, event_type: &str, data: &serde_json::Value) {
         let job_id = self.job_id;
 
-        // Persist to DB
         if let Some(store) = self.store() {
             let store = store.clone();
             let et = event_type.to_string();
@@ -162,8 +145,12 @@ impl Worker {
                 }
             });
         }
+    }
 
-        // Broadcast SSE for live web UI updates
+    /// Broadcast a job event to live web UI subscribers.
+    fn broadcast_event(&self, event_type: &str, data: &serde_json::Value) {
+        let job_id = self.job_id;
+
         if let Some(ref sse) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();
             let event = match event_type {
@@ -257,6 +244,66 @@ impl Worker {
                 sse.broadcast(event);
             }
         }
+    }
+
+    /// Fire-and-forget persistence of a job event and SSE broadcast.
+    fn log_event(&self, event_type: &str, data: serde_json::Value) {
+        self.persist_event_fire_and_forget(event_type, &data);
+        self.broadcast_event(event_type, &data);
+    }
+
+    /// Publish a finished worker outcome without turning persistence failures
+    /// into execution failures.
+    ///
+    /// The durable result event is written before the finished status becomes
+    /// visible, so readers that observe the status can immediately fetch the
+    /// final result message. Ordinary events intentionally keep the cheaper
+    /// fire-and-forget path.
+    async fn publish_terminal_outcome_best_effort(
+        &self,
+        state: JobState,
+        failure_reason: Option<&str>,
+        result_payload: serde_json::Value,
+    ) {
+        let result_status = result_payload
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if let Some(store) = self.store() {
+            if let Err(e) = store
+                .save_job_event(self.job_id, "result", &result_payload)
+                .await
+            {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    state = %state,
+                    result_status = %result_status,
+                    result_event_saved = false,
+                    error = %e,
+                    "Failed to persist finished worker result event"
+                );
+                return;
+            }
+
+            if let Err(e) = store
+                .update_job_status(self.job_id, state, failure_reason)
+                .await
+            {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    state = %state,
+                    result_status = %result_status,
+                    result_event_saved = true,
+                    error = %e,
+                    "Failed to persist finished worker status after result event"
+                );
+                return;
+            }
+        }
+
+        self.broadcast_event("result", &result_payload);
     }
 
     /// Run the worker until the job is complete or stopped.
@@ -1095,16 +1142,17 @@ or status \"failed\" when you hit an unresolvable blocker."#,
                 reason: s,
             })?;
 
-        self.log_event(
-            "result",
+        self.publish_terminal_outcome_best_effort(
+            JobState::Completed,
+            None,
             serde_json::json!({
                 "status": "completed",
                 "success": true,
                 "message": message,
                 "message_preview": truncate_for_preview(message, 2000),
             }),
-        );
-        self.persist_status(JobState::Completed, None);
+        )
+        .await;
         Ok(())
     }
 
@@ -1124,15 +1172,16 @@ or status \"failed\" when you hit an unresolvable blocker."#,
                 reason: s,
             })?;
 
-        self.log_event(
-            "result",
+        self.publish_terminal_outcome_best_effort(
+            JobState::Failed,
+            Some(reason),
             serde_json::json!({
                 "status": "failed",
                 "success": false,
                 "message": format!("Execution failed: {}", reason),
             }),
-        );
-        self.persist_status(JobState::Failed, Some(reason.to_string()));
+        )
+        .await;
         Ok(())
     }
 
@@ -1154,15 +1203,16 @@ or status \"failed\" when you hit an unresolvable blocker."#,
 
         // Emit via the typed enum so the wire string stays in sync with
         // `JobResultStatus::Stuck::as_str()` — no string-literal drift.
-        self.log_event(
-            "result",
+        self.publish_terminal_outcome_best_effort(
+            JobState::Stuck,
+            Some(reason),
             serde_json::json!({
                 "status": JobResultStatus::Stuck,
                 "success": false,
                 "message": format!("Job stuck: {}", reason),
             }),
-        );
-        self.persist_status(JobState::Stuck, Some(reason.to_string()));
+        )
+        .await;
         Ok(())
     }
 
@@ -2352,7 +2402,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_finish_job_persists_completion_summary_as_result_event() {
+    async fn test_finish_job_publishes_result_before_completed_status_is_observable() {
         let (db, _tmp) = crate::testing::test_db().await;
         let worker = make_worker_with_store(vec![], Arc::clone(&db)).await;
         transition_worker_to_in_progress(&worker).await;
@@ -2369,22 +2419,19 @@ mod tests {
         assert_response_outcome(outcome, summary);
 
         let system_store = SystemScope::new(db);
-        let persisted_message = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(message) = system_store
-                    .get_agent_job_result_message(worker.job_id)
-                    .await
-                    .unwrap()
-                {
-                    break message;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("result event should be persisted"); // safety: test
+        let persisted_job = system_store
+            .get_job(worker.job_id)
+            .await
+            .unwrap() // safety: test
+            .expect("job should be persisted"); // safety: test
+        assert_eq!(persisted_job.state, JobState::Completed); // safety: test
 
-        assert_eq!(persisted_message, summary); // safety: test
+        let persisted_message = system_store
+            .get_agent_job_result_message(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+
+        assert_eq!(persisted_message.as_deref(), Some(summary)); // safety: test
         assert!(
             system_store
                 .get_agent_job_failure_reason(worker.job_id)
