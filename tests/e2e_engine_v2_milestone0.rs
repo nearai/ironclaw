@@ -13,7 +13,6 @@ mod milestone0 {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
     use std::time::Duration;
 
     use serde::Serialize;
@@ -21,6 +20,7 @@ mod milestone0 {
     use ironclaw::channels::OutgoingResponse;
 
     use crate::assert_replay_snapshot;
+    use crate::support::engine_v2_lock::engine_v2_test_lock;
     use crate::support::metrics::TraceMetrics;
     use crate::support::replay_outcome::ReplayOutcome;
     use crate::support::test_rig::TestRigBuilder;
@@ -30,11 +30,6 @@ mod milestone0 {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/llm_traces/engine_v2"
     );
-
-    fn engine_v2_test_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
 
     #[derive(Debug, Serialize)]
     struct Milestone0ScenarioOutcome {
@@ -474,6 +469,23 @@ mod milestone0 {
         .await;
     }
 
+    /// Punctuation around execution verbs should still trigger the local-only
+    /// bias when the task clearly targets this repository.
+    #[tokio::test]
+    async fn m0_local_execution_bias_punctuation_repo_scan() {
+        snapshot_single_turn_scenario(
+            "local_execution_bias_punctuation_repo_scan",
+            "Run. In this repository, use the echo tool to say 'local punctuation ok'. Report the result.",
+            Duration::from_secs(30),
+            &[
+                "direct local execution path",
+                "already have the tool results you need in context",
+            ],
+            &[],
+        )
+        .await;
+    }
+
     /// A repeated local-only action should still get cut off as no-new-
     /// evidence, not loop forever just because the task is repo-local.
     #[tokio::test]
@@ -498,6 +510,23 @@ mod milestone0 {
         snapshot_single_turn_scenario(
             "multi_step_request_avoids_premature_finalization",
             "First use the echo tool to say 'phase one complete', then use the echo tool to say 'phase two complete', then answer with both results.",
+            Duration::from_secs(30),
+            &[],
+            &[
+                "already have the tool results you need in context",
+                "did not add meaningful new evidence",
+            ],
+        )
+        .await;
+    }
+
+    /// Punctuation around multi-step markers should still suppress the
+    /// premature finalize-now hint.
+    #[tokio::test]
+    async fn m0_multi_step_request_punctuation_avoids_premature_finalization() {
+        snapshot_single_turn_scenario(
+            "multi_step_request_punctuation_avoids_premature_finalization",
+            "First, use the echo tool to say 'phase one punctuation'. Second, use the echo tool to say 'phase two punctuation'. Finally, answer with both results.",
             Duration::from_secs(30),
             &[],
             &[

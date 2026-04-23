@@ -711,11 +711,7 @@ def latest_non_system_user_message(messages):
 def request_looks_multi_step(text):
     """Best-effort heuristic: detect requests that obviously need follow-up work."""
     lower = normalize_signature_text(text, max_chars=500)
-    markers = [
-        " and then ", " then ", " after that ", " followed by ",
-        " also ", " plus ", " next ", " first ", " second ",
-    ]
-    return any(marker in lower for marker in markers)
+    return bool(re.search(r"\b(and then|then|after that|followed by|also|plus|next|first|second)\b", lower))
 
 
 def action_name_matches(action_name, prefixes):
@@ -743,26 +739,14 @@ def request_prefers_local_execution(text):
     if not lower:
         return False
 
-    execution_markers = [
-        "run ", "execute ", "install ", "test ", "scan ",
-        "audit ", "check ", "build ", "lint ", "debug ",
-        "fix ", "try ",
-    ]
-    local_context_markers = [
-        "github.com/", " repo", "repository", "workflow", ".github/",
-        "cli", "command", "locally", "local ",
-        "this machine", "this repo", "current repo", "directory", "file",
-    ]
-    research_markers = [
-        "latest", "news", "research", "look up", "search for",
-        "find information", "browse", "documentation", "docs",
-        "what is", "compare", "web search", "on the web",
-    ]
+    execution_pattern = r"\b(run|execute|install|test|scan|audit|check|build|lint|debug|fix|try)\b"
+    local_context_pattern = r"github\.com/|\brepo\b|repository|workflow|\.github/|\bcli\b|command|locally|\blocal\b|this machine|this repo|current repo|directory|file"
+    research_pattern = r"\blatest\b|news|research|look up|search for|find information|browse|documentation|docs|what is|compare|web search|on the web"
 
     return (
-        any(marker in lower for marker in execution_markers)
-        and any(marker in lower for marker in local_context_markers)
-        and not any(marker in lower for marker in research_markers)
+        bool(re.search(execution_pattern, lower))
+        and bool(re.search(local_context_pattern, lower))
+        and not bool(re.search(research_pattern, lower))
     )
 
 
@@ -824,8 +808,8 @@ def summarize_action_batch(calls, results):
 
     for idx in range(len(calls)):
         call = calls[idx]
-        action_name = call.get("name", "unknown")
-        params_sig = action_params_signature(call.get("params", {}))
+        action_name = call.get("action_name", call.get("name", "unknown"))
+        params_sig = action_params_signature(call.get("parameters", call.get("params", {})))
         r = results[idx] if idx < len(results) else None
         if r is None:
             signature_parts.append("skip:" + action_name + "(" + params_sig + ")")
@@ -1329,7 +1313,7 @@ def run_loop(context, goal, actions, state, config):
                     gate = r
                     # Get action info from the original call or the result
                     orig_call = executable_calls[r_idx] if r_idx < len(executable_calls) else {}
-                    gate_action_name = gate.get("action_name", orig_call.get("name", ""))
+                    gate_action_name = gate.get("action_name", orig_call.get("action_name", orig_call.get("name", "")))
                     gate_resume_kind = gate.get("resume_kind", {})
                     last_user_request = latest_non_system_user_message(working_messages)
                     if should_continue_after_optional_auth_gate(
@@ -1353,8 +1337,8 @@ def run_loop(context, goal, actions, state, config):
                         "state": state,
                         "gate_name": gate.get("gate_name", ""),
                         "action_name": gate_action_name,
-                        "call_id": orig_call.get("call_id", ""),
-                        "parameters": orig_call.get("params", {}),
+                        "call_id": orig_call.get("id", orig_call.get("call_id", "")),
+                        "parameters": orig_call.get("parameters", orig_call.get("params", {})),
                         "resume_kind": gate_resume_kind,
                     }
 

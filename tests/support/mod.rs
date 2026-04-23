@@ -1,5 +1,6 @@
 pub mod assertions;
 pub mod cleanup;
+pub mod engine_v2_lock;
 #[cfg(feature = "libsql")]
 pub mod gateway_workflow_harness;
 pub mod instrumented_llm;

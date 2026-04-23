@@ -13,20 +13,13 @@ mod support;
 #[cfg(feature = "libsql")]
 mod engine_v2_tests {
     use async_trait::async_trait;
-    use std::sync::OnceLock;
     use std::time::Duration;
 
-    use tokio::sync::Mutex;
-
+    use crate::support::engine_v2_lock::engine_v2_test_lock;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep, TraceToolCall};
     use ironclaw::context::JobContext;
     use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
-
-    fn engine_v2_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     /// Check that a tool name appears in the started list.
     /// Engine v2 formats tool names as `"name(param_summary)"`, so we match

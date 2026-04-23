@@ -14,7 +14,6 @@ mod milestone0_blackbox {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
     use std::time::Duration;
 
     use serde::Serialize;
@@ -22,6 +21,7 @@ mod milestone0_blackbox {
     use ironclaw::channels::OutgoingResponse;
 
     use crate::assert_replay_snapshot;
+    use crate::support::engine_v2_lock::engine_v2_test_lock;
     use crate::support::metrics::TraceMetrics;
     use crate::support::replay_outcome::ReplayOutcome;
     use crate::support::test_rig::TestRigBuilder;
@@ -31,11 +31,6 @@ mod milestone0_blackbox {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/llm_traces/engine_v2_blackbox"
     );
-
-    fn engine_v2_test_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
 
     #[derive(Debug, Serialize)]
     struct BlackboxScenarioOutcome {

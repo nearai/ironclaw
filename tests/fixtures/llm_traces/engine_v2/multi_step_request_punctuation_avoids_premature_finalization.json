@@ -1,0 +1,52 @@
+{
+  "model_name": "v2-m0-multi-step-punctuation-avoids-premature-finalization",
+  "expects": {
+    "response_contains": ["phase one punctuation", "phase two punctuation"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "phase one punctuation"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_multistep_punctuation_echo_1",
+            "name": "echo",
+            "arguments": {
+              "message": "phase one punctuation"
+            }
+          }
+        ],
+        "input_tokens": 118,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_m0_multistep_punctuation_echo_2",
+            "name": "echo",
+            "arguments": {
+              "message": "phase two punctuation"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Done: phase one punctuation; phase two punctuation.",
+        "input_tokens": 190,
+        "output_tokens": 18
+      }
+    }
+  ]
+}
