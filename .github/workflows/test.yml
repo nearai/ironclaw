@@ -531,6 +531,11 @@ jobs:
 
           event="${{ github.event_name }}"
 
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
             echo "Docs-only change detected — test roll-up passes fast"
             exit 0
