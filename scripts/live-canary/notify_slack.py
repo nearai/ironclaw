@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -132,14 +133,18 @@ def discover_lane_dirs(artifacts_root: Path) -> list[Path]:
 def post_json(url: str, payload: dict, headers: dict[str, str], timeout: int = 20) -> dict:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        if resp.status >= 300:
-            raise RuntimeError(f"HTTP {resp.status}: {raw[:200]}")
-        try:
-            return json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            return {"_raw": raw}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        # urlopen raises HTTPError for 4xx/5xx; the response body often
+        # carries the useful detail (Anthropic "invalid API key" etc.).
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {err_body[:200]}") from e
+    try:
+        return json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {"_raw": raw}
 
 
 def run_haiku(api_key: str, report: LaneReport) -> None:
@@ -175,14 +180,19 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
         if block.get("type") == "text":
             text += block.get("text", "")
     text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
+    # Haiku is instructed to return ONLY a JSON object, but extract the
+    # outermost `{...}` span so we survive the odd case where the model
+    # adds a prose preamble or wraps the output in a ```json fence.
+    # Greedy + DOTALL matches first `{` to last `}` — correct for a
+    # single top-level object, which our schema requires.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match is None:
+        report.notable = f"haiku returned no JSON object: {text[:160]}"
+        return
     try:
-        data = json.loads(text)
+        data = json.loads(match.group(0))
     except json.JSONDecodeError:
-        report.notable = f"haiku returned non-JSON: {text[:160]}"
+        report.notable = f"haiku JSON parse failed: {match.group(0)[:160]}"
         return
     if isinstance(data.get("status"), str):
         report.status = data["status"]
