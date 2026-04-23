@@ -118,8 +118,9 @@ impl ActionProjector {
             });
         }
 
+        let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+
         if let Some(registry) = capability_registry.as_ref() {
-            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
             for lease in leases {
                 if lease.capability_name == "tools" {
                     continue;
@@ -147,6 +148,34 @@ impl ActionProjector {
                     }
                     actions.push(action.clone());
                 }
+            }
+        }
+
+        // Surface installed-but-not-yet-ready provider tools (primarily
+        // WASM tools pending OAuth) as callable actions. Without this,
+        // unauthenticated WASM tools are invisible to the LLM — they're
+        // registered in `tool_registry` only after activation, which
+        // requires auth first — so the LLM never calls them and the
+        // auth-on-first-call gate never fires. See issue #2883.
+        if let Some(auth_manager) = auth_manager {
+            for latent in auth_manager.latent_provider_actions(&context.user_id).await {
+                // Normalize hyphen→underscore to match the first loop's
+                // `td.name.replace('-', '_')`. This keeps the action name
+                // stable for the LLM before and after auth (registered
+                // tools surface as underscores) and ensures the `seen`
+                // dedup correctly suppresses overlap with tools already
+                // added above.
+                let name = latent.action_name.replace('-', "_");
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                actions.push(ActionDef {
+                    name,
+                    description: latent.description,
+                    parameters_schema: latent.parameters_schema,
+                    effects: vec![],
+                    requires_approval: false,
+                });
             }
         }
 
