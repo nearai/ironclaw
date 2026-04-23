@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, CapabilityLease, CapabilityRegistry, CapabilityStatus, EngineError,
-    ThreadExecutionContext,
+    ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, CapabilityLease,
+    CapabilityRegistry, CapabilityStatus, EngineError, ThreadExecutionContext,
 };
 
 use crate::auth::extension::AuthManager;
@@ -29,7 +29,7 @@ impl ActionProjector {
     /// instead of fetching from `auth_manager`. This allows the caller
     /// (typically `EffectBridgeAdapter`) to share a single fetch across
     /// both `ActionProjector` and `CapabilityProjector`.
-    pub(crate) async fn project(
+    pub(crate) async fn project_actions(
         tools: &ToolRegistry,
         auth_manager: Option<&AuthManager>,
         capability_registry: Option<Arc<CapabilityRegistry>>,
@@ -37,7 +37,7 @@ impl ActionProjector {
         context: &ThreadExecutionContext,
         prefetched_extensions: Option<&HashMap<String, InstalledExtension>>,
     ) -> Result<Vec<ActionDef>, EngineError> {
-        let tool_defs = tools.tool_definitions().await;
+        let tool_defs = tools.all().await;
         let owned_statuses;
         let extension_statuses: Option<&HashMap<String, InstalledExtension>> = if let Some(
             prefetched,
@@ -72,20 +72,20 @@ impl ActionProjector {
         };
 
         let mut actions = Vec::with_capacity(tool_defs.len());
-        for td in tool_defs {
-            if crate::bridge::effect_adapter::is_v1_only_tool(&td.name) {
+        for tool in tool_defs {
+            if crate::bridge::effect_adapter::is_v1_only_tool(tool.name()) {
                 continue;
             }
-            if crate::bridge::effect_adapter::is_v1_auth_tool(&td.name) {
+            if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
                 continue;
             }
 
-            if let Some(provider_extension) = tools.provider_extension_for_tool(&td.name).await {
+            if let Some(provider_extension) = tool.provider_extension() {
                 let Some(extension_statuses) = extension_statuses else {
                     continue;
                 };
                 let Some(extension) =
-                    provider_extension_status(extension_statuses, &provider_extension)
+                    provider_extension_status(extension_statuses, provider_extension)
                 else {
                     continue;
                 };
@@ -102,17 +102,12 @@ impl ActionProjector {
                 }
             }
 
-            actions.push(ActionDef {
-                name: td.name.replace('-', "_"),
-                description: td.description,
-                parameters_schema: td.parameters,
-                effects: vec![],
-                requires_approval: false,
-            });
+            actions.push(project_tool_action(tool.as_ref()));
         }
 
         if let Some(registry) = capability_registry.as_ref() {
-            let mut seen: HashSet<String> = actions.iter().map(|a| a.name.clone()).collect();
+            let mut seen: HashSet<String> =
+                actions.iter().map(|action| action.name.clone()).collect();
             for lease in leases {
                 if lease.capability_name == "tools" {
                     continue;
@@ -148,6 +143,34 @@ impl ActionProjector {
     }
 }
 
+fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
+    let callable_name = tool.name().replace('-', "_");
+    let callable_schema = tool.parameters_schema();
+    let discovery_schema = tool.discovery_schema();
+    let summary = tool
+        .discovery_summary()
+        .map(|summary| ActionDiscoverySummary {
+            always_required: summary.always_required,
+            conditional_requirements: summary.conditional_requirements,
+            notes: summary.notes,
+            examples: summary.examples,
+        });
+    let schema_override = (discovery_schema != callable_schema).then_some(discovery_schema);
+
+    ActionDef {
+        name: callable_name.clone(),
+        description: tool.description().to_string(),
+        parameters_schema: callable_schema,
+        effects: vec![],
+        requires_approval: false,
+        discovery: Some(ActionDiscoveryMetadata {
+            name: callable_name,
+            summary,
+            schema_override,
+        }),
+    }
+}
+
 fn provider_extension_status<'a>(
     extension_statuses: &'a HashMap<String, InstalledExtension>,
     provider_extension: &str,
@@ -177,7 +200,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_engine::ThreadExecutionContext;
 
-    use super::{ActionProjector, provider_extension_status};
+    use super::{ActionProjector, project_tool_action, provider_extension_status};
     use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::tools::ToolRegistry;
 
@@ -264,6 +287,51 @@ mod tests {
         }
     }
 
+    struct DiscoveryTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for DiscoveryTool {
+        fn name(&self) -> &str {
+            "mission_helper"
+        }
+
+        fn description(&self) -> &str {
+            "Mission helper"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {"id": {"type": "string"}}})
+        }
+
+        fn discovery_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "mode": {"type": "string"}
+                },
+                "required": ["id"]
+            })
+        }
+
+        fn discovery_summary(&self) -> Option<crate::tools::ToolDiscoverySummary> {
+            Some(crate::tools::ToolDiscoverySummary {
+                always_required: vec!["id".to_string()],
+                conditional_requirements: vec!["mode is needed when updating".to_string()],
+                notes: vec!["Use for mission inspection".to_string()],
+                examples: vec![],
+            })
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!("not needed")
+        }
+    }
+
     async fn projected_action_names(
         tool_name: &'static str,
         description: &'static str,
@@ -280,7 +348,7 @@ mod tests {
             .await;
 
         let extension_map = HashMap::from([(extension.name.clone(), extension)]);
-        let actions = ActionProjector::project(
+        let actions = ActionProjector::project_actions(
             tools.as_ref(),
             None,
             None,
@@ -291,7 +359,7 @@ mod tests {
         .await
         .expect("project should succeed");
 
-        actions.into_iter().map(|a| a.name).collect()
+        actions.into_iter().map(|action| action.name).collect()
     }
 
     fn test_context() -> ThreadExecutionContext {
@@ -305,6 +373,8 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
+            available_action_inventory_snapshot: None,
         }
     }
 
@@ -340,6 +410,26 @@ mod tests {
 
         assert_eq!(resolved.name, "linear-server");
         assert!(resolved.installed);
+    }
+
+    #[test]
+    fn project_tool_action_preserves_discovery_metadata() {
+        let tool = std::sync::Arc::new(DiscoveryTool);
+        let action = project_tool_action(tool.as_ref());
+
+        assert_eq!(action.description, "Mission helper");
+        assert!(
+            action.parameters_schema["properties"].get("mode").is_none(),
+            "callable schema should stay on the executable surface only"
+        );
+
+        let discovery = action.discovery.expect("discovery metadata");
+        assert_eq!(discovery.name, "mission_helper");
+        assert!(discovery.summary.is_some());
+        let schema_override = discovery
+            .schema_override
+            .expect("discovery schema override");
+        assert!(schema_override["properties"].get("mode").is_some());
     }
 
     #[tokio::test]

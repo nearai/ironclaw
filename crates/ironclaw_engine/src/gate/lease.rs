@@ -88,6 +88,7 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            discovery: None,
         }
     }
 
