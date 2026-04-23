@@ -103,9 +103,17 @@ pub async fn execute_tool_with_safety(
             name: tool_name.to_string(),
             timeout,
         })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
+        .map_err(|e| match e {
+            crate::tools::ToolError::SecretBindingApprovalRequired { approval } => {
+                crate::error::ToolError::SecretBindingApprovalRequired {
+                    name: tool_name.to_string(),
+                    approval,
+                }
+            }
+            other => crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: other.to_string(),
+            },
         })?;
 
     serde_json::to_string_pretty(&result.result).map_err(|e| {

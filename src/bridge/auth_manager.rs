@@ -206,7 +206,8 @@ impl AuthManager {
         }
     }
 
-    pub fn with_settings_store_override(
+    #[cfg(test)]
+    pub(crate) fn with_settings_store_override(
         mut self,
         store: Arc<dyn SettingsStore + Send + Sync>,
     ) -> Self {
@@ -269,12 +270,7 @@ impl AuthManager {
         &self,
         mappings: Vec<crate::secrets::CredentialMapping>,
     ) -> Vec<crate::secrets::CredentialMapping> {
-        let mut seen: std::collections::HashSet<(String, crate::secrets::CredentialLocation)> =
-            std::collections::HashSet::new();
-        mappings
-            .into_iter()
-            .filter(|mapping| seen.insert((mapping.secret_name.clone(), mapping.location.clone())))
-            .collect()
+        crate::tools::builtin::dedup_credential_mappings(mappings)
     }
 
     fn mapping_applies_to_http_call(
@@ -1048,15 +1044,11 @@ impl AuthManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
     use super::*;
     use crate::db::SettingsStore;
-    use crate::history::SettingRow;
     use crate::testing::credentials::test_secrets_store;
     use crate::tools::ToolRegistry;
 
@@ -1091,110 +1083,7 @@ mod tests {
         registry
     }
 
-    struct MemorySettingsStore {
-        values: tokio::sync::RwLock<HashMap<(String, String), serde_json::Value>>,
-    }
-
-    impl MemorySettingsStore {
-        fn new() -> Self {
-            Self {
-                values: tokio::sync::RwLock::new(HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SettingsStore for MemorySettingsStore {
-        async fn get_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .get(&(user_id.to_string(), key.to_string()))
-                .cloned())
-        }
-
-        async fn get_setting_full(
-            &self,
-            _user_id: &str,
-            _key: &str,
-        ) -> Result<Option<SettingRow>, crate::error::DatabaseError> {
-            Ok(None)
-        }
-
-        async fn set_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-            value: &serde_json::Value,
-        ) -> Result<(), crate::error::DatabaseError> {
-            self.values
-                .write()
-                .await
-                .insert((user_id.to_string(), key.to_string()), value.clone());
-            Ok(())
-        }
-
-        async fn delete_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-        ) -> Result<bool, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .write()
-                .await
-                .remove(&(user_id.to_string(), key.to_string()))
-                .is_some())
-        }
-
-        async fn list_settings(
-            &self,
-            _user_id: &str,
-        ) -> Result<Vec<SettingRow>, crate::error::DatabaseError> {
-            Ok(Vec::new())
-        }
-
-        async fn get_all_settings(
-            &self,
-            user_id: &str,
-        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .iter()
-                .filter(|((stored_user_id, _), _)| stored_user_id == user_id)
-                .map(|((_, key), value)| (key.clone(), value.clone()))
-                .collect())
-        }
-
-        async fn set_all_settings(
-            &self,
-            user_id: &str,
-            settings: &HashMap<String, serde_json::Value>,
-        ) -> Result<(), crate::error::DatabaseError> {
-            let mut values = self.values.write().await;
-            values.retain(|(stored_user_id, _), _| stored_user_id != user_id);
-            for (key, value) in settings {
-                values.insert((user_id.to_string(), key.clone()), value.clone());
-            }
-            Ok(())
-        }
-
-        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .keys()
-                .any(|(stored_user_id, _)| stored_user_id == user_id))
-        }
-    }
+    use crate::testing::settings_store::MemorySettingsStore;
 
     fn make_auth_manager(secrets_store: Arc<dyn SecretsStore + Send + Sync>) -> AuthManager {
         AuthManager::new(secrets_store, None, None, None)

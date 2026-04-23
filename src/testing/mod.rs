@@ -20,6 +20,7 @@
 
 pub mod credentials;
 pub mod fault_injection;
+pub mod settings_store;
 
 use std::sync::Arc;
 use std::sync::Mutex;

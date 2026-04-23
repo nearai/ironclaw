@@ -12,7 +12,7 @@ use reqwest::Client;
 use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
 use crate::db::{Database, UserStore};
-use crate::secrets::binding_approvals::{SECRET_BINDING_APPROVAL_ERROR, binding_approval_exists};
+use crate::secrets::binding_approvals::binding_approval_exists;
 use crate::secrets::{CredentialArtifactKind, SecretBindingApproval, SecretsStore};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::credential_injector::host_matches_pattern;
@@ -492,20 +492,9 @@ fn binding_configuration_error(
 }
 
 fn approval_required_error(approval: &SecretBindingApproval) -> ToolError {
-    ToolError::ExecutionFailed(
-        serde_json::json!({
-            "error": SECRET_BINDING_APPROVAL_ERROR,
-            "message": format!(
-                "Secret '{}' is configured, but {} '{}' is not approved for '{}' yet.",
-                approval.secret_name,
-                approval.artifact_kind.as_str(),
-                approval.artifact_name,
-                approval.host,
-            ),
-            "approval": approval,
-        })
-        .to_string(),
-    )
+    ToolError::SecretBindingApprovalRequired {
+        approval: Box::new(approval.clone()),
+    }
 }
 
 impl Default for HttpTool {

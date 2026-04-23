@@ -1240,11 +1240,7 @@ impl EffectBridgeAdapter {
             "engine_v2",
             format!("Thread {}", context.thread_id),
         );
-        if !active_skill_names.is_empty() {
-            job_ctx.metadata = serde_json::json!({
-                "active_skill_names": active_skill_names.clone(),
-            });
-        }
+        inject_active_skill_names_metadata(&mut job_ctx.metadata, &active_skill_names);
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
         // requests through the recorder/replayer.
@@ -1471,11 +1467,10 @@ impl EffectBridgeAdapter {
                 })
             }
             Err(e) => {
-                let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
-                if error_msg
-                    .contains(crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_ERROR)
-                    && let Some(approval) = extract_secret_binding_approval(&error_msg)
-                    && self.is_known_secret_binding_approval(&approval)
+                if let crate::error::Error::Tool(
+                    crate::error::ToolError::SecretBindingApprovalRequired { approval, .. },
+                ) = &e
+                    && self.is_known_secret_binding_approval(approval.as_ref())
                 {
                     tracing::warn!(
                         secret_name = %approval.secret_name,
@@ -1492,10 +1487,12 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Approval {
                             allow_always: false,
                         },
-                        Some(Self::secret_binding_resume_output(&approval)),
+                        Some(Self::secret_binding_resume_output(approval.as_ref())),
                         Some(lease.clone()),
                     ));
                 }
+
+                let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
                     && self.is_known_credential(&cred_name)
@@ -2376,16 +2373,24 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
-fn extract_secret_binding_approval(error_msg: &str) -> Option<SecretBindingApproval> {
-    if let Some(json_start) = error_msg.rfind(": {")
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start + 2..])
-    {
-        return parsed
-            .get("approval")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
+fn inject_active_skill_names_metadata(
+    metadata: &mut serde_json::Value,
+    active_skill_names: &[String],
+) {
+    if active_skill_names.is_empty() {
+        return;
     }
-    None
+
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "active_skill_names".to_string(),
+            serde_json::json!(active_skill_names),
+        );
+    }
 }
 
 fn is_v1_only_tool(name: &str) -> bool {
@@ -2473,28 +2478,133 @@ mod tests {
     }
 
     #[test]
-    fn extract_secret_binding_approval_ignores_braces_in_tool_name() {
-        let approval = SecretBindingApproval {
-            secret_name: "github_token".to_string(),
-            artifact_kind: crate::secrets::CredentialArtifactKind::Skill,
-            artifact_name: "github".to_string(),
-            artifact_fingerprint: "fingerprint-v1".to_string(),
-            host: "api.github.com".to_string(),
-            location: crate::secrets::CredentialLocation::AuthorizationBearer,
-            approved_at: chrono::Utc::now(),
-        };
-        let payload = serde_json::json!({
-            "error": crate::secrets::binding_approvals::SECRET_BINDING_APPROVAL_ERROR,
-            "approval": approval,
+    fn inject_active_skill_names_metadata_preserves_existing_entries() {
+        let mut metadata = serde_json::json!({
+            "trace_id": "trace-123",
         });
 
-        let parsed =
-            extract_secret_binding_approval(&format!("Tool 'my{{tool}}' failed: {}", payload))
-                .expect("approval should parse from trailing JSON payload");
+        inject_active_skill_names_metadata(&mut metadata, &["github".to_string()]);
 
-        assert_eq!(parsed.secret_name, "github_token");
-        assert_eq!(parsed.artifact_name, "github");
-        assert_eq!(parsed.host, "api.github.com");
+        assert_eq!(metadata["trace_id"], "trace-123");
+        assert_eq!(
+            metadata["active_skill_names"],
+            serde_json::json!(["github"])
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_secret_binding_approval_error_becomes_gate_pause() {
+        use crate::secrets::{
+            CredentialArtifactKind, CredentialBindingPolicy, CredentialBindingProvenance,
+            CredentialLocation, CredentialMapping,
+        };
+        use crate::testing::credentials::test_secrets_store;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        struct ApprovalRequiredTool;
+
+        #[async_trait]
+        impl Tool for ApprovalRequiredTool {
+            fn name(&self) -> &str {
+                "my{tool}"
+            }
+
+            fn description(&self) -> &str {
+                "approval required"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                let approval = SecretBindingApproval {
+                    secret_name: "github_token".to_string(),
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "fingerprint-v1".to_string(),
+                    host: "api.github.com".to_string(),
+                    location: CredentialLocation::AuthorizationBearer,
+                    approved_at: chrono::Utc::now(),
+                };
+                Err(ToolError::SecretBindingApprovalRequired {
+                    approval: Box::new(approval),
+                })
+            }
+        }
+
+        let cred_reg = Arc::new(SharedCredentialRegistry::new());
+        cred_reg.add_mappings(vec![
+            CredentialMapping::bearer("github_token", "api.github.com").with_provenance(
+                CredentialBindingProvenance {
+                    artifact_kind: CredentialArtifactKind::Skill,
+                    artifact_name: "github".to_string(),
+                    artifact_fingerprint: "fingerprint-v1".to_string(),
+                    binding_policy: CredentialBindingPolicy::RequireApproval,
+                },
+            ),
+        ]);
+
+        let tools = Arc::new(
+            ToolRegistry::new()
+                .with_credentials(Arc::clone(&cred_reg), Arc::new(test_secrets_store())),
+        );
+        tools.register(Arc::new(ApprovalRequiredTool)).await;
+
+        use ironclaw_safety::SafetyConfig;
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "my{tool}",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_typed_binding_approval"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                resume_output,
+                ..
+            }) => {
+                assert_eq!(gate_name, SECRET_BINDING_APPROVAL_GATE_NAME);
+                assert_eq!(action_name, "my{tool}");
+                assert!(matches!(
+                    *resume_kind,
+                    ironclaw_engine::ResumeKind::Approval {
+                        allow_always: false,
+                    }
+                ));
+                assert_eq!(
+                    resume_output
+                        .and_then(|value| value.get("secret_binding_approval").cloned())
+                        .and_then(
+                            |value| serde_json::from_value::<SecretBindingApproval>(value).ok()
+                        )
+                        .map(|approval| approval.secret_name),
+                    Some("github_token".to_string())
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
     }
 
     #[tokio::test]

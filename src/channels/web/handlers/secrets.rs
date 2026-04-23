@@ -18,7 +18,7 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::secrets::binding_approvals::{
     list_binding_approvals, location_risk, revoke_binding_approval, revoke_secret_binding_approvals,
 };
-use crate::secrets::{CreateSecretParams, SecretsStore};
+use crate::secrets::{CreateSecretParams, Secret, SecretsStore};
 
 const MAX_SECRET_EXPIRY_DAYS: u64 = 36_500;
 const MAX_SECRET_IMPORT_ITEMS: usize = 100;
@@ -62,7 +62,6 @@ struct SecretBindingApprovalResponse {
     location: serde_json::Value,
     risk: String,
     approved_at: String,
-    auto_bound: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,17 +132,20 @@ fn create_secret_params(
     Ok(params)
 }
 
+fn upsert_status(secret: &Secret) -> &'static str {
+    if secret.created_at == secret.updated_at {
+        "created"
+    } else {
+        "updated"
+    }
+}
+
 async fn upsert_secret_for_user(
     secrets: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     name: String,
     body: SecretWriteRequest,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let already_exists = secrets
-        .exists(user_id, &name)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
     let params = create_secret_params(
         name.clone(),
         body.value,
@@ -151,7 +153,7 @@ async fn upsert_secret_for_user(
         body.expires_in_days,
     )?;
 
-    secrets
+    let stored = secrets
         .create(user_id, params)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -159,13 +161,16 @@ async fn upsert_secret_for_user(
     Ok(serde_json::json!({
         "user_id": user_id,
         "name": name,
-        "status": if already_exists { "updated" } else { "created" },
+        "status": upsert_status(&stored),
     }))
 }
 
 fn resolve_optional_settings_store(
     state: &GatewayState,
 ) -> Option<&(dyn crate::db::SettingsStore + Send + Sync)> {
+    // Secrets CRUD still talks to the stores directly because ToolDispatcher
+    // does not own secret lifecycle operations yet. Keep this path isolated in
+    // this handler module until that migration lands.
     if let Some(ref cache) = state.settings_cache {
         Some(cache.as_ref())
     } else {
@@ -201,7 +206,6 @@ async fn list_secret_items(
                 location: serde_json::to_value(&approval.location).unwrap_or_default(),
                 risk: location_risk(&approval.location).to_string(),
                 approved_at: approval.approved_at.to_rfc3339(),
-                auto_bound: false,
             });
     }
 
@@ -375,6 +379,14 @@ pub async fn secrets_delete_handler(
         "Secrets store not available".to_string(),
     ))?;
 
+    revoke_secret_binding_approvals(
+        resolve_optional_settings_store(state.as_ref()),
+        &user_id,
+        &name,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let deleted = secrets
         .delete(&user_id, &name)
         .await
@@ -382,16 +394,6 @@ pub async fn secrets_delete_handler(
 
     if !deleted {
         return Err((StatusCode::NOT_FOUND, "Secret not found".to_string()));
-    }
-
-    if let Err(error) = revoke_secret_binding_approvals(
-        resolve_optional_settings_store(state.as_ref()),
-        &user_id,
-        &name,
-    )
-    .await
-    {
-        tracing::warn!(user_id = %user_id, secret_name = %name, error = %error, "Failed to revoke binding approvals after admin secret deletion");
     }
 
     Ok(Json(serde_json::json!({
@@ -453,6 +455,14 @@ pub async fn user_secrets_delete_handler(
         "Secrets store not available".to_string(),
     ))?;
 
+    revoke_secret_binding_approvals(
+        resolve_optional_settings_store(state.as_ref()),
+        &user.user_id,
+        &name,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let deleted = secrets
         .delete(&user.user_id, &name)
         .await
@@ -460,16 +470,6 @@ pub async fn user_secrets_delete_handler(
 
     if !deleted {
         return Err((StatusCode::NOT_FOUND, "Secret not found".to_string()));
-    }
-
-    if let Err(error) = revoke_secret_binding_approvals(
-        resolve_optional_settings_store(state.as_ref()),
-        &user.user_id,
-        &name,
-    )
-    .await
-    {
-        tracing::warn!(user_id = %user.user_id, secret_name = %name, error = %error, "Failed to revoke binding approvals after secret deletion");
     }
 
     Ok(Json(serde_json::json!({
@@ -534,7 +534,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use axum::{Json, extract::Path};
+    use axum::{Json, extract::Path, http::StatusCode};
     use chrono::Utc;
 
     use super::{
@@ -548,117 +548,12 @@ mod tests {
         ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, RateLimiter,
     };
     use crate::db::SettingsStore;
-    use crate::history::SettingRow;
     use crate::secrets::binding_approvals::{grant_binding_approval, list_binding_approvals};
     use crate::secrets::{
         CredentialArtifactKind, CredentialLocation, InMemorySecretsStore, SecretBindingApproval,
         SecretsCrypto, SecretsStore,
     };
-
-    struct MemorySettingsStore {
-        values: tokio::sync::RwLock<HashMap<(String, String), serde_json::Value>>,
-    }
-
-    impl MemorySettingsStore {
-        fn new() -> Self {
-            Self {
-                values: tokio::sync::RwLock::new(HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SettingsStore for MemorySettingsStore {
-        async fn get_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .get(&(user_id.to_string(), key.to_string()))
-                .cloned())
-        }
-
-        async fn get_setting_full(
-            &self,
-            _user_id: &str,
-            _key: &str,
-        ) -> Result<Option<SettingRow>, crate::error::DatabaseError> {
-            Ok(None)
-        }
-
-        async fn set_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-            value: &serde_json::Value,
-        ) -> Result<(), crate::error::DatabaseError> {
-            self.values
-                .write()
-                .await
-                .insert((user_id.to_string(), key.to_string()), value.clone());
-            Ok(())
-        }
-
-        async fn delete_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-        ) -> Result<bool, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .write()
-                .await
-                .remove(&(user_id.to_string(), key.to_string()))
-                .is_some())
-        }
-
-        async fn list_settings(
-            &self,
-            _user_id: &str,
-        ) -> Result<Vec<SettingRow>, crate::error::DatabaseError> {
-            Ok(Vec::new())
-        }
-
-        async fn get_all_settings(
-            &self,
-            user_id: &str,
-        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .iter()
-                .filter(|((stored_user_id, _), _)| stored_user_id == user_id)
-                .map(|((_, key), value)| (key.clone(), value.clone()))
-                .collect())
-        }
-
-        async fn set_all_settings(
-            &self,
-            user_id: &str,
-            settings: &HashMap<String, serde_json::Value>,
-        ) -> Result<(), crate::error::DatabaseError> {
-            let mut values = self.values.write().await;
-            values.retain(|(stored_user_id, _), _| stored_user_id != user_id);
-            for (key, value) in settings {
-                values.insert((user_id.to_string(), key.clone()), value.clone());
-            }
-            Ok(())
-        }
-
-        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .keys()
-                .any(|(stored_user_id, _)| stored_user_id == user_id))
-        }
-    }
+    use crate::testing::settings_store::MemorySettingsStore;
 
     fn test_user(user_id: &str) -> AuthenticatedUser {
         AuthenticatedUser(UserIdentity {
@@ -677,6 +572,74 @@ mod tests {
             host: "api.github.com".to_string(),
             location: CredentialLocation::AuthorizationBearer,
             approved_at: Utc::now(),
+        }
+    }
+
+    struct DeleteFailingSettingsStore {
+        inner: MemorySettingsStore,
+    }
+
+    #[async_trait]
+    impl SettingsStore for DeleteFailingSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            self.inner.get_setting(user_id, key).await
+        }
+
+        async fn get_setting_full(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            self.inner.get_setting_full(user_id, key).await
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.inner.set_setting(user_id, key, value).await
+        }
+
+        async fn delete_setting(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "delete failed".to_string(),
+            ))
+        }
+
+        async fn list_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            self.inner.list_settings(user_id).await
+        }
+
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            self.inner.get_all_settings(user_id).await
+        }
+
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.inner.set_all_settings(user_id, settings).await
+        }
+
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            self.inner.has_settings(user_id).await
         }
     }
 
@@ -781,6 +744,20 @@ mod tests {
                 .await
                 .expect("list secrets for second user");
         assert_eq!(other_user["secrets"].as_array().unwrap().len(), 0);
+
+        let Json(updated) = user_secrets_put_handler(
+            axum::extract::State(Arc::clone(&state)),
+            test_user("alice"),
+            Path("github_token".to_string()),
+            Json(SecretWriteRequest {
+                value: "ghp_secret_v2".to_string(),
+                provider: Some("github".to_string()),
+                expires_in_days: Some(14),
+            }),
+        )
+        .await
+        .expect("update secret");
+        assert_eq!(updated["status"], "updated");
 
         let Json(deleted) = user_secrets_delete_handler(
             axum::extract::State(Arc::clone(&state)),
@@ -932,5 +909,53 @@ mod tests {
             approvals.is_empty(),
             "secret delete should revoke approvals"
         );
+    }
+
+    #[tokio::test]
+    async fn user_secret_delete_returns_error_when_approval_revoke_fails() {
+        let settings_inner: Arc<dyn SettingsStore + Send + Sync> =
+            Arc::new(DeleteFailingSettingsStore {
+                inner: MemorySettingsStore::new(),
+            });
+        let settings_cache = Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+            Arc::clone(&settings_inner),
+        ));
+        let state = test_gateway_state_with_settings(Some(Arc::clone(&settings_cache)));
+
+        let _ = user_secrets_put_handler(
+            axum::extract::State(Arc::clone(&state)),
+            test_user("alice"),
+            Path("github_token".to_string()),
+            Json(SecretWriteRequest {
+                value: "ghp_secret".to_string(),
+                provider: Some("github".to_string()),
+                expires_in_days: None,
+            }),
+        )
+        .await
+        .expect("create secret");
+
+        grant_binding_approval(
+            Some(settings_cache.as_ref()),
+            "alice",
+            sample_approval("github_token"),
+        )
+        .await
+        .expect("grant approval");
+
+        let err = user_secrets_delete_handler(
+            axum::extract::State(Arc::clone(&state)),
+            test_user("alice"),
+            Path("github_token".to_string()),
+        )
+        .await
+        .expect_err("delete should fail when approval revoke fails");
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let Json(listed) =
+            user_secrets_list_handler(axum::extract::State(state), test_user("alice"))
+                .await
+                .expect("secret should remain after revoke failure");
+        assert_eq!(listed["secrets"].as_array().unwrap().len(), 1);
     }
 }

@@ -6,9 +6,13 @@ use crate::error::DatabaseError;
 use crate::secrets::{CredentialLocation, SecretBindingApproval};
 
 const SECRET_BINDING_APPROVALS_KEY: &str = "auth.secret_binding_approvals_v1";
+const MAX_SECRET_BINDING_APPROVALS_PER_USER: usize = 256;
 pub const SECRET_BINDING_APPROVAL_GATE_NAME: &str = "secret_binding_approval";
 pub const SECRET_BINDING_APPROVAL_ERROR: &str = "secret_binding_approval_required";
 
+// This lock only serializes approval mutations within the current process.
+// Multi-replica deployments still need a DB-backed coordination story if
+// approval writes ever become cross-process hot spots.
 async fn approval_lock(user_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<
         tokio::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
@@ -30,7 +34,10 @@ fn dedup_approvals(approvals: Vec<SecretBindingApproval>) -> Vec<SecretBindingAp
         by_id.insert(approval.approval_id(), approval);
     }
     let mut approvals: Vec<_> = by_id.into_values().collect();
-    approvals.sort_by(|a, b| a.approved_at.cmp(&b.approved_at));
+    approvals.sort_by_key(|a| a.approved_at);
+    if approvals.len() > MAX_SECRET_BINDING_APPROVALS_PER_USER {
+        approvals.drain(..approvals.len() - MAX_SECRET_BINDING_APPROVALS_PER_USER);
+    }
     approvals
 }
 
@@ -172,7 +179,7 @@ pub fn location_label(location: &CredentialLocation) -> String {
 
 pub fn location_risk(location: &CredentialLocation) -> &'static str {
     match location {
-        CredentialLocation::QueryParam { .. } => "high",
+        CredentialLocation::QueryParam { .. } | CredentialLocation::UrlPath { .. } => "high",
         _ => "normal",
     }
 }
@@ -190,98 +197,14 @@ pub fn approval_prompt_message(approval: &SecretBindingApproval) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use chrono::Utc;
-    use tokio::sync::RwLock;
 
     use super::*;
     use crate::db::SettingsStore;
-    use crate::history::SettingRow;
     use crate::secrets::{CredentialArtifactKind, CredentialLocation};
-
-    struct MemorySettingsStore {
-        values: RwLock<HashMap<(String, String), serde_json::Value>>,
-    }
-
-    impl MemorySettingsStore {
-        fn new() -> Self {
-            Self {
-                values: RwLock::new(HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SettingsStore for MemorySettingsStore {
-        async fn get_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-        ) -> Result<Option<serde_json::Value>, DatabaseError> {
-            Ok(self
-                .values
-                .read()
-                .await
-                .get(&(user_id.to_string(), key.to_string()))
-                .cloned())
-        }
-
-        async fn get_setting_full(
-            &self,
-            _user_id: &str,
-            _key: &str,
-        ) -> Result<Option<SettingRow>, DatabaseError> {
-            Ok(None)
-        }
-
-        async fn set_setting(
-            &self,
-            user_id: &str,
-            key: &str,
-            value: &serde_json::Value,
-        ) -> Result<(), DatabaseError> {
-            self.values
-                .write()
-                .await
-                .insert((user_id.to_string(), key.to_string()), value.clone());
-            Ok(())
-        }
-
-        async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
-            Ok(self
-                .values
-                .write()
-                .await
-                .remove(&(user_id.to_string(), key.to_string()))
-                .is_some())
-        }
-
-        async fn list_settings(&self, _user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
-            Ok(Vec::new())
-        }
-
-        async fn get_all_settings(
-            &self,
-            _user_id: &str,
-        ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-            Ok(HashMap::new())
-        }
-
-        async fn set_all_settings(
-            &self,
-            _user_id: &str,
-            _settings: &HashMap<String, serde_json::Value>,
-        ) -> Result<(), DatabaseError> {
-            Ok(())
-        }
-
-        async fn has_settings(&self, _user_id: &str) -> Result<bool, DatabaseError> {
-            Ok(false)
-        }
-    }
+    use crate::testing::settings_store::MemorySettingsStore;
 
     fn sample_approval(secret_name: &str, host: &str) -> SecretBindingApproval {
         SecretBindingApproval {
@@ -293,6 +216,16 @@ mod tests {
             location: CredentialLocation::AuthorizationBearer,
             approved_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn location_risk_marks_url_paths_high_risk() {
+        assert_eq!(
+            location_risk(&CredentialLocation::UrlPath {
+                placeholder: "token".to_string(),
+            }),
+            "high"
+        );
     }
 
     #[tokio::test]
@@ -325,6 +258,31 @@ mod tests {
                 .await
                 .expect("list approvals after revoke")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_binding_approval_caps_old_entries_per_user() {
+        let store: Arc<dyn SettingsStore + Send + Sync> = Arc::new(MemorySettingsStore::new());
+
+        for index in 0..=MAX_SECRET_BINDING_APPROVALS_PER_USER {
+            let mut approval =
+                sample_approval("github_token", &format!("host-{index}.example.com"));
+            approval.approved_at = Utc::now() + chrono::Duration::seconds(index as i64);
+            grant_binding_approval(Some(store.as_ref()), "alice", approval)
+                .await
+                .expect("grant approval");
+        }
+
+        let approvals = list_binding_approvals(Some(store.as_ref()), "alice")
+            .await
+            .expect("list approvals");
+        assert_eq!(approvals.len(), MAX_SECRET_BINDING_APPROVALS_PER_USER);
+        assert!(
+            approvals
+                .iter()
+                .all(|approval| approval.host != "host-0.example.com"),
+            "oldest approval should be trimmed once the per-user cap is exceeded"
         );
     }
 

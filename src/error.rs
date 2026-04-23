@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::secrets::SecretBindingApproval;
+
 /// Top-level error type for the agent.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -152,6 +154,12 @@ pub enum ToolError {
 
     #[error("Tool {name} execution failed: {reason}")]
     ExecutionFailed { name: String, reason: String },
+
+    #[error("Tool {name} requires secret binding approval")]
+    SecretBindingApprovalRequired {
+        name: String,
+        approval: Box<SecretBindingApproval>,
+    },
 
     #[error("Tool {name} timed out after {timeout:?}")]
     Timeout { name: String, timeout: Duration },
