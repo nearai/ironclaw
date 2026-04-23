@@ -570,63 +570,164 @@ function loadMissions() {
   currentMissionId = null;
   currentMissionData = null;
   currentEngineThreadDetail = null;
-  const detail = document.getElementById('mission-detail');
+  var detail = document.getElementById('mission-detail');
   if (detail) detail.style.display = 'none';
-  const table = document.getElementById('missions-table');
-  if (table) table.style.display = '';
+  var body = document.getElementById('missions-body');
+  if (body) body.style.display = '';
 
   Promise.all([
     apiFetch('/api/engine/missions/summary'),
     apiFetch('/api/engine/missions'),
-  ]).then(([summary, listData]) => {
+    apiFetch('/api/engine/threads').catch(function() { return { threads: [] }; }),
+  ]).then(function(results) {
+    var summary = results[0];
+    var listData = results[1];
+    var threadData = results[2];
     currentMissionList = listData.missions || [];
     activeWorkStore.rememberMissions(currentMissionList);
     renderMissionsSummary(summary);
     renderMissionsList(currentMissionList);
+    renderMissionsActivity(threadData.threads || []);
     enrichMissionProgress(currentMissionList);
-  }).catch(() => {});
+  }).catch(function() {});
 }
 
 function renderMissionsSummary(s) {
-  document.getElementById('missions-summary').innerHTML = ''
-    + summaryCard(I18n.t('missions.summary.total'), s.total, '')
-    + summaryCard(I18n.t('missions.summary.active'), s.active, 'active')
-    + summaryCard(I18n.t('missions.summary.paused'), s.paused, '')
-    + summaryCard(I18n.t('missions.summary.completed'), s.completed, 'completed')
-    + summaryCard(I18n.t('missions.summary.failed'), s.failed, 'failed');
+  document.getElementById('missions-summary').innerHTML =
+    '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.total')) + '</span><span class="ms-summary-value">' + s.total + '</span></div>'
+    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.active')) + '</span><span class="ms-summary-value green">' + s.active + '</span></div>'
+    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.paused')) + '</span><span class="ms-summary-value amber">' + s.paused + '</span></div>'
+    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.completed')) + '</span><span class="ms-summary-value blue">' + s.completed + '</span></div>'
+    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.failed')) + '</span><span class="ms-summary-value red">' + s.failed + '</span></div>';
 }
 
 function renderMissionsList(missions) {
-  const tbody = document.getElementById('missions-tbody');
-  const empty = document.getElementById('missions-empty');
+  var col = document.getElementById('missions-list-col');
+  var empty = document.getElementById('missions-empty');
+  var body = document.getElementById('missions-body');
 
   if (!missions || missions.length === 0) {
-    tbody.innerHTML = '';
+    if (col) col.innerHTML = '';
+    if (body) body.style.display = 'none';
     empty.style.display = 'block';
     return;
   }
 
   empty.style.display = 'none';
-  tbody.innerHTML = missions.map((m) => {
-    const statusClass = m.status === 'Active' ? 'in_progress'
-      : m.status === 'Completed' ? 'completed'
-      : m.status === 'Paused' ? 'pending'
-      : 'failed';
+  if (body) body.style.display = '';
 
-    return '<tr class="mission-row" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
-      + '<td>' + escapeHtml(m.name) + '</td>'
-      + '<td class="truncate">' + escapeHtml(m.goal) + '</td>'
-      + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
-      + '<td>' + m.thread_count + '</td>'
-      + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
-      + '<td>' + renderMissionProgressCell(m.id) + '</td>'
-      + '<td>'
-      + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ' : '')
-      + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ' : '')
-      + '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fire')) + '</button>'
-      + '</td>'
-      + '</tr>';
-  }).join('');
+  var groups = { Active: [], Paused: [], Completed: [], Failed: [] };
+  missions.forEach(function(m) {
+    if (groups[m.status]) groups[m.status].push(m);
+    else groups.Active.push(m);
+  });
+
+  var html = '';
+  var order = ['Active', 'Paused', 'Completed', 'Failed'];
+  var labels = {
+    Active: I18n.t('missions.summary.active'),
+    Paused: I18n.t('missions.summary.paused'),
+    Completed: I18n.t('missions.summary.completed'),
+    Failed: I18n.t('missions.summary.failed')
+  };
+
+  order.forEach(function(status) {
+    var list = groups[status];
+    if (!list.length) return;
+
+    html += '<div class="ms-section-title">' + escapeHtml(labels[status]) + '</div>';
+    list.forEach(function(m) {
+      var badgeClass = m.status === 'Active' ? 'in_progress'
+        : m.status === 'Completed' ? 'completed'
+        : m.status === 'Paused' ? 'pending' : 'failed';
+      var progress = activeWorkStore.getMissionProgress(m.id);
+      var liveHtml = progress
+        ? '<span class="ms-live-tag"><span class="ms-live-dot"></span> Running</span>'
+        : '';
+
+      html += '<div class="ms-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
+        + '<div class="ms-card-body">'
+        + '<div class="ms-card-head">'
+        + '<span class="ms-card-name">' + escapeHtml(m.name) + '</span>'
+        + '<span class="badge ' + badgeClass + '">' + escapeHtml(m.status) + '</span>'
+        + '</div>'
+        + '<div class="ms-card-goal">' + escapeHtml(m.goal) + '</div>'
+        + '<div class="ms-card-meta">'
+        + '<span>' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</span>'
+        + '<span>' + m.thread_count + ' threads</span>'
+        + '</div>'
+        + '</div>'
+        + '<div class="ms-card-right">'
+        + liveHtml
+        + '<div><div class="ms-card-threads-num">' + m.thread_count + '</div>'
+        + '<div class="ms-card-threads-label">threads</div></div>'
+        + '</div>'
+        + '</div>';
+    });
+  });
+
+  col.innerHTML = html;
+}
+
+function renderMissionsActivity(threads) {
+  var col = document.getElementById('missions-activity-col');
+  if (!col) return;
+  if (!threads || !threads.length) {
+    col.innerHTML = '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.recentActivity')) + '</div>'
+      + '<div style="color:var(--text-dimmed);font-size:var(--text-sm);padding:12px 14px;">No recent activity.</div>';
+    return;
+  }
+
+  var sorted = threads.slice().sort(function(a, b) {
+    return new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at);
+  });
+
+  var html = '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.recentActivity')) + '</div>';
+  var lastDay = '';
+
+  sorted.slice(0, 20).forEach(function(t) {
+    var d = new Date(t.updated_at || t.created_at);
+    var now = new Date();
+    var dayLabel = '';
+    if (d.toDateString() === now.toDateString()) dayLabel = 'Today';
+    else {
+      var yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      if (d.toDateString() === yesterday.toDateString()) dayLabel = 'Yesterday';
+      else dayLabel = d.toLocaleDateString();
+    }
+    if (dayLabel !== lastDay) {
+      html += '<div class="ms-day-divider">' + escapeHtml(dayLabel) + '</div>';
+      lastDay = dayLabel;
+    }
+
+    var dotClass = (t.state === 'Running') ? 'running'
+      : (t.state === 'Done' || t.state === 'Completed') ? 'done'
+      : (t.state === 'Failed') ? 'failed' : 'done';
+    var label = t.title || t.goal || ('Thread ' + (t.id || '').slice(0, 8));
+    var costStr = t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(2) : '';
+    var durationStr = '';
+    if (t.completed_at && t.created_at) {
+      var secs = Math.round((new Date(t.completed_at) - new Date(t.created_at)) / 1000);
+      if (secs < 60) durationStr = secs + 's';
+      else durationStr = Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+    }
+
+    html += '<div class="ms-act-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+      + '<div class="ms-act-dot ' + dotClass + '"></div>'
+      + '<div class="ms-act-content">'
+      + '<div class="ms-act-label">' + escapeHtml(label) + '</div>'
+      + (t.state === 'Running' ? '<div class="ms-act-sub">In progress</div>' : '')
+      + (durationStr || costStr ? '<div class="ms-act-metrics">'
+        + (durationStr ? '<span>' + escapeHtml(durationStr) + '</span>' : '')
+        + (costStr ? '<span>' + escapeHtml(costStr) + '</span>' : '')
+        + '</div>' : '')
+      + '</div>'
+      + '<span class="ms-act-time">' + escapeHtml(formatRelativeTime(t.updated_at || t.created_at)) + '</span>'
+      + '</div>';
+  });
+
+  col.innerHTML = html;
 }
 
 function openMissionDetail(id) {
@@ -654,95 +755,95 @@ function closeMissionDetail() {
 }
 
 function renderMissionDetail(m) {
-  const table = document.getElementById('missions-table');
-  if (table) table.style.display = 'none';
+  var body = document.getElementById('missions-body');
+  if (body) body.style.display = 'none';
   document.getElementById('missions-empty').style.display = 'none';
 
-  const detail = document.getElementById('mission-detail');
+  var detail = document.getElementById('mission-detail');
   detail.style.display = 'block';
 
-  const statusClass = m.status === 'Active' ? 'in_progress'
+  var badgeClass = m.status === 'Active' ? 'in_progress'
     : m.status === 'Completed' ? 'completed'
-    : m.status === 'Paused' ? 'pending'
-    : 'failed';
+    : m.status === 'Paused' ? 'pending' : 'failed';
+  var progress = activeWorkStore.getMissionProgress(m.id);
 
-  let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" data-action="close-mission-detail">' + escapeHtml(I18n.t('common.back')) + '</button>'
-    + '<h2>' + escapeHtml(m.name) + '</h2>'
-    + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span>'
-    + '</div>';
+  var html = '<button class="ms-detail-back" data-action="close-mission-detail">&larr; ' + escapeHtml(I18n.t('common.back')) + '</button>';
 
-  // Goal — full-width markdown block
-  html += '<div class="job-description"><h3>Goal</h3>'
-    + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+  html += '<div class="ms-detail-header">'
+    + '<div class="ms-detail-header-left">'
+    + '<div class="ms-detail-title-row">'
+    + '<span class="ms-detail-title">' + escapeHtml(m.name) + '</span>'
+    + '<span class="badge ' + badgeClass + '">' + escapeHtml(m.status) + '</span>'
+    + (progress ? '<span class="ms-live-tag"><span class="ms-live-dot"></span> Running</span>' : '')
+    + '</div>'
+    + '<div class="ms-detail-goal">' + renderMarkdown(m.goal) + '</div>'
+    + '</div>'
+    + '<div class="ms-detail-actions">';
 
-  html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
-    + metaItem(I18n.t('missions.status'), m.status)
-    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
-    + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
-    + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
-    + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
+  if (m.status === 'Active') {
+    html += '<button class="ms-btn primary" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fireNow')) + '</button>';
+    html += '<button class="ms-btn danger" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button>';
+  } else if (m.status === 'Paused') {
+    html += '<button class="ms-btn primary" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button>';
+    html += '<button class="ms-btn" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fireOnce')) + '</button>';
+  } else if (m.status === 'Failed') {
+    html += '<button class="ms-btn primary" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.retry')) + '</button>';
+  }
+  html += '</div></div>';
+
+  html += '<div class="ms-meta-grid">'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.cadence')) + '</div><div class="ms-meta-value">' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.threadsToday')) + '</div><div class="ms-meta-value mono">' + (m.threads_today || 0) + ' / ' + (m.max_threads_per_day || '\u221E') + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.totalThreads')) + '</div><div class="ms-meta-value mono">' + m.thread_count + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.nextFire')) + '</div><div class="ms-meta-value">' + (m.next_fire_at ? formatDate(m.next_fire_at) : (m.status === 'Paused' ? '\u2014 paused' : '\u2014')) + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.created')) + '</div><div class="ms-meta-value">' + formatDate(m.created_at) + '</div></div>'
     + '</div>';
 
   if (m.current_focus) {
-    html += '<div class="job-description"><h3>Current Focus</h3>'
-      + '<div class="job-description-body">' + renderMarkdown(m.current_focus) + '</div></div>';
+    html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.currentFocus')) + '</div>'
+      + '<div class="ms-content-block"><p>' + renderMarkdown(m.current_focus) + '</p></div>';
   }
 
   if (m.success_criteria) {
-    html += '<div class="job-description"><h3>Success Criteria</h3>'
-      + '<div class="job-description-body">' + renderMarkdown(m.success_criteria) + '</div></div>';
+    html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.successCriteria')) + '</div>'
+      + '<div class="ms-content-block"><p>' + renderMarkdown(m.success_criteria) + '</p></div>';
   }
 
   if (m.notify_channels && m.notify_channels.length > 0) {
-    html += '<div class="job-description"><h3>Notify Channels</h3>'
-      + '<div class="job-description-body">' + m.notify_channels.map(escapeHtml).join(', ') + '</div></div>';
+    html += '<div class="ms-section-title">Notify Channels</div>'
+      + '<div class="ms-content-block"><p>' + m.notify_channels.map(escapeHtml).join(', ') + '</p></div>';
   }
 
   if (m.approach_history && m.approach_history.length > 0) {
-    html += '<div class="job-description"><h3>Approach History</h3>';
-    m.approach_history.forEach((a, i) => {
-      html += '<div class="job-description-body" style="margin-bottom:8px">'
-        + '<strong>Run ' + (i + 1) + '</strong><br>'
-        + renderMarkdown(a) + '</div>';
+    html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.approachHistory')) + '</div>'
+      + '<div class="ms-approach-list">';
+    m.approach_history.forEach(function(a, i) {
+      var isLatest = i === m.approach_history.length - 1;
+      html += '<div class="ms-approach-entry' + (isLatest ? ' latest' : '') + '">'
+        + '<div class="ms-approach-run"><span>Run ' + (i + 1) + '</span></div>'
+        + '<div class="ms-approach-body">' + renderMarkdown(a) + '</div>'
+        + '</div>';
     });
     html += '</div>';
   }
 
   if (m.threads && m.threads.length > 0) {
-    html += '<div class="job-description"><h3>Spawned Threads</h3>'
-      + '<table class="missions-table"><thead><tr>'
-      + '<th>Goal</th><th>Type</th><th>State</th><th>' + escapeHtml(I18n.t('missions.progress')) + '</th><th>Steps</th><th>Tokens</th><th>Created</th>'
-      + '</tr></thead><tbody>';
-    m.threads.forEach((t) => {
-      var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+    html += '<div class="ms-section-title">' + escapeHtml(I18n.t('missions.spawnedThreads')) + '</div>'
+      + '<div class="ms-thread-list">';
+    m.threads.forEach(function(t) {
+      var tState = (t.state === 'Done' || t.state === 'Completed') ? 'done'
         : t.state === 'Failed' ? 'failed'
-        : t.state === 'Running' ? 'in_progress'
-        : 'pending';
-      html += '<tr class="mission-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
-        + '<td class="truncate">' + escapeHtml(t.goal) + '</td>'
-        + '<td>' + escapeHtml(t.thread_type) + '</td>'
-        + '<td><span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span></td>'
-        + '<td>' + renderMissionThreadProgress(t.id) + '</td>'
-        + '<td>' + t.step_count + '</td>'
-        + '<td>' + t.total_tokens.toLocaleString() + '</td>'
-        + '<td>' + formatDate(t.created_at) + '</td>'
-        + '</tr>';
+        : t.state === 'Running' ? 'running' : 'pending';
+      var costStr = t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(2) : '';
+      html += '<div class="ms-thread-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+        + '<span class="ms-thread-state ' + tState + '">' + escapeHtml(t.state) + '</span>'
+        + '<span class="ms-thread-label">' + escapeHtml(t.goal) + '</span>'
+        + '<span class="ms-thread-cost">' + escapeHtml(costStr) + '</span>'
+        + '<span class="ms-thread-time">' + formatRelativeTime(t.created_at) + '</span>'
+        + '</div>';
     });
-    html += '</tbody></table></div>';
+    html += '</div>';
   }
-
-  // Action buttons
-  html += '<div style="margin-top:16px;">';
-  if (m.status === 'Active') {
-    html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ';
-  }
-  if (m.status === 'Paused') {
-    html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ';
-  }
-  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.fireNow')) + '</button>';
-  html += '</div>';
 
   detail.innerHTML = html;
 }
@@ -756,30 +857,31 @@ function renderEngineThreadDetail(t) {
     : 'pending';
   var progress = activeWorkStore.getThreadProgress(t.id);
 
-  var html = '<div class="job-detail-header">'
-    + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
-    + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+  var html = '<button class="ms-detail-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>';
+
+  html += '<div class="ms-detail-header">'
+    + '<div class="ms-detail-header-left">'
+    + '<div class="ms-detail-title-row">'
+    + '<span class="ms-detail-title">' + escapeHtml(t.goal) + '</span>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
-    + '</div>';
+    + '</div></div></div>';
 
-  html += '<div class="job-description mission-thread-progress" data-thread-progress-block-id="' + escapeHtml(t.id) + '"'
-    + (progress ? '' : ' hidden')
-    + '><h3>Current Progress</h3>'
-    + '<div class="job-description-body" data-thread-progress-text-id="' + escapeHtml(t.id) + '">' + escapeHtml(progress || '') + '</div></div>';
+  if (progress) {
+    html += '<div class="ms-content-block" data-thread-progress-block-id="' + escapeHtml(t.id) + '">'
+      + '<p data-thread-progress-text-id="' + escapeHtml(t.id) + '">' + escapeHtml(progress) + '</p></div>';
+  }
 
-  html += '<div class="job-meta-grid">'
-    + metaItem(I18n.t('missions.threadId'), t.id)
-    + metaItem(I18n.t('missions.type'), t.thread_type)
-    + metaItem(I18n.t('missions.steps'), t.step_count)
-    + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
-    + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
-    + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
-    + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
-    + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
+  html += '<div class="ms-meta-grid">'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.type')) + '</div><div class="ms-meta-value">' + escapeHtml(t.thread_type || '-') + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.steps')) + '</div><div class="ms-meta-value mono">' + t.step_count + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.tokens')) + '</div><div class="ms-meta-value mono">' + t.total_tokens.toLocaleString() + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.cost')) + '</div><div class="ms-meta-value mono">' + (t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-') + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('missions.created')) + '</div><div class="ms-meta-value">' + formatDate(t.created_at) + '</div></div>'
+    + '<div class="ms-meta-cell"><div class="ms-meta-label">' + escapeHtml(I18n.t('jobs.completedLabel')) + '</div><div class="ms-meta-value">' + (t.completed_at ? formatDate(t.completed_at) : '-') + '</div></div>'
     + '</div>';
 
   if (t.messages && t.messages.length > 0) {
-    html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+    html += '<div class="ms-section-title">Messages (' + t.messages.length + ')</div>';
     t.messages.forEach(function(msg) {
       var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
       html += '<div class="thread-message thread-msg-' + roleClass + '">'
@@ -787,7 +889,6 @@ function renderEngineThreadDetail(t) {
         + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
         + '</div>';
     });
-    html += '</div>';
   }
 
   detail.innerHTML = html;

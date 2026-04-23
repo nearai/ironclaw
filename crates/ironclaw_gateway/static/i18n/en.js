@@ -879,6 +879,16 @@ I18n.register('en', {
   'missions.pauseFailed': 'Pause failed: {message}',
   'missions.resumed': 'Mission resumed',
   'missions.resumeFailed': 'Resume failed: {message}',
+  'missions.successCriteria': 'Success Criteria',
+  'missions.currentFocus': 'Current Focus',
+  'missions.approachHistory': 'Approach History',
+  'missions.recentActivity': 'Recent Activity',
+  'missions.spawnedThreads': 'Spawned Threads',
+  'missions.cooldown': 'Cooldown',
+  'missions.project': 'Project',
+  'missions.retry': 'Retry',
+  'missions.fireOnce': 'Fire Once',
+  'missions.lastFire': 'Last Fire',
 
   // TEE (dynamic)
   'tee.reportCopied': 'Attestation report copied',
