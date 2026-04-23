@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.head_ref || github.ref }}
+  group: test-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -337,9 +337,7 @@ jobs:
   windows-build:
     name: Windows Build (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: >
-      github.event_name != 'pull_request' ||
-      (github.base_ref != 'main' && needs.changes.outputs.has_platform_build_risk == 'true')
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_platform_build_risk == 'true'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -363,9 +361,7 @@ jobs:
   wasm-wit-compat:
     name: WASM WIT Compatibility
     needs: changes
-    if: >
-      github.event_name != 'pull_request' ||
-      (github.base_ref != 'main' && needs.changes.outputs.has_wasm_abi_risk == 'true')
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_wasm_abi_risk == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -394,7 +390,7 @@ jobs:
   bench-compile:
     name: Benchmark Compilation
     needs: changes
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -414,9 +410,7 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: >
-      github.event_name != 'pull_request' ||
-      (github.base_ref != 'main' && needs.changes.outputs.has_platform_build_risk == 'true')
+    if: github.event_name != 'pull_request' || needs.changes.outputs.has_platform_build_risk == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -430,7 +424,10 @@ jobs:
   version-check:
     name: Version Bump Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    needs: changes
+    if: >
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
       pull-requests: read
@@ -570,22 +567,22 @@ jobs:
             require_success "slack-tests" "${{ needs.slack-tests.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || ( "${{ github.base_ref }}" != "main" && "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ) ]]; then
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ]]; then
             require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || ( "${{ github.base_ref }}" != "main" && "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ) ]]; then
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ]]; then
             require_success "docker-build" "${{ needs.docker-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || ( "${{ github.base_ref }}" != "main" && "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ) ]]; then
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ]]; then
             require_success "windows-build" "${{ needs.windows-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" ]]; then
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
             require_success "bench-compile" "${{ needs.bench-compile.result }}"
           fi
 
-          if [[ "$event" == "pull_request" || "$event" == "merge_group" ]]; then
+          if [[ "$event" == "pull_request" || "$event" == "merge_group" ]] && [[ "${{ needs.changes.outputs.docs_only }}" != "true" ]]; then
             require_success "version-check" "${{ needs.version-check.result }}"
           fi
