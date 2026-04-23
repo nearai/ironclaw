@@ -31,6 +31,20 @@ struct RuntimeCheckpoint {
 }
 
 impl RuntimeCheckpoint {
+    fn has_working_messages_system_prompt(&self) -> bool {
+        self.persisted_state
+            .get("working_messages")
+            .and_then(|value| value.as_array())
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    let role = message.get("role").and_then(|value| value.as_str());
+                    let content = message.get("content").and_then(|value| value.as_str());
+                    matches!(role, Some("System" | "system"))
+                        && content.is_some_and(crate::executor::prompt::is_codeact_system_prompt)
+                })
+            })
+    }
+
     fn update_working_messages_system_prompt(&mut self, system_prompt: &str) -> bool {
         let Some(messages) = self
             .persisted_state
@@ -212,9 +226,23 @@ impl ExecutionLoop {
         self.thread.updated_at = chrono::Utc::now();
     }
 
+    fn has_engine_owned_system_prompt(&self, checkpoint: &RuntimeCheckpoint) -> bool {
+        let thread_has_prompt = |messages: &[crate::types::message::ThreadMessage]| {
+            messages.iter().any(|message| {
+                message.role == crate::types::message::MessageRole::System
+                    && crate::executor::prompt::is_codeact_system_prompt(&message.content)
+            })
+        };
+
+        thread_has_prompt(&self.thread.messages)
+            || thread_has_prompt(&self.thread.internal_messages)
+            || checkpoint.has_working_messages_system_prompt()
+    }
+
     async fn refresh_system_prompt(
         &mut self,
         system_docs: &[crate::types::memory::MemoryDoc],
+        system_docs_loaded: bool,
         checkpoint: &mut RuntimeCheckpoint,
     ) {
         let active_leases = self.leases.active_for_thread(self.thread.id).await;
@@ -223,11 +251,12 @@ impl ExecutionLoop {
             StepId::new(),
             None,
         );
-        let capabilities = match self
+        let capabilities_result = self
             .effects
             .available_capabilities(&active_leases, &prompt_context)
-            .await
-        {
+            .await;
+        let capabilities_loaded = capabilities_result.is_ok();
+        let capabilities = match capabilities_result {
             Ok(capabilities) => capabilities,
             Err(error) => {
                 debug!(
@@ -237,6 +266,19 @@ impl ExecutionLoop {
                 Vec::new()
             }
         };
+
+        if (!system_docs_loaded || !capabilities_loaded)
+            && self.has_engine_owned_system_prompt(checkpoint)
+        {
+            debug!(
+                thread_id = %self.thread.id,
+                system_docs_loaded,
+                capabilities_loaded,
+                "skipping system prompt refresh because prompt inputs are incomplete"
+            );
+            return;
+        }
+
         let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
             &[],
             &capabilities,
@@ -317,19 +359,19 @@ impl ExecutionLoop {
 
         // Pre-fetch shared memory docs once — used by both prompt overlay and
         // orchestrator loading, avoiding a duplicate Store query.
-        let system_docs = if let Some(store) = self.store.as_ref() {
+        let (system_docs, system_docs_loaded) = if let Some(store) = self.store.as_ref() {
             match store.list_shared_memory_docs(self.thread.project_id).await {
-                Ok(docs) => docs,
+                Ok(docs) => (docs, true),
                 Err(e) => {
                     debug!("failed to load shared docs for orchestrator: {e}");
-                    Vec::new()
+                    (Vec::new(), false)
                 }
             }
         } else {
-            Vec::new()
+            (Vec::new(), true)
         };
 
-        self.refresh_system_prompt(&system_docs, &mut checkpoint)
+        self.refresh_system_prompt(&system_docs, system_docs_loaded, &mut checkpoint)
             .await;
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
@@ -653,6 +695,28 @@ mod tests {
         }
     }
 
+    fn legacy_prompt_with_callable_tool_inventory() -> String {
+        concat!(
+            "You are an AI assistant with a Python REPL environment.\n\n",
+            "Legacy prompt instructions.\n\n",
+            "```repl\nprint('hi')\n```\n\n",
+            "## Available tools (call as Python functions)\n\n",
+            "- `test_tool()` — A test tool\n\n",
+            "## Available capabilities (background status)\n\n",
+            "- `telegram` [channel] — ready_scoped (Telegram). Usable through message. Telegram notifications\n\n",
+            "## Strategy\n",
+            "Legacy strategy text.\n",
+        )
+        .to_string()
+    }
+
+    fn legacy_prompt_with_step_zero_suffix() -> String {
+        format!(
+            "{}\n\n## Prior Knowledge (from completed threads)\n\n### [LESSON] Use http\n\n<skill name=\"github\" version=\"1\">\nGitHub API Skill\n</skill>\n\nThe user explicitly requested slash skill(s) that are not installed or were not found: /missing.",
+            legacy_prompt_with_callable_tool_inventory()
+        )
+    }
+
     async fn make_loop(
         llm_responses: Vec<LlmOutput>,
         effect_results: Vec<Result<ActionResult, EngineError>>,
@@ -881,22 +945,8 @@ mod tests {
             }
         }
 
-        let bare_old_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
-            &[test_action()],
-            &[CapabilitySummary {
-                name: "telegram".into(),
-                display_name: Some("Telegram".into()),
-                kind: CapabilitySummaryKind::Channel,
-                status: CapabilityStatus::ReadyScoped,
-                description: Some("Telegram notifications".into()),
-                routing_hint: Some("Usable through message".into()),
-            }],
-            &[],
-            None,
-        );
-        let old_prompt = format!(
-            "{bare_old_prompt}\n\n## Prior Knowledge (from completed threads)\n\n### [LESSON] Use http\n\n<skill name=\"github\" version=\"1\">\nGitHub API Skill\n</skill>\n\nThe user explicitly requested slash skill(s) that are not installed or were not found: /missing."
-        );
+        let old_prompt = legacy_prompt_with_step_zero_suffix();
+        assert!(old_prompt.contains("## Available tools (call as Python functions)"));
 
         let project_id = ProjectId::new();
         let mut thread = Thread::new(
@@ -978,6 +1028,153 @@ mod tests {
                 .filter(|message| { message.role == crate::types::message::MessageRole::System })
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_existing_resume_prompt_when_capabilities_fail() {
+        struct FailingRefreshEffects;
+
+        #[async_trait::async_trait]
+        impl EffectExecutor for FailingRefreshEffects {
+            async fn execute_action(
+                &self,
+                _action_name: &str,
+                _parameters: serde_json::Value,
+                _lease: &CapabilityLease,
+                _context: &ThreadExecutionContext,
+            ) -> Result<ActionResult, EngineError> {
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: Duration::from_millis(1),
+                })
+            }
+
+            async fn available_actions(
+                &self,
+                _leases: &[CapabilityLease],
+                _context: &ThreadExecutionContext,
+            ) -> Result<Vec<ActionDef>, EngineError> {
+                Ok(vec![test_action()])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ThreadExecutionContext,
+            ) -> Result<Vec<CapabilitySummary>, EngineError> {
+                Err(EngineError::Effect {
+                    reason: "capabilities unavailable".into(),
+                })
+            }
+        }
+
+        let old_prompt = legacy_prompt_with_step_zero_suffix();
+
+        let project_id = ProjectId::new();
+        let mut thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_id,
+            "test-user",
+            ThreadConfig::default(),
+        );
+        thread.messages = vec![
+            ThreadMessage::system(old_prompt.clone()),
+            ThreadMessage::user("resume me"),
+        ];
+        thread.internal_messages = vec![
+            ThreadMessage::system(old_prompt.clone()),
+            ThreadMessage::user("resume me"),
+            ThreadMessage::assistant("working on it"),
+        ];
+
+        let mut checkpoint = RuntimeCheckpoint {
+            persisted_state: serde_json::json!({
+                "working_messages": [
+                    {"role": "System", "content": old_prompt.clone()},
+                    {"role": "User", "content": "resume me"},
+                    {"role": "Assistant", "content": "working on it"},
+                ]
+            }),
+        };
+
+        let llm = Arc::new(MockLlm::new(vec![text_response("done")]));
+        let effects: Arc<dyn EffectExecutor> = Arc::new(FailingRefreshEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
+
+        let mut exec =
+            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+
+        exec.refresh_system_prompt(&[], true, &mut checkpoint).await;
+        assert_eq!(exec.thread.messages[0].content, old_prompt);
+        assert_eq!(exec.thread.internal_messages[0].content, old_prompt);
+        assert_eq!(
+            checkpoint.persisted_state["working_messages"][0]["content"]
+                .as_str()
+                .unwrap(),
+            old_prompt
+        );
+
+        let mut thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_id,
+            "test-user",
+            ThreadConfig::default(),
+        );
+        thread.messages = vec![
+            ThreadMessage::system(old_prompt.clone()),
+            ThreadMessage::user("resume me"),
+        ];
+        thread.internal_messages = vec![
+            ThreadMessage::system(old_prompt.clone()),
+            ThreadMessage::user("resume me"),
+            ThreadMessage::assistant("working on it"),
+        ];
+
+        let mut checkpoint = RuntimeCheckpoint {
+            persisted_state: serde_json::json!({
+                "working_messages": [
+                    {"role": "System", "content": old_prompt.clone()},
+                    {"role": "User", "content": "resume me"},
+                    {"role": "Assistant", "content": "working on it"},
+                ]
+            }),
+        };
+
+        let llm = Arc::new(MockLlm::new(vec![text_response("done")]));
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action()], vec![]));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
+
+        let mut exec =
+            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+
+        exec.refresh_system_prompt(&[], false, &mut checkpoint)
+            .await;
+        assert_eq!(exec.thread.messages[0].content, old_prompt);
+        assert_eq!(exec.thread.internal_messages[0].content, old_prompt);
+        assert_eq!(
+            checkpoint.persisted_state["working_messages"][0]["content"]
+                .as_str()
+                .unwrap(),
+            old_prompt
         );
     }
 
