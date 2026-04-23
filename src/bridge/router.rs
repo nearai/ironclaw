@@ -3793,6 +3793,15 @@ async fn await_thread_outcome(
     let metadata = &message.metadata;
     let sse = state.sse.as_ref();
     let tid_str = thread_id.to_string();
+    let baseline_event_count = state
+        .store
+        .load_thread(thread_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|thread| thread.events.len())
+        .unwrap_or(0);
+    let mut forwarded_event_count = 0usize;
 
     // Safety timeout: if the thread doesn't finish within 5 minutes,
     // break out to avoid hanging the user session forever (e.g. after
@@ -3804,6 +3813,7 @@ async fn await_thread_outcome(
             event = event_rx.recv() => {
                 match event {
                     Ok(ref evt) if evt.thread_id == thread_id => {
+                        forwarded_event_count += 1;
                         forward_event_to_channel(evt, channels, channel_name, metadata).await;
                         if let Some(sse) = sse {
                             for app_event in thread_event_to_app_events(evt, &tid_str) {
@@ -3841,6 +3851,21 @@ async fn await_thread_outcome(
         .record_thread_outcome(conv_id, thread_id, &outcome)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
+
+    if let Ok(Some(thread)) = state.store.load_thread(thread_id).await {
+        for event in thread
+            .events
+            .iter()
+            .skip(baseline_event_count + forwarded_event_count)
+        {
+            forward_event_to_channel(event, channels, channel_name, metadata).await;
+            if let Some(sse) = sse {
+                for app_event in thread_event_to_app_events(event, &tid_str) {
+                    sse.broadcast_for_user(&message.user_id, app_event);
+                }
+            }
+        }
+    }
 
     // Helper: write the outcome response to the v1 DB so the history API
     // shows it correctly for all outcomes that produce a response.
@@ -8119,6 +8144,130 @@ mod tests {
             extension_manager: None,
             project_root: resolve_project_root(),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_surfaces_typed_assistant_narrative_through_status_and_sse() {
+        struct NarrativeCodeLlm;
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NarrativeCodeLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Code {
+                        code: "FINAL('done')".into(),
+                        assistant_content: Some(
+                            ironclaw_engine::AssistantContent::UserVisibleNarrative(
+                                "Inspecting the page first...".into(),
+                            ),
+                        ),
+                    },
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "narrative-code"
+            }
+        }
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let sse = Arc::new(SseManager::new());
+            let mut event_stream = Box::pin(
+                sse.subscribe_raw(Some("alice".to_string()), false)
+                    .expect("subscribe raw"),
+            );
+
+            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(NarrativeCodeLlm);
+            let mut state = make_expected_test_state_with_llm(store.clone(), llm);
+            state.sse = Some(Arc::clone(&sse));
+            *lock.write().await = Some(state);
+
+            let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+            let message = IncomingMessage::new("web", "alice", "What do you see?");
+
+            let result = handle_with_engine(&agent, &message, &message.content)
+                .await
+                .expect("handle with engine");
+            assert!(matches!(result, BridgeOutcome::Respond(ref text) if text == "done"));
+
+            let statuses = statuses.lock().await.clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::Thinking(text) if text == "Inspecting the page first..."
+                )),
+                "expected caller-level status update for typed assistant narrative, got: {statuses:?}"
+            );
+
+            let thread_id = store
+                .threads
+                .read()
+                .await
+                .values()
+                .next()
+                .map(|thread| thread.id.to_string())
+                .expect("thread saved");
+
+            let mut saw_narrative = false;
+            let mut saw_response = false;
+            let mut observed_events = Vec::new();
+            for _ in 0..16 {
+                let next_event = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    event_stream.next(),
+                )
+                .await;
+                let Ok(Some(event)) = next_event else {
+                    break;
+                };
+
+                observed_events.push(format!("{event:?}"));
+                match event {
+                    AppEvent::Thinking { message, thread_id: event_thread_id }
+                        if message == "Inspecting the page first..."
+                            && event_thread_id.as_deref() == Some(thread_id.as_str()) =>
+                    {
+                        saw_narrative = true;
+                    }
+                    AppEvent::Response { content, thread_id: event_thread_id }
+                        if content == "done" && event_thread_id == thread_id =>
+                    {
+                        saw_response = true;
+                    }
+                    _ => {}
+                }
+
+                if saw_narrative && saw_response {
+                    break;
+                }
+            }
+
+            assert!(
+                saw_narrative,
+                "expected typed narrative Thinking SSE event, saw: {observed_events:?}"
+            );
+            assert!(
+                saw_response,
+                "expected final Response SSE event, saw: {observed_events:?}"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("typed assistant narrative caller-level test");
     }
 
     #[tokio::test]

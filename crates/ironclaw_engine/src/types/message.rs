@@ -12,6 +12,7 @@ use crate::types::step::{ActionCall, AssistantContent};
 
 /// Strongly-typed message identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MessageId(pub Uuid);
 
 impl MessageId {

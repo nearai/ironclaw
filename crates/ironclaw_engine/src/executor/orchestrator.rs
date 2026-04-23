@@ -952,10 +952,11 @@ async fn handle_execute_code_step(
                 // so the router/SSE layer does not need to guess status from
                 // transcript preview strings like "[stdout]" or "[code ...".
                 let had_output = !result.stdout.is_empty()
-                    || result.return_value != serde_json::Value::Null
-                    || result.action_results.iter().any(|r| {
-                        let out = r.output.as_str().unwrap_or("");
-                        !out.is_empty()
+                    || !result.return_value.is_null()
+                    || result.action_results.iter().any(|r| match &r.output {
+                        serde_json::Value::Null => false,
+                        serde_json::Value::String(text) => !text.is_empty(),
+                        _ => true,
                     });
                 let completed_event = ThreadEvent::new(
                     thread.id,
@@ -2612,7 +2613,12 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             "System" | "system" => ThreadMessage::system(content),
             "Assistant" | "assistant" => {
                 if let Some(calls) = action_calls {
-                    ThreadMessage::assistant_with_action_content(assistant_content, calls)
+                    if let Some(assistant_content) = assistant_content {
+                        ThreadMessage::assistant_with_action_content(Some(assistant_content), calls)
+                    } else {
+                        let legacy_content = (!content.is_empty()).then(|| content.to_string());
+                        ThreadMessage::assistant_with_actions(legacy_content, calls)
+                    }
                 } else if let Some(assistant_content) = assistant_content {
                     ThreadMessage::assistant_with_typed_content(assistant_content)
                 } else {
@@ -2644,6 +2650,34 @@ fn sync_runtime_state(thread: &mut Thread, state: Option<&serde_json::Value>) {
         .get("working_messages")
         .and_then(json_to_thread_messages)
     {
+        let previously_visible_narratives = thread
+            .internal_messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.assistant_content.as_ref(),
+                    Some(crate::types::step::AssistantContent::UserVisibleNarrative(
+                        _
+                    ))
+                )
+            })
+            .count();
+
+        for message in messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.assistant_content.as_ref(),
+                    Some(crate::types::step::AssistantContent::UserVisibleNarrative(
+                        _
+                    ))
+                )
+            })
+            .skip(previously_visible_narratives)
+        {
+            thread.add_message(message.clone());
+        }
+
         thread.internal_messages = messages;
         thread.updated_at = chrono::Utc::now();
     }
@@ -3912,6 +3946,39 @@ mod tests {
     }
 
     #[test]
+    fn json_to_thread_messages_preserves_legacy_assistant_content_when_action_calls_lack_typed_content()
+     {
+        let working_messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "Legacy bootstrap narrative",
+                "action_calls": [
+                    {
+                        "name": "web_fetch",
+                        "call_id": "call_fetch_1",
+                        "params": {"url": "https://example.com"}
+                    }
+                ]
+            }
+        ]);
+
+        let messages = json_to_thread_messages(&working_messages).expect("must parse");
+        assert_eq!(messages.len(), 1);
+
+        let assistant = &messages[0];
+        assert_eq!(assistant.content, "Legacy bootstrap narrative");
+        assert!(assistant.assistant_content.is_none());
+        assert_eq!(
+            assistant
+                .action_calls
+                .as_ref()
+                .expect("assistant action calls")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn python_json_to_action_calls_rejects_canonical_field_names() {
         // Sanity check: the parser is strict about Python field names.
         // If `default.py` ever changes the shape, the test must catch it.
@@ -4713,6 +4780,98 @@ FINAL(batch_error_count)
                 }
             )),
             "expected CodeExecutionCompleted event with had_output=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_code_step_counts_structured_action_output_as_output() {
+        struct JsonOutputEffects;
+
+        #[async_trait::async_trait]
+        impl EffectExecutor for JsonOutputEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &crate::types::capability::CapabilityLease,
+                _: &ThreadExecutionContext,
+            ) -> Result<crate::types::step::ActionResult, EngineError> {
+                Ok(crate::types::step::ActionResult {
+                    call_id: "call-json-1".to_string(),
+                    action_name: "json_tool".to_string(),
+                    output: serde_json::json!({"status": "ok"}),
+                    is_error: false,
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+
+            async fn available_actions(
+                &self,
+                _: &[crate::types::capability::CapabilityLease],
+            ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+                Ok(vec![crate::types::capability::ActionDef {
+                    name: "json_tool".to_string(),
+                    description: "Return structured JSON".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![crate::types::capability::EffectType::ReadLocal],
+                    requires_approval: false,
+                }])
+            }
+        }
+
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(JsonOutputEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution structured-output instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let args = &[
+            json_to_monty(&serde_json::json!("result = await json_tool()")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        assert!(
+            thread.events.iter().any(|e| matches!(
+                &e.kind,
+                EventKind::CodeExecutionCompleted {
+                    had_output: true,
+                    ..
+                }
+            )),
+            "expected CodeExecutionCompleted event with had_output=true for structured action output"
         );
     }
 
