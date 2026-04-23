@@ -357,16 +357,25 @@ fn messages_to_json(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
 }
 
 /// Serialize IronClaw [`ToolDefinition`]s into OpenAI Chat Completions JSON format.
+///
+/// Schemas are run through [`normalize_schema_strict`] so top-level
+/// `oneOf`/`anyOf`/`allOf`/`enum`/`not` (which OpenAI rejects with
+/// `invalid_function_parameters`) are flattened into a permissive object
+/// envelope. The non-streaming rig-based path normalizes via the same helper
+/// inside `RigAdapter::convert_tools`; this keeps the streaming path in sync.
 fn tools_to_json(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|t| {
+            let mut description = t.description.clone();
+            let parameters =
+                crate::llm::rig_adapter::normalize_schema_strict(&t.parameters, &mut description);
             serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
+                    "description": description,
+                    "parameters": parameters,
                 },
             })
         })
