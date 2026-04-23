@@ -1,7 +1,7 @@
 services:
   postgres:
-    # Pin a digest after first successful pull (see operator note below).
-    image: pgvector/pgvector:pg16@sha256:<REPLACE_WITH_FIRST_PULL_DIGEST>
+    # Digest pinned after first pull (Step 6).
+    image: pgvector/pgvector:pg16@sha256:7d400e340efb42f4d8c9c12c6427adb253f726881a9985d2a471bf0eed824dff
     container_name: flask-postgres
     restart: unless-stopped
     environment:
