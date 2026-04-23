@@ -25,7 +25,6 @@ use ironclaw_skills::SkillRegistry;
 use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::action_discovery::ActionDiscovery;
-use crate::bridge::action_inventory::ActionInventoryPlanner;
 use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
@@ -987,19 +986,18 @@ impl EffectBridgeAdapter {
         }
 
         if canonical_action_name == "tool_info" {
-            let inventory = context
+            let snapshot_result = context
                 .available_action_inventory_snapshot
-                .as_ref()
-                .cloned()
+                .as_deref()
+                .map(|inventory| ActionDiscovery::tool_info(&parameters, inventory))
                 .or_else(|| {
                     context
                         .available_actions_snapshot
-                        .as_ref()
-                        .cloned()
-                        .map(|actions| ActionInventory { inline: actions })
+                        .as_deref()
+                        .map(|actions| ActionDiscovery::tool_info_from_actions(&parameters, actions))
                 });
-            if let Some(inventory) = inventory {
-                match ActionDiscovery::tool_info(&parameters, &inventory) {
+            if let Some(snapshot_result) = snapshot_result {
+                match snapshot_result {
                     Ok(Some(output)) => {
                         return Ok(ActionResult {
                             call_id: context
@@ -1649,7 +1647,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        let candidates = ActionProjector::project_candidates(
+        let actions = ActionProjector::project_actions(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -1659,7 +1657,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         )
         .await?;
 
-        Ok(ActionInventoryPlanner::plan(candidates))
+        Ok(ActionInventory { inline: actions })
     }
 
     async fn available_capabilities(
@@ -2747,7 +2745,7 @@ mod tests {
     async fn tool_info_reads_action_inventory_snapshot() {
         let adapter = make_adapter();
         let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
-        ctx.available_action_inventory_snapshot = Some(ActionInventory {
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
             inline: vec![ActionDef {
                 name: "github_search".to_string(),
                 description: "Search GitHub".to_string(),
@@ -2771,7 +2769,7 @@ mod tests {
                     schema_override: None,
                 }),
             }],
-        });
+        }));
 
         let result = adapter
             .execute_action(

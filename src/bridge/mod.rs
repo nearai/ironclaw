@@ -5,7 +5,6 @@
 //! existing behavior is unchanged when the flag is off.
 
 mod action_discovery;
-mod action_inventory;
 mod action_projector;
 mod capability_projector;
 mod cost_guard_gate;
