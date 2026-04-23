@@ -578,6 +578,11 @@ pub trait SandboxStore: Send + Sync {
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
     async fn update_sandbox_job_mode(&self, id: Uuid, mode: &str) -> Result<(), DatabaseError>;
+    async fn update_sandbox_job_exposed_ports(
+        &self,
+        id: Uuid,
+        exposed_ports: &[crate::orchestrator::ExposedPort],
+    ) -> Result<(), DatabaseError>;
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError>;
     async fn save_job_event(
         &self,

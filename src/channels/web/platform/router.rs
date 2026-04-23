@@ -23,7 +23,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::header,
     middleware,
-    routing::{get, post, put},
+    routing::{any, get, post, put},
 };
 use tokio::sync::oneshot;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -32,8 +32,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::channels::web::auth::{CombinedAuthState, auth_middleware};
 use crate::channels::web::features::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
-    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
-    jobs_summary_handler,
+    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_proxy_handler,
+    jobs_restart_handler, jobs_summary_handler,
 };
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
@@ -197,6 +197,7 @@ pub async fn start_server(
         .route("/api/jobs/{id}/events", get(jobs_events_handler))
         .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
+        .route("/api/jobs/{id}/proxy/{*path}", any(jobs_proxy_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
         .route("/api/logs/level", get(logs_level_get_handler))

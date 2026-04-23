@@ -374,6 +374,9 @@ pub struct GatewayState {
     pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
+    /// Port resolver for the reverse proxy handler (thin interface over
+    /// the in-memory `ContainerHandle` port mappings).
+    pub port_resolver: Option<Arc<dyn crate::orchestrator::ContainerPortResolver>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
     /// Durable owner scope for persistence and unauthenticated callback flows.

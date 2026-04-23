@@ -477,6 +477,14 @@ impl SandboxStore for PgBackend {
         self.store.update_sandbox_job_mode(id, mode).await
     }
 
+    async fn update_sandbox_job_exposed_ports(
+        &self,
+        id: Uuid,
+        exposed_ports: &[crate::orchestrator::ExposedPort],
+    ) -> Result<(), DatabaseError> {
+        self.store.update_sandbox_job_exposed_ports(id, exposed_ports).await
+    }
+
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
         self.store.get_sandbox_job_mode(id).await
     }

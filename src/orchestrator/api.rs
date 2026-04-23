@@ -1179,6 +1179,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    exposed_ports: vec![],
                 },
             );
         }

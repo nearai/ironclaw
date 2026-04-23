@@ -13,28 +13,56 @@ use crate::db::SandboxStore;
 use crate::error::DatabaseError;
 use crate::history::{JobEventRecord, SandboxJobRecord, SandboxJobSummary, SandboxRestartParams};
 
+/// Parse the `exposed_ports` column value (JSON array of
+/// `{"container_port":N,"host_port":M}` objects). Returns an empty vec
+/// on NULL, empty string, or parse error.
+fn parse_exposed_ports_libsql(raw: Option<&str>) -> Vec<crate::orchestrator::ExposedPort> {
+    let Some(raw) = raw else {
+        return vec![];
+    };
+    if raw.trim().is_empty() {
+        return vec![];
+    }
+    match serde_json::from_str::<Vec<crate::orchestrator::ExposedPort>>(raw) {
+        Ok(ports) => ports,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse exposed_ports; treating as empty");
+            vec![]
+        }
+    }
+}
+
 #[async_trait]
 impl SandboxStore for LibSqlBackend {
     async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
-        let restart_params_json =
-            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+        let restart_params_json = SandboxRestartParams::from_record(
+                job.mcp_servers.as_deref(),
+                job.max_iterations,
+                &job.exposed_ports.iter().map(|p| p.container_port).collect::<Vec<_>>(),
+            )
                 .as_ref()
                 .and_then(SandboxRestartParams::to_json);
+        let exposed_ports_json = if job.exposed_ports.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&job.exposed_ports).ok()
+        };
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
                     id, title, description, status, source, user_id, project_dir,
                     success, failure_reason, created_at, started_at, completed_at,
-                    restart_params
-                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    restart_params, exposed_ports
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
                     success = excluded.success,
                     failure_reason = excluded.failure_reason,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at,
-                    restart_params = excluded.restart_params
+                    restart_params = excluded.restart_params,
+                    exposed_ports = excluded.exposed_ports
                 "#,
             params![
                 job.id.to_string(),
@@ -49,6 +77,7 @@ impl SandboxStore for LibSqlBackend {
                 fmt_opt_ts(&job.started_at),
                 fmt_opt_ts(&job.completed_at),
                 opt_text(restart_params_json.as_deref()),
+                opt_text(exposed_ports_json.as_deref()),
             ],
         )
         .await
@@ -63,7 +92,7 @@ impl SandboxStore for LibSqlBackend {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
                 "#,
                 params![id.to_string()],
@@ -79,6 +108,9 @@ impl SandboxStore for LibSqlBackend {
             Some(row) => {
                 let restart_params =
                     SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+                let exposed_ports = parse_exposed_ports_libsql(
+                    get_opt_text(&row, 12).as_deref(),
+                );
                 Ok(Some(SandboxJobRecord {
                     id: get_text(&row, 0).parse().unwrap_or_default(),
                     task: get_text(&row, 1),
@@ -93,6 +125,7 @@ impl SandboxStore for LibSqlBackend {
                     completed_at: get_opt_ts(&row, 10),
                     mcp_servers: restart_params.mcp_servers,
                     max_iterations: restart_params.max_iterations,
+                    exposed_ports,
                 }))
             }
             None => Ok(None),
@@ -106,7 +139,7 @@ impl SandboxStore for LibSqlBackend {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
                 "#,
@@ -123,6 +156,9 @@ impl SandboxStore for LibSqlBackend {
         {
             let restart_params =
                 SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+            let exposed_ports = parse_exposed_ports_libsql(
+                get_opt_text(&row, 12).as_deref(),
+            );
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
@@ -137,6 +173,7 @@ impl SandboxStore for LibSqlBackend {
                 completed_at: get_opt_ts(&row, 10),
                 mcp_servers: restart_params.mcp_servers,
                 max_iterations: restart_params.max_iterations,
+                exposed_ports,
             });
         }
         Ok(jobs)
@@ -239,7 +276,7 @@ impl SandboxStore for LibSqlBackend {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
-                       restart_params
+                       restart_params, exposed_ports
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
                 ORDER BY created_at DESC
                 "#,
@@ -256,6 +293,9 @@ impl SandboxStore for LibSqlBackend {
         {
             let restart_params =
                 SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+            let exposed_ports = parse_exposed_ports_libsql(
+                get_opt_text(&row, 12).as_deref(),
+            );
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
@@ -270,6 +310,7 @@ impl SandboxStore for LibSqlBackend {
                 completed_at: get_opt_ts(&row, 10),
                 mcp_servers: restart_params.mcp_servers,
                 max_iterations: restart_params.max_iterations,
+                exposed_ports,
             });
         }
         Ok(jobs)
@@ -334,6 +375,26 @@ impl SandboxStore for LibSqlBackend {
         conn.execute(
             "UPDATE agent_jobs SET job_mode = ?2 WHERE id = ?1",
             params![id.to_string(), mode],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_sandbox_job_exposed_ports(
+        &self,
+        id: Uuid,
+        exposed_ports: &[crate::orchestrator::ExposedPort],
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let json = if exposed_ports.is_empty() {
+            None
+        } else {
+            serde_json::to_string(exposed_ports).ok()
+        };
+        conn.execute(
+            "UPDATE agent_jobs SET exposed_ports = ?2 WHERE id = ?1",
+            params![id.to_string(), opt_text(json.as_deref())],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;

@@ -279,6 +279,7 @@ mod tests {
             store: Some(db),
             settings_cache: None,
             job_manager: None,
+            port_resolver: None,
             prompt_queue: None,
             scheduler: None,
             owner_id: "owner".to_string(),
