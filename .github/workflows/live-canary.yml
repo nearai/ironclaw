@@ -68,7 +68,11 @@ jobs:
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
-    runs-on: ubuntu-latest
+    # Self-hosted runner to escape GH 2-vCPU ubuntu-latest budget starvation
+    # on the multi-user browser flow (test_mcp_same_server_multi_user_via_browser).
+    # Same runner that private-oauth uses. If capacity becomes an issue, we
+    # can fan out to more self-hosted workers.
+    runs-on: [self-hosted, ironclaw-live]
     timeout-minutes: 60
     env:
       LANE: auth-smoke
