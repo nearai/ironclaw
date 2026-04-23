@@ -140,14 +140,11 @@ pub(crate) fn mission_capability_actions() -> Vec<ActionDef> {
                     "cadence": {"type": "string", "description": "New cadence: manual, cron, event:<channel>:<pattern>, or webhook:<path>"},
                     "timezone": {"type": "string", "description": "IANA timezone for cron scheduling"},
                     "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to notify with results"},
-                    "project_id": {"type": "string", "description": "Project ID to move the mission into"},
                     "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
                     "max_concurrent": {"type": "integer", "minimum": 0, "description": "Maximum simultaneous runs"},
                     "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Duplicate event suppression window"},
                     "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget"},
-                    "success_criteria": {"type": "string", "description": "Completion criteria"},
-                    "paused": {"type": "boolean", "description": "Whether the mission is paused"},
-                    "config": {"type": "object", "description": "Optional cadence-specific config object for advanced updates"}
+                    "success_criteria": {"type": "string", "description": "Completion criteria"}
                 },
                 "required": ["id"]
             }),
@@ -208,6 +205,14 @@ mod tests {
     fn mission_update_has_curated_summary_but_minimal_actions_do_not() {
         let update = action("mission_update");
         assert!(update.discovery_summary().is_some());
+        let props = update
+            .parameters_schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .expect("mission_update properties");
+        assert!(!props.contains_key("project_id"));
+        assert!(!props.contains_key("paused"));
+        assert!(!props.contains_key("config"));
 
         let list = action("mission_list");
         assert!(list.discovery.is_some());

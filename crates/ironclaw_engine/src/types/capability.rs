@@ -191,6 +191,22 @@ impl ActionDef {
             .as_ref()
             .and_then(|metadata| metadata.summary.as_ref())
     }
+
+    /// Checks whether the given name resolves to this action.
+    pub fn matches_name(&self, name: &str) -> bool {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if self.name == trimmed || self.discovery_name() == trimmed {
+            return true;
+        }
+        if trimmed.contains('-') {
+            let normalized = trimmed.replace('-', "_");
+            return self.name == normalized || self.discovery_name() == normalized;
+        }
+        false
+    }
 }
 
 /// Canonical model-visible status for capability background surfacing.
@@ -474,6 +490,42 @@ mod tests {
 
         lease.granted_actions = GrantedActions::Specific(vec!["list-prs".into()]);
         assert!(lease.covers_action("list_prs"));
+    }
+
+    #[test]
+    fn action_def_matches_exact_and_hyphenated_names() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
+        assert!(!action.matches_name("mission_resume"));
+        assert!(!action.matches_name(" "));
+    }
+
+    #[test]
+    fn action_def_matches_discovery_aliases() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: Some(ActionDiscoveryMetadata {
+                name: "mission-create".to_string(),
+                summary: None,
+                schema_override: None,
+            }),
+        };
+
+        assert!(action.matches_name("mission-create"));
+        assert!(action.matches_name("mission_create"));
     }
 
     #[test]

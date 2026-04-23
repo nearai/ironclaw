@@ -1033,7 +1033,14 @@ async fn handle_execute_action(
     };
 
     // 2. Check policy
-    let action_def = available_actions.into_iter().find(|a| a.name == name);
+    let action_def = available_actions
+        .into_iter()
+        .find(|a| a.matches_name(&name));
+
+    let canonical_name = action_def
+        .as_ref()
+        .map(|action| action.name.clone())
+        .unwrap_or_else(|| name.clone());
 
     if let Some(ref ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
@@ -1131,10 +1138,10 @@ async fn handle_execute_action(
     };
 
     // 4. Execute
-    let ps = summarize_params(&name, &params);
+    let ps = summarize_params(&canonical_name, &params);
     let execution_start = std::time::Instant::now();
     match effects
-        .execute_action(&name, params, &lease, &exec_ctx)
+        .execute_action(&canonical_name, params, &lease, &exec_ctx)
         .await
     {
         Ok(r) => {
@@ -1381,8 +1388,12 @@ async fn handle_execute_actions_parallel(
         exec_ctx.available_actions_snapshot = Some(available_actions.clone());
         let action_def = available_actions
             .iter()
-            .find(|a| a.name == pc.name)
+            .find(|a| a.matches_name(&pc.name))
             .cloned();
+        let action_name = action_def
+            .as_ref()
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
 
         if let Some(ref ad) = action_def {
             match policy.evaluate(ad, &lease, &[]) {
@@ -1394,7 +1405,7 @@ async fn handle_execute_actions_parallel(
                     });
                     let event = EventKind::ActionFailed {
                         step_id,
-                        action_name: pc.name.clone(),
+                        action_name: action_name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
                         duration_ms: 0,
@@ -1538,12 +1549,17 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
+        let action_name = available_actions
+            .iter()
+            .find(|action| action.matches_name(&pc.name))
+            .map(|action| action.name.clone())
+            .unwrap_or_else(|| pc.name.clone());
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         exec_ctx.available_actions_snapshot = Some(available_actions.clone());
-        let ps = summarize_params(&pc.name, &pc.params);
+        let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
-            &pc.name,
+            &action_name,
             pc.params.clone(),
             &pc.call_id,
             &lease,
@@ -1564,7 +1580,11 @@ async fn handle_execute_actions_parallel(
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
         for (idx, lease) in runnable {
-            let pc_name = parsed[idx].name.clone();
+            let pc_name = available_actions
+                .iter()
+                .find(|action| action.matches_name(&parsed[idx].name))
+                .map(|action| action.name.clone())
+                .unwrap_or_else(|| parsed[idx].name.clone());
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();

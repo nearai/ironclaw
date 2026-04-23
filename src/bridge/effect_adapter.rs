@@ -947,9 +947,18 @@ impl EffectBridgeAdapter {
         approval_already_granted: bool,
     ) -> Result<ActionResult, EngineError> {
         let start = Instant::now();
+        let canonical_action_name = context
+            .available_actions_snapshot
+            .as_ref()
+            .and_then(|actions| ActionDiscovery::resolve(actions, action_name))
+            .map(|action| action.name.as_str())
+            .unwrap_or(action_name);
 
-        let resolved_name = self.tools.resolve_name(action_name).await;
-        let mut lookup_name = resolved_name.as_deref().unwrap_or(action_name).to_string();
+        let resolved_name = self.tools.resolve_name(canonical_action_name).await;
+        let mut lookup_name = resolved_name
+            .as_deref()
+            .unwrap_or(canonical_action_name)
+            .to_string();
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -966,7 +975,7 @@ impl EffectBridgeAdapter {
         }
 
         if let Some(result) = self
-            .handle_mission_call(action_name, &parameters, context)
+            .handle_mission_call(canonical_action_name, &parameters, context)
             .await
         {
             return result.map(|mut r| {
@@ -975,7 +984,7 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if action_name == "tool_info"
+        if canonical_action_name == "tool_info"
             && let Some(actions) = context.available_actions_snapshot.as_ref()
         {
             match ActionDiscovery::tool_info(&parameters, actions) {
@@ -984,8 +993,8 @@ impl EffectBridgeAdapter {
                         call_id: context
                             .current_call_id
                             .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
-                        action_name: action_name.to_string(),
+                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                        action_name: canonical_action_name.to_string(),
                         output: output.result,
                         is_error: false,
                         duration: start.elapsed(),
@@ -999,8 +1008,8 @@ impl EffectBridgeAdapter {
                         call_id: context
                             .current_call_id
                             .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
-                        action_name: action_name.to_string(),
+                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                        action_name: canonical_action_name.to_string(),
                         output: serde_json::json!({"error": sanitized.content}),
                         is_error: true,
                         duration: start.elapsed(),
@@ -2653,6 +2662,80 @@ mod tests {
         assert_eq!(
             result.output["summary"]["always_required"],
             serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_falls_back_to_registry_when_snapshot_misses() {
+        use crate::tools::builtin::EchoTool;
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(EchoTool)).await;
+        tools.register_tool_info();
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_registry"),
+        );
+        ctx.available_actions_snapshot = Some(vec![ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create a mission".to_string(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            discovery: None,
+        }]);
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "echo", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should fall back to the registry after a snapshot miss");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("echo"));
+    }
+
+    #[tokio::test]
+    async fn hyphenated_engine_native_action_uses_snapshot_canonical_name() {
+        let adapter = make_adapter_with_missions().await;
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_mission_alias"));
+        ctx.available_actions_snapshot =
+            Some(crate::bridge::engine_actions::mission_capability_actions());
+
+        let result = adapter
+            .execute_action(
+                "mission-create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("hyphenated mission action should canonicalize through the snapshot");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(result.action_name, "mission_create");
+        assert_eq!(
+            result.output.get("status").and_then(|value| value.as_str()),
+            Some("created")
         );
     }
 

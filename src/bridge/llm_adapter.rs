@@ -418,9 +418,21 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
 }
 
 fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
+    let has_discovery_hint = action.discovery_summary().is_some()
+        || action.discovery_schema() != &action.parameters_schema;
+    let description = if has_discovery_hint {
+        format!(
+            "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+            action.description,
+            action.discovery_name()
+        )
+    } else {
+        action.description.clone()
+    };
+
     ToolDefinition {
         name: action.name.clone(),
-        description: action.description.clone(),
+        description,
         parameters: action.parameters_schema.clone(),
     }
 }
@@ -828,6 +840,42 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+    }
+
+    #[test]
+    fn action_def_to_tool_def_preserves_tool_info_hint_for_discovery_metadata() {
+        let action = ActionDef {
+            name: "gmail_send".to_string(),
+            description: "Send email".to_string(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string" }
+                },
+                "required": ["to"]
+            }),
+            effects: vec![EffectType::WriteExternal],
+            requires_approval: false,
+            discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                name: "gmail_send".to_string(),
+                summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                    notes: vec!["Subject/body rules".to_string()],
+                    ..ironclaw_engine::ActionDiscoverySummary::default()
+                }),
+                schema_override: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to": { "type": "string" },
+                        "subject": { "type": "string" }
+                    },
+                    "required": ["to", "subject"]
+                })),
+            }),
+        };
+
+        let tool_def = action_def_to_tool_def(&action);
+        assert!(tool_def.description.contains("tool_info"));
+        assert!(tool_def.parameters["properties"].get("subject").is_none());
     }
 
     #[tokio::test]

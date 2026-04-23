@@ -1150,7 +1150,11 @@ async fn preflight_action(
         .available_actions(std::slice::from_ref(&lease), context)
         .await
         .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.name == action_name));
+        .and_then(|actions| actions.into_iter().find(|a| a.matches_name(action_name)));
+    let canonical_action_name = action_def
+        .as_ref()
+        .map(|action| action.name.as_str())
+        .unwrap_or(action_name);
 
     if let Some(ref action_def) = action_def {
         match policy.evaluate(action_def, &lease, capability_policies) {
@@ -1181,7 +1185,7 @@ async fn preflight_action(
                 return PreflightResult::GatePaused(
                     crate::runtime::messaging::ThreadOutcome::GatePaused {
                         gate_name: "approval".into(),
-                        action_name: action_name.into(),
+                        action_name: canonical_action_name.into(),
                         call_id: call_id.into(),
                         parameters: params.clone(),
                         resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },

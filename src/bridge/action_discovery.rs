@@ -76,14 +76,7 @@ impl ActionDiscovery {
     }
 
     pub(crate) fn resolve<'a>(actions: &'a [ActionDef], name: &str) -> Option<&'a ActionDef> {
-        let normalized = name.replace('-', "_");
-
-        actions.iter().find(|action| {
-            action.name == name
-                || action.discovery_name() == name
-                || action.name == normalized
-                || action.discovery_name() == normalized
-        })
+        actions.iter().find(|action| action.matches_name(name))
     }
 }
 
