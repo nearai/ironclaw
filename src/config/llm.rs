@@ -778,6 +778,11 @@ impl LlmConfig {
             .or(env_base_url)
             .or_else(|| default_base_url.map(String::from))
             .unwrap_or_default();
+        // `url::Url::parse` tolerates trailing whitespace, but the downstream
+        // `http::Uri` parser used by reqwest/rig rejects with "invalid uri
+        // character". Normalize here so env vars (CI variables often carry
+        // trailing newlines) and DB-pasted URLs don't reach the request layer.
+        let base_url = base_url.trim().to_string();
 
         if base_url_required
             && base_url.is_empty()
@@ -1392,6 +1397,46 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn base_url_trims_surrounding_whitespace() {
+        // Regression: GitHub Actions repo variables and DB-pasted URLs can
+        // carry trailing newlines or spaces. `url::Url::parse` tolerates
+        // them, but `http::Uri` (used by reqwest/rig) rejects with "invalid
+        // uri character", causing all live requests to fail.
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai_compatible");
+            std::env::set_var("LLM_BASE_URL", "  http://localhost:8080/v1\n");
+            std::env::set_var("LLM_MODEL", "test-model");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "http://localhost:8080/v1");
+
+        // Same path through DB-stored settings.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BASE_URL");
+        }
+        let settings = Settings {
+            openai_compatible_base_url: Some("http://localhost:8080/v1\n".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "http://localhost:8080/v1");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_MODEL");
         }
     }
 
