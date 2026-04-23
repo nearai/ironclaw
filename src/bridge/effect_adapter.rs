@@ -1000,7 +1000,26 @@ impl EffectBridgeAdapter {
                         duration: start.elapsed(),
                     });
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    let requested = parameters
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<missing>");
+                    let error_msg = format!(
+                        "Tool tool_info failed: no callable action named '{requested}' is available in this execution context"
+                    );
+                    let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                    return Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                        action_name: canonical_action_name.to_string(),
+                        output: serde_json::json!({"error": sanitized.content}),
+                        is_error: true,
+                        duration: start.elapsed(),
+                    });
+                }
                 Err(error) => {
                     let error_msg = format!("Tool {} failed: {}", "tool_info", error);
                     let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
@@ -2669,23 +2688,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_info_falls_back_to_registry_when_snapshot_misses() {
-        use crate::tools::builtin::EchoTool;
-        use ironclaw_safety::SafetyConfig;
-
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(EchoTool)).await;
-        tools.register_tool_info();
-
-        let adapter = EffectBridgeAdapter::new(
-            Arc::clone(&tools),
-            Arc::new(SafetyLayer::new(&SafetyConfig {
-                max_output_length: 10_000,
-                injection_check_enabled: false,
-            })),
-            Arc::new(HookRegistry::default()),
-        );
-
+    async fn tool_info_rejects_actions_outside_callable_snapshot() {
+        let adapter = make_adapter();
         let mut ctx = exec_ctx(
             ironclaw_engine::ThreadId::new(),
             Some("call_tool_info_registry"),
@@ -2710,10 +2714,18 @@ mod tests {
                 &ctx,
             )
             .await
-            .expect("tool_info should fall back to the registry after a snapshot miss");
+            .expect("tool_info should return an error result for out-of-snapshot actions");
 
-        assert!(!result.is_error);
-        assert_eq!(result.output["name"], serde_json::json!("echo"));
+        assert!(result.is_error);
+        assert_eq!(result.action_name, "tool_info");
+        assert!(
+            result.output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no callable action named 'echo'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
     }
 
     #[tokio::test]
