@@ -365,6 +365,7 @@ pub struct TuiChannel {
     tools: Vec<ToolCategory>,
     skills: Vec<SkillCategory>,
     workspace_path: String,
+    layout_path: Option<std::path::PathBuf>,
     memory_count: usize,
     identity_files: Vec<String>,
     identity_file_contents: Vec<(String, String)>,
@@ -393,6 +394,7 @@ impl TuiChannel {
             tools: Vec::new(),
             skills: Vec::new(),
             workspace_path: String::new(),
+            layout_path: None,
             memory_count: 0,
             identity_files: Vec::new(),
             identity_file_contents: Vec::new(),
@@ -435,6 +437,12 @@ impl TuiChannel {
     /// Set workspace path for the welcome screen.
     pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
         self.workspace_path = path.into();
+        self
+    }
+
+    /// Set the filesystem path used to persist the TUI layout (theme, etc.).
+    pub fn with_layout_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.layout_path = Some(path.into());
         self
     }
 
@@ -489,6 +497,7 @@ impl Channel for TuiChannel {
             });
         }
 
+        let repo_label = ironclaw_tui::repo::compute_repo_label(&self.workspace_path);
         let config = TuiAppConfig {
             version: self.version.clone(),
             model: self.model.clone(),
@@ -497,6 +506,8 @@ impl Channel for TuiChannel {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
             workspace_path: self.workspace_path.clone(),
+            repo_label,
+            layout_path: self.layout_path.clone(),
             memory_count: self.memory_count,
             identity_files: self.identity_files.clone(),
             identity_file_contents: self.identity_file_contents.clone(),

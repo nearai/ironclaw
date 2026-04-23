@@ -159,6 +159,10 @@ fn main() {
         workspace_path: std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/projects/ironclaw".into()),
+        repo_label: std::env::current_dir()
+            .map(|p| ironclaw_tui::repo::compute_repo_label(&p.display().to_string()))
+            .unwrap_or_else(|_| "dev".into()),
+        layout_path: None,
         memory_count: 42,
         identity_files: vec!["AGENTS.md".into(), "SOUL.md".into(), "USER.md".into()],
         identity_file_contents: vec![

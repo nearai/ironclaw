@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use crate::event::{TuiAttachment, TuiEvent, TuiLogEntry, TuiUserMessage};
 use crate::input::{InputAction, map_key};
 use crate::layout::{TopTabBarMode, TuiLayout};
+use crate::theme::Theme;
 use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
 use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::conversation::ConversationWidget;
@@ -40,7 +41,7 @@ use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
 use crate::widgets::projects::ProjectsWidget;
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
 use crate::widgets::thread_picker::ThreadPickerWidget;
-use crate::widgets::workspace::WorkspaceWidget;
+use crate::widgets::workspace::{WorkspaceMouseAction, WorkspaceWidget};
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
     DashboardPanel, EngineThreadInfo, IdentityFileModal, JobInfo, JobStatus, MemoryEntry,
@@ -74,6 +75,11 @@ pub struct TuiAppConfig {
     pub skills: Vec<SkillCategory>,
     /// Workspace directory path.
     pub workspace_path: String,
+    /// Short repo/cwd label for the status bar (branch name when available).
+    pub repo_label: String,
+    /// Optional path to the `tui/layout.json` file used for persisting
+    /// user preferences (theme, etc.) across restarts.
+    pub layout_path: Option<std::path::PathBuf>,
     /// Number of memory entries in the workspace.
     pub memory_count: usize,
     /// Identity files loaded at startup (e.g. "AGENTS.md", "SOUL.md").
@@ -158,6 +164,8 @@ async fn run_tui(
         welcome_tools: config.tools,
         welcome_skills: config.skills,
         workspace_path: config.workspace_path,
+        repo_label: config.repo_label,
+        layout_path: config.layout_path,
         memory_count: config.memory_count,
         identity_files: config.identity_files,
         identity_file_contents: config.identity_file_contents,
@@ -171,14 +179,15 @@ async fn run_tui(
         settings: {
             let mut state = crate::widgets::SettingsState::default();
             state.set_entries(config.settings);
+            state.active_theme = config.layout.theme.clone();
             state
         },
         work_sidebar_visible: config.layout.conversation.show_work_sidebar,
         ..AppState::default()
     };
 
-    let mut widgets = create_default_widgets(&config.layout);
     let layout = config.layout;
+    let mut widgets = create_default_widgets(&layout);
 
     // Spawn crossterm input poller
     let poll_tx = input_event_tx;
@@ -476,7 +485,10 @@ async fn handle_event(
             }
         }
         TuiEvent::Key(key) => {
-            if handle_settings_key(key, state, msg_tx).await {
+            if handle_settings_key(key, state, msg_tx, widgets, layout).await {
+                return;
+            }
+            if handle_workspace_key(key, state).await {
                 return;
             }
             if handle_projects_key(key, state, msg_tx).await {
@@ -487,6 +499,20 @@ async fn handle_event(
 
             match action {
                 InputAction::Submit => {
+                    if widgets.input_box.is_empty()
+                        && state.active_tab == ActiveTab::Workspace
+                        && !state.model_picker.visible
+                        && !state.command_palette.visible
+                    {
+                        if !state
+                            .workspace
+                            .toggle_selected_directory(&state.memory_entries)
+                        {
+                            state.workspace.toggle_preview_mode(&state.memory_entries);
+                        }
+                        return;
+                    }
+
                     // Keyboard drilldown for Missions tab when input box is empty.
                     if widgets.input_box.is_empty()
                         && state.active_tab == ActiveTab::Missions
@@ -1943,6 +1969,8 @@ async fn handle_settings_key(
     key: event::KeyEvent,
     state: &mut AppState,
     msg_tx: &mpsc::Sender<TuiUserMessage>,
+    widgets: &mut BuiltinWidgets,
+    layout: &TuiLayout,
 ) -> bool {
     if state.active_tab != ActiveTab::Settings
         || state.pending_approval.is_some()
@@ -2010,40 +2038,151 @@ async fn handle_settings_key(
         }
     } else {
         match (key.code, key.modifiers) {
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                state.settings.cycle_focus(false);
+                true
+            }
+            (KeyCode::BackTab, KeyModifiers::SHIFT) => {
+                state.settings.cycle_focus(true);
+                true
+            }
             (KeyCode::Up, KeyModifiers::NONE) => {
-                state.settings.move_selection(-1);
+                match state.settings.focus {
+                    crate::widgets::SettingsFocus::Sections => state.settings.move_section(-1),
+                    crate::widgets::SettingsFocus::Themes => state
+                        .settings
+                        .move_theme_selection(-1, Theme::preset_catalog().len()),
+                    crate::widgets::SettingsFocus::Entries => state.settings.move_selection(-1),
+                }
                 true
             }
             (KeyCode::Down, KeyModifiers::NONE) => {
-                state.settings.move_selection(1);
+                match state.settings.focus {
+                    crate::widgets::SettingsFocus::Sections => state.settings.move_section(1),
+                    crate::widgets::SettingsFocus::Themes => state
+                        .settings
+                        .move_theme_selection(1, Theme::preset_catalog().len()),
+                    crate::widgets::SettingsFocus::Entries => state.settings.move_selection(1),
+                }
                 true
+            }
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                if state.settings.focus == crate::widgets::SettingsFocus::Themes {
+                    state
+                        .settings
+                        .move_theme_selection(-1, Theme::preset_catalog().len());
+                    true
+                } else {
+                    false
+                }
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                if state.settings.focus == crate::widgets::SettingsFocus::Themes {
+                    state
+                        .settings
+                        .move_theme_selection(1, Theme::preset_catalog().len());
+                    true
+                } else {
+                    false
+                }
             }
             (KeyCode::PageUp, _) => {
-                state.settings.page(-1);
-                true
+                if state.settings.focus == crate::widgets::SettingsFocus::Entries {
+                    state.settings.page(-1);
+                    true
+                } else {
+                    false
+                }
             }
             (KeyCode::PageDown, _) => {
-                state.settings.page(1);
-                true
+                if state.settings.focus == crate::widgets::SettingsFocus::Entries {
+                    state.settings.page(1);
+                    true
+                } else {
+                    false
+                }
             }
             (KeyCode::Home, _) => {
-                state.settings.selected = 0;
-                state.settings.ensure_selected_visible();
+                match state.settings.focus {
+                    crate::widgets::SettingsFocus::Sections => {
+                        state.settings.section = crate::widgets::SettingsSection::Inference;
+                        state.settings.sync_section_selection();
+                    }
+                    crate::widgets::SettingsFocus::Themes => {
+                        state.settings.theme_selected = 0;
+                    }
+                    crate::widgets::SettingsFocus::Entries => {
+                        state.settings.selected = 0;
+                        state.settings.ensure_selected_visible();
+                    }
+                }
                 true
             }
             (KeyCode::End, _) => {
-                state.settings.selected = state.settings.entries.len().saturating_sub(1);
-                state.settings.ensure_selected_visible();
+                match state.settings.focus {
+                    crate::widgets::SettingsFocus::Sections => {
+                        state.settings.section = crate::widgets::SettingsSection::Tools;
+                        state.settings.sync_section_selection();
+                    }
+                    crate::widgets::SettingsFocus::Themes => {
+                        state.settings.theme_selected =
+                            Theme::preset_catalog().len().saturating_sub(1);
+                    }
+                    crate::widgets::SettingsFocus::Entries => {
+                        state.settings.selected =
+                            state.settings.visible_entry_count().saturating_sub(1);
+                        state.settings.ensure_selected_visible();
+                    }
+                }
                 true
             }
             (KeyCode::Enter, KeyModifiers::NONE)
             | (KeyCode::Char('e'), KeyModifiers::NONE)
             | (KeyCode::Char('E'), KeyModifiers::SHIFT) => {
-                state.settings.start_editing();
+                match state.settings.focus {
+                    crate::widgets::SettingsFocus::Sections => {
+                        state.settings.focus = crate::widgets::SettingsFocus::Entries;
+                    }
+                    crate::widgets::SettingsFocus::Themes => {
+                        if let Some(preset) =
+                            Theme::preset_catalog().get(state.settings.theme_selected)
+                        {
+                            let mut updated_layout = layout.clone();
+                            updated_layout.theme = preset.id.to_string();
+                            state.settings.active_theme = preset.id.to_string();
+                            *widgets = create_default_widgets(&updated_layout);
+                            state.status_text = format!("Applied {} theme", preset.name);
+                            let persist_note = if let Some(path) = state.layout_path.as_ref() {
+                                match updated_layout.save_to_file(path) {
+                                    Ok(()) => " (saved)",
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "failed to persist tui layout to {}: {}",
+                                            path.display(),
+                                            e
+                                        );
+                                        " (not saved)"
+                                    }
+                                }
+                            } else {
+                                ""
+                            };
+                            state.toasts.push(Toast {
+                                message: format!("Theme: {}{}", preset.name, persist_note),
+                                kind: ToastKind::Info,
+                                created_at: chrono::Utc::now(),
+                            });
+                        }
+                    }
+                    crate::widgets::SettingsFocus::Entries => state.settings.start_editing(),
+                }
                 true
             }
             (KeyCode::Char('r'), KeyModifiers::NONE)
             | (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+                if state.settings.focus != crate::widgets::SettingsFocus::Entries {
+                    return false;
+                }
                 let Some(entry) = state.settings.selected_entry().cloned() else {
                     return true;
                 };
@@ -2120,6 +2259,39 @@ fn resolve_key_action(
         KeyCode::Up if widgets.input_box.is_cursor_on_first_line() => InputAction::HistoryUp,
         KeyCode::Down if widgets.input_box.is_cursor_on_last_line() => InputAction::HistoryDown,
         _ => InputAction::Forward,
+    }
+}
+
+async fn handle_workspace_key(key: event::KeyEvent, state: &mut AppState) -> bool {
+    if state.active_tab != ActiveTab::Workspace
+        || state.pending_approval.is_some()
+        || state.command_palette.visible
+        || state.model_picker.visible
+        || state.search.active
+        || state.help_visible
+        || state.identity_file_modal.is_some()
+        || state.expanded_dashboard_panel.is_some()
+        || state.tool_detail_modal.is_some()
+        || state.pending_thread_picker.is_some()
+        || key.modifiers != KeyModifiers::NONE
+    {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Up => {
+            state.workspace.move_selection(-1, &state.memory_entries);
+            true
+        }
+        KeyCode::Down => {
+            state.workspace.move_selection(1, &state.memory_entries);
+            true
+        }
+        KeyCode::Left => state.workspace.select_parent(&state.memory_entries),
+        KeyCode::Right => state
+            .workspace
+            .toggle_selected_directory(&state.memory_entries),
+        _ => false,
     }
 }
 
@@ -2564,13 +2736,27 @@ async fn handle_mouse_click(
     if state.active_tab == ActiveTab::Workspace {
         let main_area = active_surface_area(frame_sections(terminal, layout, state)[2], layout);
         let widget = WorkspaceWidget::new(widgets_theme(layout));
-        if let Some(index) = widget.row_index_at(main_area, state, column, row) {
-            state.workspace.selected = index;
-            state.workspace.selected_path = state
-                .memory_entries
-                .get(index)
-                .map(|entry| entry.path.clone());
-            state.workspace.preview_scroll = 0;
+        if let Some(action) = widget.action_at(main_area, state, column, row) {
+            match action {
+                WorkspaceMouseAction::ToggleDirectory(path) => {
+                    let items = state.workspace.visible_items(&state.memory_entries);
+                    if let Some(index) = items.iter().position(|item| item.path == path) {
+                        state.workspace.selected = index;
+                        state.workspace.selected_path = Some(path);
+                        state
+                            .workspace
+                            .toggle_selected_directory(&state.memory_entries);
+                    }
+                }
+                WorkspaceMouseAction::SelectFile(path) => {
+                    let items = state.workspace.visible_items(&state.memory_entries);
+                    if let Some(index) = items.iter().position(|item| item.path == path) {
+                        state.workspace.selected = index;
+                        state.workspace.selected_path = Some(path);
+                        state.workspace.preview_scroll = 0;
+                    }
+                }
+            }
             state.text_selection = None;
             return;
         }
@@ -3764,6 +3950,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_tab_tab_cycles_focus() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+        assert_eq!(state.settings.focus, crate::widgets::SettingsFocus::Entries);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(
+            state.settings.focus,
+            crate::widgets::SettingsFocus::Sections
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(state.settings.focus, crate::widgets::SettingsFocus::Themes);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_enter_applies_selected_theme() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+        state.settings.focus = crate::widgets::SettingsFocus::Themes;
+        state.settings.theme_selected = 1;
+        state.settings.active_theme = "dark".to_string();
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(state.settings.active_theme, "graphite");
+        assert!(state.status_text.contains("Graphite"));
+    }
+
+    #[tokio::test]
+    async fn settings_tab_enter_persists_theme_to_layout_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout_path = tmp.path().join("layout.json");
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            layout_path: Some(layout_path.clone()),
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+        state.settings.focus = crate::widgets::SettingsFocus::Themes;
+        state.settings.theme_selected = 1;
+        state.settings.active_theme = "dark".to_string();
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(layout_path.exists(), "layout.json should be written");
+        let saved = TuiLayout::load_from_file(&layout_path);
+        assert_eq!(saved.theme, "graphite");
+        let last_toast = state.toasts.last().expect("toast");
+        assert!(last_toast.message.contains("saved"));
+    }
+
+    #[tokio::test]
+    async fn settings_tab_enter_without_layout_path_still_applies_theme() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            layout_path: None,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+        state.settings.focus = crate::widgets::SettingsFocus::Themes;
+        state.settings.theme_selected = 1;
+        state.settings.active_theme = "dark".to_string();
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(state.settings.active_theme, "graphite");
+        let last_toast = state.toasts.last().expect("toast");
+        assert!(!last_toast.message.contains("saved"));
+        assert!(!last_toast.message.contains("not saved"));
+    }
+
+    #[tokio::test]
     async fn thread_list_only_populates_picker() {
         let mut state = AppState::default();
 
@@ -4199,13 +4492,69 @@ mod tests {
             &mut state,
             TuiEvent::MouseClick {
                 column: list_area.x + 2,
-                row: list_area.y + 2,
+                row: list_area.y + 3,
             },
         )
         .await;
 
-        assert_eq!(state.workspace.selected, 1);
+        assert_eq!(state.workspace.selected, 2);
         assert_eq!(state.workspace.selected_path.as_deref(), Some("docs/b.md"));
+    }
+
+    #[tokio::test]
+    async fn workspace_right_arrow_collapses_directory() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Workspace,
+            memory_entries: vec![MemoryEntry {
+                path: "docs/a.md".to_string(),
+                snippet: String::new(),
+                updated_at: None,
+            }],
+            ..Default::default()
+        };
+        state.workspace.sync_entries(&state.memory_entries);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(state.workspace.collapsed_dirs.contains("docs"));
+        assert_eq!(
+            state.workspace.visible_items(&state.memory_entries).len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_enter_on_file_toggles_preview_mode() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Workspace,
+            memory_entries: vec![MemoryEntry {
+                path: "docs/a.md".to_string(),
+                snippet: String::new(),
+                updated_at: None,
+            }],
+            ..Default::default()
+        };
+        state.workspace.sync_entries(&state.memory_entries);
+        state.workspace.move_selection(1, &state.memory_entries);
+        assert_eq!(
+            state.workspace.preview_mode,
+            crate::widgets::WorkspacePreviewMode::Rendered
+        );
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(
+            state.workspace.preview_mode,
+            crate::widgets::WorkspacePreviewMode::Raw
+        );
     }
 
     #[tokio::test]

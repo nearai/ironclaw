@@ -583,6 +583,7 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             ironclaw_tui::TuiLayout::default()
         };
+        let layout_path = workspace_root.join("tui").join("layout.json");
 
         let (memory_count, identity_files, identity_file_contents, memory_entries) =
             if let Some(ref ws) = components.workspace {
@@ -686,6 +687,7 @@ async fn async_main() -> anyhow::Result<()> {
         )
         .with_context_window(context_window.unwrap_or(128_000))
         .with_layout(layout)
+        .with_layout_path(layout_path)
         .with_log_broadcaster(Arc::clone(&log_broadcaster))
         .with_tools(tool_categories)
         .with_skills(skill_categories)

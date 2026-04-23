@@ -78,6 +78,46 @@ pub struct ThemeOverrides {
     pub chrome_border: Option<ThemeColor>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemePresetMeta {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub tagline: &'static str,
+}
+
+pub const THEME_PRESETS: &[ThemePresetMeta] = &[
+    ThemePresetMeta {
+        id: "dark",
+        name: "Iron Dark",
+        tagline: "Default emerald control room",
+    },
+    ThemePresetMeta {
+        id: "graphite",
+        name: "Graphite",
+        tagline: "Muted chrome with softer contrast",
+    },
+    ThemePresetMeta {
+        id: "midnight_emerald",
+        name: "Midnight Emerald",
+        tagline: "High-contrast green-on-night operators theme",
+    },
+    ThemePresetMeta {
+        id: "amber_terminal",
+        name: "Amber Terminal",
+        tagline: "Warm amber command-center glow",
+    },
+    ThemePresetMeta {
+        id: "ice",
+        name: "Ice",
+        tagline: "Cool cyan shell with crisp panels",
+    },
+    ThemePresetMeta {
+        id: "light",
+        name: "Paper Light",
+        tagline: "Bright, cleaner daytime cockpit",
+    },
+];
+
 /// Serialisable color representation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -326,6 +366,21 @@ impl Theme {
         }
     }
 
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "light" => Self::light(),
+            "graphite" => Self::graphite(),
+            "midnight_emerald" => Self::midnight_emerald(),
+            "amber_terminal" => Self::amber_terminal(),
+            "ice" => Self::ice(),
+            _ => Self::dark(),
+        }
+    }
+
+    pub fn preset_catalog() -> &'static [ThemePresetMeta] {
+        THEME_PRESETS
+    }
+
     /// Light theme variant.
     pub fn light() -> Self {
         Self {
@@ -406,6 +461,446 @@ impl Theme {
                 r: 210,
                 g: 218,
                 b: 226,
+            },
+        }
+    }
+
+    pub fn graphite() -> Self {
+        Self {
+            name: "graphite".to_string(),
+            bg: ThemeColor::Named("reset".to_string()),
+            fg: ThemeColor::Rgb {
+                r: 232,
+                g: 236,
+                b: 241,
+            },
+            accent: ThemeColor::Rgb {
+                r: 124,
+                g: 194,
+                b: 255,
+            },
+            dim: ThemeColor::Rgb {
+                r: 114,
+                g: 123,
+                b: 135,
+            },
+            success: ThemeColor::Rgb {
+                r: 118,
+                g: 211,
+                b: 159,
+            },
+            warning: ThemeColor::Rgb {
+                r: 245,
+                g: 191,
+                b: 96,
+            },
+            error: ThemeColor::Rgb {
+                r: 255,
+                g: 122,
+                b: 122,
+            },
+            border: ThemeColor::Rgb {
+                r: 69,
+                g: 78,
+                b: 90,
+            },
+            header_bg: ThemeColor::Rgb {
+                r: 18,
+                g: 22,
+                b: 28,
+            },
+            header_fg: ThemeColor::Rgb {
+                r: 236,
+                g: 240,
+                b: 244,
+            },
+            status_bg: ThemeColor::Rgb {
+                r: 18,
+                g: 22,
+                b: 28,
+            },
+            status_fg: ThemeColor::Rgb {
+                r: 135,
+                g: 144,
+                b: 154,
+            },
+            nav_bg: ThemeColor::Rgb {
+                r: 20,
+                g: 24,
+                b: 31,
+            },
+            nav_fg: ThemeColor::Rgb {
+                r: 131,
+                g: 141,
+                b: 154,
+            },
+            nav_active_fg: ThemeColor::Rgb {
+                r: 232,
+                g: 240,
+                b: 252,
+            },
+            panel_bg: ThemeColor::Rgb {
+                r: 24,
+                g: 29,
+                b: 37,
+            },
+            panel_alt_bg: ThemeColor::Rgb {
+                r: 28,
+                g: 34,
+                b: 43,
+            },
+            surface_header_bg: ThemeColor::Rgb {
+                r: 24,
+                g: 30,
+                b: 39,
+            },
+            surface_header_fg: ThemeColor::Rgb {
+                r: 236,
+                g: 240,
+                b: 244,
+            },
+            selected_bg: ThemeColor::Rgb {
+                r: 42,
+                g: 53,
+                b: 66,
+            },
+            tab_bar_bg: ThemeColor::Rgb {
+                r: 16,
+                g: 20,
+                b: 26,
+            },
+            tab_active_bg: ThemeColor::Rgb {
+                r: 32,
+                g: 39,
+                b: 49,
+            },
+            tab_active_fg: ThemeColor::Rgb {
+                r: 232,
+                g: 240,
+                b: 252,
+            },
+            tab_inactive_fg: ThemeColor::Rgb {
+                r: 124,
+                g: 133,
+                b: 145,
+            },
+            chrome_border: ThemeColor::Rgb {
+                r: 61,
+                g: 70,
+                b: 82,
+            },
+        }
+    }
+
+    pub fn midnight_emerald() -> Self {
+        Self {
+            name: "midnight_emerald".to_string(),
+            bg: ThemeColor::Named("reset".to_string()),
+            fg: ThemeColor::Rgb {
+                r: 229,
+                g: 255,
+                b: 246,
+            },
+            accent: ThemeColor::Rgb {
+                r: 94,
+                g: 234,
+                b: 190,
+            },
+            dim: ThemeColor::Rgb {
+                r: 98,
+                g: 126,
+                b: 118,
+            },
+            success: ThemeColor::Rgb {
+                r: 94,
+                g: 234,
+                b: 190,
+            },
+            warning: ThemeColor::Rgb {
+                r: 250,
+                g: 204,
+                b: 21,
+            },
+            error: ThemeColor::Rgb {
+                r: 248,
+                g: 113,
+                b: 113,
+            },
+            border: ThemeColor::Rgb {
+                r: 36,
+                g: 73,
+                b: 65,
+            },
+            header_bg: ThemeColor::Rgb { r: 5, g: 16, b: 16 },
+            header_fg: ThemeColor::Rgb {
+                r: 221,
+                g: 255,
+                b: 244,
+            },
+            status_bg: ThemeColor::Rgb { r: 5, g: 16, b: 16 },
+            status_fg: ThemeColor::Rgb {
+                r: 94,
+                g: 126,
+                b: 118,
+            },
+            nav_bg: ThemeColor::Rgb { r: 5, g: 18, b: 18 },
+            nav_fg: ThemeColor::Rgb {
+                r: 99,
+                g: 139,
+                b: 127,
+            },
+            nav_active_fg: ThemeColor::Rgb {
+                r: 220,
+                g: 255,
+                b: 244,
+            },
+            panel_bg: ThemeColor::Rgb { r: 8, g: 24, b: 24 },
+            panel_alt_bg: ThemeColor::Rgb {
+                r: 10,
+                g: 30,
+                b: 29,
+            },
+            surface_header_bg: ThemeColor::Rgb { r: 9, g: 27, b: 26 },
+            surface_header_fg: ThemeColor::Rgb {
+                r: 220,
+                g: 255,
+                b: 244,
+            },
+            selected_bg: ThemeColor::Rgb {
+                r: 16,
+                g: 55,
+                b: 47,
+            },
+            tab_bar_bg: ThemeColor::Rgb { r: 4, g: 13, b: 13 },
+            tab_active_bg: ThemeColor::Rgb {
+                r: 12,
+                g: 35,
+                b: 33,
+            },
+            tab_active_fg: ThemeColor::Rgb {
+                r: 220,
+                g: 255,
+                b: 244,
+            },
+            tab_inactive_fg: ThemeColor::Rgb {
+                r: 102,
+                g: 134,
+                b: 126,
+            },
+            chrome_border: ThemeColor::Rgb {
+                r: 25,
+                g: 62,
+                b: 56,
+            },
+        }
+    }
+
+    pub fn amber_terminal() -> Self {
+        Self {
+            name: "amber_terminal".to_string(),
+            bg: ThemeColor::Named("reset".to_string()),
+            fg: ThemeColor::Rgb {
+                r: 255,
+                g: 237,
+                b: 203,
+            },
+            accent: ThemeColor::Rgb {
+                r: 251,
+                g: 191,
+                b: 36,
+            },
+            dim: ThemeColor::Rgb {
+                r: 155,
+                g: 124,
+                b: 83,
+            },
+            success: ThemeColor::Rgb {
+                r: 250,
+                g: 204,
+                b: 21,
+            },
+            warning: ThemeColor::Rgb {
+                r: 251,
+                g: 191,
+                b: 36,
+            },
+            error: ThemeColor::Rgb {
+                r: 248,
+                g: 113,
+                b: 113,
+            },
+            border: ThemeColor::Rgb {
+                r: 99,
+                g: 72,
+                b: 35,
+            },
+            header_bg: ThemeColor::Rgb { r: 24, g: 14, b: 5 },
+            header_fg: ThemeColor::Rgb {
+                r: 255,
+                g: 243,
+                b: 214,
+            },
+            status_bg: ThemeColor::Rgb { r: 24, g: 14, b: 5 },
+            status_fg: ThemeColor::Rgb {
+                r: 171,
+                g: 128,
+                b: 77,
+            },
+            nav_bg: ThemeColor::Rgb { r: 26, g: 15, b: 5 },
+            nav_fg: ThemeColor::Rgb {
+                r: 188,
+                g: 146,
+                b: 92,
+            },
+            nav_active_fg: ThemeColor::Rgb {
+                r: 255,
+                g: 244,
+                b: 220,
+            },
+            panel_bg: ThemeColor::Rgb { r: 32, g: 20, b: 8 },
+            panel_alt_bg: ThemeColor::Rgb { r: 39, g: 24, b: 9 },
+            surface_header_bg: ThemeColor::Rgb { r: 35, g: 22, b: 8 },
+            surface_header_fg: ThemeColor::Rgb {
+                r: 255,
+                g: 244,
+                b: 220,
+            },
+            selected_bg: ThemeColor::Rgb {
+                r: 64,
+                g: 42,
+                b: 17,
+            },
+            tab_bar_bg: ThemeColor::Rgb { r: 21, g: 12, b: 4 },
+            tab_active_bg: ThemeColor::Rgb {
+                r: 43,
+                g: 28,
+                b: 11,
+            },
+            tab_active_fg: ThemeColor::Rgb {
+                r: 255,
+                g: 244,
+                b: 220,
+            },
+            tab_inactive_fg: ThemeColor::Rgb {
+                r: 180,
+                g: 139,
+                b: 89,
+            },
+            chrome_border: ThemeColor::Rgb {
+                r: 97,
+                g: 68,
+                b: 29,
+            },
+        }
+    }
+
+    pub fn ice() -> Self {
+        Self {
+            name: "ice".to_string(),
+            bg: ThemeColor::Named("reset".to_string()),
+            fg: ThemeColor::Rgb {
+                r: 231,
+                g: 247,
+                b: 255,
+            },
+            accent: ThemeColor::Rgb {
+                r: 103,
+                g: 232,
+                b: 249,
+            },
+            dim: ThemeColor::Rgb {
+                r: 110,
+                g: 138,
+                b: 149,
+            },
+            success: ThemeColor::Rgb {
+                r: 45,
+                g: 212,
+                b: 191,
+            },
+            warning: ThemeColor::Rgb {
+                r: 251,
+                g: 191,
+                b: 36,
+            },
+            error: ThemeColor::Rgb {
+                r: 248,
+                g: 113,
+                b: 113,
+            },
+            border: ThemeColor::Rgb {
+                r: 45,
+                g: 70,
+                b: 83,
+            },
+            header_bg: ThemeColor::Rgb { r: 8, g: 19, b: 28 },
+            header_fg: ThemeColor::Rgb {
+                r: 234,
+                g: 248,
+                b: 255,
+            },
+            status_bg: ThemeColor::Rgb { r: 8, g: 19, b: 28 },
+            status_fg: ThemeColor::Rgb {
+                r: 115,
+                g: 141,
+                b: 151,
+            },
+            nav_bg: ThemeColor::Rgb { r: 8, g: 21, b: 31 },
+            nav_fg: ThemeColor::Rgb {
+                r: 126,
+                g: 159,
+                b: 173,
+            },
+            nav_active_fg: ThemeColor::Rgb {
+                r: 228,
+                g: 249,
+                b: 255,
+            },
+            panel_bg: ThemeColor::Rgb {
+                r: 10,
+                g: 26,
+                b: 36,
+            },
+            panel_alt_bg: ThemeColor::Rgb {
+                r: 13,
+                g: 31,
+                b: 42,
+            },
+            surface_header_bg: ThemeColor::Rgb {
+                r: 12,
+                g: 29,
+                b: 40,
+            },
+            surface_header_fg: ThemeColor::Rgb {
+                r: 228,
+                g: 249,
+                b: 255,
+            },
+            selected_bg: ThemeColor::Rgb {
+                r: 19,
+                g: 49,
+                b: 63,
+            },
+            tab_bar_bg: ThemeColor::Rgb { r: 7, g: 16, b: 24 },
+            tab_active_bg: ThemeColor::Rgb {
+                r: 17,
+                g: 40,
+                b: 54,
+            },
+            tab_active_fg: ThemeColor::Rgb {
+                r: 228,
+                g: 249,
+                b: 255,
+            },
+            tab_inactive_fg: ThemeColor::Rgb {
+                r: 124,
+                g: 154,
+                b: 168,
+            },
+            chrome_border: ThemeColor::Rgb {
+                r: 37,
+                g: 63,
+                b: 77,
             },
         }
     }

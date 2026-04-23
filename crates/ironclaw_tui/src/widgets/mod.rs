@@ -34,6 +34,7 @@ pub mod workspace;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::LogRingBuffer;
 use crate::layout::TuiSlot;
@@ -241,6 +242,14 @@ pub struct AppState {
     /// Workspace directory path (for display on welcome screen).
     pub workspace_path: String,
 
+    /// Short label for the status bar: git branch when in a repo, otherwise
+    /// a shortened cwd. Rendered as the leading ⌂ segment.
+    pub repo_label: String,
+
+    /// Optional path to the `tui/layout.json` file so the app can persist
+    /// user preferences (e.g. selected theme) across restarts.
+    pub layout_path: Option<std::path::PathBuf>,
+
     /// Number of memory entries in the workspace.
     pub memory_count: usize,
 
@@ -389,8 +398,46 @@ pub enum SettingsSection {
     Tools,
 }
 
+impl SettingsSection {
+    pub const fn all() -> [Self; 9] {
+        [
+            Self::Inference,
+            Self::Agent,
+            Self::Channels,
+            Self::Networking,
+            Self::Extensions,
+            Self::Mcp,
+            Self::Skills,
+            Self::Users,
+            Self::Tools,
+        ]
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Inference => "Inference",
+            Self::Agent => "Agent",
+            Self::Channels => "Channels",
+            Self::Networking => "Networking",
+            Self::Extensions => "Extensions",
+            Self::Mcp => "MCP",
+            Self::Skills => "Skills",
+            Self::Users => "Users",
+            Self::Tools => "Tools",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsFocus {
+    Sections,
+    Themes,
+    #[default]
+    Entries,
+}
+
 /// Mutable UI state for the Settings tab.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsState {
     pub entries: Vec<SettingEntry>,
     pub selected: usize,
@@ -399,6 +446,26 @@ pub struct SettingsState {
     pub editing: bool,
     pub edit_value: String,
     pub section: SettingsSection,
+    pub focus: SettingsFocus,
+    pub theme_selected: usize,
+    pub active_theme: String,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            visible_rows: 0,
+            editing: false,
+            edit_value: String::new(),
+            section: SettingsSection::default(),
+            focus: SettingsFocus::default(),
+            theme_selected: 0,
+            active_theme: "dark".to_string(),
+        }
+    }
 }
 
 impl SettingsState {
@@ -409,25 +476,54 @@ impl SettingsState {
         });
         self.entries = entries;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-        self.scroll = self.scroll.min(self.entries.len().saturating_sub(1));
-        self.ensure_selected_visible();
+        if self.visible_entry_count() == 0
+            && let Some(first) = self.entries.first()
+        {
+            self.section = Self::section_for_path(&first.path);
+        }
+        self.sync_section_selection();
     }
 
     pub fn selected_entry(&self) -> Option<&SettingEntry> {
-        self.entries.get(self.selected)
+        self.entries.get(self.selected_entry_index()?)
     }
 
     pub fn selected_entry_mut(&mut self) -> Option<&mut SettingEntry> {
-        self.entries.get_mut(self.selected)
+        let index = self.selected_entry_index()?;
+        self.entries.get_mut(index)
+    }
+
+    pub fn selected_entry_index(&self) -> Option<usize> {
+        let indices = self.filtered_entry_indices();
+        if indices.is_empty() {
+            None
+        } else {
+            Some(indices[self.selected.min(indices.len().saturating_sub(1))])
+        }
+    }
+
+    pub fn filtered_entry_indices(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (Self::section_for_path(&entry.path) == self.section).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn visible_entry_count(&self) -> usize {
+        self.filtered_entry_indices().len()
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        if self.entries.is_empty() {
+        let count = self.visible_entry_count();
+        if count == 0 {
             self.selected = 0;
             self.scroll = 0;
             return;
         }
-        let max = self.entries.len().saturating_sub(1) as isize;
+        let max = count.saturating_sub(1) as isize;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
         self.ensure_selected_visible();
     }
@@ -435,6 +531,42 @@ impl SettingsState {
     pub fn page(&mut self, delta: isize) {
         let page = self.visible_rows.max(1) as isize;
         self.move_selection(delta.saturating_mul(page));
+    }
+
+    pub fn move_section(&mut self, delta: isize) {
+        let sections = SettingsSection::all();
+        let current = sections
+            .iter()
+            .position(|section| *section == self.section)
+            .unwrap_or_default() as isize;
+        let max = sections.len().saturating_sub(1) as isize;
+        self.section = sections[(current + delta).clamp(0, max) as usize];
+        self.sync_section_selection();
+    }
+
+    pub fn move_theme_selection(&mut self, delta: isize, theme_count: usize) {
+        if theme_count == 0 {
+            self.theme_selected = 0;
+            return;
+        }
+        let max = theme_count.saturating_sub(1) as isize;
+        self.theme_selected = (self.theme_selected as isize + delta).clamp(0, max) as usize;
+    }
+
+    pub fn cycle_focus(&mut self, reverse: bool) {
+        self.focus = match (self.focus, reverse) {
+            (SettingsFocus::Sections, false) => SettingsFocus::Themes,
+            (SettingsFocus::Themes, false) => SettingsFocus::Entries,
+            (SettingsFocus::Entries, false) => SettingsFocus::Sections,
+            (SettingsFocus::Sections, true) => SettingsFocus::Entries,
+            (SettingsFocus::Themes, true) => SettingsFocus::Sections,
+            (SettingsFocus::Entries, true) => SettingsFocus::Themes,
+        };
+    }
+
+    pub fn set_active_theme(&mut self, theme_name: impl Into<String>, theme_count: usize) {
+        self.active_theme = theme_name.into();
+        self.theme_selected = self.theme_selected.min(theme_count.saturating_sub(1));
     }
 
     pub fn start_editing(&mut self) {
@@ -460,6 +592,55 @@ impl SettingsState {
         } else if self.selected >= self.scroll + rows {
             self.scroll = self.selected.saturating_sub(rows.saturating_sub(1));
         }
+        self.scroll = self.scroll.min(
+            self.visible_entry_count()
+                .saturating_sub(rows.min(self.visible_entry_count())),
+        );
+    }
+
+    pub fn sync_section_selection(&mut self) {
+        let count = self.visible_entry_count();
+        self.selected = self.selected.min(count.saturating_sub(1));
+        self.scroll = self.scroll.min(count.saturating_sub(1));
+        self.ensure_selected_visible();
+    }
+
+    pub fn section_for_path(path: &str) -> SettingsSection {
+        let lower = path.to_ascii_lowercase();
+        if lower == "selected_model"
+            || lower.starts_with("llm_")
+            || lower.starts_with("embeddings")
+            || lower.starts_with("openai")
+            || lower.starts_with("anthropic")
+            || lower.starts_with("groq")
+            || lower.starts_with("ollama")
+            || lower.starts_with("bedrock")
+            || lower.starts_with("nearai")
+        {
+            SettingsSection::Inference
+        } else if lower.starts_with("agent.") || lower == "agent_name" {
+            SettingsSection::Agent
+        } else if lower.starts_with("channels.") {
+            SettingsSection::Channels
+        } else if lower.starts_with("http")
+            || lower.contains("allowlist")
+            || lower.contains("network")
+            || lower.contains("origin")
+        {
+            SettingsSection::Networking
+        } else if lower.starts_with("extensions.") {
+            SettingsSection::Extensions
+        } else if lower.starts_with("mcp.") {
+            SettingsSection::Mcp
+        } else if lower.starts_with("skills.") {
+            SettingsSection::Skills
+        } else if lower.starts_with("users.") || lower.contains("auth") {
+            SettingsSection::Users
+        } else if lower.starts_with("tool_") || lower.starts_with("tools.") {
+            SettingsSection::Tools
+        } else {
+            SettingsSection::Agent
+        }
     }
 }
 
@@ -468,6 +649,15 @@ pub enum WorkspacePreviewMode {
     #[default]
     Rendered,
     Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceListItem {
+    pub path: String,
+    pub label: String,
+    pub depth: usize,
+    pub is_dir: bool,
+    pub entry_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -479,11 +669,89 @@ pub struct WorkspaceState {
     pub selected_path: Option<String>,
     pub search_query: String,
     pub preview_mode: WorkspacePreviewMode,
+    pub collapsed_dirs: BTreeSet<String>,
 }
 
 impl WorkspaceState {
+    pub fn visible_items(&self, entries: &[MemoryEntry]) -> Vec<WorkspaceListItem> {
+        let mut directories: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut files: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+
+        for (index, entry) in entries.iter().enumerate() {
+            let mut parent = String::new();
+            let parts: Vec<&str> = entry.path.split('/').collect();
+            for (part_index, part) in parts.iter().enumerate() {
+                let is_last = part_index == parts.len() - 1;
+                if is_last {
+                    files
+                        .entry(parent.clone())
+                        .or_default()
+                        .push((index, (*part).to_string()));
+                } else {
+                    let child = if parent.is_empty() {
+                        (*part).to_string()
+                    } else {
+                        format!("{parent}/{part}")
+                    };
+                    directories
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(child.clone());
+                    parent = child;
+                }
+            }
+        }
+
+        let mut items = Vec::new();
+        self.collect_workspace_items("", 0, &directories, &files, &mut items);
+        items
+    }
+
+    fn collect_workspace_items(
+        &self,
+        parent: &str,
+        depth: usize,
+        directories: &BTreeMap<String, BTreeSet<String>>,
+        files: &BTreeMap<String, Vec<(usize, String)>>,
+        items: &mut Vec<WorkspaceListItem>,
+    ) {
+        if let Some(children) = directories.get(parent) {
+            for child in children {
+                let label = child.rsplit('/').next().unwrap_or(child).to_string();
+                items.push(WorkspaceListItem {
+                    path: child.clone(),
+                    label,
+                    depth,
+                    is_dir: true,
+                    entry_index: None,
+                });
+                if !self.collapsed_dirs.contains(child) {
+                    self.collect_workspace_items(child, depth + 1, directories, files, items);
+                }
+            }
+        }
+
+        if let Some(file_entries) = files.get(parent) {
+            for (entry_index, label) in file_entries {
+                let path = if parent.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{parent}/{label}")
+                };
+                items.push(WorkspaceListItem {
+                    path,
+                    label: label.clone(),
+                    depth,
+                    is_dir: false,
+                    entry_index: Some(*entry_index),
+                });
+            }
+        }
+    }
+
     pub fn sync_entries(&mut self, entries: &[MemoryEntry]) {
-        if entries.is_empty() {
+        let items = self.visible_items(entries);
+        if items.is_empty() {
             self.selected = 0;
             self.scroll = 0;
             self.selected_path = None;
@@ -491,38 +759,99 @@ impl WorkspaceState {
         }
 
         if let Some(path) = self.selected_path.as_deref()
-            && let Some(index) = entries.iter().position(|entry| entry.path == path)
+            && let Some(index) = items.iter().position(|item| item.path == path)
         {
             self.selected = index;
         }
 
-        self.selected = self.selected.min(entries.len().saturating_sub(1));
-        self.selected_path = entries.get(self.selected).map(|entry| entry.path.clone());
-        self.ensure_selected_visible(entries.len());
+        self.selected = self.selected.min(items.len().saturating_sub(1));
+        self.selected_path = items.get(self.selected).map(|item| item.path.clone());
+        self.ensure_selected_visible(items.len());
+    }
+
+    pub fn selected_item(&self, entries: &[MemoryEntry]) -> Option<WorkspaceListItem> {
+        let items = self.visible_items(entries);
+        if let Some(path) = self.selected_path.as_deref()
+            && let Some(item) = items.iter().find(|item| item.path == path)
+        {
+            return Some(item.clone());
+        }
+        items.get(self.selected).cloned()
     }
 
     pub fn selected_entry<'a>(&self, entries: &'a [MemoryEntry]) -> Option<&'a MemoryEntry> {
-        entries.get(self.selected)
+        let item = self.selected_item(entries)?;
+        item.entry_index.and_then(|index| entries.get(index))
     }
 
     pub fn move_selection(&mut self, delta: isize, entries: &[MemoryEntry]) {
-        if entries.is_empty() {
+        let items = self.visible_items(entries);
+        if items.is_empty() {
             self.selected = 0;
             self.scroll = 0;
             self.selected_path = None;
             return;
         }
 
-        let max = entries.len().saturating_sub(1) as isize;
+        let max = items.len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-        self.selected_path = entries.get(self.selected).map(|entry| entry.path.clone());
-        self.ensure_selected_visible(entries.len());
+        self.selected_path = items.get(self.selected).map(|item| item.path.clone());
+        self.ensure_selected_visible(items.len());
         self.preview_scroll = 0;
     }
 
     pub fn page(&mut self, delta: isize, entries: &[MemoryEntry]) {
         let page = self.visible_rows.max(1) as isize;
         self.move_selection(delta.saturating_mul(page), entries);
+    }
+
+    pub fn toggle_selected_directory(&mut self, entries: &[MemoryEntry]) -> bool {
+        let Some(item) = self.selected_item(entries) else {
+            return false;
+        };
+        if !item.is_dir {
+            return false;
+        }
+        if !self.collapsed_dirs.insert(item.path.clone()) {
+            self.collapsed_dirs.remove(&item.path);
+        }
+        self.sync_entries(entries);
+        true
+    }
+
+    pub fn select_parent(&mut self, entries: &[MemoryEntry]) -> bool {
+        let Some(item) = self.selected_item(entries) else {
+            return false;
+        };
+        if item.is_dir && !self.collapsed_dirs.contains(&item.path) {
+            self.collapsed_dirs.insert(item.path.clone());
+            self.sync_entries(entries);
+            return true;
+        }
+
+        let Some((parent, _)) = item.path.rsplit_once('/') else {
+            return false;
+        };
+        let items = self.visible_items(entries);
+        if let Some(index) = items.iter().position(|visible| visible.path == parent) {
+            self.selected = index;
+            self.selected_path = Some(parent.to_string());
+            self.ensure_selected_visible(items.len());
+            return true;
+        }
+        false
+    }
+
+    pub fn toggle_preview_mode(&mut self, entries: &[MemoryEntry]) -> bool {
+        if self.selected_entry(entries).is_none() {
+            return false;
+        }
+        self.preview_mode = match self.preview_mode {
+            WorkspacePreviewMode::Rendered => WorkspacePreviewMode::Raw,
+            WorkspacePreviewMode::Raw => WorkspacePreviewMode::Rendered,
+        };
+        self.preview_scroll = 0;
+        true
     }
 
     pub fn ensure_selected_visible(&mut self, total_rows: usize) {
@@ -950,6 +1279,8 @@ impl Default for AppState {
             welcome_tools: Vec::new(),
             welcome_skills: Vec::new(),
             workspace_path: String::new(),
+            repo_label: String::new(),
+            layout_path: None,
             memory_count: 0,
             identity_files: Vec::new(),
             help_visible: false,

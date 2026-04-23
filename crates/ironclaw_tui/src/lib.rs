@@ -36,6 +36,7 @@ pub mod event;
 pub mod input;
 pub mod layout;
 pub mod render;
+pub mod repo;
 pub mod spinner;
 pub mod theme;
 pub mod widgets;

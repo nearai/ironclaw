@@ -103,11 +103,18 @@ impl TuiLayout {
 
     /// Resolve the theme from the layout's theme name.
     pub fn resolve_theme(&self) -> Theme {
-        let base = match self.theme.as_str() {
-            "light" => Theme::light(),
-            _ => Theme::dark(),
-        };
-        base.apply_overrides(&self.theme_overrides)
+        Theme::from_name(&self.theme).apply_overrides(&self.theme_overrides)
+    }
+
+    /// Serialize the layout to pretty JSON and write it to `path`, creating
+    /// parent directories as needed.
+    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(path, json)
     }
 }
 
@@ -320,6 +327,37 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ironclaw-layout-{test_name}-{nanos}"));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("layout.json")
+    }
+
+    #[test]
+    fn save_to_file_round_trips_theme() {
+        let path = unique_test_layout_path("save-roundtrip");
+        let layout = TuiLayout {
+            theme: "midnight_emerald".to_string(),
+            ..Default::default()
+        };
+        layout.save_to_file(&path).expect("save layout");
+
+        let loaded = TuiLayout::load_from_file(&path);
+        assert_eq!(loaded.theme, "midnight_emerald");
+    }
+
+    #[test]
+    fn save_to_file_creates_missing_parent_directories() {
+        let dir = std::env::temp_dir().join(format!(
+            "ironclaw-layout-deep-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let path = dir.join("nested").join("layout.json");
+        let layout = TuiLayout {
+            theme: "graphite".to_string(),
+            ..Default::default()
+        };
+        layout.save_to_file(&path).expect("save layout");
+        assert!(path.exists());
     }
 
     #[test]

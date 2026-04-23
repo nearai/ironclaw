@@ -13,6 +13,11 @@ use crate::theme::Theme;
 
 use super::{AppState, TuiWidget};
 
+pub enum WorkspaceMouseAction {
+    ToggleDirectory(String),
+    SelectFile(String),
+}
+
 pub struct WorkspaceWidget {
     theme: Theme,
 }
@@ -34,13 +39,13 @@ impl WorkspaceWidget {
         area.height.saturating_sub(2) as usize
     }
 
-    pub fn row_index_at(
+    pub fn action_at(
         &self,
         area: Rect,
         state: &AppState,
         column: u16,
         row: u16,
-    ) -> Option<usize> {
+    ) -> Option<WorkspaceMouseAction> {
         let (list_area, _) = Self::pane_areas(area);
         if !rect_contains(list_area, column, row)
             || row <= list_area.y
@@ -51,21 +56,34 @@ impl WorkspaceWidget {
 
         let inner_y = row.saturating_sub(list_area.y + 1) as usize;
         let index = state.workspace.scroll + inner_y;
-        state.memory_entries.get(index)?;
-        Some(index)
+        let item = state
+            .workspace
+            .visible_items(&state.memory_entries)
+            .get(index)?
+            .clone();
+        if item.is_dir {
+            Some(WorkspaceMouseAction::ToggleDirectory(item.path))
+        } else {
+            Some(WorkspaceMouseAction::SelectFile(item.path))
+        }
     }
 
     fn preview_lines(&self, state: &AppState, width: u16, height: u16) -> Vec<Line<'static>> {
         let Some(entry) = state.workspace.selected_entry(&state.memory_entries) else {
             return vec![Line::from(Span::styled(
-                "No workspace files available yet.",
+                if state.memory_entries.is_empty() {
+                    "No workspace files available yet."
+                } else {
+                    "Select a file to preview."
+                },
                 self.theme.dim_style(),
             ))];
         };
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Path ", self.theme.dim_style()),
+                Span::styled("Workspace", self.theme.dim_style()),
+                Span::styled("  /  ", self.theme.dim_style()),
                 Span::styled(entry.path.clone(), self.theme.bold_style()),
             ]),
             Line::from(vec![
@@ -77,6 +95,8 @@ impl WorkspaceWidget {
                     },
                     self.theme.accent_style(),
                 ),
+                Span::styled("  ·  ", self.theme.dim_style()),
+                Span::styled("Enter toggles view", self.theme.dim_style()),
             ]),
         ];
 
@@ -93,18 +113,30 @@ impl WorkspaceWidget {
         lines.push(Line::from(""));
 
         let content_width = width.saturating_sub(2) as usize;
-        let wrapped = wrap_text(
-            &entry.snippet,
-            content_width.max(1),
-            Style::default().fg(self.theme.fg.to_color()),
-        );
-        if wrapped.is_empty() {
+        let preview_lines = match state.workspace.preview_mode {
+            super::WorkspacePreviewMode::Rendered => wrap_text(
+                &entry.snippet,
+                content_width.max(1),
+                Style::default().fg(self.theme.fg.to_color()),
+            ),
+            super::WorkspacePreviewMode::Raw => entry
+                .snippet
+                .lines()
+                .map(|line| {
+                    Line::from(Span::styled(
+                        truncate(line, content_width.max(1)),
+                        Style::default().fg(self.theme.fg.to_color()),
+                    ))
+                })
+                .collect(),
+        };
+        if preview_lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "(empty preview)",
                 self.theme.dim_style(),
             )));
         } else {
-            lines.extend(wrapped);
+            lines.extend(preview_lines);
         }
 
         let usable_height = height.saturating_sub(2) as usize;
@@ -137,29 +169,45 @@ impl TuiWidget for WorkspaceWidget {
         let (list_area, preview_area) = Self::pane_areas(area);
 
         let visible_rows = Self::list_rows(list_area);
-        let list_lines: Vec<Line<'static>> = if state.memory_entries.is_empty() {
+        let visible_items = state.workspace.visible_items(&state.memory_entries);
+        let list_lines: Vec<Line<'static>> = if visible_items.is_empty() {
             vec![Line::from(Span::styled(
                 "No files in workspace",
                 self.theme.dim_style(),
             ))]
         } else {
-            state
-                .memory_entries
+            visible_items
                 .iter()
                 .enumerate()
                 .skip(state.workspace.scroll)
                 .take(visible_rows.max(1))
-                .map(|(index, entry)| {
+                .map(|(index, item)| {
                     let is_selected = index == state.workspace.selected;
                     let prefix = if is_selected { "▶ " } else { "  " };
-                    let path_width = list_area.width.saturating_sub(5) as usize;
+                    let indent = "  ".repeat(item.depth);
+                    let icon = if item.is_dir {
+                        if state.workspace.collapsed_dirs.contains(&item.path) {
+                            "▸ "
+                        } else {
+                            "▾ "
+                        }
+                    } else {
+                        "• "
+                    };
+                    let path_width =
+                        list_area.width.saturating_sub(5 + (item.depth as u16 * 2)) as usize;
                     let style = if is_selected {
                         self.theme.accent_style().add_modifier(Modifier::BOLD)
+                    } else if item.is_dir {
+                        self.theme.dim_style().add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(self.theme.fg.to_color())
                     };
                     Line::from(Span::styled(
-                        format!("{prefix}{}", truncate(&entry.path, path_width.max(1))),
+                        format!(
+                            "{prefix}{indent}{icon}{}",
+                            truncate(&item.label, path_width.max(1))
+                        ),
                         style,
                     ))
                 })
@@ -171,7 +219,7 @@ impl TuiWidget for WorkspaceWidget {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(self.theme.border_style())
-                    .title(" Workspace files "),
+                    .title(" Workspace browser "),
             )
             .render(list_area, buf);
 
@@ -196,7 +244,7 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::{MemoryEntry, WorkspaceState};
+    use crate::widgets::{MemoryEntry, WorkspacePreviewMode, WorkspaceState};
 
     fn buffer_text(buf: &Buffer, area: Rect) -> String {
         let mut lines = Vec::new();
@@ -239,9 +287,36 @@ mod tests {
         widget.render(area, &mut buf, &state);
 
         let text = buffer_text(&buf, area);
-        assert!(text.contains("Workspace files"));
-        assert!(text.contains("docs/spec.md"));
+        assert!(text.contains("Workspace browser"));
+        assert!(text.contains("docs"));
+        assert!(text.contains("spec.md"));
         assert!(text.contains("hello from preview pane"));
+    }
+
+    #[test]
+    fn workspace_raw_preview_preserves_line_breaks() {
+        let widget = WorkspaceWidget::new(Theme::dark());
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let state = AppState {
+            memory_entries: vec![MemoryEntry {
+                path: "docs/spec.md".to_string(),
+                snippet: "line one\nline two".to_string(),
+                updated_at: None,
+            }],
+            workspace: WorkspaceState {
+                selected_path: Some("docs/spec.md".to_string()),
+                preview_mode: WorkspacePreviewMode::Raw,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("line one"));
+        assert!(text.contains("line two"));
     }
 
     #[test]
@@ -276,33 +351,46 @@ mod tests {
     }
 
     #[test]
-    fn row_index_at_maps_clicks_to_visible_entries() {
+    fn action_at_toggles_directory_rows() {
         let widget = WorkspaceWidget::new(Theme::dark());
         let area = Rect::new(0, 0, 100, 20);
         let state = AppState {
-            memory_entries: vec![
-                MemoryEntry {
-                    path: "a.md".to_string(),
-                    snippet: String::new(),
-                    updated_at: None,
-                },
-                MemoryEntry {
-                    path: "b.md".to_string(),
-                    snippet: String::new(),
-                    updated_at: None,
-                },
-            ],
+            memory_entries: vec![MemoryEntry {
+                path: "docs/a.md".to_string(),
+                snippet: String::new(),
+                updated_at: None,
+            }],
             workspace: WorkspaceState {
-                selected: 0,
-                selected_path: Some("a.md".to_string()),
+                selected_path: Some("docs".to_string()),
                 ..Default::default()
             },
             ..Default::default()
         };
         let (list_area, _) = WorkspaceWidget::pane_areas(area);
 
-        let index = widget.row_index_at(area, &state, list_area.x + 2, list_area.y + 2);
+        let action = widget.action_at(area, &state, list_area.x + 2, list_area.y + 1);
 
-        assert_eq!(index, Some(1));
+        assert!(matches!(
+            action,
+            Some(WorkspaceMouseAction::ToggleDirectory(path)) if path == "docs"
+        ));
+    }
+
+    #[test]
+    fn workspace_state_toggle_directory_hides_children() {
+        let entries = vec![MemoryEntry {
+            path: "docs/a.md".to_string(),
+            snippet: String::new(),
+            updated_at: None,
+        }];
+        let mut workspace = WorkspaceState {
+            selected_path: Some("docs".to_string()),
+            ..Default::default()
+        };
+        workspace.sync_entries(&entries);
+        assert_eq!(workspace.visible_items(&entries).len(), 2);
+
+        assert!(workspace.toggle_selected_directory(&entries));
+        assert_eq!(workspace.visible_items(&entries).len(), 1);
     }
 }

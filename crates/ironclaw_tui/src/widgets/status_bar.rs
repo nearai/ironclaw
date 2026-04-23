@@ -99,13 +99,21 @@ impl TuiWidget for StatusBarWidget {
             self.theme.accent_style()
         };
 
-        let mut left_spans = vec![
+        let mut left_spans: Vec<Span<'static>> = Vec::new();
+        if !state.repo_label.is_empty() {
+            left_spans.push(Span::styled(
+                format!(" \u{2302} {} ", state.repo_label),
+                self.theme.bold_accent_style(),
+            ));
+            left_spans.push(sep.clone());
+        }
+        left_spans.extend([
             Span::styled(format!(" {tab_label} "), self.theme.bold_accent_style()),
             sep.clone(),
             Span::styled(state.model.to_string(), self.theme.accent_style()),
             sep.clone(),
             Span::styled(format!("v{}", state.version), self.theme.dim_style()),
-        ];
+        ]);
 
         // Fleet/activity summary: active tools and threads
         let tool_count = state.active_tools.len();
@@ -305,6 +313,41 @@ mod tests {
         let bar = context_bar(1.5, 10);
         // Should be same as 1.0
         assert_eq!(bar, context_bar(1.0, 10));
+    }
+
+    #[test]
+    fn renders_repo_label_as_leading_segment() {
+        let widget = StatusBarWidget::new(Theme::dark());
+        let state = AppState {
+            repo_label: "feat/tui-status-bar".to_string(),
+            ..AppState::default()
+        };
+        let area = Rect::new(0, 0, 140, 1);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(
+            text.contains("\u{2302} feat/tui-status-bar"),
+            "expected leading repo label segment, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn omits_repo_label_when_empty() {
+        let widget = StatusBarWidget::new(Theme::dark());
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 140, 1);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(
+            !text.contains("\u{2302}"),
+            "expected no repo glyph when label is empty, got: {text:?}"
+        );
     }
 
     #[test]

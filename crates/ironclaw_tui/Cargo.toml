@@ -32,3 +32,4 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tempfile = "3"
