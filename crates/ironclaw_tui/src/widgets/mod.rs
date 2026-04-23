@@ -553,11 +553,14 @@ pub struct ProjectsState {
     pub selected_project_id: Option<String>,
     pub selected_mission_id: Option<String>,
     pub selected_thread_id: Option<String>,
+    pub overview_loaded: bool,
+    pub overview_error: Option<String>,
 }
 
 impl ProjectsState {
     pub fn sync_overview(&mut self, data: &ProjectsOverviewData) {
-        if data.projects.is_empty() {
+        let total_items = data.attention.len() + data.projects.len();
+        if total_items == 0 {
             self.selected_overview = 0;
             if self.view == ProjectsView::Overview {
                 self.selected_project_id = None;
@@ -566,33 +569,65 @@ impl ProjectsState {
         }
 
         if let Some(id) = self.selected_project_id.as_deref()
-            && let Some(index) = data.projects.iter().position(|project| project.id == id)
+            && let Some(index) = data
+                .attention
+                .iter()
+                .position(|item| item.project_id == id)
+                .or_else(|| {
+                    data.projects
+                        .iter()
+                        .position(|project| project.id == id)
+                        .map(|index| data.attention.len() + index)
+                })
         {
             self.selected_overview = index;
         }
 
-        self.selected_overview = self
-            .selected_overview
-            .min(data.projects.len().saturating_sub(1));
+        self.selected_overview = self.selected_overview.min(total_items.saturating_sub(1));
         if self.view == ProjectsView::Overview {
-            self.selected_project_id = data
-                .projects
-                .get(self.selected_overview)
-                .map(|project| project.id.clone());
+            self.selected_project_id = self.selected_overview_project_id(data).map(str::to_owned);
         }
     }
 
     pub fn move_selection(&mut self, delta: isize, data: &ProjectsOverviewData) {
-        if self.view != ProjectsView::Overview || data.projects.is_empty() {
+        let total_items = data.attention.len() + data.projects.len();
+        if self.view != ProjectsView::Overview || total_items == 0 {
             return;
         }
 
-        let max = data.projects.len().saturating_sub(1) as isize;
+        let max = total_items.saturating_sub(1) as isize;
         self.selected_overview = (self.selected_overview as isize + delta).clamp(0, max) as usize;
-        self.selected_project_id = data
-            .projects
-            .get(self.selected_overview)
-            .map(|project| project.id.clone());
+        self.selected_project_id = self.selected_overview_project_id(data).map(str::to_owned);
+    }
+
+    pub fn selected_attention<'a>(
+        &self,
+        data: &'a ProjectsOverviewData,
+    ) -> Option<&'a ProjectAttentionItem> {
+        if self.view == ProjectsView::Overview && self.selected_overview < data.attention.len() {
+            data.attention.get(self.selected_overview)
+        } else {
+            None
+        }
+    }
+
+    pub fn selected_project_card<'a>(
+        &self,
+        data: &'a ProjectsOverviewData,
+    ) -> Option<&'a ProjectOverviewCard> {
+        if self.view != ProjectsView::Overview {
+            return None;
+        }
+        let index = self.selected_overview.checked_sub(data.attention.len())?;
+        data.projects.get(index)
+    }
+
+    fn selected_overview_project_id<'a>(&self, data: &'a ProjectsOverviewData) -> Option<&'a str> {
+        if let Some(item) = self.selected_attention(data) {
+            return Some(&item.project_id);
+        }
+        self.selected_project_card(data)
+            .map(|project| project.id.as_str())
     }
 
     pub fn open_project(&mut self, project_id: String) {

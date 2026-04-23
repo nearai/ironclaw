@@ -479,6 +479,9 @@ async fn handle_event(
             if handle_settings_key(key, state, msg_tx).await {
                 return;
             }
+            if handle_projects_key(key, state, msg_tx).await {
+                return;
+            }
 
             let action = resolve_key_action(key, state, widgets);
 
@@ -1171,6 +1174,8 @@ async fn handle_event(
 
         TuiEvent::UpdateProjectsOverview(data) => {
             state.projects_overview = *data;
+            state.projects.overview_loaded = true;
+            state.projects.overview_error = None;
             state.projects.sync_overview(&state.projects_overview);
             state
                 .missions_surface
@@ -2059,6 +2064,73 @@ fn resolve_key_action(
         KeyCode::Up if widgets.input_box.is_cursor_on_first_line() => InputAction::HistoryUp,
         KeyCode::Down if widgets.input_box.is_cursor_on_last_line() => InputAction::HistoryDown,
         _ => InputAction::Forward,
+    }
+}
+
+async fn handle_projects_key(
+    key: event::KeyEvent,
+    state: &mut AppState,
+    msg_tx: &mpsc::Sender<TuiUserMessage>,
+) -> bool {
+    if state.active_tab != ActiveTab::Projects
+        || state.pending_approval.is_some()
+        || state.command_palette.visible
+        || state.model_picker.visible
+        || state.search.active
+        || state.help_visible
+        || state.identity_file_modal.is_some()
+        || state.expanded_dashboard_panel.is_some()
+        || state.tool_detail_modal.is_some()
+        || state.pending_thread_picker.is_some()
+        || key.modifiers != KeyModifiers::NONE
+    {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Up => {
+            state.projects.move_selection(-1, &state.projects_overview);
+            true
+        }
+        KeyCode::Down => {
+            state.projects.move_selection(1, &state.projects_overview);
+            true
+        }
+        KeyCode::Enter => {
+            open_selected_project_item(state, msg_tx).await;
+            true
+        }
+        KeyCode::Esc if state.projects.view != crate::widgets::ProjectsView::Overview => {
+            state.projects.back_to_overview(&state.projects_overview);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn open_selected_project_item(state: &mut AppState, msg_tx: &mpsc::Sender<TuiUserMessage>) {
+    if state.projects.view != crate::widgets::ProjectsView::Overview {
+        return;
+    }
+
+    if let Some(item) = state.projects.selected_attention(&state.projects_overview) {
+        if let Some(thread_id) = &item.thread_id {
+            state.projects.selected_thread_id = Some(thread_id.clone());
+            let _ = msg_tx
+                .send(TuiUserMessage::open_engine_thread_detail(thread_id.clone()))
+                .await;
+        } else {
+            state.projects.open_project(item.project_id.clone());
+        }
+        return;
+    }
+
+    if let Some(project_id) = state
+        .projects
+        .selected_project_card(&state.projects_overview)
+        .map(|project| project.id.clone())
+    {
+        state.projects.open_project(project_id);
     }
 }
 
@@ -4287,6 +4359,103 @@ mod tests {
             messages[0].ui_action.as_ref(),
             Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "thread-1"
         ));
+    }
+
+    #[tokio::test]
+    async fn projects_arrow_and_enter_open_selected_attention_item() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: vec![crate::widgets::ProjectAttentionItem {
+                    kind: "gate".to_string(),
+                    project_id: "project-1".to_string(),
+                    project_name: "Alpha".to_string(),
+                    message: "Awaiting approval".to_string(),
+                    thread_id: Some("thread-1".to_string()),
+                }],
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: Vec::new(),
+                    recent_activity: Vec::new(),
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.sync_overview(&state.projects_overview);
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(
+            state.projects.selected_thread_id.as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0].ui_action.as_ref(),
+            Some(TuiUiAction::OpenEngineThreadDetail { thread_id }) if thread_id == "thread-1"
+        ));
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(state.projects.selected_overview, 1);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(
+            state.projects.view,
+            crate::widgets::ProjectsView::ProjectDetail
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_escape_returns_from_detail_to_overview() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Projects,
+            projects_overview: crate::widgets::ProjectsOverviewData {
+                attention: Vec::new(),
+                projects: vec![crate::widgets::ProjectOverviewCard {
+                    id: "project-1".to_string(),
+                    name: "Alpha".to_string(),
+                    description: "desc".to_string(),
+                    health: "green".to_string(),
+                    active_missions: 1,
+                    threads_today: 2,
+                    cost_today_usd: "$0.50".to_string(),
+                    last_activity: None,
+                    goals: Vec::new(),
+                    missions: Vec::new(),
+                    recent_activity: Vec::new(),
+                }],
+            },
+            ..Default::default()
+        };
+        state.projects.open_project("project-1".to_string());
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(state.projects.view, crate::widgets::ProjectsView::Overview);
     }
 
     #[tokio::test]
