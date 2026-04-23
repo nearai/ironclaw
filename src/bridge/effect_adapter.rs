@@ -23,6 +23,7 @@ use ironclaw_skills::SkillRegistry;
 
 use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
+use crate::bridge::action_discovery::ActionDiscovery;
 use crate::bridge::action_projector::ActionProjector;
 use crate::bridge::capability_projector::CapabilityProjector;
 use crate::bridge::router::synthetic_action_call_id;
@@ -972,6 +973,40 @@ impl EffectBridgeAdapter {
                 r.duration = start.elapsed();
                 r
             });
+        }
+
+        if action_name == "tool_info"
+            && let Some(actions) = context.available_actions_snapshot.as_ref()
+        {
+            match ActionDiscovery::tool_info(&parameters, actions) {
+                Ok(Some(output)) => {
+                    return Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: output.result,
+                        is_error: false,
+                        duration: start.elapsed(),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                    let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                    return Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({"error": sanitized.content}),
+                        is_error: true,
+                        duration: start.elapsed(),
+                    });
+                }
+            }
         }
 
         if is_v1_only_tool(&lookup_name) {
@@ -2563,7 +2598,62 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
+            available_actions_snapshot: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_callable_action_snapshot_for_engine_native_actions() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_actions_snapshot = Some(vec![ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create a mission".to_string(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "cadence": {"type": "string"}
+                },
+                "required": ["name", "goal", "cadence"]
+            }),
+            effects: vec![],
+            requires_approval: false,
+            discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                name: "mission_create".to_string(),
+                summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                    always_required: vec![
+                        "name".to_string(),
+                        "goal".to_string(),
+                        "cadence".to_string(),
+                    ],
+                    conditional_requirements: vec![
+                        "Use this only for recurring or scheduled work".to_string(),
+                    ],
+                    notes: vec![],
+                    examples: vec![],
+                }),
+                schema_override: None,
+            }),
+        }]);
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "mission_create", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should succeed through callable action discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("mission_create"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
     }
 
     #[tokio::test]
@@ -3444,6 +3534,7 @@ mod tests {
             thread_goal: Some(
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
             ),
+            available_actions_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3463,6 +3554,7 @@ mod tests {
             thread_goal: Some(
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
             ),
+            available_actions_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3480,6 +3572,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
+            available_actions_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3497,6 +3590,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
+            available_actions_snapshot: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -3517,6 +3611,7 @@ mod tests {
             source_channel: Some("gateway".to_string()),
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
+            available_actions_snapshot: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -3535,6 +3630,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
+            available_actions_snapshot: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -3757,6 +3853,7 @@ mod tests {
                 source_channel: Some("gateway".to_string()),
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
+                available_actions_snapshot: None,
             }
         }
 
@@ -4038,6 +4135,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -4134,6 +4232,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
         };
 
         let result = adapter
@@ -4244,6 +4343,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
         };
 
         let result = adapter
@@ -4695,6 +4795,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: None,
+            available_actions_snapshot: None,
         };
 
         let capabilities = adapter
@@ -5951,29 +6052,7 @@ Use this skill to set up a Pika meeting.
         ironclaw_engine::Capability {
             name: "missions".into(),
             description: "Mission lifecycle".into(),
-            actions: vec![
-                ActionDef {
-                    name: "mission_create".into(),
-                    description: "Create a mission".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-                ActionDef {
-                    name: "mission_list".into(),
-                    description: "List missions".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-                ActionDef {
-                    name: "mission_complete".into(),
-                    description: "Complete a mission".into(),
-                    parameters_schema: serde_json::json!({"type": "object"}),
-                    effects: vec![],
-                    requires_approval: false,
-                },
-            ],
+            actions: crate::bridge::engine_actions::mission_capability_actions(),
             knowledge: vec![],
             policies: vec![],
         }
@@ -6022,6 +6101,33 @@ Use this skill to set up a Pika meeting.
                 "expected {expected} in advertised actions, got: {names:?}"
             );
         }
+
+        let mission_create = actions
+            .iter()
+            .find(|action| action.name == "mission_create")
+            .expect("mission_create should be advertised");
+        assert_eq!(
+            mission_create.parameters_schema["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+        let create_summary = mission_create
+            .discovery_summary()
+            .expect("mission_create should carry curated discovery guidance");
+        assert_eq!(
+            create_summary.always_required,
+            vec![
+                "name".to_string(),
+                "goal".to_string(),
+                "cadence".to_string()
+            ]
+        );
+
+        let mission_list = actions
+            .iter()
+            .find(|action| action.name == "mission_list")
+            .expect("mission_list should be advertised");
+        assert!(mission_list.discovery.is_some());
+        assert!(mission_list.discovery_summary().is_none());
     }
 
     #[tokio::test]
@@ -6177,6 +6283,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "tool_auth".into(), // v1 auth tool
@@ -6184,6 +6291,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "safe_action".into(),
@@ -6191,6 +6299,7 @@ Use this skill to set up a Pika meeting.
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![],
                     requires_approval: false,
+                    discovery: None,
                 },
             ],
             knowledge: vec![],

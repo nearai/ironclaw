@@ -650,6 +650,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            discovery: None,
         }
     }
 
@@ -1594,6 +1595,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            discovery: None,
         };
 
         let llm = Arc::new(MockLlm::new(vec![

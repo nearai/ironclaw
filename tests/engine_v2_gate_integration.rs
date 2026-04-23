@@ -245,6 +245,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "create-issue".into(),
@@ -252,6 +253,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
         ])
     }
@@ -368,6 +370,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -375,6 +378,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -382,6 +386,7 @@ impl EffectExecutor for GateMockEffects {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
         ])
     }
@@ -593,6 +598,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                discovery: None,
             },
             ActionDef {
                 name: "echo".into(),
@@ -600,6 +606,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "tool_install".into(),
@@ -607,6 +614,7 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: require_approval,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -626,6 +634,7 @@ fn make_caps_with_approval_tool() -> CapabilityRegistry {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
+            discovery: None,
         }],
         knowledge: vec![],
         policies: vec![],
@@ -645,6 +654,7 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "create_issue".into(),
@@ -652,6 +662,7 @@ fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
                 parameters_schema: serde_json::json!({"type": "object"}),
                 effects: vec![EffectType::WriteExternal],
                 requires_approval: false,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -1005,6 +1016,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
     };
 
     let tool_result = effects
@@ -1141,6 +1153,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1252,6 +1265,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
     };
 
     effects.mark_approved("tool_install").await;
@@ -1393,6 +1407,7 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         source_channel: None,
         user_timezone: None,
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
     };
 
     effects.mark_authenticated("tool_install").await;
@@ -1749,6 +1764,7 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                discovery: None,
             },
             ActionDef {
                 name: "routine_create".into(),
@@ -1756,6 +1772,7 @@ async fn lease_planner_mission_excludes_denylisted() {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                discovery: None,
             },
         ],
         knowledge: vec![],
@@ -1895,6 +1912,7 @@ async fn lease_gate_denies_without_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -1941,6 +1959,7 @@ async fn lease_gate_allows_with_valid_lease() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteLocal],
         requires_approval: true,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -2011,6 +2030,7 @@ async fn pipeline_first_deny_wins() {
         parameters_schema: serde_json::json!({}),
         effects: vec![],
         requires_approval: false,
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});
@@ -2102,6 +2122,7 @@ async fn auto_approve_mode_still_pauses_always_tools() {
         parameters_schema: serde_json::json!({}),
         effects: vec![EffectType::WriteExternal],
         requires_approval: true, // This maps to Always in the real system
+        discovery: None,
     };
     let auto = std::collections::HashSet::new();
     let params = serde_json::json!({});

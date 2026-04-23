@@ -497,6 +497,7 @@ mod tests {
                 }),
                 effects: vec![],
                 requires_approval: false,
+                discovery: None,
             }],
             &[],
             &[],

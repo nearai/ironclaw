@@ -980,7 +980,13 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let available_actions = effects
+        .available_actions(&active_leases, &exec_ctx)
+        .await
+        .unwrap_or_default();
+    exec_ctx.available_actions_snapshot = Some(available_actions.clone());
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1027,11 +1033,7 @@ async fn handle_execute_action(
     };
 
     // 2. Check policy
-    let action_def = effects
-        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-        .await
-        .ok()
-        .and_then(|actions| actions.into_iter().find(|a| a.name == name));
+    let action_def = available_actions.into_iter().find(|a| a.name == name);
 
     if let Some(ref ad) = action_def {
         match policy.evaluate(ad, &lease, &[]) {
@@ -1323,6 +1325,12 @@ async fn handle_execute_actions_parallel(
     }
 
     let step_id = StepId::new();
+    let actions_context = thread_execution_context(thread, step_id, None);
+    let active_leases = leases.active_for_thread(thread.id).await;
+    let available_actions = effects
+        .available_actions(&active_leases, &actions_context)
+        .await
+        .unwrap_or_default();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1369,12 +1377,12 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        let action_def = effects
-            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
-            .await
-            .ok()
-            .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.available_actions_snapshot = Some(available_actions.clone());
+        let action_def = available_actions
+            .iter()
+            .find(|a| a.name == pc.name)
+            .cloned();
 
         if let Some(ref ad) = action_def {
             match policy.evaluate(ad, &lease, &[]) {
@@ -1530,7 +1538,8 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.available_actions_snapshot = Some(available_actions.clone());
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1560,7 +1569,8 @@ async fn handle_execute_actions_parallel(
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            exec_ctx.available_actions_snapshot = Some(available_actions.clone());
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {

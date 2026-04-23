@@ -133,6 +133,64 @@ pub struct ActionDef {
     pub effects: Vec<EffectType>,
     /// Whether this action requires user approval before execution.
     pub requires_approval: bool,
+    /// Optional discovery metadata used by `tool_info` and prompt guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ActionDiscoveryMetadata>,
+}
+
+/// Curated discovery guidance for a callable action.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoverySummary {
+    /// Parameters that are always required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    /// Conditional requirements or cross-field invariants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    /// Additional notes for correct tool selection/use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Optional structured examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
+/// Optional discovery metadata layered on top of an executable action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoveryMetadata {
+    /// Canonical discovery name shown to the model.
+    pub name: String,
+    /// Optional curated discovery guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ActionDiscoverySummary>,
+    /// Optional discovery schema when it differs from the callable schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_override: Option<serde_json::Value>,
+}
+
+impl ActionDef {
+    /// Canonical discovery name for this action.
+    pub fn discovery_name(&self) -> &str {
+        self.discovery
+            .as_ref()
+            .map(|metadata| metadata.name.as_str())
+            .unwrap_or(self.name.as_str())
+    }
+
+    /// Discovery schema, defaulting to the callable schema.
+    pub fn discovery_schema(&self) -> &serde_json::Value {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.schema_override.as_ref())
+            .unwrap_or(&self.parameters_schema)
+    }
+
+    /// Curated discovery summary, when one exists.
+    pub fn discovery_summary(&self) -> Option<&ActionDiscoverySummary> {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.summary.as_ref())
+    }
 }
 
 /// Canonical model-visible status for capability background surfacing.

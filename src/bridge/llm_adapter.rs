@@ -675,6 +675,7 @@ mod tests {
             }),
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
+            discovery: None,
         }
     }
 
@@ -1020,6 +1021,7 @@ mod tests {
                     parameters_schema: serde_json::json!({"type": "object"}),
                     effects: vec![EffectType::ReadLocal],
                     requires_approval: false,
+                    discovery: None,
                 }],
                 &config,
             )

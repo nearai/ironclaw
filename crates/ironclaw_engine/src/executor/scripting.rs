@@ -2001,6 +2001,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            discovery: None,
         }
     }
 
@@ -2025,6 +2026,7 @@ mod tests {
             source_channel: None,
             user_timezone: None,
             thread_goal: Some(thread.goal.clone()),
+            available_actions_snapshot: None,
         }
     }
 

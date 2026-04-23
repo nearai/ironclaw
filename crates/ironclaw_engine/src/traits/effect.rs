@@ -33,6 +33,11 @@ pub struct ThreadExecutionContext {
     /// Host adapters use this to distinguish immediate one-shot foreground
     /// requests from explicit mission/routine setup.
     pub thread_goal: Option<String>,
+    /// Snapshot of callable actions visible to the current step.
+    ///
+    /// Populated by the orchestrator when an execution path needs on-demand
+    /// discovery parity (for example `tool_info`).
+    pub available_actions_snapshot: Option<Vec<ActionDef>>,
 }
 
 /// Abstraction over capability action execution.
