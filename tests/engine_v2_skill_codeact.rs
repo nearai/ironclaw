@@ -130,6 +130,7 @@ impl EffectExecutor for HttpMockEffects {
     async fn available_actions(
         &self,
         _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
         Ok(vec![ActionDef {
             name: "http".into(),
@@ -147,6 +148,14 @@ impl EffectExecutor for HttpMockEffects {
             effects: vec![EffectType::ReadExternal],
             requires_approval: false,
         }])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
     }
 }
 
