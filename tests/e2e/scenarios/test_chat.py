@@ -128,6 +128,58 @@ async def test_send_message_and_receive_response(page):
     assert "4" in result["text"], f"Expected '4' in response, got: '{result['text']}'"
 
 
+async def test_first_gateway_conversation_appears_in_conversation_list(page):
+    """The chat sidebar should show one normal conversation row, not a pinned assistant row."""
+    thread_id = "00000000-0000-4000-8000-000000000001"
+
+    async def patch_threads_response(route):
+        await route.fulfill(
+            json={
+                "assistant_thread": {
+                    "id": thread_id,
+                    "state": "Idle",
+                    "turn_count": 1,
+                    "created_at": "2026-04-22T00:00:00Z",
+                    "updated_at": "2026-04-22T00:00:00Z",
+                    "title": "sidebar label regression check",
+                    "thread_type": "assistant",
+                    "channel": "gateway",
+                },
+                "threads": [],
+                "active_thread": thread_id,
+            }
+        )
+
+    async def patch_history_response(route):
+        await route.fulfill(
+            json={
+                "thread_id": thread_id,
+                "turns": [],
+                "has_more": False,
+                "oldest_timestamp": None,
+                "channel": "gateway",
+            }
+        )
+
+    await page.route("**/api/chat/threads", patch_threads_response)
+    await page.route("**/api/chat/history**", patch_history_response)
+
+    await page.evaluate(
+        """() => {
+            currentThreadId = null;
+            const list = document.getElementById('thread-list');
+            if (list) list.innerHTML = '';
+            loadThreads();
+        }"""
+    )
+
+    row = page.locator(f'#thread-list [data-thread-id="{thread_id}"] .thread-label').first
+    await row.wait_for(state="visible", timeout=15000)
+    assert (await row.text_content() or "").strip() == "sidebar label regression check"
+    assert await page.locator("#assistant-thread").count() == 0
+    await page.unroute_all(behavior="ignoreErrors")
+
+
 async def test_multiple_messages(page):
     """Send two messages, verify both get responses."""
     chat_input = page.locator(SEL["chat_input"])
