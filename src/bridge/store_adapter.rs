@@ -1695,6 +1695,13 @@ impl Store for HybridStore {
     }
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
+        // Injection scanning note: persist_doc() -> persist_text() -> ws.write()
+        // runs the workspace-level injection scan on the serialized content.
+        // Knowledge docs (.system/engine/knowledge/) are user-authored semantic
+        // content and ARE scanned; engine runtime paths are exempt. Any external
+        // content flowing through this method is therefore already covered by
+        // the workspace write-path injection guard.
+
         // Defense-in-depth: gate orchestrator/prompt writes even if a caller
         // bypassed tool-level checks. The "trusted internal" exemption is
         // keyed off a tokio task-local flag set by `with_trusted_internal_writes`,
