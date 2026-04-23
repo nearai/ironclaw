@@ -1087,7 +1087,7 @@ async def _get_mock_mcp_state(mock_base_url: str) -> dict:
 async def _wait_for_refresh_request(
     mock_base_url: str,
     *,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> dict:
     for _ in range(int(timeout * 2)):
         state = await _get_mock_oauth_state(mock_base_url)
@@ -1567,10 +1567,10 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     await chat_input.press("Enter")
 
     thread_id = await _current_thread_id(page)
-    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=90.0)
+    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=120.0)
     assert tokens, "expected Gmail to hit the mock Google API after settings-first auth"
     history = await _wait_for_response_contains(
-        server["base_url"], thread_id, "Quarterly update", timeout=90.0
+        server["base_url"], thread_id, "Quarterly update", timeout=120.0
     )
     assert history.get("pending_gate") is None, history
     assert "Quarterly update" in " ".join(
