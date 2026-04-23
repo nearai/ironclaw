@@ -16,8 +16,9 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, CapabilityRegistry, CapabilitySummary,
-    EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext, WorkspaceMounts,
+    ActionDef, ActionInventory, ActionResult, CapabilityLease, CapabilityRegistry,
+    CapabilitySummary, EffectExecutor, EngineError, MountError, Store, ThreadExecutionContext,
+    WorkspaceMounts,
 };
 use ironclaw_skills::SkillRegistry;
 
@@ -984,36 +985,50 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if canonical_action_name == "tool_info"
-            && let Some(actions) = context.available_actions_snapshot.as_ref()
-        {
-            match ActionDiscovery::tool_info(&parameters, actions.as_ref()) {
-                Ok(Some(output)) => {
-                    return Ok(ActionResult {
-                        call_id: context
-                            .current_call_id
-                            .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
-                        action_name: canonical_action_name.to_string(),
-                        output: output.result,
-                        is_error: false,
-                        duration: start.elapsed(),
-                    });
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let error_msg = format!("Tool {} failed: {}", "tool_info", error);
-                    let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
-                    return Ok(ActionResult {
-                        call_id: context
-                            .current_call_id
-                            .clone()
-                            .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
-                        action_name: canonical_action_name.to_string(),
-                        output: serde_json::json!({"error": sanitized.content}),
-                        is_error: true,
-                        duration: start.elapsed(),
-                    });
+        if canonical_action_name == "tool_info" {
+            let inventory = context
+                .available_action_inventory_snapshot
+                .as_ref()
+                .cloned()
+                .or_else(|| {
+                    context
+                        .available_actions_snapshot
+                        .as_ref()
+                        .cloned()
+                        .map(|actions| ActionInventory {
+                            callable: actions,
+                            deferred: Vec::new(),
+                        })
+                });
+            if let Some(inventory) = inventory {
+                match ActionDiscovery::tool_info(&parameters, &inventory) {
+                    Ok(Some(output)) => {
+                        return Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                            action_name: canonical_action_name.to_string(),
+                            output: output.result,
+                            is_error: false,
+                            duration: start.elapsed(),
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let error_msg = format!("Tool {} failed: {}", "tool_info", error);
+                        let sanitized = self.safety.sanitize_tool_output("tool_info", &error_msg);
+                        return Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(canonical_action_name)),
+                            action_name: canonical_action_name.to_string(),
+                            output: serde_json::json!({"error": sanitized.content}),
+                            is_error: true,
+                            duration: start.elapsed(),
+                        });
+                    }
                 }
             }
         }
@@ -2714,6 +2729,55 @@ mod tests {
 
         assert!(!result.is_error);
         assert_eq!(result.output["name"], serde_json::json!("echo"));
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_deferred_action_inventory_snapshot() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_tool_info"));
+        ctx.available_action_inventory_snapshot = Some(ActionInventory {
+            callable: vec![],
+            deferred: vec![ActionDef {
+                name: "github_search".to_string(),
+                description: "Search GitHub".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+                discovery: Some(ironclaw_engine::ActionDiscoveryMetadata {
+                    name: "github_search".to_string(),
+                    summary: Some(ironclaw_engine::ActionDiscoverySummary {
+                        always_required: vec!["query".to_string()],
+                        conditional_requirements: vec![],
+                        notes: vec!["Deferred until promoted".to_string()],
+                        examples: vec![],
+                    }),
+                    schema_override: None,
+                }),
+            }],
+        });
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "github_search", "detail": "summary"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve deferred discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("github_search"));
+        assert_eq!(
+            result.output["summary"]["always_required"],
+            serde_json::json!(["query"])
+        );
     }
 
     #[tokio::test]
