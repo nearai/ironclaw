@@ -81,6 +81,9 @@ struct WecomConfig {
 #[derive(Debug, Serialize, Deserialize)]
 struct WecomMessageMetadata {
     to_user: String,
+    target: Option<String>,
+    chat_id: Option<String>,
+    chat_type: Option<String>,
     source_msg_id: Option<String>,
     ws_req_id: Option<String>,
     ws_chat_id: Option<String>,
@@ -115,8 +118,14 @@ enum ParsedCallbackPayload {
 
 #[derive(Debug, Clone)]
 enum PairingReplyRoute {
-    AgentApi { to_user: String },
-    Websocket { req_id: String, reply_cmd: String },
+    AgentApi {
+        to_user: String,
+    },
+    Websocket {
+        req_id: String,
+        reply_cmd: String,
+        chat_type: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -788,15 +797,44 @@ fn load_allow_from() -> Vec<String> {
 }
 
 fn send_pairing_reply(route: &PairingReplyRoute, code: &str) -> Result<(), String> {
-    let content = format!(
-        "This WeCom channel requires approval before chatting. Pairing code: {}",
-        code
-    );
+    let content = pairing_reply_text(route, code);
     match route {
         PairingReplyRoute::AgentApi { to_user } => send_text_message(to_user, &content),
-        PairingReplyRoute::Websocket { req_id, reply_cmd } => {
-            send_websocket_stream_reply(req_id, reply_cmd, &content)
+        PairingReplyRoute::Websocket {
+            req_id, reply_cmd, ..
+        } => send_websocket_stream_reply(req_id, reply_cmd, &content),
+    }
+}
+
+fn pairing_route_is_group(route: &PairingReplyRoute) -> bool {
+    match route {
+        PairingReplyRoute::AgentApi { .. } => false,
+        PairingReplyRoute::Websocket { chat_type, .. } => {
+            normalize_chat_type(chat_type.as_deref()).as_deref() == Some("group")
         }
+    }
+}
+
+fn should_send_pairing_reply(route: &PairingReplyRoute, created: bool) -> bool {
+    if pairing_route_is_group(route) {
+        // Group chats only receive the generic "please DM" notice once per
+        // pairing request to avoid leaking or spamming operational details.
+        created
+    } else {
+        // In private chats, always send the code so users can still get it
+        // even if the request was originally created in a group context.
+        true
+    }
+}
+
+fn pairing_reply_text(route: &PairingReplyRoute, code: &str) -> String {
+    if pairing_route_is_group(route) {
+        "This WeCom channel requires approval before chatting. For security, please DM the bot to get your pairing code.".to_string()
+    } else {
+        format!(
+            "This WeCom channel requires approval before chatting. Pairing code: {}",
+            code
+        )
     }
 }
 
@@ -826,8 +864,8 @@ fn is_sender_allowed(
     if dm_policy == "pairing" {
         let meta = serde_json::json!({ "user_id": sender_id }).to_string();
         let result = channel_host::pairing_upsert_request(CHANNEL_NAME, sender_id, &meta)?;
-        if result.created {
-            if let Some(reply_route) = pairing_reply {
+        if let Some(reply_route) = pairing_reply {
+            if should_send_pairing_reply(&reply_route, result.created) {
                 let _ = send_pairing_reply(&reply_route, &result.code);
             }
         }
@@ -2041,6 +2079,28 @@ fn websocket_fallback_target(sender_id: &str, chat_type: Option<&str>) -> String
     }
 }
 
+fn normalize_chat_type(chat_type: Option<&str>) -> Option<String> {
+    let kind = chat_type.map(str::trim).filter(|value| !value.is_empty())?;
+    Some(match kind {
+        "single" => "private".to_string(),
+        other => other.to_string(),
+    })
+}
+
+fn wecom_conversation_scope(
+    sender_id: &str,
+    chat_id: Option<&str>,
+    chat_type: Option<&str>,
+) -> String {
+    let normalized_chat_type = normalize_chat_type(chat_type);
+    if normalized_chat_type.as_deref() == Some("group") {
+        if let Some(group_chat_id) = chat_id.map(str::trim).filter(|value| !value.is_empty()) {
+            return format!("wecom:group:{group_chat_id}");
+        }
+    }
+    format!("wecom:dm:{sender_id}")
+}
+
 fn websocket_metadata_json(
     sender_id: &str,
     msg_id: &str,
@@ -2049,12 +2109,25 @@ fn websocket_metadata_json(
     chat_type: Option<&str>,
     reply_cmd: &str,
 ) -> Result<String, String> {
+    let normalized_chat_type = normalize_chat_type(chat_type);
+    let normalized_chat_id = chat_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let to_user = websocket_fallback_target(sender_id, chat_type);
+    let target = normalized_chat_id
+        .clone()
+        .or_else(|| (!to_user.is_empty()).then_some(to_user.clone()));
+
     serde_json::to_string(&WecomMessageMetadata {
-        to_user: websocket_fallback_target(sender_id, chat_type),
+        to_user,
+        target,
+        chat_id: normalized_chat_id,
+        chat_type: normalized_chat_type,
         source_msg_id: Some(msg_id.to_string()),
         ws_req_id: Some(req_id.to_string()),
-        ws_chat_id: chat_id.map(ToOwned::to_owned),
-        ws_chat_type: chat_type.map(ToOwned::to_owned),
+        ws_chat_id: chat_id.map(str::to_string),
+        ws_chat_type: chat_type.map(str::to_string),
         ws_reply_cmd: Some(reply_cmd.to_string()),
     })
     .map_err(|e| format!("Failed to serialize WeCom websocket metadata: {e}"))
@@ -2257,6 +2330,7 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
         Some(PairingReplyRoute::Websocket {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
+            chat_type: body.chattype.clone(),
         }),
     ) {
         Ok(true) => {}
@@ -2335,12 +2409,14 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
             return;
         }
     };
+    let conversation_scope =
+        wecom_conversation_scope(&sender_id, body.chatid.as_deref(), body.chattype.as_deref());
 
     channel_host::emit_message(&EmittedMessage {
         user_id: sender_id,
         user_name: None,
         content,
-        thread_id: None,
+        thread_id: Some(conversation_scope),
         metadata_json,
         attachments,
     });
@@ -2375,6 +2451,7 @@ fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
         Some(PairingReplyRoute::Websocket {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: reply_cmd.to_string(),
+            chat_type: body.chattype.clone(),
         }),
     ) {
         Ok(true) => {}
@@ -2402,12 +2479,14 @@ fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
             return;
         }
     };
+    let conversation_scope =
+        wecom_conversation_scope(&sender_id, body.chatid.as_deref(), body.chattype.as_deref());
 
     channel_host::emit_message(&EmittedMessage {
         user_id: sender_id,
         user_name: None,
         content,
-        thread_id: None,
+        thread_id: Some(conversation_scope),
         metadata_json,
         attachments: Vec::new(),
     });
@@ -2547,6 +2626,7 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
     }
 
     let sender_id = parsed.sender_id.clone();
+    let conversation_scope = wecom_conversation_scope(&sender_id, None, Some("private"));
 
     match is_sender_allowed(
         &sender_id,
@@ -2585,6 +2665,9 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
 
     let metadata = WecomMessageMetadata {
         to_user: sender_id.clone(),
+        target: Some(sender_id.clone()),
+        chat_id: None,
+        chat_type: Some("private".to_string()),
         source_msg_id: Some(parsed.msg_id),
         ws_req_id: None,
         ws_chat_id: None,
@@ -2606,7 +2689,7 @@ fn handle_callback_message(parsed: ParsedCallbackMessage) {
         user_id: sender_id,
         user_name: None,
         content: parsed.text.unwrap_or_default(),
-        thread_id: None,
+        thread_id: Some(conversation_scope),
         metadata_json,
         attachments,
     });
@@ -3059,6 +3142,9 @@ mod tests {
     fn websocket_media_target_prefers_chat_id_over_user_id() {
         let metadata = WecomMessageMetadata {
             to_user: "ZhangSan".to_string(),
+            target: Some("wr-chat".to_string()),
+            chat_id: Some("wr-chat".to_string()),
+            chat_type: Some("group".to_string()),
             source_msg_id: Some("msg-1".to_string()),
             ws_req_id: Some("req-1".to_string()),
             ws_chat_id: Some("wr-chat".to_string()),
@@ -3086,10 +3172,60 @@ mod tests {
 
         let metadata: WecomMessageMetadata = serde_json::from_str(&json).expect("metadata");
         assert_eq!(metadata.to_user, "");
+        assert_eq!(metadata.target.as_deref(), Some("chat-1"));
+        assert_eq!(metadata.chat_id.as_deref(), Some("chat-1"));
+        assert_eq!(metadata.chat_type.as_deref(), Some("group"));
         assert_eq!(metadata.ws_req_id.as_deref(), Some("req-1"));
         assert_eq!(metadata.ws_chat_id.as_deref(), Some("chat-1"));
         assert_eq!(metadata.ws_chat_type.as_deref(), Some("group"));
         assert_eq!(metadata.ws_reply_cmd.as_deref(), Some(WECOM_WS_REPLY_CMD));
+    }
+
+    #[test]
+    fn wecom_conversation_scope_splits_group_and_dm() {
+        assert_eq!(
+            wecom_conversation_scope("zhangsan", Some("chat-1"), Some("group")),
+            "wecom:group:chat-1"
+        );
+        assert_eq!(
+            wecom_conversation_scope("zhangsan", Some("chat-1"), Some("single")),
+            "wecom:dm:zhangsan"
+        );
+        assert_eq!(
+            wecom_conversation_scope("zhangsan", None, Some("private")),
+            "wecom:dm:zhangsan"
+        );
+    }
+
+    #[test]
+    fn pairing_reply_hides_code_in_group_chat() {
+        let route = PairingReplyRoute::Websocket {
+            req_id: "req-1".to_string(),
+            reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
+            chat_type: Some("group".to_string()),
+        };
+
+        assert!(should_send_pairing_reply(&route, true));
+        assert!(!should_send_pairing_reply(&route, false));
+
+        let content = pairing_reply_text(&route, "ABCD1234");
+        assert!(content.contains("please DM"));
+        assert!(!content.contains("ABCD1234"));
+    }
+
+    #[test]
+    fn pairing_reply_always_sends_code_in_private_chat() {
+        let route = PairingReplyRoute::Websocket {
+            req_id: "req-2".to_string(),
+            reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
+            chat_type: Some("single".to_string()),
+        };
+
+        assert!(should_send_pairing_reply(&route, true));
+        assert!(should_send_pairing_reply(&route, false));
+
+        let content = pairing_reply_text(&route, "EFGH5678");
+        assert!(content.contains("EFGH5678"));
     }
 
     #[test]
