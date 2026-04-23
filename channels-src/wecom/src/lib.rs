@@ -1111,19 +1111,7 @@ fn build_websocket_stream_reply_payload(
     reply_cmd: &str,
     content: &str,
     finish: bool,
-    msg_items: Option<Vec<JsonValue>>,
 ) -> Result<String, String> {
-    let mut stream = serde_json::json!({
-        "id": websocket_stream_id(req_id),
-        "content": content,
-        "finish": finish,
-    });
-    if let Some(items) = msg_items {
-        if !items.is_empty() {
-            stream["msg_item"] = JsonValue::Array(items);
-        }
-    }
-
     let payload = serde_json::json!({
         "cmd": reply_cmd,
         "headers": {
@@ -1131,7 +1119,11 @@ fn build_websocket_stream_reply_payload(
         },
         "body": {
             "msgtype": "stream",
-            "stream": stream,
+            "stream": {
+                "id": websocket_stream_id(req_id),
+                "content": content,
+                "finish": finish,
+            },
         }
     });
     serde_json::to_string(&payload)
@@ -1148,7 +1140,7 @@ fn build_websocket_text_stream_reply_payloads(
     let chunks = chunk_text(content, STREAM_CHUNK_LIMIT_BYTES);
     for (index, chunk) in chunks.iter().enumerate() {
         let finish = finish_last_chunk && index + 1 == chunks.len();
-        let payload = build_websocket_stream_reply_payload(req_id, reply_cmd, chunk, finish, None)?;
+        let payload = build_websocket_stream_reply_payload(req_id, reply_cmd, chunk, finish)?;
         payloads.push(payload);
     }
     Ok(payloads)
@@ -1161,15 +1153,7 @@ fn websocket_media_md5_hex(data: &[u8]) -> String {
 }
 
 fn send_websocket_response(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
-    let mut payloads =
-        build_websocket_text_stream_reply_payloads(req_id, reply_cmd, content, true)?;
-    if payloads.is_empty() {
-        payloads.push(build_websocket_stream_reply_payload(
-            req_id, reply_cmd, "", true, None,
-        )?);
-    }
-
-    for payload in payloads {
+    for payload in build_websocket_text_stream_reply_payloads(req_id, reply_cmd, content, true)? {
         channel_host::websocket_send_text(&payload)
             .map_err(|e| format!("Failed to send WeCom websocket reply: {e}"))?;
     }
@@ -1607,22 +1591,23 @@ fn complete_websocket_media_batch(
         batch.final_text
     };
 
-    if !batch.response_req_id.trim().is_empty() {
-        if !final_text.trim().is_empty() {
-            if let Err(error) = send_websocket_active_markdown(&batch.chat_id, &final_text) {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Failed to send WeCom websocket active final text after media: {error}"
-                    ),
-                );
-            }
-        }
-    } else if !final_text.trim().is_empty() {
-        if let Err(error) = send_websocket_active_markdown(&batch.chat_id, &final_text) {
+    let final_text = final_text.trim();
+    if !final_text.is_empty() {
+        let send_result = if batch.response_req_id.trim().is_empty() {
+            send_websocket_active_markdown(&batch.chat_id, final_text)
+        } else {
+            let response_cmd = if batch.response_cmd.trim().is_empty() {
+                WECOM_WS_REPLY_CMD
+            } else {
+                batch.response_cmd.as_str()
+            };
+            send_websocket_stream_reply(&batch.response_req_id, response_cmd, final_text)
+        };
+
+        if let Err(error) = send_result {
             channel_host::log(
                 channel_host::LogLevel::Warn,
-                &format!("Failed to send WeCom websocket active final text after media: {error}"),
+                &format!("Failed to send WeCom websocket final text after media: {error}"),
             );
         }
     }
@@ -2608,19 +2593,6 @@ mod tests {
             17
         );
         assert_eq!(second["body"]["stream"]["finish"], serde_json::json!(true));
-    }
-
-    #[test]
-    fn websocket_empty_stream_reply_finishes_original_request() {
-        let payload =
-            build_websocket_stream_reply_payload("req-123", WECOM_WS_REPLY_CMD, "", true, None)
-                .expect("payload");
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("payload json");
-
-        assert_eq!(value["cmd"], serde_json::json!(WECOM_WS_REPLY_CMD));
-        assert_eq!(value["headers"]["req_id"], serde_json::json!("req-123"));
-        assert_eq!(value["body"]["stream"]["content"], serde_json::json!(""));
-        assert_eq!(value["body"]["stream"]["finish"], serde_json::json!(true));
     }
 
     #[test]

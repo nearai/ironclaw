@@ -98,11 +98,25 @@ fn oauth_scopes_secret_name(secret_name: &str) -> String {
     format!("{}_scopes", secret_name.to_lowercase())
 }
 
-fn validation_placeholder_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> =
-        // safety: this regex is a fixed literal validated in tests and cannot fail at runtime.
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\{([^{}]+)\}").expect("valid regex"));
-    &RE
+fn validation_endpoint_placeholder_names(template: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = template[offset..].find('{') {
+        let start = offset + relative_start;
+        let value_start = start + 1;
+        let Some(relative_end) = template[value_start..].find('}') else {
+            break;
+        };
+        let end = value_start + relative_end;
+        let name = &template[value_start..end];
+        if !name.is_empty() && !name.contains(['{', '}']) {
+            names.insert(name.to_string());
+        }
+        offset = end + 1;
+    }
+
+    names
 }
 
 fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
@@ -6986,11 +7000,7 @@ impl ExtensionManager {
         if name != TELEGRAM_CHANNEL_NAME
             && let Some(ref endpoint_template) = channel_validation_endpoint
         {
-            let placeholder_names: std::collections::BTreeSet<String> =
-                validation_placeholder_regex()
-                    .captures_iter(endpoint_template)
-                    .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
-                    .collect();
+            let placeholder_names = validation_endpoint_placeholder_names(endpoint_template);
 
             let mut validation_url = endpoint_template.to_string();
             let mut all_placeholders_resolved = true;
@@ -11699,6 +11709,18 @@ mod tests {
             "Validation endpoint returned errcode 40013: invalid corpid"
         );
         assert!(super::validation_endpoint_body_error(br#"{"errcode":0,"errmsg":"ok"}"#).is_none());
+    }
+
+    #[test]
+    fn validation_endpoint_placeholder_names_extracts_unique_names_without_regex() {
+        let names = super::validation_endpoint_placeholder_names(
+            "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={wecom_corp_id}&corpsecret={wecom_corp_secret}&again={wecom_corp_id}",
+        );
+
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["wecom_corp_id".to_string(), "wecom_corp_secret".to_string()]
+        );
     }
 
     #[tokio::test]

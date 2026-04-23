@@ -4,7 +4,7 @@
   "kind": "channel",
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Talk to your agent through a WeCom self-built app callback channel",
+  "description": "Talk to your agent through a WeCom intelligent bot, with optional self-built app callback and Agent API fallback",
   "keywords": [
     "messaging",
     "chat",
@@ -21,6 +21,8 @@
     "method": "manual",
     "provider": "WeCom",
     "secrets": [
+      "wecom_bot_id",
+      "wecom_bot_secret",
       "wecom_corp_id",
       "wecom_corp_secret",
       "wecom_agent_id",

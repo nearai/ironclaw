@@ -2,7 +2,7 @@
 name = "wecom-channel"
 version = "0.1.0"
 edition = "2021"
-description = "WeCom self-built app callback channel for IronClaw"
+description = "WeCom bot-first channel for IronClaw"
 license = "MIT OR Apache-2.0"
 
 [lib]

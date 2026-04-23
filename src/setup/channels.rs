@@ -922,10 +922,7 @@ async fn substitute_validation_placeholders(
     validation_endpoint: &str,
 ) -> Result<String, ChannelSetupError> {
     let mut resolved = validation_endpoint.to_string();
-    let placeholder_names: std::collections::BTreeSet<String> = validation_placeholder_regex()
-        .captures_iter(validation_endpoint)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
-        .collect();
+    let placeholder_names = validation_placeholder_names(validation_endpoint);
 
     for secret_name in placeholder_names {
         let secret_value = secrets.get_secret(&secret_name).await?;
@@ -1066,12 +1063,25 @@ fn normalize_validation_domain(host: &str) -> &str {
     host.trim_end_matches('.')
 }
 
-fn validation_placeholder_regex() -> &'static regex::Regex {
-    static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PLACEHOLDER_RE.get_or_init(|| {
-        regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile") // safety: hardcoded literal
-    })
+fn validation_placeholder_names(template: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = template[offset..].find('{') {
+        let start = offset + relative_start;
+        let value_start = start + 1;
+        let Some(relative_end) = template[value_start..].find('}') else {
+            break;
+        };
+        let end = value_start + relative_end;
+        let name = &template[value_start..end];
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            names.insert(name.to_string());
+        }
+        offset = end + 1;
+    }
+
+    names
 }
 
 fn validation_target_display(parsed: &Url) -> String {
@@ -1319,6 +1329,18 @@ mod tests {
         assert_eq!(
             resolved,
             "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
+        );
+    }
+
+    #[test]
+    fn test_validation_placeholder_names_extracts_unique_secret_names() {
+        let names = super::validation_placeholder_names(
+            "https://api.example.com/{workspace_id}/verify?token={telegram_bot_token}&again={workspace_id}",
+        );
+
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["telegram_bot_token".to_string(), "workspace_id".to_string()]
         );
     }
 
