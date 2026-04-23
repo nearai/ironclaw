@@ -98,6 +98,11 @@ fn oauth_scopes_secret_name(secret_name: &str) -> String {
     format!("{}_scopes", secret_name.to_lowercase())
 }
 
+const SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES: usize = 16 * 1024;
+const SETUP_SECRET_VALIDATION_REGEX_SIZE_LIMIT: usize = 1 << 20;
+const SETUP_SECRET_VALIDATION_REGEX_DFA_SIZE_LIMIT: usize = 1 << 20;
+const SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES: usize = 64 * 1024;
+
 fn validation_endpoint_placeholder_names(template: &str) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
     let mut offset = 0;
@@ -119,6 +124,16 @@ fn validation_endpoint_placeholder_names(template: &str) -> std::collections::BT
     names
 }
 
+fn validation_endpoint_disallowed_placeholder<'a>(
+    placeholder_names: &'a std::collections::BTreeSet<String>,
+    allowed_secrets: &HashSet<String>,
+) -> Option<&'a str> {
+    placeholder_names
+        .iter()
+        .map(String::as_str)
+        .find(|name| !allowed_secrets.contains(*name))
+}
+
 fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
     let errcode = parsed.get("errcode")?.as_i64()?;
@@ -135,6 +150,47 @@ fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
     ))
 }
 
+fn validation_response_exceeds_limit(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    match current_len.checked_add(chunk_len) {
+        Some(total) => total > limit,
+        None => true,
+    }
+}
+
+async fn read_setup_validation_response_body(
+    response: &mut reqwest::Response,
+) -> Result<Vec<u8>, ExtensionError> {
+    if let Some(content_length) = response.content_length()
+        && content_length > SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES as u64
+    {
+        return Err(ExtensionError::Other(format!(
+            "Validation response exceeded {} bytes",
+            SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES
+        )));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ExtensionError::Other(format!("Failed to read validation response: {}", e)))?
+    {
+        if validation_response_exceeds_limit(
+            body.len(),
+            chunk.len(),
+            SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES,
+        ) {
+            return Err(ExtensionError::Other(format!(
+                "Validation response exceeded {} bytes",
+                SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
 fn validate_setup_secret_value(
     secret_name: &str,
     value: &str,
@@ -148,12 +204,26 @@ fn validate_setup_secret_value(
     }
 
     if let Some(pattern) = validation {
-        let re = regex::Regex::new(pattern).map_err(|e| {
-            ExtensionError::Config(format!(
-                "Invalid validation pattern for secret '{}': {}",
-                secret_name, e
-            ))
-        })?;
+        if pattern.len() > SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES {
+            return Err(ExtensionError::Config(format!(
+                "Validation pattern for secret '{}' is too large",
+                secret_name
+            )));
+        }
+
+        // Capabilities files may be installed from external packages. The
+        // regex crate matches in linear time, but compilation can still spend
+        // excessive memory on very large or accidentally complex patterns.
+        let re = regex::RegexBuilder::new(pattern)
+            .size_limit(SETUP_SECRET_VALIDATION_REGEX_SIZE_LIMIT)
+            .dfa_size_limit(SETUP_SECRET_VALIDATION_REGEX_DFA_SIZE_LIMIT)
+            .build()
+            .map_err(|e| {
+                ExtensionError::Config(format!(
+                    "Invalid validation pattern for secret '{}': {}",
+                    secret_name, e
+                ))
+            })?;
         if !re.is_match(value) {
             return Err(ExtensionError::ValidationFailed(format!(
                 "Secret '{}' does not match the expected format",
@@ -5764,6 +5834,7 @@ impl ExtensionManager {
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
+        let webhook_methods = loaded.webhook_methods();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
         let secret_config_mappings = loaded
@@ -5824,7 +5895,7 @@ impl ExtensionManager {
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
                 path: webhook_path,
-                methods: vec!["POST".to_string()],
+                methods: webhook_methods,
                 require_secret: host_webhook_secret.is_some(),
             }];
 
@@ -7001,20 +7072,27 @@ impl ExtensionManager {
             && let Some(ref endpoint_template) = channel_validation_endpoint
         {
             let placeholder_names = validation_endpoint_placeholder_names(endpoint_template);
+            if let Some(secret_name) =
+                validation_endpoint_disallowed_placeholder(&placeholder_names, &allowed_secrets)
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Validation endpoint for extension '{name}' references undeclared secret placeholder '{secret_name}'"
+                )));
+            }
 
             let mut validation_url = endpoint_template.to_string();
             let mut all_placeholders_resolved = true;
 
-            for secret_name in placeholder_names {
+            for secret_name in &placeholder_names {
                 let resolved_value = if let Some(value) = secrets
-                    .get(&secret_name)
+                    .get(secret_name.as_str())
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
                 {
                     Some(value)
                 } else {
                     self.secrets
-                        .get_decrypted(user_id, &secret_name)
+                        .get_decrypted(user_id, secret_name)
                         .await
                         .ok()
                         .map(|secret| secret.expose().trim().to_string())
@@ -7026,19 +7104,20 @@ impl ExtensionManager {
                     break;
                 };
 
-                let encoded =
-                    if name == TELEGRAM_CHANNEL_NAME && secret_name == "telegram_bot_token" {
-                        secret_value
-                    } else {
-                        url::form_urlencoded::byte_serialize(secret_value.as_bytes()).collect()
-                    };
+                let encoded = if name == TELEGRAM_CHANNEL_NAME
+                    && secret_name.as_str() == "telegram_bot_token"
+                {
+                    secret_value
+                } else {
+                    url::form_urlencoded::byte_serialize(secret_value.as_bytes()).collect()
+                };
                 validation_url = validation_url.replace(&format!("{{{secret_name}}}"), &encoded);
             }
 
             if all_placeholders_resolved {
                 crate::tools::builtin::skill_tools::validate_fetch_url(&validation_url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
-                let response = reqwest::Client::builder()
+                let mut response = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
                     .map_err(|e| ExtensionError::Other(e.to_string()))?
@@ -7057,15 +7136,13 @@ impl ExtensionManager {
                         ExtensionError::Other("Token validation request failed".to_string())
                     })?;
                 let status = response.status();
-                let body = response.bytes().await.map_err(|e| {
-                    ExtensionError::Other(format!("Failed to read validation response: {}", e))
-                })?;
                 if !status.is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
                         "Invalid token (API returned {})",
                         status
                     )));
                 }
+                let body = read_setup_validation_response_body(&mut response).await?;
                 if let Some(error) = validation_endpoint_body_error(&body) {
                     return Err(ExtensionError::ValidationFailed(error));
                 }
@@ -11712,6 +11789,33 @@ mod tests {
     }
 
     #[test]
+    fn validation_response_exceeds_limit_detects_chunk_overflow() {
+        assert!(!super::validation_response_exceeds_limit(10, 20, 30));
+        assert!(super::validation_response_exceeds_limit(10, 21, 30));
+        assert!(super::validation_response_exceeds_limit(usize::MAX, 1, 30));
+    }
+
+    #[test]
+    fn validate_setup_secret_value_accepts_bounded_validation_pattern() {
+        assert!(
+            super::validate_setup_secret_value("wecom_corp_id", "ww123abc", Some(r"^ww[a-z0-9]+$"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_setup_secret_value_rejects_oversized_validation_pattern() {
+        let pattern = "a".repeat(super::SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES + 1);
+        let err = super::validate_setup_secret_value("wecom_corp_id", "ww123abc", Some(&pattern))
+            .expect_err("oversized validation pattern should fail closed");
+
+        assert!(
+            matches!(&err, ExtensionError::Config(message) if message.contains("too large")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn validation_endpoint_placeholder_names_extracts_unique_names_without_regex() {
         let names = super::validation_endpoint_placeholder_names(
             "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={wecom_corp_id}&corpsecret={wecom_corp_secret}&again={wecom_corp_id}",
@@ -11720,6 +11824,29 @@ mod tests {
         assert_eq!(
             names.into_iter().collect::<Vec<_>>(),
             vec!["wecom_corp_id".to_string(), "wecom_corp_secret".to_string()]
+        );
+    }
+
+    #[test]
+    fn validation_endpoint_disallowed_placeholder_rejects_undeclared_secret_names() {
+        let placeholders = std::collections::BTreeSet::from([
+            "openai_api_key".to_string(),
+            "wecom_corp_id".to_string(),
+        ]);
+        let allowed = std::collections::HashSet::from(["wecom_corp_id".to_string()]);
+
+        assert_eq!(
+            super::validation_endpoint_disallowed_placeholder(&placeholders, &allowed),
+            Some("openai_api_key")
+        );
+
+        let allowed = std::collections::HashSet::from([
+            "openai_api_key".to_string(),
+            "wecom_corp_id".to_string(),
+        ]);
+        assert_eq!(
+            super::validation_endpoint_disallowed_placeholder(&placeholders, &allowed),
+            None
         );
     }
 

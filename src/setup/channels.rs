@@ -22,6 +22,8 @@ use crate::setup::prompts::{
     secret_input, select_one,
 };
 
+const VALIDATION_RESPONSE_BODY_MAX_BYTES: usize = 64 * 1024;
+
 /// Typed errors for channel setup flows.
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelSetupError {
@@ -874,7 +876,7 @@ async fn validate_channel_credentials(
         .build()
         .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
 
-    let response = client.get(parsed.clone()).send().await.map_err(|e| {
+    let mut response = client.get(parsed.clone()).send().await.map_err(|e| {
         ChannelSetupError::Network(format!(
             "Validation request to {} failed: {}",
             target,
@@ -883,11 +885,8 @@ async fn validate_channel_credentials(
     })?;
 
     let status = response.status();
-    let body = response.bytes().await.map_err(|e| {
-        ChannelSetupError::Network(format!("Failed to read validation response: {}", e))
-    })?;
-
     if status.is_success() {
+        let body = read_validation_response_body(&mut response).await?;
         if let Some(error) = validation_endpoint_body_error(&body) {
             Err(ChannelSetupError::Validation(error))
         } else {
@@ -899,6 +898,45 @@ async fn validate_channel_credentials(
             status, target
         )))
     }
+}
+
+fn validation_response_exceeds_limit(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    match current_len.checked_add(chunk_len) {
+        Some(total) => total > limit,
+        None => true,
+    }
+}
+
+async fn read_validation_response_body(
+    response: &mut reqwest::Response,
+) -> Result<Vec<u8>, ChannelSetupError> {
+    if let Some(content_length) = response.content_length()
+        && content_length > VALIDATION_RESPONSE_BODY_MAX_BYTES as u64
+    {
+        return Err(ChannelSetupError::Network(format!(
+            "Validation response exceeded {} bytes",
+            VALIDATION_RESPONSE_BODY_MAX_BYTES
+        )));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        ChannelSetupError::Network(format!("Failed to read validation response: {}", e))
+    })? {
+        if validation_response_exceeds_limit(
+            body.len(),
+            chunk.len(),
+            VALIDATION_RESPONSE_BODY_MAX_BYTES,
+        ) {
+            return Err(ChannelSetupError::Network(format!(
+                "Validation response exceeded {} bytes",
+                VALIDATION_RESPONSE_BODY_MAX_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
 }
 
 fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
@@ -1275,6 +1313,13 @@ mod tests {
     #[test]
     fn test_validate_cloudflare_token_empty() {
         assert!(!validate_cloudflare_token_format(""));
+    }
+
+    #[test]
+    fn test_validation_response_exceeds_limit_detects_chunk_overflow() {
+        assert!(!super::validation_response_exceeds_limit(10, 20, 30));
+        assert!(super::validation_response_exceeds_limit(10, 21, 30));
+        assert!(super::validation_response_exceeds_limit(usize::MAX, 1, 30));
     }
 
     #[tokio::test]

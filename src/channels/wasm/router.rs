@@ -32,12 +32,31 @@ pub struct RegisteredEndpoint {
     pub require_secret: bool,
 }
 
+fn normalize_registered_methods(methods: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for method in methods {
+        let upper = method.trim().to_ascii_uppercase();
+        if !matches!(upper.as_str(), "GET" | "POST") || normalized.contains(&upper) {
+            continue;
+        }
+        normalized.push(upper);
+    }
+
+    if normalized.is_empty() {
+        normalized.push("POST".to_string());
+    }
+
+    normalized
+}
+
 /// Router for WASM channel HTTP endpoints.
 pub struct WasmChannelRouter {
     /// Registered channels by name.
     channels: RwLock<HashMap<String, Arc<WasmChannel>>>,
     /// Path to channel mapping for fast lookup.
     path_to_channel: RwLock<HashMap<String, String>>,
+    /// Allowed HTTP methods by registered path.
+    path_methods: RwLock<HashMap<String, Vec<String>>>,
     /// Expected webhook secrets by channel name.
     secrets: RwLock<HashMap<String, String>>,
     /// Webhook secret header names by channel name (e.g., "X-Telegram-Bot-Api-Secret-Token").
@@ -54,6 +73,7 @@ impl WasmChannelRouter {
         Self {
             channels: RwLock::new(HashMap::new()),
             path_to_channel: RwLock::new(HashMap::new()),
+            path_methods: RwLock::new(HashMap::new()),
             secrets: RwLock::new(HashMap::new()),
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
@@ -83,12 +103,30 @@ impl WasmChannelRouter {
 
         // Register path mappings
         let mut path_map = self.path_to_channel.write().await;
+        let mut method_map = self.path_methods.write().await;
+        let previous_paths: Vec<String> = path_map
+            .iter()
+            .filter_map(|(path, channel_name)| {
+                if channel_name == &name {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for path in previous_paths {
+            path_map.remove(&path);
+            method_map.remove(&path);
+        }
+
         for endpoint in endpoints {
+            let methods = normalize_registered_methods(&endpoint.methods);
             path_map.insert(endpoint.path.clone(), name.clone());
+            method_map.insert(endpoint.path.clone(), methods.clone());
             tracing::info!(
                 channel = %name,
                 path = %endpoint.path,
-                methods = ?endpoint.methods,
+                methods = ?methods,
                 "Registered WASM channel HTTP endpoint"
             );
         }
@@ -139,11 +177,28 @@ impl WasmChannelRouter {
         self.signature_keys.write().await.remove(channel_name);
         self.hmac_secrets.write().await.remove(channel_name);
 
-        // Remove all paths for this channel
-        self.path_to_channel
-            .write()
-            .await
-            .retain(|_, name| name != channel_name);
+        // Remove all paths and method metadata for this channel.
+        let removed_paths = {
+            let mut path_map = self.path_to_channel.write().await;
+            let paths: Vec<String> = path_map
+                .iter()
+                .filter_map(|(path, name)| {
+                    if name.as_str() == channel_name {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for path in &paths {
+                path_map.remove(path);
+            }
+            paths
+        };
+        let mut method_map = self.path_methods.write().await;
+        for path in removed_paths {
+            method_map.remove(&path);
+        }
 
         tracing::info!(
             channel = %channel_name,
@@ -157,6 +212,15 @@ impl WasmChannelRouter {
         let channel_name = path_map.get(path)?;
 
         self.channels.read().await.get(channel_name).cloned()
+    }
+
+    /// Whether a registered path allows the provided HTTP method.
+    pub async fn method_allowed_for_path(&self, path: &str, method: &Method) -> bool {
+        self.path_methods
+            .read()
+            .await
+            .get(path)
+            .is_some_and(|methods| methods.iter().any(|m| m == method.as_str()))
     }
 
     /// Validate a secret for a channel.
@@ -325,6 +389,26 @@ async fn webhook_handler(
             );
         }
     };
+
+    if !state
+        .router
+        .method_allowed_for_path(&full_path, &method)
+        .await
+    {
+        tracing::warn!(
+            path = %full_path,
+            method = %method,
+            "Webhook method not allowed for registered WASM channel endpoint"
+        );
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(serde_json::json!({
+                "error": "Method not allowed for channel path",
+                "path": full_path,
+                "method": method.as_str()
+            })),
+        );
+    }
 
     tracing::info!(
         channel = %channel.channel_name(),
@@ -710,6 +794,42 @@ mod tests {
         // Should not find non-existent path
         let not_found = router.get_channel_for_path("/webhook/telegram").await;
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_router_tracks_allowed_methods_per_path() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("wecom");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "wecom".to_string(),
+            path: "/webhook/wecom".to_string(),
+            methods: vec![
+                "post".to_string(),
+                "GET".to_string(),
+                "TRACE".to_string(),
+                "POST".to_string(),
+            ],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None).await;
+
+        assert!(
+            router
+                .method_allowed_for_path("/webhook/wecom", &axum::http::Method::POST)
+                .await
+        );
+        assert!(
+            router
+                .method_allowed_for_path("/webhook/wecom", &axum::http::Method::GET)
+                .await
+        );
+        assert!(
+            !router
+                .method_allowed_for_path("/webhook/wecom", &axum::http::Method::TRACE)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -1398,6 +1518,20 @@ mod tests {
 
         let app = create_wasm_channel_router(wasm_router.clone(), None);
         (wasm_router, app)
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_get_for_post_only_endpoint() {
+        let (_wasm_router, app) = setup_slack_router().await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/webhook/slack")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     /// Helper: compute expected Slack signature for testing.

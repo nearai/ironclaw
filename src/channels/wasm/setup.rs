@@ -283,10 +283,7 @@ async fn register_channel(
     let endpoints = vec![RegisteredEndpoint {
         channel_name: channel_name.clone(),
         path: webhook_path,
-        // Callback-style channels like WeCom need GET for URL verification and
-        // POST for normal delivery, so the registered metadata should reflect
-        // the actual catch-all router behavior.
-        methods: vec!["GET".to_string(), "POST".to_string()],
+        methods: loaded.webhook_methods(),
         require_secret: host_webhook_secret.is_some(),
     }];
 
@@ -686,13 +683,27 @@ mod tests {
     }
 
     fn test_loaded_channel(name: &str, capabilities_config: serde_json::Value) -> LoadedChannel {
+        test_loaded_channel_with_webhook_methods(name, capabilities_config, Vec::new())
+    }
+
+    fn test_loaded_channel_with_webhook_methods(
+        name: &str,
+        capabilities_config: serde_json::Value,
+        methods: Vec<&str>,
+    ) -> LoadedChannel {
+        let webhook = if methods.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "methods": methods })
+        };
         let cap_file = ChannelCapabilitiesFile::from_json(
             &serde_json::json!({
                 "type": "channel",
                 "name": name,
                 "capabilities": {
                     "channel": {
-                        "allowed_paths": [format!("/webhook/{name}")]
+                        "allowed_paths": [format!("/webhook/{name}")],
+                        "webhook": webhook
                     }
                 },
                 "config": capabilities_config
@@ -971,9 +982,48 @@ mod tests {
             .get_channel_for_path("/webhook/telegram")
             .await
             .expect("telegram channel should be registered");
+        assert!(
+            wasm_router
+                .method_allowed_for_path("/webhook/telegram", &axum::http::Method::POST)
+                .await,
+            "startup registration should default webhook methods to POST"
+        );
+        assert!(
+            !wasm_router
+                .method_allowed_for_path("/webhook/telegram", &axum::http::Method::GET)
+                .await,
+            "startup registration should not expose GET unless capabilities declare it"
+        );
         assert_eq!(
             registered.owner_actor_id_for_test().await,
             Some("12345".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_channel_uses_declared_webhook_methods() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel_with_webhook_methods(
+            "wecom",
+            serde_json::json!({ "owner_id": 12345 }),
+            vec!["GET", "POST"],
+        );
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
+
+        assert!(
+            wasm_router
+                .method_allowed_for_path("/webhook/wecom", &axum::http::Method::GET)
+                .await
+        );
+        assert!(
+            wasm_router
+                .method_allowed_for_path("/webhook/wecom", &axum::http::Method::POST)
+                .await
         );
     }
 

@@ -1450,11 +1450,13 @@ impl WasmChannel {
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
         let websocket_outbound_tx_state = Arc::clone(&self.websocket_outbound_tx);
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
-        if let Ok(mut guard) = self.websocket_outbound_tx.try_write() {
-            *guard = Some(outbound_tx.clone());
-        }
 
         tokio::spawn(async move {
+            {
+                let mut guard = websocket_outbound_tx_state.write().await;
+                *guard = Some(outbound_tx.clone());
+            }
+
             let mut shutdown = std::pin::pin!(shutdown_rx);
             let mut reconnect_attempt = 0u32;
 
@@ -1492,6 +1494,7 @@ impl WasmChannel {
                 let connect_result = tokio_tungstenite::connect_async(connect_url).await;
                 let (stream, _) = match connect_result {
                     Ok(parts) => {
+                        reconnect_attempt = 0;
                         tracing::info!(channel = %channel_name, "Websocket runtime connected");
                         parts
                     }

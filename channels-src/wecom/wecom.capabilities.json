@@ -101,6 +101,7 @@
         "messages_per_hour": 5000
       },
       "webhook": {
+        "methods": ["GET", "POST"],
         "managed_by_host": false
       }
     }

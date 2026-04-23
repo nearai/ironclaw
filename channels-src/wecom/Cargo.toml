@@ -18,6 +18,7 @@ md-5 = "0.10"
 aes = "0.8"
 cbc = "0.1"
 subtle = "2.6"
+xmlparser = "0.13.6"
 
 [profile.release]
 opt-level = "s"

@@ -19,7 +19,9 @@ use md5::Md5;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha1::{Digest, Sha1};
+use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
+use xmlparser::{ElementEnd, Token, Tokenizer};
 
 use exports::near::agent::channel::{
     AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
@@ -384,26 +386,141 @@ fn parse_query(req: &IncomingHttpRequest, key: &str) -> Option<String> {
     query.get(key)?.as_str().map(ToOwned::to_owned)
 }
 
-fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
-    let cdata_open = format!("<{tag}><![CDATA[");
-    let cdata_close = format!("]]></{tag}>");
-    if let Some(start) = xml.find(&cdata_open) {
-        let value_start = start + cdata_open.len();
-        if let Some(end_rel) = xml[value_start..].find(&cdata_close) {
-            return Some(xml[value_start..value_start + end_rel].to_string());
+type XmlFields = BTreeMap<String, String>;
+
+fn valid_wecom_xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn insert_xml_field(fields: &mut XmlFields, name: String, value: String) -> Result<(), String> {
+    if fields.insert(name.clone(), value).is_some() {
+        return Err(format!("duplicate XML field '{name}'"));
+    }
+    Ok(())
+}
+
+fn parse_wecom_xml_fields(xml: &str) -> Result<XmlFields, String> {
+    let mut fields = XmlFields::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut current_field: Option<(String, String)> = None;
+    let mut root_seen = false;
+
+    for token in Tokenizer::from(xml) {
+        match token.map_err(|e| format!("invalid XML payload: {e}"))? {
+            Token::Declaration { .. }
+            | Token::Comment { .. }
+            | Token::ProcessingInstruction { .. } => {}
+            Token::DtdStart { .. }
+            | Token::EmptyDtd { .. }
+            | Token::EntityDeclaration { .. }
+            | Token::DtdEnd { .. } => {
+                return Err("XML DTD/entity declarations are not supported".to_string());
+            }
+            Token::ElementStart { local, .. } => {
+                let name = local.as_str();
+                if !valid_wecom_xml_name(name) {
+                    return Err(format!("invalid XML field name '{name}'"));
+                }
+
+                match stack.len() {
+                    0 => {
+                        if root_seen {
+                            return Err("XML payload has multiple root elements".to_string());
+                        }
+                        if name != "xml" {
+                            return Err(format!("unexpected XML root '{name}'"));
+                        }
+                        root_seen = true;
+                        stack.push(name.to_string());
+                    }
+                    1 => {
+                        if current_field.is_some() {
+                            return Err(
+                                "XML parser entered a new field before closing the previous field"
+                                    .to_string(),
+                            );
+                        }
+                        current_field = Some((name.to_string(), String::new()));
+                        stack.push(name.to_string());
+                    }
+                    _ => {
+                        return Err(format!("nested XML element '{name}' is not supported"));
+                    }
+                }
+            }
+            Token::Attribute { .. } => {}
+            Token::ElementEnd { end, .. } => match end {
+                ElementEnd::Open => {}
+                ElementEnd::Empty => {
+                    let Some(name) = stack.pop() else {
+                        return Err("unexpected empty XML element".to_string());
+                    };
+                    if stack.is_empty() {
+                        continue;
+                    }
+
+                    let Some((field_name, value)) = current_field.take() else {
+                        return Err(format!("unexpected empty XML field '{name}'"));
+                    };
+                    if field_name != name {
+                        return Err(format!(
+                            "XML field mismatch: started '{field_name}', ended '{name}'"
+                        ));
+                    }
+                    insert_xml_field(&mut fields, field_name, value)?;
+                }
+                ElementEnd::Close(_, local) => {
+                    let close_name = local.as_str();
+                    let Some(open_name) = stack.pop() else {
+                        return Err(format!("unexpected XML closing tag '{close_name}'"));
+                    };
+                    if open_name != close_name {
+                        return Err(format!(
+                            "XML tag mismatch: started '{open_name}', ended '{close_name}'"
+                        ));
+                    }
+
+                    if stack.len() == 1 {
+                        let Some((field_name, value)) = current_field.take() else {
+                            return Err(format!("unexpected XML field close '{close_name}'"));
+                        };
+                        if field_name != close_name {
+                            return Err(format!(
+                                "XML field mismatch: started '{field_name}', ended '{close_name}'"
+                            ));
+                        }
+                        insert_xml_field(&mut fields, field_name, value)?;
+                    }
+                }
+            },
+            Token::Text { text } | Token::Cdata { text, .. } => {
+                if let Some((_, value)) = current_field.as_mut() {
+                    value.push_str(text.as_str());
+                } else if !text.as_str().trim().is_empty() {
+                    return Err("unexpected text outside XML fields".to_string());
+                }
+            }
         }
     }
 
-    let plain_open = format!("<{tag}>");
-    let plain_close = format!("</{tag}>");
-    if let Some(start) = xml.find(&plain_open) {
-        let value_start = start + plain_open.len();
-        if let Some(end_rel) = xml[value_start..].find(&plain_close) {
-            return Some(xml[value_start..value_start + end_rel].to_string());
-        }
+    if !stack.is_empty() {
+        return Err("XML payload ended before all tags were closed".to_string());
+    }
+    if !root_seen {
+        return Err("XML payload is missing root element".to_string());
     }
 
-    None
+    Ok(fields)
+}
+
+fn xml_field(fields: &XmlFields, tag: &str) -> Option<String> {
+    fields.get(tag).cloned()
 }
 
 fn verify_callback_signature(
@@ -472,13 +589,13 @@ fn decrypt_callback_message(
     Ok((xml, corp_id))
 }
 
-fn parse_callback_message_xml_with_type(
-    xml: &str,
+fn parse_callback_message_fields_with_type(
+    fields: &XmlFields,
     msg_type: &str,
 ) -> Option<ParsedCallbackMessage> {
     let msg_id =
-        extract_xml_value(xml, "MsgId").unwrap_or_else(|| channel_host::now_millis().to_string());
-    let sender_id = extract_xml_value(xml, "FromUserName")?;
+        xml_field(fields, "MsgId").unwrap_or_else(|| channel_host::now_millis().to_string());
+    let sender_id = xml_field(fields, "FromUserName")?;
 
     let mut text = None;
     let mut media_id = None;
@@ -487,27 +604,27 @@ fn parse_callback_message_xml_with_type(
 
     match msg_type {
         "text" => {
-            text = extract_xml_value(xml, "Content").or(Some(String::new()));
+            text = xml_field(fields, "Content").or(Some(String::new()));
         }
         "image" => {
-            media_id = extract_xml_value(xml, "MediaId");
+            media_id = xml_field(fields, "MediaId");
             media_kind = Some(InboundMediaKind::Image);
         }
         "voice" => {
-            media_id = extract_xml_value(xml, "MediaId");
+            media_id = xml_field(fields, "MediaId");
             media_kind = Some(InboundMediaKind::Voice);
-            voice_recognition = extract_xml_value(xml, "Recognition");
+            voice_recognition = xml_field(fields, "Recognition");
             text = voice_recognition.clone();
         }
         "file" | "video" => {
-            media_id = extract_xml_value(xml, "MediaId");
+            media_id = xml_field(fields, "MediaId");
             media_kind = Some(InboundMediaKind::File);
         }
         "location" => {
-            text = Some(format_location_message(xml));
+            text = Some(format_location_message(fields));
         }
         "link" => {
-            text = Some(format_link_message(xml));
+            text = Some(format_link_message(fields));
         }
         _ => return None,
     }
@@ -522,12 +639,12 @@ fn parse_callback_message_xml_with_type(
     })
 }
 
-fn format_location_message(xml: &str) -> String {
-    let label = extract_xml_value(xml, "Label");
-    let poiname = extract_xml_value(xml, "Poiname");
-    let location_x = extract_xml_value(xml, "Location_X");
-    let location_y = extract_xml_value(xml, "Location_Y");
-    let scale = extract_xml_value(xml, "Scale");
+fn format_location_message(fields: &XmlFields) -> String {
+    let label = xml_field(fields, "Label");
+    let poiname = xml_field(fields, "Poiname");
+    let location_x = xml_field(fields, "Location_X");
+    let location_y = xml_field(fields, "Location_Y");
+    let scale = xml_field(fields, "Scale");
 
     let mut lines = Vec::new();
     if let Some(label) = label.as_deref().filter(|value| !value.is_empty()) {
@@ -556,10 +673,10 @@ fn format_location_message(xml: &str) -> String {
     lines.join("\n")
 }
 
-fn format_link_message(xml: &str) -> String {
-    let title = extract_xml_value(xml, "Title");
-    let description = extract_xml_value(xml, "Description");
-    let url = extract_xml_value(xml, "Url");
+fn format_link_message(fields: &XmlFields) -> String {
+    let title = xml_field(fields, "Title");
+    let description = xml_field(fields, "Description");
+    let url = xml_field(fields, "Url");
 
     let mut lines = Vec::new();
     if let Some(title) = title.as_deref().filter(|value| !value.is_empty()) {
@@ -600,13 +717,13 @@ fn build_callback_event_id(
     parts.join(":")
 }
 
-fn parse_callback_event_xml(xml: &str) -> Option<ParsedCallbackEvent> {
-    let event_type = extract_xml_value(xml, "Event")?;
-    let sender_id = extract_xml_value(xml, "FromUserName");
-    let create_time = extract_xml_value(xml, "CreateTime");
-    let event_key = extract_xml_value(xml, "EventKey");
-    let change_type = extract_xml_value(xml, "ChangeType");
-    let explicit_id = extract_xml_value(xml, "MsgId").filter(|value| !value.is_empty());
+fn parse_callback_event_fields(fields: &XmlFields) -> Option<ParsedCallbackEvent> {
+    let event_type = xml_field(fields, "Event")?;
+    let sender_id = xml_field(fields, "FromUserName");
+    let create_time = xml_field(fields, "CreateTime");
+    let event_key = xml_field(fields, "EventKey");
+    let change_type = xml_field(fields, "ChangeType");
+    let explicit_id = xml_field(fields, "MsgId").filter(|value| !value.is_empty());
     let event_id = explicit_id.unwrap_or_else(|| {
         build_callback_event_id(
             &event_type,
@@ -626,13 +743,22 @@ fn parse_callback_event_xml(xml: &str) -> Option<ParsedCallbackEvent> {
     })
 }
 
-fn parse_callback_payload_xml(xml: &str) -> Option<ParsedCallbackPayload> {
-    let msg_type = extract_xml_value(xml, "MsgType")?;
+fn try_parse_callback_payload_xml(xml: &str) -> Result<Option<ParsedCallbackPayload>, String> {
+    let fields = parse_wecom_xml_fields(xml)?;
+    let Some(msg_type) = xml_field(&fields, "MsgType") else {
+        return Ok(None);
+    };
     if msg_type == "event" {
-        return parse_callback_event_xml(xml).map(ParsedCallbackPayload::Event);
+        return Ok(parse_callback_event_fields(&fields).map(ParsedCallbackPayload::Event));
     }
 
-    parse_callback_message_xml_with_type(xml, &msg_type).map(ParsedCallbackPayload::Message)
+    Ok(parse_callback_message_fields_with_type(&fields, &msg_type)
+        .map(ParsedCallbackPayload::Message))
+}
+
+#[cfg(test)]
+fn parse_callback_payload_xml(xml: &str) -> Option<ParsedCallbackPayload> {
+    try_parse_callback_payload_xml(xml).ok().flatten()
 }
 
 #[cfg(test)]
@@ -640,6 +766,14 @@ fn parse_callback_message_xml(xml: &str) -> Option<ParsedCallbackMessage> {
     match parse_callback_payload_xml(xml)? {
         ParsedCallbackPayload::Message(parsed) => Some(parsed),
         ParsedCallbackPayload::Event(_) => None,
+    }
+}
+
+#[cfg(test)]
+fn parse_callback_event_xml(xml: &str) -> Option<ParsedCallbackEvent> {
+    match parse_callback_payload_xml(xml)? {
+        ParsedCallbackPayload::Event(parsed) => Some(parsed),
+        ParsedCallbackPayload::Message(_) => None,
     }
 }
 
@@ -863,6 +997,61 @@ fn validate_outbound_media_size(
     Ok(())
 }
 
+fn multipart_quoted_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\r' | '\n' => escaped.push('_'),
+            ch if ch.is_control() => escaped.push('_'),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn is_mime_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '!' | '#' | '$' | '&' | '-' | '^' | '_' | '.' | '+')
+}
+
+fn safe_multipart_content_type(content_type: &str) -> String {
+    let content_type = content_type.trim();
+    let Some((kind, subtype)) = content_type.split_once('/') else {
+        return "application/octet-stream".to_string();
+    };
+    if kind.is_empty()
+        || subtype.is_empty()
+        || !kind.chars().all(is_mime_token_char)
+        || !subtype.chars().all(is_mime_token_char)
+    {
+        return "application/octet-stream".to_string();
+    }
+    content_type.to_string()
+}
+
+fn build_upload_media_multipart_body(att: &Attachment, boundary: &str) -> Vec<u8> {
+    let filename = if att.filename.trim().is_empty() {
+        "attachment.bin"
+    } else {
+        att.filename.as_str()
+    };
+    let filename = multipart_quoted_string(filename);
+    let content_type = safe_multipart_content_type(base_mime_type(&att.mime_type));
+    let header = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"{}\"; filelength={}\r\nContent-Type: {}\r\n\r\n",
+        filename,
+        att.data.len(),
+        content_type
+    );
+    let footer = format!("\r\n--{boundary}--\r\n");
+    let mut body = Vec::with_capacity(header.len() + att.data.len() + footer.len());
+    body.extend_from_slice(header.as_bytes());
+    body.extend_from_slice(&att.data);
+    body.extend_from_slice(footer.as_bytes());
+    body
+}
+
 fn upload_media(att: &Attachment, media_kind: OutboundMediaKind) -> Result<String, String> {
     let api_base = channel_host::workspace_read(API_BASE_PATH).unwrap_or_else(default_api_base);
     let access_token = get_valid_access_token(&api_base)?;
@@ -872,24 +1061,9 @@ fn upload_media(att: &Attachment, media_kind: OutboundMediaKind) -> Result<Strin
         access_token,
         media_kind.as_api_type()
     );
-    let content_type = base_mime_type(&att.mime_type);
 
     let boundary = format!("----ironclaw-wecom-{}", channel_host::now_millis());
-    let header = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"{}\"; filelength={}\r\nContent-Type: {}\r\n\r\n",
-        att.filename,
-        att.data.len(),
-        if content_type.is_empty() {
-            "application/octet-stream"
-        } else {
-            content_type
-        }
-    );
-    let footer = format!("\r\n--{boundary}--\r\n");
-    let mut body = Vec::with_capacity(header.len() + att.data.len() + footer.len());
-    body.extend_from_slice(header.as_bytes());
-    body.extend_from_slice(&att.data);
-    body.extend_from_slice(footer.as_bytes());
+    let body = build_upload_media_multipart_body(att, &boundary);
 
     let response = channel_host::http_request(
         "POST",
@@ -2405,7 +2579,11 @@ impl Guest for WecomChannel {
             Ok(value) => value,
             Err(_) => return text_response(400, "invalid utf-8 body"),
         };
-        let encrypted = match extract_xml_value(body_str, "Encrypt") {
+        let outer_fields = match parse_wecom_xml_fields(body_str) {
+            Ok(fields) => fields,
+            Err(error) => return text_response(400, &error),
+        };
+        let encrypted = match xml_field(&outer_fields, "Encrypt") {
             Some(value) => value,
             None => return text_response(400, "missing Encrypt field"),
         };
@@ -2422,7 +2600,12 @@ impl Guest for WecomChannel {
             return text_response(403, "corp_id mismatch");
         }
 
-        if let Some(parsed) = parse_callback_payload_xml(&inner_xml) {
+        let parsed = match try_parse_callback_payload_xml(&inner_xml) {
+            Ok(value) => value,
+            Err(error) => return text_response(400, &error),
+        };
+
+        if let Some(parsed) = parsed {
             match parsed {
                 ParsedCallbackPayload::Message(message) => handle_callback_message(message),
                 ParsedCallbackPayload::Event(event) => handle_callback_event(event),
@@ -2537,6 +2720,10 @@ mod tests {
         assert_eq!(
             caps["capabilities"]["channel"]["allowed_paths"][0],
             serde_json::Value::String("/webhook/wecom".to_string())
+        );
+        assert_eq!(
+            caps["capabilities"]["channel"]["webhook"]["methods"],
+            serde_json::json!(["GET", "POST"])
         );
         let required = caps["setup"]["required_secrets"]
             .as_array()
@@ -2828,6 +3015,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_text_callback_message_xml_preserves_markup_inside_cdata() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <MsgType><![CDATA[text]]></MsgType>
+  <Content><![CDATA[hello <b>wecom</b> & raw text]]></Content>
+  <MsgId>markup-1</MsgId>
+</xml>
+"#;
+
+        let parsed = parse_callback_message_xml(xml).expect("parsed");
+        assert_eq!(
+            parsed.text.as_deref(),
+            Some("hello <b>wecom</b> & raw text")
+        );
+    }
+
+    #[test]
+    fn parse_callback_payload_xml_rejects_duplicate_fields() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <MsgType><![CDATA[text]]></MsgType>
+  <MsgType><![CDATA[event]]></MsgType>
+  <Content><![CDATA[hello]]></Content>
+</xml>
+"#;
+
+        let error = try_parse_callback_payload_xml(xml).expect_err("duplicate field should fail");
+        assert!(error.contains("duplicate XML field"));
+    }
+
+    #[test]
+    fn parse_callback_payload_xml_rejects_cdata_tag_injection() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <MsgType><![CDATA[text]]></MsgType>
+  <Content><![CDATA[safe]]></Content><![CDATA[</Content><MsgId>evil</MsgId>]]>
+  <MsgId>msg-1</MsgId>
+</xml>
+"#;
+
+        let error = try_parse_callback_payload_xml(xml).expect_err("malformed XML should fail");
+        assert!(error.contains("unexpected text outside XML fields"));
+    }
+
+    #[test]
+    fn parse_callback_payload_xml_rejects_nested_field_elements() {
+        let xml = r#"
+<xml>
+  <FromUserName><![CDATA[zhangsan]]></FromUserName>
+  <MsgType><![CDATA[text]]></MsgType>
+  <Content><b>hello</b></Content>
+  <MsgId>msg-1</MsgId>
+</xml>
+"#;
+
+        let error = try_parse_callback_payload_xml(xml).expect_err("nested XML should fail");
+        assert!(error.contains("nested XML element"));
+    }
+
+    #[test]
     fn parse_voice_callback_message_xml_uses_recognition_text() {
         let xml = r#"
 <xml>
@@ -3073,6 +3323,33 @@ mod tests {
         assert_eq!(base_mime_type("audio/amr; codecs=amr"), "audio/amr");
         assert_eq!(base_mime_type("image/png"), "image/png");
         assert_eq!(base_mime_type(""), "");
+    }
+
+    #[test]
+    fn multipart_quoted_string_escapes_header_breaking_filename_chars() {
+        assert_eq!(
+            multipart_quoted_string("a\"b\\c\r\nx.png"),
+            "a\\\"b\\\\c__x.png"
+        );
+    }
+
+    #[test]
+    fn upload_media_multipart_body_sanitizes_headers() {
+        let att = Attachment {
+            filename: "a\"b\\c\r\nX-Bad: y.png".to_string(),
+            mime_type: "image/png\r\nX-Bad: y".to_string(),
+            data: b"abc".to_vec(),
+        };
+
+        let body = build_upload_media_multipart_body(&att, "test-boundary");
+        let body = String::from_utf8_lossy(&body);
+
+        assert!(body.contains(
+            "Content-Disposition: form-data; name=\"media\"; filename=\"a\\\"b\\\\c__X-Bad: y.png\"; filelength=3"
+        ));
+        assert!(body.contains("Content-Type: application/octet-stream\r\n\r\nabc"));
+        assert!(!body.contains("filename=\"a\"b\\c\r\nX-Bad: y.png\""));
+        assert!(!body.contains("Content-Type: image/png\r\nX-Bad: y"));
     }
 
     #[test]

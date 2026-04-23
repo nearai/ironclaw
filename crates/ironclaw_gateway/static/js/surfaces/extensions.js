@@ -665,6 +665,9 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
     input.type = 'password';
     input.name = secret.name;
     input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
+    // Do not copy extension-provided regexes into HTML pattern. Browser regex
+    // engines can backtrack catastrophically; server-side validation is the
+    // security boundary for manifest-provided secret.validation patterns.
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
