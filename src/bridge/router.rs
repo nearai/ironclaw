@@ -5853,6 +5853,11 @@ pub(crate) mod test_support {
             }
         }
 
+        let project_id = threads
+            .first()
+            .map(|thread| thread.project_id)
+            .unwrap_or_default();
+
         let store = Arc::new(ThreadTestStore::new());
         for thread in threads {
             store.save_thread(&thread).await.expect("seed thread"); // safety: cfg(test) fixture
@@ -5880,7 +5885,6 @@ pub(crate) mod test_support {
         ));
         let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
-        let project_id = ProjectId::new();
         let state = EngineState {
             thread_manager: tm,
             conversation_manager: cm,

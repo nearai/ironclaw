@@ -726,12 +726,14 @@ pub(crate) async fn chat_threads_handler(
                     });
                 }
 
-                // Keep the chat sidebar scoped to persisted chat conversations.
-                // Engine v2 foreground threads are assistant execution internals
-                // and can rotate per message, so surfacing them here makes
-                // ordinary prompts look like standalone `engine` threads.
-                // Explicit engine-thread history still works via
-                // `chat_history_handler` when the caller already has a thread id.
+                // Keep the chat sidebar scoped to persisted conversations.
+                // A conversation can span multiple foreground engine threads,
+                // so rendering each engine thread as its own row produces
+                // misleading per-turn labels like "try again" instead of a
+                // stable conversation label. Engine-thread history remains
+                // accessible when the caller already has a thread id via
+                // `chat_history_handler`.
+
                 let active_thread = session.lock().await.active_thread;
 
                 return Ok(Json(ThreadListResponse {
@@ -2018,7 +2020,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_chat_threads_handler_hides_engine_threads_from_sidebar() {
+    async fn test_chat_threads_handler_hides_engine_threads_and_keeps_conversation_titles() {
         let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
             .lock()
             .await;
@@ -2026,22 +2028,42 @@ mod tests {
 
         let project_id =
             crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-        let mut thread = ironclaw_engine::Thread::new(
+
+        let mut foreground_thread = ironclaw_engine::Thread::new(
             "assistant hello",
             ironclaw_engine::ThreadType::Foreground,
             project_id,
             "alice",
             ironclaw_engine::ThreadConfig::default(),
         );
-        thread
+        foreground_thread
             .messages
             .push(ironclaw_engine::ThreadMessage::user("hello"));
-        let engine_thread_id = thread.id.0;
-        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+        let foreground_thread_id = foreground_thread.id.0;
+
+        crate::bridge::test_support::install_engine_state_with_threads(vec![foreground_thread])
+            .await;
 
         let (db, _tmp) = crate::testing::test_db().await;
+        let assistant_id = db
+            .get_or_create_assistant_conversation("alice", "gateway")
+            .await
+            .expect("assistant conversation");
+        db.add_conversation_message(assistant_id, "user", "first assistant ask")
+            .await
+            .expect("seed assistant conversation");
+
+        let channel_thread_id = db
+            .create_conversation("telegram", "alice", None)
+            .await
+            .expect("create telegram conversation");
+        db.add_conversation_message(channel_thread_id, "user", "ping")
+            .await
+            .expect("seed telegram conversation");
+
         let session_manager = Arc::new(SessionManager::new());
-        let state = test_gateway_state_with_store_and_session_manager(db, session_manager);
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
 
         let response = chat_threads_handler(
             axum::extract::State(state),
@@ -2054,20 +2076,35 @@ mod tests {
         .await
         .expect("handler ok");
 
-        assert!(response.assistant_thread.is_some());
+        assert_eq!(
+            response
+                .assistant_thread
+                .as_ref()
+                .and_then(|thread| thread.title.as_deref()),
+            Some("first assistant ask"),
+            "assistant conversation should carry the first user message as its title"
+        );
+        assert!(
+            response.threads.iter().any(|thread| {
+                thread.id == channel_thread_id
+                    && thread.channel.as_deref() == Some("telegram")
+                    && thread.title.as_deref() == Some("ping")
+            }),
+            "chat sidebar must keep persisted channel conversations"
+        );
         assert!(
             response
                 .threads
                 .iter()
-                .all(|thread| thread.id != engine_thread_id),
-            "chat sidebar must not surface engine execution threads"
+                .all(|thread| thread.id != foreground_thread_id),
+            "chat sidebar must not surface separate engine execution threads"
         );
         assert!(
             response
                 .threads
                 .iter()
                 .all(|thread| thread.channel.as_deref() != Some("engine")),
-            "chat sidebar must stay scoped to chat conversations"
+            "chat sidebar rows should stay conversation-based rather than engine-thread-based"
         );
 
         crate::bridge::test_support::clear_engine_state().await;

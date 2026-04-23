@@ -4554,8 +4554,14 @@ mod tests {
         }
     }
 
+    /// Regression for #2883: latent provider actions (installed but not yet
+    /// ready — primarily WASM tools pending OAuth) must surface as callable
+    /// actions so the LLM can attempt them and trigger the auth-on-first-call
+    /// gate. Before the fix, unauthenticated WASM tools were invisible to the
+    /// LLM because `tool_definitions()` only returns registered tools and WASM
+    /// tools register only at activation (which requires auth first).
     #[tokio::test]
-    async fn available_actions_omit_latent_inactive_provider_actions() {
+    async fn available_actions_include_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4618,7 +4624,11 @@ mod tests {
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
-        assert!(!actions.iter().any(|action| action.name == "latent_tool"));
+        assert!(
+            actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should appear in available_actions so the LLM can call it and trigger auth; got: {:?}",
+            actions.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -4971,7 +4981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_capabilities_projects_inactive_provider_background() {
+    async fn available_capabilities_omit_latent_provider_background() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -5049,10 +5059,12 @@ mod tests {
             .await
             .expect("capabilities");
 
-        assert!(capabilities.iter().any(|summary| {
-            summary.name == "latent_tool"
-                && summary.status == ironclaw_engine::CapabilityStatus::Inactive
-        }));
+        assert!(
+            !capabilities
+                .iter()
+                .any(|summary| summary.name == "latent_tool"),
+            "latent provider tool should not appear in capability background when it is callable"
+        );
     }
 
     #[tokio::test]
