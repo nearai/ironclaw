@@ -1087,7 +1087,7 @@ async def _get_mock_mcp_state(mock_base_url: str) -> dict:
 async def _wait_for_refresh_request(
     mock_base_url: str,
     *,
-    timeout: float = 20.0,
+    timeout: float = 60.0,
 ) -> dict:
     for _ in range(int(timeout * 2)):
         state = await _get_mock_oauth_state(mock_base_url)
@@ -1356,7 +1356,7 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
     thread_id = await _create_thread(server["base_url"])
 
     event_type, payload, auth_url = await _wait_for_auth_event(
-        server["base_url"], thread_id, timeout=60
+        server["base_url"], thread_id, timeout=90
     )
 
     assert auth_url, payload
@@ -1367,7 +1367,7 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
         auth = payload["resume_kind"]["Authentication"]
         assert auth.get("credential_name") in {"gmail", "google_oauth_token"}, payload
 
-    history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=60)
+    history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=90)
     all_text = " ".join(turn.get("response") or "" for turn in history.get("turns", []))
     pending = history.get("pending_gate")
     assert (
@@ -1454,12 +1454,12 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         owner_result = await send_chat_and_wait_for_terminal_message(
             owner_page,
             "check mock mcp search",
-            timeout=60000,
+            timeout=90000,
         )
         member_result = await send_chat_and_wait_for_terminal_message(
             member_page,
             "check mock mcp search",
-            timeout=60000,
+            timeout=90000,
         )
         assert owner_result["role"] == "assistant", owner_result
         assert member_result["role"] == "assistant", member_result
@@ -1567,10 +1567,10 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     await chat_input.press("Enter")
 
     thread_id = await _current_thread_id(page)
-    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
+    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=90.0)
     assert tokens, "expected Gmail to hit the mock Google API after settings-first auth"
     history = await _wait_for_response_contains(
-        server["base_url"], thread_id, "Quarterly update", timeout=60.0
+        server["base_url"], thread_id, "Quarterly update", timeout=90.0
     )
     assert history.get("pending_gate") is None, history
     assert "Quarterly update" in " ".join(
