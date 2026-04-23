@@ -104,7 +104,11 @@ async fn run_bridge(
     let mut shutdown = std::pin::pin!(shutdown_rx);
     let mut reconnect_attempt: u32 = 0;
     // Reuse a single HTTP client across reconnects to avoid repeated TLS session setup.
-    let http_client = reqwest::Client::new();
+    // 30-second timeout prevents stalled connections from blocking the retry loop forever.
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     loop {
         // Check for shutdown before connecting
@@ -182,10 +186,16 @@ async fn run_bridge(
 
         tracing::info!(channel = %channel_name, "Connecting to Socket Mode WebSocket");
 
-        // Connect to the WebSocket
-        let ws_stream = match tokio_tungstenite::connect_async(&wss_url).await {
-            Ok((stream, _response)) => stream,
-            Err(e) => {
+        // Connect to the WebSocket with a bounded timeout — a stalled TLS
+        // handshake or half-open network path must not block the retry loop.
+        let connect_result = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio_tungstenite::connect_async(&wss_url),
+        )
+        .await;
+        let ws_stream = match connect_result {
+            Ok(Ok((stream, _response))) => stream,
+            Ok(Err(e)) => {
                 reconnect_attempt += 1;
                 if reconnect_attempt > config.max_reconnect_attempts {
                     return Err(WasmChannelError::SocketMode {
@@ -210,6 +220,24 @@ async fn run_bridge(
                     _ = tokio::time::sleep(delay) => continue,
                     _ = &mut shutdown => return Ok(()),
                 }
+            }
+            Err(_elapsed) => {
+                reconnect_attempt += 1;
+                tracing::warn!(
+                    channel = %channel_name,
+                    attempt = reconnect_attempt,
+                    "WebSocket connect timed out after 30s"
+                );
+                if reconnect_attempt > config.max_reconnect_attempts {
+                    return Err(WasmChannelError::SocketMode {
+                        name: channel_name.clone(),
+                        reason: format!(
+                            "WebSocket connect timed out after {} attempts",
+                            reconnect_attempt
+                        ),
+                    });
+                }
+                continue;
             }
         };
 

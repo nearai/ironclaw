@@ -117,11 +117,13 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 fn should_route_as_approval(
     thread_state: ThreadState,
     raw_content: &str,
-    has_awaiting_approval_in_session: bool,
+    _has_awaiting_approval_in_session: bool,
 ) -> bool {
-    thread_state == ThreadState::AwaitingApproval
-        || has_awaiting_approval_in_session
-        || raw_content.trim().starts_with('/')
+    // Bare approval keywords (yes/no/always) are thread-local only.
+    // Cross-thread approval requires an explicit request ID or slash command.
+    // This prevents an unrelated "yes" in thread B from approving a
+    // destructive tool call pending in thread A.
+    thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
 }
 
 #[cfg(test)]
@@ -2543,17 +2545,23 @@ mod tests {
     }
 
     #[test]
-    fn should_route_as_approval_accepts_bare_keywords_when_other_thread_pending() {
+    fn bare_keywords_do_not_route_cross_thread() {
+        // Bare "yes"/"no"/"always" must stay thread-local. Cross-thread
+        // approval requires an explicit request ID or slash command.
+        // Prevents an unrelated "yes" in thread B from approving a
+        // destructive tool call pending in thread A.
         use super::should_route_as_approval;
         use crate::agent::session::ThreadState;
 
-        assert!(should_route_as_approval(ThreadState::Idle, "yes", true));
-        assert!(should_route_as_approval(ThreadState::Completed, "no", true));
-        assert!(should_route_as_approval(
+        assert!(!should_route_as_approval(ThreadState::Idle, "yes", true));
+        assert!(!should_route_as_approval(ThreadState::Completed, "no", true));
+        assert!(!should_route_as_approval(
             ThreadState::Interrupted,
             "always",
             true
         ));
+        // Slash commands still route cross-thread
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve", true));
     }
 
     #[test]
