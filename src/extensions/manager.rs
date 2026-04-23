@@ -4059,7 +4059,7 @@ impl ExtensionManager {
         // `load_tool_capabilities` so the legacy-hyphen alias is also
         // tried — without this, a tool whose `.capabilities.json` is
         // saved under the pre-v0.23 hyphen form (e.g.
-        // `google-drive-tool.capabilities.json`) would silently report
+        // `portfolio-tool.capabilities.json`) would silently report
         // `no_auth_required` even though the file declares OAuth, which
         // is the bug behind the v2 Drive trace's missing auth gate.
         let cap_file = match self.load_tool_capabilities(name).await {
@@ -4727,7 +4727,7 @@ impl ExtensionManager {
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
     ///
-    /// When multiple tools share an OAuth provider (e.g., google-calendar and google-drive
+    /// When multiple tools share an OAuth provider (e.g., google-docs and google-sheets
     /// both use `google_oauth_token`), we request all their scopes in a single OAuth flow
     /// so one login covers everything.
     async fn collect_shared_scopes(
@@ -5742,9 +5742,9 @@ impl ExtensionManager {
         })?;
 
         // Use the alias-aware helper so a tool installed under the
-        // legacy hyphen filename (`google-drive-tool.wasm`) is found
+        // legacy hyphen filename (`portfolio-tool.wasm`) is found
         // when looked up via the canonical underscore name
-        // (`google_drive_tool`). Without this, `determine_installed_kind`
+        // (`portfolio_tool`). Without this, `determine_installed_kind`
         // happily reports the extension as installed via its own alias
         // check, but `activate_wasm_tool` then fails with `NotInstalled`
         // here — and the upstream readiness probe falls back to
@@ -8560,18 +8560,18 @@ mod tests {
             dir.path().join("channels"),
             None,
         );
-        let target_wasm = dir.path().join("web-search.wasm");
-        let target_caps = dir.path().join("web-search.capabilities.json");
+        let target_wasm = dir.path().join("portfolio.wasm");
+        let target_caps = dir.path().join("portfolio.capabilities.json");
         let tar_gz = make_test_tar_gz(&[
-            ("web_search_tool.wasm", b"\0asmfallback"),
+            ("portfolio_tool.wasm", b"\0asmfallback"),
             (
-                "web-search-tool.capabilities.json",
-                br#"{"name":"web-search-tool"}"#,
+                "portfolio-tool.capabilities.json",
+                br#"{"name":"portfolio-tool"}"#,
             ),
         ]);
 
         manager
-            .extract_wasm_tar_gz("web-search", &tar_gz, &target_wasm, &target_caps)
+            .extract_wasm_tar_gz("portfolio", &tar_gz, &target_wasm, &target_caps)
             .expect("extract tar.gz");
 
         assert_eq!(
@@ -8580,7 +8580,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&target_caps).expect("read capabilities"),
-            r#"{"name":"web-search-tool"}"#
+            r#"{"name":"portfolio-tool"}"#
         );
     }
 
@@ -8756,20 +8756,20 @@ mod tests {
     /// silently broke when it lost the `user_id` parameter and the
     /// `push_action` closure during a refactor.
     ///
-    /// Note: action names use the canonical form (`web_search`) because the
+    /// Note: action names use the canonical form (`portfolio_tool`) because the
     /// registry runs every entry through `canonicalize_entries` on
     /// construction.
     #[tokio::test]
     async fn latent_provider_actions_include_registry_backed_uninstalled_wasm_tool() {
         let dir = tempfile::tempdir().expect("temp dir");
         let entry = RegistryEntry {
-            name: "web_search".to_string(),
-            display_name: "Web Search".to_string(),
+            name: "portfolio_tool".to_string(),
+            display_name: "Portfolio".to_string(),
             kind: ExtensionKind::WasmTool,
-            description: "Search the web".to_string(),
-            keywords: vec!["search".into(), "web".into()],
+            description: "Manage portfolio".to_string(),
+            keywords: vec!["portfolio".into(), "finance".into()],
             source: ExtensionSource::WasmDownload {
-                wasm_url: "https://example.com/web_search.wasm".to_string(),
+                wasm_url: "https://example.com/portfolio_tool.wasm".to_string(),
                 capabilities_url: None,
             },
             fallback_source: None,
@@ -8785,20 +8785,20 @@ mod tests {
         );
 
         let actions = manager.latent_provider_actions("test").await;
-        let web_search = actions
+        let portfolio = actions
             .iter()
-            .find(|action| action.action_name == "web_search")
+            .find(|action| action.action_name == "portfolio_tool")
             .unwrap_or_else(|| {
                 panic!(
-                    "expected registry-backed web_search latent action; got: {:?}",
+                    "expected registry-backed portfolio_tool latent action; got: {:?}",
                     actions.iter().map(|a| &a.action_name).collect::<Vec<_>>()
                 )
             });
-        assert_eq!(web_search.provider_extension, "web_search");
+        assert_eq!(portfolio.provider_extension, "portfolio_tool");
         assert!(
-            web_search.description.contains("Search the web"),
+            portfolio.description.contains("Manage portfolio"),
             "latent action description should carry the registry entry's description, got: {}",
-            web_search.description
+            portfolio.description
         );
     }
 
@@ -9003,7 +9003,7 @@ mod tests {
     /// Auto-install path for registry-backed wasm tools.
     ///
     /// `ensure_extension_ready` should:
-    ///   1. See `web_search` is not installed,
+    ///   1. See `portfolio_tool` is not installed,
     ///   2. Look it up in the registry catalog,
     ///   3. Run the buildable install path which copies the artifact and
     ///      capabilities sidecar into `wasm_tools_dir`,
@@ -9026,21 +9026,21 @@ mod tests {
         let channels_dir = dir.path().join("channels");
 
         // Stage the buildable source layout that the install path expects:
-        //   <build_dir>/target/wasm32-wasip2/release/web_search.wasm
-        //   <build_dir>/web_search.capabilities.json
+        //   <build_dir>/target/wasm32-wasip2/release/portfolio_tool.wasm
+        //   <build_dir>/portfolio_tool.capabilities.json
         let build_dir = dir.path().join("build");
         let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
-        let wasm_path = artifact_dir.join("web_search.wasm");
+        let wasm_path = artifact_dir.join("portfolio_tool.wasm");
         // Minimal valid wasm header (`\x00asm` + version 1) so any later
         // validation reading the magic bytes is satisfied.
         std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
 
-        let caps_path = build_dir.join("web_search.capabilities.json");
+        let caps_path = build_dir.join("portfolio_tool.capabilities.json");
         std::fs::write(
             &caps_path,
             serde_json::json!({
-                "description": "Test web search tool",
+                "description": "Test portfolio tool",
                 "auth": {
                     "secret_name": "brave_api_key",
                     "display_name": "Brave Search",
@@ -9052,18 +9052,18 @@ mod tests {
         .expect("write capabilities");
 
         let entry = RegistryEntry {
-            name: "web_search".to_string(),
-            display_name: "Web Search".to_string(),
+            name: "portfolio_tool".to_string(),
+            display_name: "Portfolio".to_string(),
             kind: ExtensionKind::WasmTool,
-            description: "Search the web via Brave Search".to_string(),
-            keywords: vec!["search".into(), "web".into()],
+            description: "Manage your portfolio via Portfolio".to_string(),
+            keywords: vec!["portfolio".into(), "finance".into()],
             // `WasmBuildable.source_dir` is unused on the buildable install
             // path (only `build_dir` + `crate_name` matter), but the field
             // is required so we point it at the same tempdir for clarity.
             source: ExtensionSource::WasmBuildable {
                 source_dir: build_dir.to_string_lossy().into_owned(),
                 build_dir: Some(build_dir.to_string_lossy().into_owned()),
-                crate_name: Some("web_search".to_string()),
+                crate_name: Some("portfolio_tool".to_string()),
             },
             fallback_source: None,
             auth_hint: AuthHint::CapabilitiesAuth,
@@ -9080,7 +9080,7 @@ mod tests {
 
         let outcome = manager
             .ensure_extension_ready(
-                "web_search",
+                "portfolio_tool",
                 "test",
                 crate::extensions::EnsureReadyIntent::ExplicitActivate,
             )
@@ -9103,16 +9103,16 @@ mod tests {
         // Auto-install must have produced the wasm file in the tools dir,
         // so determine_installed_kind now resolves to WasmTool.
         let kind = manager
-            .determine_installed_kind("web_search", "test")
+            .determine_installed_kind("portfolio_tool", "test")
             .await
             .expect("installed kind");
         assert_eq!(kind, ExtensionKind::WasmTool);
         assert!(
-            tools_dir.join("web_search.wasm").exists(),
+            tools_dir.join("portfolio_tool.wasm").exists(),
             "auto-install should have copied the wasm artifact into wasm_tools_dir"
         );
         assert!(
-            tools_dir.join("web_search.capabilities.json").exists(),
+            tools_dir.join("portfolio_tool.capabilities.json").exists(),
             "auto-install should have copied the capabilities sidecar into wasm_tools_dir"
         );
     }
@@ -9132,21 +9132,21 @@ mod tests {
         let build_dir = dir.path().join("build");
         let artifact_dir = build_dir.join("target/wasm32-wasip2/release");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
-        let wasm_path = artifact_dir.join("web_search.wasm");
+        let wasm_path = artifact_dir.join("portfolio_tool.wasm");
         std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
-        let caps_path = build_dir.join("web_search.capabilities.json");
+        let caps_path = build_dir.join("portfolio_tool.capabilities.json");
         std::fs::write(&caps_path, "{}").expect("write capabilities");
 
         let entry = RegistryEntry {
-            name: "web_search".to_string(),
-            display_name: "Web Search".to_string(),
+            name: "portfolio_tool".to_string(),
+            display_name: "Portfolio".to_string(),
             kind: ExtensionKind::WasmTool,
-            description: "Search the web via Brave Search".to_string(),
-            keywords: vec!["search".into(), "web".into()],
+            description: "Manage your portfolio via Portfolio".to_string(),
+            keywords: vec!["portfolio".into(), "finance".into()],
             source: ExtensionSource::WasmBuildable {
                 source_dir: build_dir.to_string_lossy().into_owned(),
                 build_dir: Some(build_dir.to_string_lossy().into_owned()),
-                crate_name: Some("web_search".to_string()),
+                crate_name: Some("portfolio_tool".to_string()),
             },
             fallback_source: None,
             auth_hint: AuthHint::CapabilitiesAuth,
@@ -9163,7 +9163,7 @@ mod tests {
 
         let result = manager
             .ensure_extension_ready(
-                "web_search",
+                "portfolio_tool",
                 "test",
                 crate::extensions::EnsureReadyIntent::UseCapability,
             )
@@ -9174,7 +9174,7 @@ mod tests {
             "UseCapability must surface NotInstalled, not auto-install; got {result:?}"
         );
         assert!(
-            !tools_dir.join("web_search.wasm").exists(),
+            !tools_dir.join("portfolio_tool.wasm").exists(),
             "UseCapability path must NOT have copied the wasm artifact into wasm_tools_dir"
         );
     }
@@ -9514,13 +9514,13 @@ mod tests {
     }
 
     /// Regression: a tool installed under the legacy hyphenated form
-    /// (e.g. `google-drive-tool.wasm`) must be findable by
+    /// (e.g. `portfolio-tool.wasm`) must be findable by
     /// `activate_wasm_tool` when looked up via the canonical underscore
-    /// form (`google_drive_tool`). Before consolidating the file lookup
+    /// form (`portfolio_tool`). Before consolidating the file lookup
     /// helpers, `determine_installed_kind` correctly resolved the alias
     /// (so the extension reported as "installed") but `activate_wasm_tool`
     /// hard-coded `dir.join("{name}.wasm")` and missed it. The disagreement
-    /// surfaced as an `Extension not installed: WASM tool 'google_drive_tool'
+    /// surfaced as an `Extension not installed: WASM tool 'portfolio_tool'
     /// not found at <path>` error in the readiness probe, which the upstream
     /// wrapper then swallowed as `ToolReadiness::Ready`, sending the agent
     /// off to call a tool that couldn't activate.
@@ -9538,10 +9538,10 @@ mod tests {
         let tools_dir = dir.path().join("tools");
         std::fs::create_dir_all(&tools_dir).expect("tools dir");
         // Hyphenated file → canonical lookup name has underscores.
-        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+        std::fs::write(tools_dir.join("portfolio-tool.wasm"), b"not-a-real-wasm")
             .expect("hyphen file");
         // Canonical file → no alias needed.
-        std::fs::write(tools_dir.join("gmail.wasm"), b"not-a-real-wasm").expect("canonical file");
+        std::fs::write(tools_dir.join("telegram.wasm"), b"not-a-real-wasm").expect("canonical file");
 
         let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
         let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
@@ -9549,7 +9549,7 @@ mod tests {
 
         // Hyphen → canonical lookup. Must NOT return NotInstalled / not found.
         let err = mgr
-            .activate("google_drive_tool", "test")
+            .activate("portfolio_tool", "test")
             .await
             .expect_err("byte stream is not real WASM");
         let msg = err.to_string();
@@ -9557,13 +9557,13 @@ mod tests {
             !msg.contains("not found")
                 && !msg.contains("not installed")
                 && !msg.contains("Not installed"),
-            "activate_wasm_tool must find google-drive-tool.wasm via legacy alias \
-             when looked up as `google_drive_tool`; got: {msg}"
+            "activate_wasm_tool must find portfolio-tool.wasm via legacy alias \
+             when looked up as `portfolio_tool`; got: {msg}"
         );
 
         // Canonical name with no alias still works.
         let err = mgr
-            .activate("gmail", "test")
+            .activate("telegram", "test")
             .await
             .expect_err("byte stream is not real WASM");
         let msg = err.to_string();
@@ -9608,7 +9608,7 @@ mod tests {
     /// Regression test for the v2 Drive trace: `auth_wasm_tool` used to
     /// open `wasm_tools_dir.join("{canonical}.capabilities.json")`
     /// directly without trying the legacy hyphen alias. A tool installed
-    /// as `google-drive-tool.capabilities.json` (the pre-v0.23 layout)
+    /// as `portfolio-tool.capabilities.json` (the pre-v0.23 layout)
     /// would silently report `no_auth_required` even though the file on
     /// disk declared OAuth, which broke both the pre-flight readiness
     /// gate and the post-flight auth detector. Now the function delegates
@@ -9624,10 +9624,10 @@ mod tests {
         // The capabilities file declares an OAuth secret so a missed
         // alias would mistakenly report `NoAuthRequired` instead of
         // `AwaitingAuthorization`.
-        std::fs::write(tools_dir.join("google-drive-tool.wasm"), b"not-a-real-wasm")
+        std::fs::write(tools_dir.join("portfolio-tool.wasm"), b"not-a-real-wasm")
             .expect("hyphen wasm file");
         let caps_json = r#"{
-            "name": "google-drive-tool",
+            "name": "portfolio-tool",
             "version": "0.1.0",
             "description": "test",
             "auth": {
@@ -9637,7 +9637,7 @@ mod tests {
             }
         }"#;
         std::fs::write(
-            tools_dir.join("google-drive-tool.capabilities.json"),
+            tools_dir.join("portfolio-tool.capabilities.json"),
             caps_json,
         )
         .expect("hyphen caps file");
@@ -9646,10 +9646,10 @@ mod tests {
 
         // Look up by the canonical underscore name. Before the fix this
         // returned `NoAuthRequired` because `auth_wasm_tool` joined
-        // `google_drive_tool.capabilities.json` directly and that file
+        // `portfolio_tool.capabilities.json` directly and that file
         // doesn't exist on disk.
         let result = mgr
-            .auth("google_drive_tool", "test")
+            .auth("portfolio_tool", "test")
             .await
             .expect("auth lookup must succeed");
         match result.status {
@@ -10575,16 +10575,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        std::fs::write(dir.path().join("gmail.wasm"), b"fake-tool").expect("write tool");
+        std::fs::write(dir.path().join("telegram.wasm"), b"fake-tool").expect("write tool");
 
         let listener = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
         let abort_handle = listener.abort_handle();
         mgr.pending_auth.write().await.insert(
-            super::PendingAuthKey::new("test", "gmail"),
+            super::PendingAuthKey::new("test", "telegram"),
             super::PendingAuth {
-                _name: "gmail".to_string(),
+                _name: "telegram".to_string(),
                 _kind: ExtensionKind::WasmTool,
                 created_at: std::time::Instant::now(),
                 task_handle: Some(listener),
@@ -10594,14 +10594,14 @@ mod tests {
         mgr.activation_errors
             .write()
             .await
-            .insert("gmail".to_string(), "cached failure".to_string());
+            .insert("telegram".to_string(), "cached failure".to_string());
 
         let secrets = Arc::clone(&mgr.secrets);
         mgr.pending_oauth_flows().write().await.insert(
-            "gmail-state".to_string(),
+            "telegram-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
-                display_name: "Gmail".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
+                display_name: "Telegram".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client123".to_string(),
                 client_secret: None,
@@ -10627,8 +10627,8 @@ mod tests {
         mgr.pending_oauth_flows().write().await.insert(
             "other-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: ironclaw_common::ExtensionName::new("web-search").unwrap(),
-                display_name: "Web Search".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("portfolio-tool").unwrap(),
+                display_name: "Portfolio".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client456".to_string(),
                 client_secret: None,
@@ -10652,7 +10652,7 @@ mod tests {
             },
         );
 
-        let result = mgr.remove("gmail", "test").await;
+        let result = mgr.remove("telegram", "test").await;
         assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
 
         tokio::task::yield_now().await;
@@ -10661,7 +10661,7 @@ mod tests {
             mgr.pending_auth
                 .read()
                 .await
-                .get(&super::PendingAuthKey::new("test", "gmail"))
+                .get(&super::PendingAuthKey::new("test", "telegram"))
                 .is_none(),
             "pending auth entry should be removed"
         );
@@ -10670,13 +10670,13 @@ mod tests {
             "pending auth listener should be aborted"
         );
         assert!(
-            !mgr.activation_errors.read().await.contains_key("gmail"),
+            !mgr.activation_errors.read().await.contains_key("telegram"),
             "stale activation error should be cleared"
         );
 
         let flows = mgr.pending_oauth_flows().read().await;
         assert!(
-            !flows.contains_key("gmail-state"),
+            !flows.contains_key("telegram-state"),
             "gateway OAuth flow for removed extension should be cleared"
         );
         assert!(
@@ -10881,28 +10881,28 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         write_test_tool(
             dir.path(),
-            "google-calendar",
+            "portfolio-docs",
             r#"{
-                "name": "google-calendar",
-                "auth": { "secret_name": "google_oauth_token" },
+                "name": "portfolio-docs",
+                "auth": { "secret_name": "portfolio_oauth_token" },
                 "setup": {
                     "required_secrets": [
-                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
-                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                        { "name": "portfolio_oauth_client_id", "prompt": "Portfolio OAuth client id for cleanup testing." },
+                        { "name": "portfolio_oauth_client_secret", "prompt": "Portfolio OAuth client secret for cleanup testing." }
                     ]
                 }
             }"#,
         );
         let tools_dir = write_test_tool(
             dir.path(),
-            "google-drive",
+            "portfolio-sheets",
             r#"{
-                "name": "google-drive",
-                "auth": { "secret_name": "google_oauth_token" },
+                "name": "portfolio-sheets",
+                "auth": { "secret_name": "portfolio_oauth_token" },
                 "setup": {
                     "required_secrets": [
-                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
-                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                        { "name": "portfolio_oauth_client_id", "prompt": "Portfolio OAuth client id for cleanup testing." },
+                        { "name": "portfolio_oauth_client_secret", "prompt": "Portfolio OAuth client secret for cleanup testing." }
                     ]
                 }
             }"#,
@@ -10910,45 +10910,45 @@ mod tests {
         let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
 
         for (secret_name, value) in [
-            ("google_oauth_token", "access-token"),
-            ("google_oauth_token_refresh_token", "refresh-token"),
-            ("google_oauth_token_scopes", "calendar drive"),
-            ("google_oauth_client_id", "client-id"),
-            ("google_oauth_client_secret", "client-secret"),
+            ("portfolio_oauth_token", "access-token"),
+            ("portfolio_oauth_token_refresh_token", "refresh-token"),
+            ("portfolio_oauth_token_scopes", "docs sheets"),
+            ("portfolio_oauth_client_id", "client-id"),
+            ("portfolio_oauth_client_secret", "client-secret"),
         ] {
             store_test_secret(&mgr, secret_name, value).await;
         }
 
-        mgr.remove("google-calendar", "test")
+        mgr.remove("portfolio-docs", "test")
             .await
             .expect("first remove should succeed");
 
         for secret_name in [
-            "google_oauth_token",
-            "google_oauth_token_refresh_token",
-            "google_oauth_token_scopes",
-            "google_oauth_client_id",
-            "google_oauth_client_secret",
+            "portfolio_oauth_token",
+            "portfolio_oauth_token_refresh_token",
+            "portfolio_oauth_token_scopes",
+            "portfolio_oauth_client_id",
+            "portfolio_oauth_client_secret",
         ] {
             assert!(
                 mgr.secrets
                     .exists("test", secret_name)
                     .await
                     .expect("exists query"),
-                "shared secret {secret_name} should remain while google-drive is still installed"
+                "shared secret {secret_name} should remain while portfolio-sheets is still installed"
             );
         }
 
-        mgr.remove("google-drive", "test")
+        mgr.remove("portfolio-sheets", "test")
             .await
             .expect("second remove should succeed");
 
         for secret_name in [
-            "google_oauth_token",
-            "google_oauth_token_refresh_token",
-            "google_oauth_token_scopes",
-            "google_oauth_client_id",
-            "google_oauth_client_secret",
+            "portfolio_oauth_token",
+            "portfolio_oauth_token_refresh_token",
+            "portfolio_oauth_token_scopes",
+            "portfolio_oauth_client_id",
+            "portfolio_oauth_client_secret",
         ] {
             assert!(
                 !mgr.secrets
@@ -12341,10 +12341,10 @@ mod tests {
                 }
             }
         });
-        std::fs::write(tools_dir.join("gmail.wasm"), b"\0asm")
+        std::fs::write(tools_dir.join("telegram.wasm"), b"\0asm")
             .map_err(|err| format!("write wasm: {err}"))?;
         std::fs::write(
-            tools_dir.join("gmail.capabilities.json"),
+            tools_dir.join("telegram.capabilities.json"),
             serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
         )
         .map_err(|err| format!("write caps: {err}"))?;
@@ -12354,7 +12354,7 @@ mod tests {
             .await;
 
         let result = mgr
-            .auth("gmail", "test")
+            .auth("telegram", "test")
             .await
             .map_err(|err| err.to_string())?;
         assert!(

@@ -9,10 +9,10 @@
 //!
 //! ```text
 //! ~/.ironclaw/tools/
-//! ├── slack.wasm
-//! ├── slack.capabilities.json
-//! ├── github.wasm
-//! └── github.capabilities.json
+//! ├── telegram.wasm
+//! ├── telegram.capabilities.json
+//! ├── portfolio_tool.wasm
+//! └── portfolio_tool.capabilities.json
 //! ```
 //!
 //! ```ignore
@@ -216,10 +216,10 @@ impl WasmToolLoader {
     ///
     /// ```text
     /// tools/
-    /// ├── slack.wasm                  <- Tool WASM component
-    /// ├── slack.capabilities.json     <- Capabilities (optional)
-    /// ├── github.wasm
-    /// └── github.capabilities.json
+    /// ├── telegram.wasm               <- Tool WASM component
+    /// ├── telegram.capabilities.json  <- Capabilities (optional)
+    /// ├── portfolio_tool.wasm
+    /// └── portfolio_tool.capabilities.json
     /// ```
     ///
     /// Tools without a capabilities file get no permissions (default deny).
@@ -520,7 +520,7 @@ pub fn resolve_wasm_target_dir(crate_dir: &Path) -> PathBuf {
 /// Return the expected path to a compiled WASM artifact for a given crate.
 ///
 /// Combines [`resolve_wasm_target_dir`] with the `wasm32-wasip2/release/` subdirectory
-/// and the binary name without extension (e.g. `slack_tool`).
+/// and the binary name without extension (e.g. `telegram_tool`).
 ///
 /// `binary_name` should not include the `.wasm` extension; it is appended automatically.
 ///
@@ -551,7 +551,7 @@ fn tools_src_dir() -> PathBuf {
 /// - `tools-src/<name>/target/wasm32-wasip2/release/<crate_name>_tool.wasm`
 /// - `tools-src/<name>/<name>-tool.capabilities.json`
 ///
-/// Returns a map of install-name (e.g. "gmail_tool") to paths.
+/// Returns a map of install-name (e.g. "telegram_tool") to paths.
 pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std::io::Error> {
     let src_dir = tools_src_dir();
     let mut tools = HashMap::new();
@@ -842,14 +842,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         // Create wasm and capabilities files
-        std::fs::File::create(dir.path().join("slack.wasm")).unwrap();
+        std::fs::File::create(dir.path().join("telegram.wasm")).unwrap();
         let mut cap_file =
-            std::fs::File::create(dir.path().join("slack.capabilities.json")).unwrap();
+            std::fs::File::create(dir.path().join("telegram.capabilities.json")).unwrap();
         cap_file.write_all(b"{}").unwrap();
 
         let tools = discover_tools(dir.path()).await.unwrap();
         assert_eq!(tools.len(), 1);
-        assert!(tools["slack"].capabilities_path.is_some());
+        assert!(tools["telegram"].capabilities_path.is_some());
     }
 
     #[tokio::test]

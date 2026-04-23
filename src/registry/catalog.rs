@@ -90,7 +90,7 @@ pub enum RegistryError {
 /// Central catalog loaded from the `registry/` directory.
 #[derive(Debug, Clone)]
 pub struct RegistryCatalog {
-    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/github").
+    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/portfolio").
     manifests: HashMap<String, ExtensionManifest>,
 
     /// Bundle definitions from `_bundles.json`.
@@ -297,11 +297,11 @@ impl RegistryCatalog {
         results
     }
 
-    /// Get a manifest by name. Tries exact key match first ("tools/github"),
-    /// then searches by bare name ("github").
+    /// Get a manifest by name. Tries exact key match first ("tools/portfolio"),
+    /// then searches by bare name ("portfolio").
     ///
     /// If a bare name matches more than one prefix, returns `None`.
-    /// Use a qualified key ("tools/github", "channels/telegram", or
+    /// Use a qualified key ("tools/portfolio", "channels/telegram", or
     /// "mcp-servers/notion") to disambiguate.
     pub fn get(&self, name: &str) -> Option<&ExtensionManifest> {
         // Try exact key first
@@ -364,7 +364,7 @@ impl RegistryCatalog {
         }
     }
 
-    /// Get the full key ("tools/github", "channels/telegram", or
+    /// Get the full key ("tools/portfolio", "channels/telegram", or
     /// "mcp-servers/notion") for a manifest.
     pub fn key_for(&self, name: &str) -> Option<String> {
         if self.manifests.contains_key(name) {
@@ -583,23 +583,23 @@ mod tests {
         fs::create_dir_all(&mcp_dir).unwrap();
 
         fs::write(
-            tools_dir.join("slack.json"),
+            tools_dir.join("portfolio.json"),
             r#"{
-                "name": "slack",
-                "display_name": "Slack",
+                "name": "portfolio",
+                "display_name": "Portfolio",
                 "kind": "tool",
                 "version": "0.1.0",
-                "description": "Post messages via Slack API",
+                "description": "Portfolio management tool",
                 "keywords": ["messaging", "chat"],
                 "source": {
-                    "dir": "tools-src/slack",
-                    "capabilities": "slack-tool.capabilities.json",
-                    "crate_name": "slack-tool"
+                    "dir": "tools-src/portfolio",
+                    "capabilities": "portfolio-tool.capabilities.json",
+                    "crate_name": "portfolio-tool"
                 },
                 "auth_summary": {
                     "method": "oauth",
-                    "provider": "Slack",
-                    "secrets": ["slack_bot_token"]
+                    "provider": "Portfolio",
+                    "secrets": ["portfolio_bot_token"]
                 },
                 "tags": ["default", "messaging"]
             }"#,
@@ -607,18 +607,18 @@ mod tests {
         .unwrap();
 
         fs::write(
-            tools_dir.join("github.json"),
+            tools_dir.join("telegram_mtproto.json"),
             r#"{
-                "name": "github",
-                "display_name": "GitHub",
+                "name": "telegram_mtproto",
+                "display_name": "Telegram MTProto",
                 "kind": "tool",
                 "version": "0.1.0",
-                "description": "GitHub integration for issues and PRs",
+                "description": "Telegram MTProto tool for advanced messaging",
                 "keywords": ["code", "git"],
                 "source": {
-                    "dir": "tools-src/github",
-                    "capabilities": "github-tool.capabilities.json",
-                    "crate_name": "github-tool"
+                    "dir": "tools-src/telegram",
+                    "capabilities": "telegram-tool.capabilities.json",
+                    "crate_name": "telegram-tool"
                 },
                 "tags": ["default", "development"]
             }"#,
@@ -663,12 +663,12 @@ mod tests {
                 "bundles": {
                     "default": {
                         "display_name": "Recommended",
-                        "extensions": ["tools/slack", "tools/github", "channels/telegram"]
+                        "extensions": ["tools/portfolio", "channels/telegram"]
                     },
                     "messaging": {
                         "display_name": "Messaging",
                         "aliases": ["chat-suite"],
-                        "extensions": ["tools/slack", "channels/telegram"],
+                        "extensions": ["tools/portfolio", "channels/telegram"],
                         "shared_auth": null
                     }
                 }
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(defaults.len(), 2);
 
         let messaging = catalog.list(None, Some("messaging"));
-        assert_eq!(messaging.len(), 2); // slack (tool) and telegram (channel) both have "messaging" tag
+        assert_eq!(messaging.len(), 2); // portfolio (tool) and telegram (channel) both have "messaging" tag
     }
 
     #[test]
@@ -723,11 +723,11 @@ mod tests {
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
 
         // Full key
-        assert!(catalog.get("tools/slack").is_some());
+        assert!(catalog.get("tools/portfolio").is_some());
         assert!(catalog.get("mcp-servers/notion").is_some());
 
         // Bare name
-        assert!(catalog.get("slack").is_some());
+        assert!(catalog.get("portfolio").is_some());
         assert!(catalog.get("telegram").is_some());
         assert!(catalog.get("notion").is_some());
 
@@ -742,9 +742,9 @@ mod tests {
 
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
 
-        let results = catalog.search("slack");
+        let results = catalog.search("portfolio");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "slack");
+        assert_eq!(results[0].name, "portfolio");
 
         let results = catalog.search("messaging");
         assert!(!results.is_empty());
@@ -761,7 +761,7 @@ mod tests {
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
 
         let (manifests, missing) = catalog.resolve_bundle("default").unwrap();
-        assert_eq!(manifests.len(), 3);
+        assert_eq!(manifests.len(), 2);
         assert!(missing.is_empty());
 
         assert!(catalog.resolve_bundle("nonexistent").is_err());
@@ -775,13 +775,13 @@ mod tests {
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
 
         // Single extension
-        let (manifests, bundle) = catalog.resolve("slack").unwrap();
+        let (manifests, bundle) = catalog.resolve("portfolio").unwrap();
         assert_eq!(manifests.len(), 1);
         assert!(bundle.is_none());
 
         // Bundle
         let (manifests, bundle) = catalog.resolve("default").unwrap();
-        assert_eq!(manifests.len(), 3);
+        assert_eq!(manifests.len(), 2);
         assert!(bundle.is_some());
     }
 
@@ -813,11 +813,11 @@ mod tests {
 
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
         let entries = catalog.discovery_entries();
-        let slack = entries
+        let portfolio = entries
             .into_iter()
-            .find(|entry| entry.name == "slack")
-            .expect("slack entry");
-        assert!(slack.keywords.iter().any(|keyword| keyword == "chat-suite"));
+            .find(|entry| entry.name == "portfolio")
+            .expect("portfolio entry");
+        assert!(portfolio.keywords.iter().any(|keyword| keyword == "chat-suite"));
     }
 
     #[test]

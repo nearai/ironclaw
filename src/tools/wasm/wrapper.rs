@@ -1706,7 +1706,7 @@ fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
 /// inlines the relevant schema info directly:
 ///
 /// 1. **Tagged-enum / `oneOf` schemas**: extract a compact
-///    `action -> [required fields]` map. For google-drive that's
+///    `action -> [required fields]` map. For portfolio-tool that's
 ///    ~400 chars / 100 tokens, vs. the ~$0.005-0.01 cost of an
 ///    extra LLM turn. Tells the LLM exactly which fields it forgot
 ///    for which action.
@@ -2312,7 +2312,7 @@ mod tests {
         assert_eq!(compacted["additionalProperties"], true);
     }
 
-    /// Specific repro for the google-drive bug: a schemars-derived
+    /// Specific repro for the portfolio-tool bug: a schemars-derived
     /// `oneOf` schema with one variant that has `file_id` as required.
     /// After compaction, the `file_id` requirement must still be visible
     /// to the LLM, otherwise it will call `{"action":"get_file"}` and
@@ -2321,7 +2321,7 @@ mod tests {
     fn test_compact_schema_preserves_file_id_required_for_get_file() {
         let schema = serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "GoogleDriveAction",
+            "title": "PortfolioToolAction",
             "oneOf": [
                 {
                     "type": "object",
@@ -3322,7 +3322,7 @@ mod tests {
             ]
         });
 
-        let hint = super::build_tool_usage_hint("google-drive-tool", &schema);
+        let hint = super::build_tool_usage_hint("portfolio-tool", &schema);
 
         // The hint must NOT recommend an extra round-trip via tool_info.
         assert!(
@@ -3334,7 +3334,7 @@ mod tests {
         assert!(hint.contains("list_files=[]"));
         assert!(hint.contains("get_file=[file_id]"));
         assert!(hint.contains("share_file=[file_id,email]"));
-        assert!(hint.contains("Required fields per action for google-drive-tool"));
+        assert!(hint.contains("Required fields per action for portfolio-tool"));
     }
 
     /// For flat (non-oneOf) schemas, the hint should embed the schema
@@ -3349,13 +3349,13 @@ mod tests {
             "required": ["query"]
         });
 
-        let hint = super::build_tool_usage_hint("web-search-tool", &schema);
+        let hint = super::build_tool_usage_hint("portfolio-tool", &schema);
 
         assert!(
             !hint.contains("call tool_info"),
             "hint should not recommend tool_info for compact schemas; got: {hint}"
         );
-        assert!(hint.contains("Schema for web-search-tool"));
+        assert!(hint.contains("Schema for portfolio-tool"));
         assert!(hint.contains("\"query\""));
         assert!(hint.contains("\"required\""));
     }

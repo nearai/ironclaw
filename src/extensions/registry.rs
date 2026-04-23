@@ -413,18 +413,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_gws_alias_finds_google_tools() {
+    async fn test_search_bundle_alias_finds_extensions() {
         let registry = registry_with_catalog();
-        let results = registry.search("gws").await;
+        let results = registry.search("messaging").await;
         assert!(
-            results.iter().any(|result| result.entry.name == "gmail"),
-            "gws search should surface Gmail"
-        );
-        assert!(
-            results
-                .iter()
-                .any(|result| result.entry.name == "google_drive"),
-            "gws search should surface Google Drive"
+            results.iter().any(|result| result.entry.name == "telegram_mtproto"),
+            "messaging search should surface Telegram"
         );
     }
 

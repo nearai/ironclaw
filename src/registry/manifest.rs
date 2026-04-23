@@ -10,10 +10,10 @@ use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry}
 /// A single extension manifest loaded from `registry/{tools,channels,mcp-servers}/<name>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
-    /// Unique identifier (matches crate name stem, e.g. "slack").
+    /// Unique identifier (matches crate name stem, e.g. "portfolio").
     pub name: String,
 
-    /// Human-readable name (e.g. "Slack").
+    /// Human-readable name (e.g. "Portfolio").
     pub display_name: String,
 
     /// Whether this is a tool, channel, or MCP server.
@@ -88,7 +88,7 @@ impl std::fmt::Display for ManifestKind {
 /// Source code location for building from source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSpec {
-    /// Path relative to repo root (e.g. "tools-src/slack").
+    /// Path relative to repo root (e.g. "tools-src/portfolio").
     pub dir: String,
 
     /// Capabilities filename relative to source dir.
@@ -122,7 +122,7 @@ pub struct AuthSummary {
     #[serde(default)]
     pub method: Option<String>,
 
-    /// Display name for the auth provider (e.g. "Google", "Slack").
+    /// Display name for the auth provider (e.g. "Google", "Portfolio").
     #[serde(default)]
     pub provider: Option<String>,
 
@@ -296,32 +296,32 @@ mod tests {
     #[test]
     fn test_parse_tool_manifest() {
         let json = r#"{
-            "name": "slack",
-            "display_name": "Slack",
+            "name": "portfolio",
+            "display_name": "Portfolio",
             "kind": "tool",
             "version": "0.1.0",
-            "description": "Post messages via Slack API",
+            "description": "Portfolio management tool",
             "keywords": ["messaging"],
             "source": {
-                "dir": "tools-src/slack",
-                "capabilities": "slack-tool.capabilities.json",
-                "crate_name": "slack-tool"
+                "dir": "tools-src/portfolio",
+                "capabilities": "portfolio-tool.capabilities.json",
+                "crate_name": "portfolio-tool"
             },
             "artifacts": {
                 "wasm32-wasip2": { "url": null, "sha256": null }
             },
             "auth_summary": {
                 "method": "oauth",
-                "provider": "Slack",
-                "secrets": ["slack_bot_token"],
+                "provider": "Portfolio",
+                "secrets": ["portfolio_bot_token"],
                 "shared_auth": null,
-                "setup_url": "https://api.slack.com/apps"
+                "setup_url": "https://example.com/setup"
             },
             "tags": ["default", "messaging"]
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        assert_eq!(manifest.name, "slack");
+        assert_eq!(manifest.name, "portfolio");
         assert_eq!(manifest.kind, ManifestKind::Tool);
         assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
         assert!(manifest.tags.contains(&"default".to_string()));
@@ -359,16 +359,16 @@ mod tests {
     fn test_parse_bundles() {
         let json = r#"{
             "bundles": {
-                "google": {
-                    "display_name": "Google Suite",
-                    "description": "All Google tools",
-                    "extensions": ["tools/gmail", "tools/google-calendar"],
-                    "shared_auth": "google_oauth_token",
-                    "aliases": ["gws", "gsuite"]
+                "messaging": {
+                    "display_name": "Messaging Suite",
+                    "description": "All messaging tools",
+                    "extensions": ["tools/telegram_mtproto", "channels/telegram"],
+                    "shared_auth": "telegram_bot_token",
+                    "aliases": ["tg", "tele"]
                 },
                 "default": {
                     "display_name": "Recommended Set",
-                    "extensions": ["tools/github", "tools/slack"]
+                    "extensions": ["tools/portfolio", "channels/telegram"]
                 }
             }
         }"#;
@@ -376,10 +376,10 @@ mod tests {
         let bundles: BundlesFile = serde_json::from_str(json).expect("parse bundles");
         assert_eq!(bundles.bundles.len(), 2);
         assert_eq!(
-            bundles.bundles["google"].shared_auth.as_deref(),
-            Some("google_oauth_token")
+            bundles.bundles["messaging"].shared_auth.as_deref(),
+            Some("telegram_bot_token")
         );
-        assert_eq!(bundles.bundles["google"].aliases, vec!["gws", "gsuite"]);
+        assert_eq!(bundles.bundles["messaging"].aliases, vec!["tg", "tele"]);
         assert!(bundles.bundles["default"].shared_auth.is_none());
     }
 
@@ -395,20 +395,20 @@ mod tests {
     #[test]
     fn test_manifest_with_download_url_has_buildable_fallback() {
         let json = r#"{
-            "name": "gmail",
-            "display_name": "Gmail",
+            "name": "telegram_mtproto",
+            "display_name": "Telegram MTProto",
             "kind": "tool",
             "version": "0.1.0",
-            "description": "Gmail tool",
+            "description": "Telegram MTProto tool",
             "keywords": ["email"],
             "source": {
-                "dir": "tools-src/gmail",
-                "capabilities": "gmail-tool.capabilities.json",
-                "crate_name": "gmail-tool"
+                "dir": "tools-src/telegram",
+                "capabilities": "telegram-tool.capabilities.json",
+                "crate_name": "telegram-tool"
             },
             "artifacts": {
                 "wasm32-wasip2": {
-                    "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
+                    "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram_mtproto-wasm32-wasip2.tar.gz",
                     "sha256": null
                 }
             },
@@ -436,8 +436,8 @@ mod tests {
                 crate_name,
                 ..
             } => {
-                assert_eq!(build_dir.as_deref(), Some("tools-src/gmail"));
-                assert_eq!(crate_name.as_deref(), Some("gmail-tool"));
+                assert_eq!(build_dir.as_deref(), Some("tools-src/telegram"));
+                assert_eq!(crate_name.as_deref(), Some("telegram-tool"));
             }
             other => panic!("Fallback should be WasmBuildable, got {:?}", other),
         }
@@ -448,16 +448,16 @@ mod tests {
     #[test]
     fn test_manifest_with_null_url_no_fallback() {
         let json = r#"{
-            "name": "slack",
-            "display_name": "Slack",
+            "name": "portfolio",
+            "display_name": "Portfolio",
             "kind": "tool",
             "version": "0.1.0",
-            "description": "Slack tool",
+            "description": "Portfolio tool",
             "keywords": [],
             "source": {
-                "dir": "tools-src/slack",
-                "capabilities": "slack-tool.capabilities.json",
-                "crate_name": "slack-tool"
+                "dir": "tools-src/portfolio",
+                "capabilities": "portfolio-tool.capabilities.json",
+                "crate_name": "portfolio-tool"
             },
             "artifacts": {
                 "wasm32-wasip2": { "url": null, "sha256": null }

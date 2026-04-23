@@ -189,15 +189,19 @@ fn credential_spec_to_auth_descriptor(
     }
 }
 
-/// Register credential mappings from loaded skills into the shared registry.
+/// Register credential mappings and HTTP allowlists from loaded skills into the shared registry.
 ///
 /// Validates each spec before registration; invalid specs are logged and skipped.
+/// Credential host patterns are implicitly added to the HTTP allowlist, so hosts
+/// that receive credential injection are always permitted.
 pub fn register_skill_credentials(
     skills: &[LoadedSkill],
     registry: &crate::tools::wasm::SharedCredentialRegistry,
 ) {
     let mut count = 0usize;
     for skill in skills {
+        let mut credential_hosts: Vec<String> = Vec::new();
+
         for spec in &skill.manifest.credentials {
             let errors = ironclaw_skills::validation::validate_credential_spec(spec);
             if !errors.is_empty() {
@@ -216,12 +220,34 @@ pub fn register_skill_credentials(
                 hosts = ?spec.hosts,
                 "Registering skill credential mapping"
             );
+            credential_hosts.extend(spec.hosts.iter().cloned());
             registry.add_mappings(std::iter::once(mapping));
             if let Some(oauth) = credential_spec_to_oauth_refresh(spec) {
                 registry
                     .add_oauth_refresh_configs(std::iter::once((oauth.secret_name.clone(), oauth)));
             }
             count += 1;
+        }
+
+        let allowlist_errors =
+            ironclaw_skills::validation::validate_http_allowlist(&skill.manifest.http);
+        if !allowlist_errors.is_empty() {
+            tracing::warn!(
+                skill = %skill.name(),
+                errors = ?allowlist_errors,
+                "Skipping invalid HTTP allowlist"
+            );
+        } else {
+            let mut hosts: Vec<String> = skill.manifest.http.allowed_hosts.clone();
+            hosts.extend(credential_hosts);
+            if !hosts.is_empty() {
+                tracing::debug!(
+                    skill = %skill.name(),
+                    hosts = ?hosts,
+                    "Registering skill HTTP allowlist"
+                );
+                registry.add_http_allowlist_patterns(hosts);
+            }
         }
     }
     if count > 0 {
@@ -344,6 +370,7 @@ mod tests {
                     oauth: None,
                     setup_instructions: None,
                 }],
+                http: SkillHttpAllowlist::default(),
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
@@ -395,6 +422,7 @@ mod tests {
                     }),
                     setup_instructions: None,
                 }],
+                http: SkillHttpAllowlist::default(),
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
@@ -438,6 +466,7 @@ mod tests {
                     oauth: None,
                     setup_instructions: None,
                 }],
+                http: SkillHttpAllowlist::default(),
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),

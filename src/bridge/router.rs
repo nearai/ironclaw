@@ -369,7 +369,7 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
 /// carries `credential_name` (e.g. `google_oauth_token`), which is opaque
 /// to users AND fails when fed back into `submit_auth_token` for
 /// WASM-tool-backed credentials, while the owning extension name (e.g.
-/// `google-drive-tool`) is what both the user-facing UI and
+/// `portfolio-tool`) is what both the user-facing UI and
 /// `submit_auth_token` actually want. For built-in tools, HTTP, and skill
 /// credentials there's no owning extension and the fallback is the right
 /// thing.
@@ -4152,7 +4152,7 @@ async fn await_thread_outcome(
 // ── Shared event display helpers ────────────────────────────
 
 /// Format an action name with optional parameter summary for display.
-/// e.g., `"http(https://api.github.com/...)"` or just `"web_search"`.
+/// e.g., `"http(https://api.github.com/...)"` or just `"portfolio_tool"`.
 fn format_action_display_name(action_name: &str, params_summary: &Option<String>) -> String {
     match params_summary {
         Some(summary) => format!("{}({})", action_name, summary),

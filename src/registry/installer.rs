@@ -1151,7 +1151,7 @@ mod tests {
     #[test]
     fn test_source_fallback_on_latest_url_mismatch() {
         let latest_mismatch = RegistryError::ChecksumMismatch {
-            url: "https://github.com/nearai/ironclaw/releases/latest/download/github-wasm32-wasip2.tar.gz".to_string(),
+            url: "https://github.com/nearai/ironclaw/releases/latest/download/portfolio-wasm32-wasip2.tar.gz".to_string(),
             expected_sha256: "aaa".to_string(),
             actual_sha256: "bbb".to_string(),
         };
@@ -1161,7 +1161,7 @@ mod tests {
         );
 
         let pinned_mismatch = RegistryError::ChecksumMismatch {
-            url: "https://github.com/nearai/ironclaw/releases/download/v0.7.0/github-0.2.0-wasm32-wasip2.tar.gz".to_string(),
+            url: "https://github.com/nearai/ironclaw/releases/download/v0.7.0/portfolio-0.1.0-wasm32-wasip2.tar.gz".to_string(),
             expected_sha256: "aaa".to_string(),
             actual_sha256: "bbb".to_string(),
         };
@@ -1172,9 +1172,9 @@ mod tests {
     }
 
     // Regression tests for tool/channel artifact name collision (PR #964).
-    // When a tool and channel share the same registry filename (e.g. slack.json),
-    // CI produces kind-prefixed bundles (tool-slack-*.tar.gz vs channel-slack-*.tar.gz).
-    // The files *inside* each archive use manifest.name (slack-tool.wasm vs slack.wasm).
+    // When a tool and channel share the same registry filename (e.g. telegram.json),
+    // CI produces kind-prefixed bundles (tool-telegram_mtproto-*.tar.gz vs channel-telegram-*.tar.gz).
+    // The files *inside* each archive use manifest.name (telegram-tool.wasm vs telegram.wasm).
     // These tests verify the installer extracts by manifest.name correctly.
 
     fn build_test_tar_gz(wasm_name: &str, caps_name: Option<&str>) -> Vec<u8> {
@@ -1211,16 +1211,16 @@ mod tests {
 
     #[test]
     fn test_extract_rejects_archive_with_wrong_wasm_name() {
-        // Simulates the collision bug: archive contains channel's slack.wasm,
-        // but installer tries to extract tool's slack_tool.wasm.
-        let gz_bytes = build_test_tar_gz("slack.wasm", Some("slack.capabilities.json"));
+        // Simulates the collision bug: archive contains channel's telegram.wasm,
+        // but installer tries to extract tool's portfolio.wasm.
+        let gz_bytes = build_test_tar_gz("telegram.wasm", Some("telegram.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
         let result = extract_tar_gz(
             &gz_bytes,
-            "slack_tool",
-            &tmp.path().join("slack_tool.wasm"),
-            &tmp.path().join("slack_tool.capabilities.json"),
+            "portfolio",
+            &tmp.path().join("portfolio.wasm"),
+            &tmp.path().join("portfolio.capabilities.json"),
             "test://url",
         );
 
@@ -1228,13 +1228,13 @@ mod tests {
         match err {
             RegistryError::DownloadFailed { reason, .. } => {
                 assert!(
-                    reason.contains("slack_tool.wasm"),
+                    reason.contains("portfolio.wasm"),
                     "error should mention expected filename: {}",
                     reason
                 );
                 // Error should also mention the hyphenated alias that was tried
                 assert!(
-                    reason.contains("slack-tool.wasm"),
+                    reason.contains("portfolio.wasm"),
                     "error should mention alias filename: {}",
                     reason
                 );
@@ -1245,16 +1245,16 @@ mod tests {
 
     #[test]
     fn test_extract_correct_wasm_from_tool_bundle() {
-        // Tool bundle contains slack_tool.wasm — extraction by canonical name succeeds.
-        let gz_bytes = build_test_tar_gz("slack_tool.wasm", Some("slack_tool.capabilities.json"));
+        // Tool bundle contains portfolio-tool.wasm — extraction by canonical name succeeds.
+        let gz_bytes = build_test_tar_gz("portfolio-tool.wasm", Some("portfolio-tool.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
-        let wasm_path = tmp.path().join("slack_tool.wasm");
-        let caps_path = tmp.path().join("slack_tool.capabilities.json");
+        let wasm_path = tmp.path().join("portfolio-tool.wasm");
+        let caps_path = tmp.path().join("portfolio-tool.capabilities.json");
 
         let result = extract_tar_gz(
             &gz_bytes,
-            "slack_tool",
+            "portfolio-tool",
             &wasm_path,
             &caps_path,
             "test://url",
@@ -1268,15 +1268,15 @@ mod tests {
 
     #[test]
     fn test_extract_correct_wasm_from_channel_bundle() {
-        // Channel bundle contains slack.wasm — extraction by name="slack" succeeds.
-        let gz_bytes = build_test_tar_gz("slack.wasm", Some("slack.capabilities.json"));
+        // Channel bundle contains telegram.wasm — extraction by name="telegram" succeeds.
+        let gz_bytes = build_test_tar_gz("telegram.wasm", Some("telegram.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
-        let wasm_path = tmp.path().join("slack.wasm");
-        let caps_path = tmp.path().join("slack.capabilities.json");
+        let wasm_path = tmp.path().join("telegram.wasm");
+        let caps_path = tmp.path().join("telegram.capabilities.json");
 
         let result =
-            extract_tar_gz(&gz_bytes, "slack", &wasm_path, &caps_path, "test://url").unwrap();
+            extract_tar_gz(&gz_bytes, "telegram", &wasm_path, &caps_path, "test://url").unwrap();
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
@@ -1285,21 +1285,21 @@ mod tests {
 
     #[test]
     fn test_extract_tar_gz_matches_hyphenated_alias() {
-        // Regression: archives contain hyphenated filenames (e.g. "google-calendar.wasm")
-        // but the canonical name uses underscores ("google_calendar"). The extractor
+        // Regression: archives contain hyphenated filenames (e.g. "telegram-mtproto.wasm")
+        // but the canonical name uses underscores ("telegram_mtproto"). The extractor
         // must accept the hyphenated form when the canonical name is passed.
         let gz_bytes = build_test_tar_gz(
-            "google-calendar.wasm",
-            Some("google-calendar.capabilities.json"),
+            "telegram-mtproto.wasm",
+            Some("telegram-mtproto.capabilities.json"),
         );
 
         let tmp = tempfile::tempdir().unwrap();
-        let wasm_path = tmp.path().join("google_calendar.wasm");
-        let caps_path = tmp.path().join("google_calendar.capabilities.json");
+        let wasm_path = tmp.path().join("telegram_mtproto.wasm");
+        let caps_path = tmp.path().join("telegram_mtproto.capabilities.json");
 
         let result = extract_tar_gz(
             &gz_bytes,
-            "google_calendar",
+            "telegram_mtproto",
             &wasm_path,
             &caps_path,
             "test://url",
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_and_channel_install_to_separate_directories() {
-        // Tool and channel manifests with the same file_stem ("slack") install
+        // Tool and channel manifests with the same file_stem ("telegram") install
         // to different directories without collision.
         let temp = tempfile::tempdir().expect("tempdir");
         let installer = RegistryInstaller::new(
@@ -1323,15 +1323,15 @@ mod tests {
         );
 
         let tool_manifest = test_manifest_with_kind(
-            "slack-tool",
-            "tools-src/slack",
+            "portfolio-tool",
+            "tools-src/portfolio",
             None,
             None,
             ManifestKind::Tool,
         );
         let channel_manifest = test_manifest_with_kind(
-            "slack",
-            "channels-src/slack",
+            "telegram",
+            "channels-src/telegram",
             None,
             None,
             ManifestKind::Channel,
@@ -1351,8 +1351,8 @@ mod tests {
         match tool_err {
             RegistryError::ManifestRead { path, .. } => {
                 assert!(
-                    path.ends_with("tools-src/slack"),
-                    "tool should resolve to tools-src/slack, got: {}",
+                    path.ends_with("tools-src/portfolio"),
+                    "tool should resolve to tools-src/portfolio, got: {}",
                     path.display()
                 );
             }
@@ -1361,8 +1361,8 @@ mod tests {
         match channel_err {
             RegistryError::ManifestRead { path, .. } => {
                 assert!(
-                    path.ends_with("channels-src/slack"),
-                    "channel should resolve to channels-src/slack, got: {}",
+                    path.ends_with("channels-src/telegram"),
+                    "channel should resolve to channels-src/telegram, got: {}",
                     path.display()
                 );
             }

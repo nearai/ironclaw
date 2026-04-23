@@ -64,7 +64,7 @@ codegen-units = 1
 
 ### A3: Write `<name>-tool.capabilities.json`
 
-Declare the tool's security requirements. Determine what APIs it needs and create the allowlist. Reference `tools-src/slack/slack-tool.capabilities.json` for the format.
+Declare the tool's security requirements. Determine what APIs it needs and create the allowlist. Reference `tools-src/portfolio/portfolio-tool.capabilities.json` for the format.
 
 Key sections to include:
 - `http.allowlist` - API endpoints (host, path_prefix, methods)
@@ -226,7 +226,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
 export!(<Name>Tool);
 ```
 
-Fill in the `schema()` with a proper JSON Schema using `oneOf` for each action variant. Reference `tools-src/slack/src/lib.rs` for the exact pattern.
+Fill in the `schema()` with a proper JSON Schema using `oneOf` for each action variant. Reference `tools-src/portfolio/src/lib.rs` for the exact pattern.
 
 ### A7: Verify
 

@@ -51,8 +51,8 @@ pub mod registry;
 // Re-export core types at crate root for convenience.
 pub use types::{
     ActivationCriteria, GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE,
-    ProviderRefreshStrategy, SkillCredentialLocation, SkillCredentialSpec, SkillManifest,
-    SkillOAuthConfig, SkillSource, SkillTrust,
+    ProviderRefreshStrategy, SkillCredentialLocation, SkillCredentialSpec, SkillHttpAllowlist,
+    SkillManifest, SkillOAuthConfig, SkillSource, SkillTrust,
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
@@ -62,7 +62,7 @@ pub use selector::{
 };
 pub use validation::{
     escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,
-    validate_credential_spec, validate_skill_name,
+    validate_credential_spec, validate_http_allowlist, validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]

@@ -66,9 +66,14 @@ impl From<SecretError> for InjectionError {
 /// Aggregates credential mappings from WASM tools so the built-in HTTP tool can
 /// auto-inject credentials for matching hosts. Uses `std::sync::RwLock` so
 /// `requires_approval` (sync) can query it without async.
+///
+/// Also holds skill-driven HTTP host allowlist patterns. When non-empty, the
+/// built-in `http` tool only permits requests to hosts matching these patterns
+/// (plus any hosts from registered credentials). Empty allowlist = no restriction.
 pub struct SharedCredentialRegistry {
     mappings: RwLock<Vec<CredentialMapping>>,
     oauth_refresh: RwLock<HashMap<String, OAuthRefreshConfig>>,
+    http_allowlist: RwLock<Vec<String>>,
 }
 
 impl SharedCredentialRegistry {
@@ -77,6 +82,7 @@ impl SharedCredentialRegistry {
         Self {
             mappings: RwLock::new(Vec::new()),
             oauth_refresh: RwLock::new(HashMap::new()),
+            http_allowlist: RwLock::new(Vec::new()),
         }
     }
 
@@ -212,6 +218,80 @@ impl SharedCredentialRegistry {
             }
         };
         guard.get(secret_name).cloned()
+    }
+
+    /// Add HTTP allowlist host patterns from a skill.
+    ///
+    /// These patterns restrict which hosts the built-in `http` tool may
+    /// contact when any skill with an allowlist is active.
+    pub fn add_http_allowlist_patterns(&self, patterns: impl IntoIterator<Item = String>) {
+        let collected: Vec<String> = patterns.into_iter().collect();
+        if collected.is_empty() {
+            return;
+        }
+        match self.http_allowlist.write() {
+            Ok(mut guard) => {
+                guard.extend(collected);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_http_allowlist_patterns; recovering"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.extend(collected);
+            }
+        }
+    }
+
+    /// Remove HTTP allowlist patterns that match any of the given patterns.
+    ///
+    /// Called when a skill is removed so its host restrictions don't outlive it.
+    pub fn remove_http_allowlist_patterns(&self, to_remove: &[String]) {
+        let mut guard = match self.http_allowlist.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during remove_http_allowlist_patterns; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.retain(|p| !to_remove.contains(p));
+    }
+
+    /// Check if a host is allowed by the skill-driven HTTP allowlist.
+    ///
+    /// Returns `true` when:
+    /// - The allowlist is empty (no restriction, all hosts permitted)
+    /// - The host matches any pattern in the allowlist
+    /// - The host matches any registered credential's host_patterns
+    ///   (credential hosts are implicitly allowed)
+    ///
+    /// Returns `false` when the allowlist is non-empty and the host
+    /// matches neither allowlist patterns nor credential host patterns.
+    pub fn http_host_allowed(&self, host: &str) -> bool {
+        let allowlist_guard = match self.http_allowlist.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during http_host_allowed; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        if allowlist_guard.is_empty() {
+            return true;
+        }
+
+        if allowlist_guard
+            .iter()
+            .any(|pattern| host_matches_pattern(host, pattern))
+        {
+            return true;
+        }
+
+        self.has_credentials_for_host(host)
     }
 }
 

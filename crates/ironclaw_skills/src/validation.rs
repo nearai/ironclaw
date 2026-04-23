@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::types::{SkillCredentialSpec, SkillOAuthConfig};
+use crate::types::{SkillCredentialSpec, SkillHttpAllowlist, SkillOAuthConfig, MAX_HTTP_ALLOWLIST_HOSTS};
 
 /// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
 static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
@@ -209,6 +209,34 @@ fn validate_oauth_config(credential_name: &str, oauth: &SkillOAuthConfig) -> Vec
 /// Normalize line endings to LF before hashing to ensure cross-platform consistency.
 pub fn normalize_line_endings(content: &str) -> String {
     content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Validate the HTTP allowlist declared by a skill.
+///
+/// Returns a list of validation errors (empty = valid).
+/// An empty allowlist is valid (means no host restriction).
+pub fn validate_http_allowlist(allowlist: &SkillHttpAllowlist) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if allowlist.allowed_hosts.len() > MAX_HTTP_ALLOWLIST_HOSTS {
+        errors.push(format!(
+            "HTTP allowlist must not exceed {} host patterns",
+            MAX_HTTP_ALLOWLIST_HOSTS
+        ));
+    }
+
+    for host in &allowlist.allowed_hosts {
+        if host.is_empty() {
+            errors.push("HTTP allowlist host pattern must not be empty".to_string());
+        } else if host.contains('/') || host.contains(':') {
+            errors.push(format!(
+                "HTTP allowlist host pattern '{}' must not contain '/' or ':' (host only, not URL)",
+                host
+            ));
+        }
+    }
+
+    errors
 }
 
 #[cfg(test)]
@@ -478,5 +506,59 @@ mod tests {
         };
         let errors = validate_credential_spec(&spec);
         assert_eq!(errors.len(), 3); // bad name + empty provider + empty hosts
+    }
+
+    #[test]
+    fn test_validate_http_allowlist_valid() {
+        use crate::types::SkillHttpAllowlist;
+        let allowlist = SkillHttpAllowlist {
+            allowed_hosts: vec![
+                "api.github.com".to_string(),
+                "*.googleapis.com".to_string(),
+            ],
+        };
+        assert!(validate_http_allowlist(&allowlist).is_empty());
+    }
+
+    #[test]
+    fn test_validate_http_allowlist_empty_is_valid() {
+        use crate::types::SkillHttpAllowlist;
+        let allowlist = SkillHttpAllowlist::default();
+        assert!(validate_http_allowlist(&allowlist).is_empty());
+    }
+
+    #[test]
+    fn test_validate_http_allowlist_empty_host_rejected() {
+        use crate::types::SkillHttpAllowlist;
+        let allowlist = SkillHttpAllowlist {
+            allowed_hosts: vec!["api.github.com".to_string(), String::new()],
+        };
+        let errors = validate_http_allowlist(&allowlist);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_http_allowlist_url_rejected() {
+        use crate::types::SkillHttpAllowlist;
+        let allowlist = SkillHttpAllowlist {
+            allowed_hosts: vec!["https://api.github.com/v1".to_string()],
+        };
+        let errors = validate_http_allowlist(&allowlist);
+        assert_eq!(errors.len(), 2); // contains both '/' and ':'
+        assert!(errors[0].contains("must not contain"));
+    }
+
+    #[test]
+    fn test_validate_http_allowlist_too_many_hosts() {
+        use crate::types::{SkillHttpAllowlist, MAX_HTTP_ALLOWLIST_HOSTS};
+        let allowlist = SkillHttpAllowlist {
+            allowed_hosts: (0..MAX_HTTP_ALLOWLIST_HOSTS + 1)
+                .map(|i| format!("host{}.example.com", i))
+                .collect(),
+        };
+        let errors = validate_http_allowlist(&allowlist);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("must not exceed"));
     }
 }

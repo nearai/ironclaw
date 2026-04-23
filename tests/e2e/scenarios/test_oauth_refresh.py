@@ -168,6 +168,7 @@ async def _wait_for_refresh_request(mock_base_url: str, timeout: float = 20.0) -
     raise AssertionError("Timed out waiting for exactly one OAuth refresh request")
 
 
+@pytest.mark.skip(reason="gmail WASM tool deleted; Google tools are now skills")
 async def test_hosted_gmail_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     server = hosted_oauth_refresh_server["base_url"]
     db_path = hosted_oauth_refresh_server["db_path"]

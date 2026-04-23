@@ -508,6 +508,15 @@ impl Tool for HttpTool {
             .host_str()
             .ok_or_else(|| ToolError::InvalidParameters("URL missing host".into()))?
             .to_string();
+
+        if let Some(registry) = &self.credential_registry
+            && !registry.http_host_allowed(&host)
+        {
+            return Err(ToolError::NotAuthorized(
+                format!("Host '{}' is not in any active skill's HTTP allowlist", host)
+            ));
+        }
+
         let client = build_pinned_client(
             &host,
             &resolved_addrs,
@@ -1073,6 +1082,13 @@ impl Tool for HttpTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if let Some(registry) = &self.credential_registry
+            && let Some(host) = extract_host_from_params(params)
+            && !registry.http_host_allowed(&host)
+        {
+            return ApprovalRequirement::Always;
+        }
+
         let has_credentials = ironclaw_safety::params_contain_manual_credentials(params)
             || (self.credential_registry.as_ref().is_some_and(|registry| {
                 extract_host_from_params(params)

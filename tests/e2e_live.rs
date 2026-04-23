@@ -538,8 +538,8 @@ mod live_tests {
         // job of the *first tool call after Phase A*. The pre-fix
         // recovery loop signature was the LLM choosing to call
         // `secret_list`, `tool_search`, `tool_install`, etc. — never
-        // re-attempting the original `google_drive_tool` call. The
-        // auto-retry signature is the original `google_drive_tool`
+        // re-attempting the original `portfolio_tool` call. The
+        // auto-retry signature is the original `portfolio_tool`
         // call running again, kernel-side, before any new LLM
         // iteration touches the recovery tools.
         //
@@ -550,7 +550,7 @@ mod live_tests {
         //      pre-fix recovery loop's smoking gun).
         //
         //   2. The first tool that does run in Phase B is one of
-        //      `google_drive_tool` or its action variants (so we know
+        //      `portfolio_tool` or its action variants (so we know
         //      the resume actually re-ran the gated action and the
         //      LLM didn't get a second chance to pick something else).
         let phase_b_tools = rig
@@ -573,12 +573,12 @@ mod live_tests {
         assert!(
             !phase_b_recovery,
             "Phase B contains pre-fix recovery-loop tools — the resume should \
-             re-run google_drive_tool through the kernel, not delegate to the \
+             re-run portfolio_tool through the kernel, not delegate to the \
              LLM to figure out what to do. Phase B tools: {phase_b_tools:?}"
         );
         if real_token_used {
             // Real token: the resume must have actually re-run
-            // google_drive_tool *first* (before any other tool), and
+            // portfolio_tool *first* (before any other tool), and
             // it must have executed *successfully* against the real
             // Google Drive API. The agent's eventual response text
             // can vary widely (full summary, partial summary, hits a
@@ -589,14 +589,14 @@ mod live_tests {
             let first_phase_b_tool = phase_b_tools.first().map(String::as_str);
             assert!(
                 first_phase_b_tool.is_some_and(|t| t.contains("google_drive")),
-                "Phase B's first tool call must be google_drive_tool (the auto-retry \
+                "Phase B's first tool call must be portfolio_tool (the auto-retry \
                  of the originally-gated action), got {first_phase_b_tool:?}. If this \
                  is anything else, the resume didn't re-run the original action — \
                  the LLM picked a different tool, which is the pre-fix recovery loop \
                  signature."
             );
 
-            // At least one google_drive_tool execution must have *succeeded*
+            // At least one portfolio_tool execution must have *succeeded*
             // (not just been attempted) — that's our proof that the auto-retry
             // actually called the real Google Drive API and got data back.
             // `tool_calls_completed` returns (name, success) for every
@@ -608,7 +608,7 @@ mod live_tests {
                 .any(|(name, success)| name.contains("google_drive") && success);
             assert!(
                 drive_succeeded,
-                "Real token in use but no google_drive_tool execution succeeded in \
+                "Real token in use but no portfolio_tool execution succeeded in \
                  Phase B. The auto-retry either re-fired the gate or the wrapper \
                  rejected the credential. Phase B tools: {phase_b_tools:?}"
             );
@@ -787,7 +787,7 @@ mod live_tests {
                 .collect::<Vec<_>>()
         );
 
-        // CRITICAL assertion #2: at least one google_drive_tool call
+        // CRITICAL assertion #2: at least one portfolio_tool call
         // succeeded against the real API. If the refresh failed
         // silently (e.g. invalid refresh token, hosted-proxy
         // misconfig), the wrapper would have failed closed and the
@@ -800,7 +800,7 @@ mod live_tests {
             .any(|(name, success)| name.contains("google_drive") && success);
         assert!(
             drive_succeeded,
-            "No google_drive_tool execution succeeded — the wrapper either \
+            "No portfolio_tool execution succeeded — the wrapper either \
              never ran the tool or it failed silently. Tools attempted: {tools:?}"
         );
 

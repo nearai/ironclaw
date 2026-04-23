@@ -158,7 +158,7 @@ async def test_oauth_url_has_extra_params(oauth_params):
     """Verify extra_params from capabilities.json are included."""
     params = oauth_params
 
-    # Google-specific extra_params from gmail-tool.capabilities.json
+    # Google-specific extra_params (Google tools are now skills, not WASM binaries)
     assert "access_type" in params, (
         "Should include 'access_type' from extra_params"
     )
