@@ -254,6 +254,8 @@
             <div id="ghost-text" class="ghost-text"></div>
           </div>
           <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
+          <button id="trace-preview-btn" class="trace-chip-btn" title="Preview redacted trace contribution"
+            aria-label="Preview redacted trace contribution">Trace</button>
           <button id="attach-btn" class="attach-btn" data-i18n="chat.attachImages" data-i18n-attr="title" title="Attach images"
             aria-label="Attach images">&#x1F4CE;</button>
           <button id="send-btn" data-i18n="chat.send">Send</button>
@@ -399,6 +401,7 @@
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
           <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
           <button class="settings-subtab" data-settings-subtab="tools" data-i18n="settings.tools">Tools</button>
+          <button class="settings-subtab" data-settings-subtab="trace-commons">Trace Commons</button>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
@@ -544,6 +547,11 @@
               </div>
             </div>
           </div>
+          <div class="settings-subpanel" id="settings-trace-commons">
+            <div class="extensions-container" id="settings-trace-commons-content">
+              <div class="empty-state" data-i18n="common.loading">Loading...</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -557,6 +565,21 @@
       <div class="modal-actions">
         <button id="confirm-modal-cancel-btn" class="btn-secondary" data-i18n="btn.cancel">Cancel</button>
         <button id="confirm-modal-btn" class="btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="trace-preview-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="trace-preview-title">
+    <div class="modal trace-modal">
+      <h3 id="trace-preview-title">Trace Commons Preview</h3>
+      <div class="trace-modal-body" id="trace-preview-body">
+        <div class="empty-state">Loading...</div>
+      </div>
+      <div class="modal-actions">
+        <button id="trace-preview-refresh-btn" class="btn-secondary">Refresh</button>
+        <button id="trace-preview-cancel-btn" class="btn-secondary" data-i18n="btn.cancel">Cancel</button>
+        <button id="trace-preview-queue-btn" class="btn-secondary">Queue</button>
+        <button id="trace-preview-submit-btn" class="btn-primary">Submit / Flush</button>
       </div>
     </div>
   </div>

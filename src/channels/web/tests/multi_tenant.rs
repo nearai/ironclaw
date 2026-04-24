@@ -926,6 +926,580 @@ mod admin_role_enforcement {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Trace Contribution Handler Isolation Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "libsql")]
+mod trace_contribution_isolation {
+    use super::*;
+    use crate::channels::web::handlers::traces::{
+        traces_credit_handler, traces_policy_get_handler, traces_policy_put_handler,
+        traces_preview_handler, traces_revoke_handler, traces_submissions_handler,
+        traces_submit_handler,
+    };
+    use crate::trace_contribution::{
+        LocalTraceSubmissionStatus, TraceSubmissionReceipt,
+        record_submitted_trace_envelope_for_scope,
+    };
+
+    fn trace_router(state: Arc<GatewayState>) -> Router {
+        trace_router_with_auth(state, two_user_auth())
+    }
+
+    fn trace_router_with_auth(state: Arc<GatewayState>, auth: MultiAuthState) -> Router {
+        Router::new()
+            .route(
+                "/api/traces/policy",
+                get(traces_policy_get_handler).put(traces_policy_put_handler),
+            )
+            .route("/api/traces/preview", post(traces_preview_handler))
+            .route("/api/traces/submit", post(traces_submit_handler))
+            .route("/api/traces/credit", get(traces_credit_handler))
+            .route("/api/traces/submissions", get(traces_submissions_handler))
+            .route(
+                "/api/traces/submissions/{submission_id}/revoke",
+                post(traces_revoke_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn trace_auth(alice_user_id: String, bob_user_id: String) -> MultiAuthState {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-alice".to_string(),
+            UserIdentity {
+                user_id: alice_user_id,
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        tokens.insert(
+            "tok-bob".to_string(),
+            UserIdentity {
+                user_id: bob_user_id,
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        MultiAuthState::multi(tokens)
+    }
+
+    fn remove_queued_traces(scope: &str) {
+        if let Ok(paths) =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(scope))
+        {
+            for path in paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn remove_trace_state(scope: &str) {
+        let dir = crate::trace_contribution::trace_contribution_dir_for_scope(Some(scope));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn json_request(
+        app: &Router,
+        method: Method,
+        uri: impl Into<String>,
+        token: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri.into())
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build json request");
+        app.clone().oneshot(req).await.expect("json response")
+    }
+
+    async fn authed_get(
+        app: &Router,
+        uri: impl Into<String>,
+        token: &str,
+    ) -> axum::response::Response {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri.into())
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("build get request");
+        app.clone().oneshot(req).await.expect("get response")
+    }
+
+    async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .expect("read json response"),
+        )
+        .expect("parse json response")
+    }
+
+    #[tokio::test]
+    async fn test_trace_preview_is_tenant_scoped() {
+        let (db, _dir) = test_db().await;
+        let alice_thread = db
+            .create_conversation("gateway", "alice", None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Please inspect /tmp/build.log")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(
+            alice_thread,
+            "assistant",
+            "I inspected the redacted build log.",
+        )
+        .await
+        .expect("add alice assistant message");
+
+        let app = trace_router(build_state(Some(db), None));
+        let body = serde_json::json!({
+            "thread_id": alice_thread,
+            "include_message_text": true
+        });
+
+        let alice_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/traces/preview")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build alice request");
+        let alice_resp = app
+            .clone()
+            .oneshot(alice_req)
+            .await
+            .expect("alice response");
+        assert_eq!(alice_resp.status(), StatusCode::OK);
+        let alice_body = axum::body::to_bytes(alice_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read alice response");
+        let alice_preview: serde_json::Value =
+            serde_json::from_slice(&alice_body).expect("parse alice preview");
+        let contributor = &alice_preview["envelope"]["contributor"];
+        assert!(
+            contributor["pseudonymous_contributor_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            contributor["tenant_scope_ref"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("tenant_sha256:"))
+        );
+        assert!(
+            !alice_body
+                .windows(b"alice".len())
+                .any(|chunk| chunk == b"alice")
+        );
+
+        let bob_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/traces/preview")
+            .header("Authorization", "Bearer tok-bob")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build bob request");
+        let bob_resp = app.oneshot(bob_req).await.expect("bob response");
+        assert_eq!(bob_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_trace_policy_and_preview_defaults_are_tenant_scoped() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(
+            alice_thread,
+            "user",
+            "Secret default-off text: sk-live-alice-test",
+        )
+        .await
+        .expect("add alice user message");
+        db.add_conversation_message(
+            alice_thread,
+            "assistant",
+            "I will keep that default-off text out of preview payloads.",
+        )
+        .await
+        .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+
+        let alice_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-alice").await).await;
+        assert_eq!(alice_policy["policy"]["include_message_text"], false);
+        assert_eq!(alice_policy["policy"]["include_tool_payloads"], false);
+        let bob_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-bob").await).await;
+        assert_eq!(bob_policy["policy"]["include_message_text"], false);
+        assert_eq!(bob_policy["policy"]["include_tool_payloads"], false);
+
+        let put_resp = json_request(
+            &app,
+            Method::PUT,
+            "/api/traces/policy",
+            "tok-alice",
+            serde_json::json!({
+                "include_message_text": true,
+                "include_tool_payloads": true
+            }),
+        )
+        .await;
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        let alice_policy = response_json(put_resp).await;
+        assert_eq!(alice_policy["policy"]["include_message_text"], true);
+        assert_eq!(alice_policy["policy"]["include_tool_payloads"], true);
+
+        let bob_policy =
+            response_json(authed_get(&app, "/api/traces/policy", "tok-bob").await).await;
+        assert_eq!(
+            bob_policy["policy"]["include_message_text"], false,
+            "alice policy updates must not change bob defaults"
+        );
+        assert_eq!(bob_policy["policy"]["include_tool_payloads"], false);
+
+        let bob_preview_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-bob",
+            serde_json::json!({ "thread_id": alice_thread }),
+        )
+        .await;
+        assert_eq!(bob_preview_resp.status(), StatusCode::NOT_FOUND);
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_preview_request_defaults_omit_text_and_payloads() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(
+            alice_thread,
+            "user",
+            "Default preview should hide this phrase: trace-default-secret",
+        )
+        .await
+        .expect("add alice user message");
+        db.add_conversation_message(
+            alice_thread,
+            "assistant",
+            r#"{"tool_calls":[{"id":"call-1","name":"shell","arguments":{"cmd":"echo trace-default-secret"}}]}"#,
+        )
+        .await
+        .expect("add alice tool call message");
+        db.add_conversation_message(
+            alice_thread,
+            "assistant",
+            "The default preview should stay metadata-only.",
+        )
+        .await
+        .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({ "thread_id": alice_thread }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read preview body");
+        assert!(
+            !body
+                .windows(b"trace-default-secret".len())
+                .any(|chunk| chunk == b"trace-default-secret"),
+            "metadata-only preview should not include message text or tool arguments by default"
+        );
+        let preview: serde_json::Value = serde_json::from_slice(&body).expect("parse preview body");
+        assert_eq!(
+            preview["envelope"]["consent"]["message_text_included"],
+            false
+        );
+        assert_eq!(
+            preview["envelope"]["consent"]["tool_payloads_included"],
+            false
+        );
+        assert!(
+            preview["envelope"]["events"]
+                .as_array()
+                .expect("events array")
+                .iter()
+                .all(|event| event.get("redacted_content").is_none())
+        );
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_submit_is_tenant_scoped_and_requires_preview_ack() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_queued_traces(&alice_user_id);
+        remove_queued_traces(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Please inspect /tmp/trace.log")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "I inspected the trace log.")
+            .await
+            .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let body = serde_json::json!({
+            "thread_id": alice_thread,
+            "include_message_text": true,
+            "user_previewed": true
+        });
+
+        let unacknowledged_body = serde_json::json!({
+            "thread_id": alice_thread,
+            "include_message_text": true,
+            "user_previewed": false
+        });
+        let unacknowledged_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/traces/submit")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(unacknowledged_body.to_string()))
+            .expect("build unacknowledged request");
+        let unacknowledged_resp = app
+            .clone()
+            .oneshot(unacknowledged_req)
+            .await
+            .expect("unacknowledged response");
+        assert_eq!(unacknowledged_resp.status(), StatusCode::BAD_REQUEST);
+
+        let alice_before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let bob_before =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&bob_user_id))
+                .expect("read bob queue")
+                .len();
+
+        let bob_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/traces/submit")
+            .header("Authorization", "Bearer tok-bob")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build bob request");
+        let bob_resp = app.clone().oneshot(bob_req).await.expect("bob response");
+        assert_eq!(bob_resp.status(), StatusCode::NOT_FOUND);
+
+        let alice_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/traces/submit")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build alice request");
+        let alice_resp = app.oneshot(alice_req).await.expect("alice response");
+        assert_eq!(alice_resp.status(), StatusCode::OK);
+        let alice_body = axum::body::to_bytes(alice_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read alice response");
+        let alice_submit: serde_json::Value =
+            serde_json::from_slice(&alice_body).expect("parse alice submit");
+        assert_eq!(alice_submit["queued"], true);
+        assert_eq!(alice_submit["flushed"], false);
+
+        let alice_after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&alice_user_id))
+                .expect("read alice queue")
+                .len();
+        let bob_after =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&bob_user_id))
+                .expect("read bob queue")
+                .len();
+        assert_eq!(alice_after, alice_before + 1);
+        assert_eq!(bob_after, bob_before);
+
+        remove_queued_traces(&alice_user_id);
+        remove_queued_traces(&bob_user_id);
+    }
+
+    #[tokio::test]
+    async fn test_trace_credit_submissions_and_revoke_are_tenant_scoped() {
+        let (db, _dir) = test_db().await;
+        let alice_user_id = format!("alice-{}", Uuid::new_v4());
+        let bob_user_id = format!("bob-{}", Uuid::new_v4());
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+
+        let alice_thread = db
+            .create_conversation("gateway", &alice_user_id, None)
+            .await
+            .expect("create alice conversation");
+        db.add_conversation_message(alice_thread, "user", "Create a trace credit record")
+            .await
+            .expect("add alice user message");
+        db.add_conversation_message(alice_thread, "assistant", "Trace credit record created.")
+            .await
+            .expect("add alice assistant message");
+
+        let app = trace_router_with_auth(
+            build_state(Some(db), None),
+            trace_auth(alice_user_id.clone(), bob_user_id.clone()),
+        );
+        let preview_resp = json_request(
+            &app,
+            Method::POST,
+            "/api/traces/preview",
+            "tok-alice",
+            serde_json::json!({ "thread_id": alice_thread }),
+        )
+        .await;
+        assert_eq!(preview_resp.status(), StatusCode::OK);
+        let preview = response_json(preview_resp).await;
+        let envelope: crate::trace_contribution::TraceContributionEnvelope =
+            serde_json::from_value(preview["envelope"].clone()).expect("parse envelope");
+        let submission_id = envelope.submission_id;
+        record_submitted_trace_envelope_for_scope(
+            Some(&alice_user_id),
+            &envelope,
+            "https://trace.example.test/v1/traces",
+            TraceSubmissionReceipt {
+                status: "submitted".to_string(),
+                credit_points_pending: Some(7.0),
+                credit_points_final: None,
+                explanation: vec!["alice-only credit".to_string()],
+            },
+        )
+        .expect("record alice submitted trace");
+
+        let alice_credit =
+            response_json(authed_get(&app, "/api/traces/credit", "tok-alice").await).await;
+        assert_eq!(alice_credit["summary"]["submissions_total"], 1);
+        assert_eq!(alice_credit["summary"]["pending_credit"], 7.0);
+        assert_eq!(
+            alice_credit["records"][0]["submission_id"],
+            submission_id.to_string()
+        );
+
+        let bob_credit_resp = authed_get(&app, "/api/traces/credit", "tok-bob").await;
+        assert_eq!(bob_credit_resp.status(), StatusCode::OK);
+        let bob_credit_body = axum::body::to_bytes(bob_credit_resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read bob credit");
+        assert!(
+            !bob_credit_body
+                .windows(submission_id.to_string().as_bytes().len())
+                .any(|chunk| chunk == submission_id.to_string().as_bytes()),
+            "bob credit response must not include alice submission ids"
+        );
+        let bob_credit: serde_json::Value =
+            serde_json::from_slice(&bob_credit_body).expect("parse bob credit");
+        assert_eq!(bob_credit["summary"]["submissions_total"], 0);
+        assert_eq!(
+            bob_credit["records"]
+                .as_array()
+                .expect("records array")
+                .len(),
+            0
+        );
+
+        let bob_revoke_resp = json_request(
+            &app,
+            Method::POST,
+            format!("/api/traces/submissions/{submission_id}/revoke"),
+            "tok-bob",
+            serde_json::json!({ "call_remote": false }),
+        )
+        .await;
+        assert_eq!(bob_revoke_resp.status(), StatusCode::NO_CONTENT);
+
+        let alice_submissions =
+            response_json(authed_get(&app, "/api/traces/submissions", "tok-alice").await).await;
+        assert_eq!(
+            alice_submissions
+                .as_array()
+                .expect("alice submissions")
+                .len(),
+            1
+        );
+        assert_eq!(
+            alice_submissions[0]["submission_id"],
+            submission_id.to_string()
+        );
+        assert_eq!(alice_submissions[0]["status"], "submitted");
+
+        let bob_submissions =
+            response_json(authed_get(&app, "/api/traces/submissions", "tok-bob").await).await;
+        assert_eq!(
+            bob_submissions.as_array().expect("bob submissions").len(),
+            1
+        );
+        assert_eq!(
+            bob_submissions[0]["submission_id"],
+            submission_id.to_string()
+        );
+        assert_eq!(bob_submissions[0]["status"], "revoked");
+
+        let alice_records =
+            crate::trace_contribution::read_local_trace_records_for_scope(Some(&alice_user_id))
+                .expect("read alice records");
+        assert_eq!(alice_records.len(), 1);
+        assert_eq!(
+            alice_records[0].status,
+            LocalTraceSubmissionStatus::Submitted
+        );
+
+        remove_trace_state(&alice_user_id);
+        remove_trace_state(&bob_user_id);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Admin Tool Policy Tests
 // ═══════════════════════════════════════════════════════════════════════
 

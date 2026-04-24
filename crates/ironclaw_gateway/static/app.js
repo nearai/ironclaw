@@ -95,6 +95,8 @@ let stagedImages = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
+let traceOperatorBearerToken = '';
+let traceSubmissionFilter = { status: 'all', query: '' };
 
 // --- Hash-based URL Navigation ---
 //
@@ -4412,6 +4414,7 @@ function refreshCurrentSettingsTab() {
   if (currentSettingsSubtab === 'extensions') loadExtensions();
   if (currentSettingsSubtab === 'channels') loadChannelsStatus();
   if (currentSettingsSubtab === 'mcp') loadMcpServers();
+  if (currentSettingsSubtab === 'trace-commons') loadTraceCommonsSettings();
 }
 
 function activateExtension(name) {
@@ -7094,7 +7097,682 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
+  else if (subtab === 'trace-commons') loadTraceCommonsSettings();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
+}
+
+function loadTraceCommonsSettings() {
+  var container = document.getElementById('settings-trace-commons-content');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+
+  Promise.all([
+    apiFetch('/api/traces/policy'),
+    apiFetch('/api/traces/credit').catch(function() { return { summary: {}, records: [] }; }),
+    apiFetch('/api/traces/submissions').catch(function() { return []; }),
+  ]).then(function(results) {
+    var policyResponse = results[0] || {};
+    var credit = results[1] || {};
+    var submissions = results[2] || [];
+    var policy = policyResponse.policy || {};
+    var summary = credit.summary || {};
+    var latestCredit = traceLastFlushReport && traceLastFlushReport.credit_notice
+      ? traceLastFlushReport.credit_notice
+      : summary;
+    var queuedCount = policyResponse.queued_envelopes || 0;
+    var selectedTools = Array.isArray(policy.selected_tools) ? policy.selected_tools.join(', ') : '';
+    var scopes = ['debugging_evaluation', 'benchmark_only', 'ranking_training', 'model_training'];
+    var scopeOptions = scopes.map(function(scope) {
+      return '<option value="' + scope + '"' + (policy.default_scope === scope ? ' selected' : '') + '>' + scope.replace(/_/g, ' ') + '</option>';
+    }).join('');
+    var operatorBaseUrl = traceOperatorDefaultBaseUrl(policy.ingestion_endpoint || '');
+
+    container.innerHTML = ''
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Standing Opt-In</div>'
+      + traceCheckboxRow('trace-commons-enabled', 'Enabled', policy.enabled)
+      + traceTextRow('trace-commons-endpoint', 'Ingestion endpoint', policy.ingestion_endpoint || '', 'http://127.0.0.1:3907/v1/traces')
+      + traceTextRow('trace-commons-token-env', 'Bearer token env', policy.bearer_token_env || 'IRONCLAW_TRACE_SUBMIT_TOKEN', 'IRONCLAW_TRACE_SUBMIT_TOKEN')
+      + traceSelectRow('trace-commons-scope', 'Default scope', scopeOptions)
+      + traceActionsRow('<button id="trace-commons-save-btn" class="btn-primary">Save</button>')
+      + '</div>'
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Autonomous Submission</div>'
+      + traceCheckboxRow('trace-commons-text', 'Include redacted message text', policy.include_message_text === true)
+      + traceCheckboxRow('trace-commons-payloads', 'Include redacted tool payloads', policy.include_tool_payloads === true)
+      + traceCheckboxRow('trace-commons-auto-failed', 'Auto-submit failed traces', policy.auto_submit_failed_traces)
+      + traceCheckboxRow('trace-commons-auto-high-value', 'Auto-submit high-value traces', policy.auto_submit_high_value_traces)
+      + traceCheckboxRow('trace-commons-pii-review', 'Hold traces when PII is detected', policy.require_manual_approval_when_pii_detected)
+      + traceNumberRow('trace-commons-min-score', 'Minimum score', policy.min_submission_score === undefined ? 0.35 : policy.min_submission_score, '0.01', '0', '1')
+      + traceNumberRow('trace-commons-credit-hours', 'Credit notice interval hours', policy.credit_notice_interval_hours || 168, '1', '1', '')
+      + traceTextRow('trace-commons-tools', 'Selected tools', selectedTools, 'calendar, slack, shell')
+      + '</div>'
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Queue / Submit</div>'
+      + traceDisplayRow('Queue state', traceQueueStateText(policy, queuedCount))
+      + traceDisplayRow('Queued locally', queuedCount)
+      + traceHeldRows(traceLastFlushReport)
+      + traceActionsRow('<button id="trace-commons-flush-btn" class="btn-secondary">Submit / Flush Queue</button>')
+      + '</div>'
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Credit</div>'
+      + traceMetricRows(summary, submissions)
+      + traceCreditSummaryRows(latestCredit)
+      + traceDelayedCreditRows(submissions)
+      + '</div>'
+      + '<div class="settings-group">'
+      + '<div class="settings-group-title">Recent Submissions</div>'
+      + traceSubmissionFilterControls(submissions)
+      + '</div>'
+      + traceOperatorPanel(operatorBaseUrl);
+
+    document.getElementById('trace-commons-save-btn').addEventListener('click', saveTraceCommonsSettings);
+    document.getElementById('trace-commons-flush-btn').addEventListener('click', flushTraceCommonsQueue);
+    document.querySelectorAll('[data-action^="trace-operator-"]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        runTraceOperatorAction(btn.dataset.action.replace('trace-operator-', ''));
+      });
+    });
+    var traceFilterStatus = document.getElementById('trace-submission-filter-status');
+    var traceFilterQuery = document.getElementById('trace-submission-filter-query');
+    if (traceFilterStatus) {
+      traceFilterStatus.addEventListener('change', function() {
+        traceSubmissionFilter.status = traceFilterStatus.value || 'all';
+        renderTraceSubmissionList(submissions);
+      });
+    }
+    if (traceFilterQuery) {
+      traceFilterQuery.addEventListener('input', function() {
+        traceSubmissionFilter.query = traceFilterQuery.value || '';
+        renderTraceSubmissionList(submissions);
+      });
+    }
+    var operatorTokenInput = document.getElementById('trace-operator-token');
+    if (operatorTokenInput) {
+      operatorTokenInput.value = traceOperatorBearerToken;
+      operatorTokenInput.addEventListener('input', function() {
+        traceOperatorBearerToken = operatorTokenInput.value || '';
+      });
+    }
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function traceCheckboxRow(id, label, checked) {
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
+    + '<input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '>'
+    + '</div>';
+}
+
+function traceTextRow(id, label, value, placeholder) {
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
+    + '<input class="settings-input" type="text" id="' + id + '" value="' + escapeHtml(value || '') + '" placeholder="' + escapeHtml(placeholder || '') + '">'
+    + '</div>';
+}
+
+function traceNumberRow(id, label, value, step, min, max) {
+  var normalizedValue = value === undefined || value === null ? '' : String(value);
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
+    + '<input class="settings-input" type="number" id="' + id + '" value="' + escapeHtml(normalizedValue) + '" step="' + escapeHtml(step || '1') + '" min="' + escapeHtml(min || '') + '" max="' + escapeHtml(max || '') + '">'
+    + '</div>';
+}
+
+function traceSelectRow(id, label, optionsHtml) {
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
+    + '<select class="settings-select" id="' + id + '">' + optionsHtml + '</select>'
+    + '</div>';
+}
+
+function traceActionsRow(actionsHtml) {
+  return '<div class="settings-row"><div class="settings-label-wrap"></div><div class="trace-actions">' + actionsHtml + '</div></div>';
+}
+
+function traceQueueStateText(policy, queuedCount) {
+  if (!policy || !policy.enabled) return 'disabled';
+  if (!policy.ingestion_endpoint) return 'enabled, missing ingestion endpoint';
+  return queuedCount > 0 ? 'ready to flush, ' + queuedCount + ' queued' : 'enabled, queue idle';
+}
+
+function traceMetricRows(summary, submissions) {
+  var submitted = summary.submissions_submitted || 0;
+  var revoked = summary.submissions_revoked || 0;
+  var pending = Number(summary.pending_credit || 0).toFixed(2);
+  var finalCredit = Number(summary.final_credit || 0).toFixed(2);
+  var localStatuses = traceSubmissionStatusCounts(submissions);
+  return ''
+    + traceDisplayRow('Submitted', submitted)
+    + traceDisplayRow('Revoked', revoked)
+    + traceDisplayRow('Local status mix', localStatuses)
+    + traceDisplayRow('Pending credit', '+' + pending)
+    + traceDisplayRow('Final credit', '+' + finalCredit)
+    + traceDisplayRow('Known records', Array.isArray(submissions) ? submissions.length : 0);
+}
+
+function traceCreditSummaryRows(summary) {
+  if (!summary) return '';
+  var explanations = Array.isArray(summary.recent_explanations) ? summary.recent_explanations.slice(0, 3) : [];
+  var parts = [
+    'pending +' + Number(summary.pending_credit || 0).toFixed(2),
+    'final +' + Number(summary.final_credit || 0).toFixed(2),
+  ].concat(explanations);
+  return traceDisplayRow('Latest credit summary', parts.join(' | '));
+}
+
+function traceDelayedCreditRows(submissions) {
+  if (!Array.isArray(submissions)) return '';
+  var delayed = [];
+  submissions.forEach(function(record) {
+    traceCreditExplanationList(record).forEach(function(line) {
+      delayed.push((record.submission_id ? String(record.submission_id).substring(0, 8) + ': ' : '') + line);
+    });
+  });
+  if (delayed.length === 0) {
+    return traceDisplayRow('Delayed credit explanations', 'none reported yet');
+  }
+  return traceDisplayRow('Delayed credit explanations', delayed.slice(-5).join(' | '));
+}
+
+function traceHeldRows(report) {
+  if (!report) return '';
+  var rows = '';
+  if (report.held !== undefined) rows += traceDisplayRow('Held last flush', report.held || 0);
+  if (Array.isArray(report.holds) && report.holds.length > 0) {
+    rows += traceDisplayRow('Held reasons', report.holds.map(function(hold) {
+      return (hold.submission_id ? String(hold.submission_id).substring(0, 8) + ': ' : '') + (hold.reason || 'held');
+    }).join(' | '));
+  }
+  return rows;
+}
+
+function traceDisplayRow(label, value) {
+  return '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">' + escapeHtml(label) + '</div></div>'
+    + '<div class="settings-display-value trace-display-value">' + escapeHtml(String(value)) + '</div>'
+    + '</div>';
+}
+
+function traceSubmissionFilterControls(submissions) {
+  var counts = traceSubmissionStatusCountsMap(submissions);
+  var statusOptions = ['all'].concat(Object.keys(counts).sort()).map(function(status) {
+    var label = status === 'all' ? 'All statuses' : status + ' (' + counts[status] + ')';
+    return '<option value="' + escapeHtml(status) + '"' + (traceSubmissionFilter.status === status ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
+  return '<div class="trace-filter-row">'
+    + '<select class="settings-select" id="trace-submission-filter-status">' + statusOptions + '</select>'
+    + '<input class="settings-input" type="text" id="trace-submission-filter-query" value="' + escapeHtml(traceSubmissionFilter.query || '') + '" placeholder="Filter id, risk, reason, export, audit">'
+    + '</div>'
+    + '<div id="trace-submission-list">' + traceSubmissionRows(submissions) + '</div>';
+}
+
+function renderTraceSubmissionList(submissions) {
+  var list = document.getElementById('trace-submission-list');
+  if (list) list.innerHTML = traceSubmissionRows(submissions);
+}
+
+function traceFilteredSubmissions(submissions) {
+  if (!Array.isArray(submissions)) return [];
+  var statusFilter = traceSubmissionFilter.status || 'all';
+  var query = String(traceSubmissionFilter.query || '').trim().toLowerCase();
+  return submissions.filter(function(record) {
+    var status = record.server_status || record.status || 'queued';
+    if (statusFilter !== 'all' && status !== statusFilter) return false;
+    if (!query) return true;
+    return traceSubmissionSearchText(record).indexOf(query) !== -1;
+  });
+}
+
+function traceSubmissionSearchText(record) {
+  return [
+    record.submission_id,
+    record.trace_id,
+    record.server_status,
+    record.status,
+    record.privacy_risk,
+    record.hold_reason,
+    record.held_reason,
+    record.review_hold_reason,
+    record.export_id,
+    record.export_manifest_id,
+    record.manifest_id,
+    record.audit_event_id,
+    traceCreditExplanationList(record).join(' '),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function traceSubmissionRows(submissions) {
+  var filtered = traceFilteredSubmissions(submissions);
+  if (!Array.isArray(submissions) || submissions.length === 0) {
+    return '<div class="empty-state">No submissions yet.</div>';
+  }
+  if (filtered.length === 0) {
+    return '<div class="empty-state">No submissions match the current filter.</div>';
+  }
+  return filtered.slice(-12).reverse().map(function(record) {
+    var status = record.server_status || record.status || 'queued';
+    var credit = Number(record.credit_points_pending || 0).toFixed(2);
+    var score = record.submission_score !== undefined ? ' · score ' + Number(record.submission_score || 0).toFixed(2) : '';
+    var redactions = traceRedactionSummary(record.redaction_counts);
+    var finalCredit = record.credit_points_final !== undefined && record.credit_points_final !== null
+      ? ' / +' + Number(record.credit_points_final || 0).toFixed(2)
+      : '';
+    var explanations = traceCreditExplanationList(record).join(' | ');
+    var heldReason = record.hold_reason || record.held_reason || record.review_hold_reason || '';
+    var statusClass = traceSubmissionStatusClass(status);
+    var ids = traceRecordIds(record);
+    return '<div class="settings-row trace-submission-row">'
+      + '<div class="settings-label-wrap">'
+      + '<div class="settings-label">' + escapeHtml((record.submission_id || '').substring(0, 8)) + '</div>'
+      + '<div class="settings-description"><span class="trace-status-pill ' + statusClass + '">' + escapeHtml(status) + '</span> risk ' + escapeHtml(record.privacy_risk || 'unknown') + escapeHtml(score) + (redactions ? ' · ' + escapeHtml(redactions) : '') + '</div>'
+      + (ids ? '<div class="settings-description trace-id-line">' + escapeHtml(ids) + '</div>' : '')
+      + (heldReason ? '<div class="settings-description">held: ' + escapeHtml(heldReason) + '</div>' : '')
+      + (explanations ? '<div class="settings-description">' + escapeHtml(explanations) + '</div>' : '')
+      + '</div>'
+      + '<div class="trace-actions">'
+      + '<span class="settings-display-value">+' + escapeHtml(credit) + escapeHtml(finalCredit) + '</span>'
+      + '<button class="btn-secondary" data-action="trace-revoke" data-id="' + escapeHtml(record.submission_id || '') + '">Revoke</button>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function traceRecordIds(record) {
+  var pairs = [
+    ['submission', record.submission_id],
+    ['trace', record.trace_id],
+    ['manifest', record.manifest_id || record.export_manifest_id],
+    ['export', record.export_id],
+    ['audit', record.audit_event_id],
+  ].filter(function(pair) { return pair[1]; });
+  return pairs.map(function(pair) { return pair[0] + ' ' + pair[1]; }).join(' | ');
+}
+
+function traceSubmissionStatusCounts(submissions) {
+  var counts = traceSubmissionStatusCountsMap(submissions);
+  if (Object.keys(counts).length === 0) return 'none';
+  return Object.keys(counts).sort().map(function(status) {
+    return status + ' ' + counts[status];
+  }).join(' | ');
+}
+
+function traceSubmissionStatusCountsMap(submissions) {
+  var counts = {};
+  if (!Array.isArray(submissions)) return counts;
+  submissions.forEach(function(record) {
+    var status = record.server_status || record.status || 'queued';
+    counts[status] = (counts[status] || 0) + 1;
+  });
+  return counts;
+}
+
+function traceSubmissionStatusClass(status) {
+  var normalized = String(status || '').toLowerCase();
+  if (normalized.indexOf('revoked') !== -1 || normalized.indexOf('reject') !== -1) return 'is-danger';
+  if (normalized.indexOf('held') !== -1 || normalized.indexOf('quarantine') !== -1 || normalized.indexOf('pending') !== -1) return 'is-warning';
+  if (normalized.indexOf('submitted') !== -1 || normalized.indexOf('accepted') !== -1 || normalized.indexOf('final') !== -1) return 'is-success';
+  return '';
+}
+
+function traceCreditExplanationList(record) {
+  if (!record) return [];
+  if (Array.isArray(record.credit_explanation)) return record.credit_explanation;
+  if (Array.isArray(record.delayed_credit_explanations)) return record.delayed_credit_explanations;
+  if (Array.isArray(record.credit_points_ledger)) {
+    return record.credit_points_ledger.map(function(event) {
+      return event.reason || event.explanation || event.event_type || '';
+    }).filter(Boolean);
+  }
+  return [];
+}
+
+function traceRedactionSummary(counts) {
+  if (!counts || Object.keys(counts).length === 0) return '';
+  return Object.keys(counts).sort().map(function(key) {
+    return String(counts[key]) + ' ' + key;
+  }).join(', ');
+}
+
+function traceOperatorDefaultBaseUrl(ingestionEndpoint) {
+  var raw = String(ingestionEndpoint || '').trim();
+  if (!raw) return 'http://127.0.0.1:3907';
+  try {
+    var url = new URL(raw, window.location.href);
+    url.pathname = url.pathname.replace(/\/v1\/traces\/?$/, '');
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch (err) {
+    return raw.replace(/\/v1\/traces\/?$/, '').replace(/\/$/, '');
+  }
+}
+
+function traceOperatorPanel(baseUrl) {
+  var creditKinds = ['benchmark_conversion', 'regression_catch', 'training_utility', 'ranking_utility', 'reviewer_bonus', 'abuse_penalty'];
+  var statuses = ['accepted', 'quarantined', 'rejected', 'revoked'];
+  var risks = ['low', 'medium', 'high'];
+  return '<div class="settings-group trace-operator-section">'
+    + '<div class="settings-group-title">Internal Reviewer / Operator</div>'
+    + '<div class="trace-private-notice"><strong>Private tool.</strong> Calls go directly from this browser to the configured ingest service. Bearer tokens are kept only in this page session and are never saved by the UI.</div>'
+    + traceTextRow('trace-operator-base-url', 'Ingest service root', baseUrl, 'http://127.0.0.1:3907')
+    + '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">Reviewer bearer token</div><div class="settings-description">Paste a reviewer/admin token for this browser session only.</div></div>'
+    + '<input class="settings-input" type="password" id="trace-operator-token" autocomplete="off" placeholder="tenant:reviewer:token" value="' + escapeHtml(traceOperatorBearerToken) + '">'
+    + '</div>'
+    + traceTextRow('trace-operator-submission-id', 'Submission ID', '', 'uuid for review, revocation, credit, conversion')
+    + '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">Review decision</div></div>'
+    + '<select class="settings-select" id="trace-operator-decision"><option value="approve">approve</option><option value="reject">reject</option></select>'
+    + '</div>'
+    + traceNumberRow('trace-operator-pending-credit', 'Pending credit override', '', '0.01', '', '')
+    + '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">Credit event type</div></div>'
+    + '<select class="settings-select" id="trace-operator-credit-kind">' + creditKinds.map(function(kind) {
+      return '<option value="' + kind + '">' + kind.replace(/_/g, ' ') + '</option>';
+    }).join('') + '</select>'
+    + '</div>'
+    + traceNumberRow('trace-operator-credit-points', 'Credit points delta', '1', '0.01', '', '')
+    + traceTextRow('trace-operator-reason', 'Reason / explanation', '', 'why this decision or credit event exists')
+    + traceTextRow('trace-operator-external-ref', 'External ref', '', 'benchmark:foo, regression:bar')
+    + traceNumberRow('trace-operator-limit', 'List/export limit', '25', '1', '1', '500')
+    + '<div class="settings-row">'
+    + '<div class="settings-label-wrap"><div class="settings-label">Trace list filters</div><div class="settings-description">Optional reviewer filters for central trace metadata.</div></div>'
+    + '<div class="trace-inline-fields">'
+    + '<select class="settings-select" id="trace-operator-status"><option value="">any status</option>' + statuses.map(function(status) {
+      return '<option value="' + status + '">' + status + '</option>';
+    }).join('') + '</select>'
+    + '<select class="settings-select" id="trace-operator-risk"><option value="">any risk</option>' + risks.map(function(risk) {
+      return '<option value="' + risk + '">' + risk + '</option>';
+    }).join('') + '</select>'
+    + '<input class="settings-input" type="text" id="trace-operator-tool" placeholder="tool">'
+    + '<input class="settings-input" type="text" id="trace-operator-coverage" placeholder="coverage tag">'
+    + '</div></div>'
+    + '<div class="settings-row trace-operator-actions-row"><div class="settings-label-wrap"><div class="settings-label">Actions</div></div>'
+    + '<div class="trace-actions">'
+    + '<button class="btn-secondary" data-action="trace-operator-health">Health</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-analytics">Analytics</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-list">Trace List</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-quarantine">Quarantine</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-revoke">Central Revoke</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-propagate">Revocation Propagation</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-decision">Append Decision</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-credit">Append Credit Event</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-benchmark">Benchmark Convert</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-replay">Replay Export</button>'
+    + '<button class="btn-secondary" data-action="trace-operator-audit">Audit Events</button>'
+    + '</div></div>'
+    + '<pre class="trace-operator-result" id="trace-operator-result">No operator request sent.</pre>'
+    + '</div>';
+}
+
+function traceOperatorInputs() {
+  var limit = parseInt((document.getElementById('trace-operator-limit') || {}).value || '25', 10);
+  var tokenEl = document.getElementById('trace-operator-token');
+  if (tokenEl) traceOperatorBearerToken = tokenEl.value || '';
+  return {
+    baseUrl: ((document.getElementById('trace-operator-base-url') || {}).value || '').trim().replace(/\/$/, ''),
+    token: traceOperatorBearerToken.trim(),
+    submissionId: ((document.getElementById('trace-operator-submission-id') || {}).value || '').trim(),
+    decision: ((document.getElementById('trace-operator-decision') || {}).value || 'approve'),
+    pendingCredit: ((document.getElementById('trace-operator-pending-credit') || {}).value || '').trim(),
+    creditKind: ((document.getElementById('trace-operator-credit-kind') || {}).value || 'reviewer_bonus'),
+    creditPoints: ((document.getElementById('trace-operator-credit-points') || {}).value || '').trim(),
+    reason: ((document.getElementById('trace-operator-reason') || {}).value || '').trim(),
+    externalRef: ((document.getElementById('trace-operator-external-ref') || {}).value || '').trim(),
+    status: ((document.getElementById('trace-operator-status') || {}).value || '').trim(),
+    risk: ((document.getElementById('trace-operator-risk') || {}).value || '').trim(),
+    tool: ((document.getElementById('trace-operator-tool') || {}).value || '').trim(),
+    coverageTag: ((document.getElementById('trace-operator-coverage') || {}).value || '').trim(),
+    limit: isNaN(limit) ? 25 : Math.max(1, Math.min(500, limit)),
+  };
+}
+
+function traceOperatorSetResult(message, isError) {
+  var resultEl = document.getElementById('trace-operator-result');
+  if (!resultEl) return;
+  resultEl.classList.toggle('is-error', !!isError);
+  resultEl.textContent = message;
+}
+
+function runTraceOperatorAction(action) {
+  var input = traceOperatorInputs();
+  if (!input.baseUrl) {
+    traceOperatorSetResult('Missing ingest service root.', true);
+    return;
+  }
+  var request;
+  try {
+    request = traceOperatorRequest(action, input);
+  } catch (err) {
+    traceOperatorSetResult(err.message, true);
+    return;
+  }
+  traceOperatorSetResult(request.method + ' ' + request.url + '\nSending...', false);
+  traceOperatorFetch(request, input.token).then(function(data) {
+    traceOperatorSetResult(traceOperatorFormatResult(data), false);
+    showToast('Trace operator request complete', 'success');
+  }).catch(function(err) {
+    var unsupported = err && (err.status === 404 || err.status === 501);
+    traceOperatorSetResult(err.message, !unsupported);
+    showToast(unsupported ? 'Trace operator endpoint is not available yet' : 'Trace operator request failed: ' + err.message, unsupported ? 'info' : 'error');
+  });
+}
+
+function traceOperatorRequest(action, input) {
+  var method = 'GET';
+  var path = '/health';
+  var body = null;
+  if (action === 'analytics') path = '/v1/analytics/summary';
+  else if (action === 'list') path = '/v1/traces?' + traceQueryString({
+    limit: input.limit,
+    status: input.status,
+    privacy_risk: input.risk,
+    tool: input.tool,
+    coverage_tag: input.coverageTag,
+  });
+  else if (action === 'quarantine') path = '/v1/review/quarantine';
+  else if (action === 'replay') path = '/v1/datasets/replay?limit=' + encodeURIComponent(input.limit);
+  else if (action === 'audit') path = '/v1/audit/events?limit=' + encodeURIComponent(input.limit);
+  else if (action === 'revoke') {
+    if (!input.submissionId) throw new Error('Submission ID is required for central revocation.');
+    method = 'POST';
+    path = '/v1/traces/' + encodeURIComponent(input.submissionId) + '/revoke';
+  } else if (action === 'propagate') {
+    method = 'POST';
+    path = '/v1/admin/maintenance';
+    body = {
+      purpose: input.reason || 'operator revocation propagation',
+      dry_run: false,
+      prune_export_cache: true,
+    };
+  } else if (action === 'benchmark') {
+    method = 'POST';
+    path = '/v1/benchmarks/convert';
+    body = {
+      purpose: input.reason || 'operator benchmark conversion',
+      limit: input.limit,
+      status: input.status || undefined,
+      privacy_risk: input.risk || undefined,
+      external_ref: input.externalRef || undefined,
+    };
+  }
+  else if (action === 'decision') {
+    if (!input.submissionId) throw new Error('Submission ID is required for review decisions.');
+    method = 'POST';
+    path = '/v1/review/' + encodeURIComponent(input.submissionId) + '/decision';
+    body = { decision: input.decision, reason: input.reason || undefined };
+    if (input.pendingCredit !== '') {
+      if (!Number.isFinite(Number(input.pendingCredit))) {
+        throw new Error('Pending credit override must be a finite number.');
+      }
+      body.credit_points_pending = Number(input.pendingCredit);
+    }
+  } else if (action === 'credit') {
+    if (!input.submissionId) throw new Error('Submission ID is required for credit events.');
+    if (input.creditPoints === '' || !Number.isFinite(Number(input.creditPoints))) {
+      throw new Error('Credit points delta must be a finite number.');
+    }
+    method = 'POST';
+    path = '/v1/review/' + encodeURIComponent(input.submissionId) + '/credit-events';
+    body = {
+      event_type: input.creditKind,
+      credit_points_delta: Number(input.creditPoints),
+      reason: input.reason || undefined,
+      external_ref: input.externalRef || undefined,
+    };
+  } else if (action !== 'health') {
+    throw new Error('Unknown operator action: ' + action);
+  }
+  return { method: method, url: input.baseUrl + path, body: body };
+}
+
+function traceQueryString(params) {
+  var search = new URLSearchParams();
+  Object.keys(params).forEach(function(key) {
+    var value = params[key];
+    if (value !== undefined && value !== null && value !== '') search.set(key, value);
+  });
+  return search.toString();
+}
+
+function traceOperatorFetch(request, bearerToken) {
+  var options = { method: request.method, headers: {} };
+  if (bearerToken) options.headers.Authorization = 'Bearer ' + bearerToken;
+  if (request.body) {
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(request.body);
+  }
+  return fetch(request.url, options).then(function(res) {
+    return res.text().then(function(text) {
+      var parsed = text;
+      if (text) {
+        try { parsed = JSON.parse(text); } catch (err) { parsed = text; }
+      } else {
+        parsed = null;
+      }
+      if (!res.ok) {
+        var message = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+        var prefix = (res.status === 404 || res.status === 501)
+          ? 'Endpoint not available yet: '
+          : '';
+        var error = new Error(prefix + res.status + ' ' + res.statusText + (message ? '\n' + message : ''));
+        error.status = res.status;
+        throw error;
+      }
+      return parsed;
+    });
+  });
+}
+
+function traceOperatorFormatResult(data) {
+  var highlights = traceOperatorHighlights(data);
+  var body = data === undefined ? 'undefined' : JSON.stringify(data, null, 2);
+  return (highlights ? highlights + '\n\n' : '') + body;
+}
+
+function traceOperatorHighlights(data) {
+  var labels = {
+    submission_id: 'submission ids',
+    audit_event_id: 'audit ids',
+    event_id: 'audit ids',
+    export_id: 'export ids',
+    conversion_id: 'conversion ids',
+    manifest_id: 'manifest ids',
+    export_manifest_id: 'manifest ids',
+    skipped_count: 'skipped count',
+    skipped: 'skipped count',
+    revoked_count: 'revoked count',
+    revoked: 'revoked count',
+    revoked_submission_count: 'revoked submissions',
+    records_marked_revoked: 'records marked revoked',
+    derived_marked_revoked: 'derived marked revoked',
+    export_cache_files_pruned: 'export cache files pruned',
+    item_count: 'export item count',
+  };
+  var hits = {};
+  traceCollectFields(data, labels, hits);
+  var lines = Object.keys(hits).sort().map(function(label) {
+    return label + ': ' + hits[label].slice(0, 12).join(', ');
+  });
+  return lines.length ? 'Highlights\n' + lines.join('\n') : '';
+}
+
+function traceCollectFields(value, labels, hits) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach(function(item) { traceCollectFields(item, labels, hits); });
+    return;
+  }
+  Object.keys(value).forEach(function(key) {
+    var label = labels[key];
+    var fieldValue = value[key];
+    if (label && (typeof fieldValue === 'string' || typeof fieldValue === 'number')) {
+      if (!hits[label]) hits[label] = [];
+      var stringValue = String(fieldValue);
+      if (hits[label].indexOf(stringValue) === -1) hits[label].push(stringValue);
+    }
+    traceCollectFields(fieldValue, labels, hits);
+  });
+}
+
+function saveTraceCommonsSettings() {
+  var selectedTools = (document.getElementById('trace-commons-tools').value || '')
+    .split(/[\n,]/)
+    .map(function(tool) { return tool.trim(); })
+    .filter(Boolean);
+  apiFetch('/api/traces/policy', {
+    method: 'PUT',
+    body: {
+      enabled: document.getElementById('trace-commons-enabled').checked,
+      endpoint: document.getElementById('trace-commons-endpoint').value.trim(),
+      bearer_token_env: document.getElementById('trace-commons-token-env').value.trim() || 'IRONCLAW_TRACE_SUBMIT_TOKEN',
+      include_message_text: document.getElementById('trace-commons-text').checked,
+      include_tool_payloads: document.getElementById('trace-commons-payloads').checked,
+      auto_submit_failed_traces: document.getElementById('trace-commons-auto-failed').checked,
+      auto_submit_high_value_traces: document.getElementById('trace-commons-auto-high-value').checked,
+      selected_tools: selectedTools,
+      require_manual_approval_when_pii_detected: document.getElementById('trace-commons-pii-review').checked,
+      min_submission_score: parseFloat(document.getElementById('trace-commons-min-score').value || '0.35'),
+      credit_notice_interval_hours: parseInt(document.getElementById('trace-commons-credit-hours').value || '168', 10),
+      default_scope: document.getElementById('trace-commons-scope').value,
+    },
+  }).then(function() {
+    showToast('Trace Commons policy saved', 'success');
+    loadTraceCommonsSettings();
+  }).catch(function(err) {
+    showToast('Trace Commons save failed: ' + err.message, 'error');
+  });
+}
+
+function flushTraceCommonsQueue() {
+  apiFetch('/api/traces/flush?limit=25', { method: 'POST' }).then(function(report) {
+    traceLastFlushReport = report || null;
+    showToast(traceFlushToast(report), 'success');
+    loadTraceCommonsSettings();
+  }).catch(function(err) {
+    showToast('Trace queue flush failed: ' + err.message, 'error');
+  });
+}
+
+function traceFlushToast(report) {
+  report = report || {};
+  return 'Trace queue flushed: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held';
+}
+
+function revokeTraceSubmission(submissionId) {
+  if (!submissionId) return;
+  apiFetch('/api/traces/submissions/' + encodeURIComponent(submissionId) + '/revoke', {
+    method: 'POST',
+    body: { call_remote: true },
+  }).then(function() {
+    showToast('Trace submission revoked', 'success');
+    loadTraceCommonsSettings();
+  }).catch(function(err) {
+    showToast('Trace revocation failed: ' + err.message, 'error');
+  });
 }
 
 // --- Structured Settings Definitions ---
@@ -7981,6 +8659,9 @@ function closeModals() {
   // Close restart confirmation modal
   const restartModal = document.getElementById('restart-confirm-modal');
   if (restartModal) restartModal.style.display = 'none';
+
+  const traceModal = document.getElementById('trace-preview-modal');
+  if (traceModal) traceModal.style.display = 'none';
 }
 
 // --- ARIA Accessibility (Phase 5.2) ---
@@ -8015,6 +8696,231 @@ function formatDate(isoString) {
   if (!isoString) return '-';
   const d = new Date(isoString);
   return d.toLocaleString();
+}
+
+var tracePreviewState = {
+  includeMessageText: false,
+  includeToolPayloads: false,
+  includeTurnCount: 5,
+  scope: 'debugging_evaluation',
+  lastEnvelope: null,
+  lastResponse: null,
+  lastSubmitReport: null,
+};
+var traceLastFlushReport = null;
+
+function openTraceContributionModal() {
+  if (!currentThreadId) {
+    showToast('Open a thread before previewing a trace', 'info');
+    return;
+  }
+  var modal = document.getElementById('trace-preview-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  loadTraceContributionPreview(false);
+}
+
+function closeTraceContributionModal() {
+  var modal = document.getElementById('trace-preview-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function syncTracePreviewControls() {
+  var includeText = document.getElementById('trace-preview-include-text');
+  var includePayloads = document.getElementById('trace-preview-include-payloads');
+  var includeTurns = document.getElementById('trace-preview-turns');
+  var scope = document.getElementById('trace-preview-scope');
+  if (includeText) tracePreviewState.includeMessageText = includeText.checked;
+  if (includePayloads) tracePreviewState.includeToolPayloads = includePayloads.checked;
+  if (includeTurns) {
+    var parsedTurns = parseInt(includeTurns.value || '5', 10);
+    tracePreviewState.includeTurnCount = isNaN(parsedTurns) ? 5 : Math.max(1, Math.min(20, parsedTurns));
+  }
+  if (scope) tracePreviewState.scope = scope.value || 'debugging_evaluation';
+}
+
+function loadTraceContributionPreview(enqueue) {
+  if (!currentThreadId) return;
+  syncTracePreviewControls();
+  var bodyEl = document.getElementById('trace-preview-body');
+  if (bodyEl) bodyEl.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+  requestTraceContributionPreview(enqueue).then(function(preview) {
+    tracePreviewState.lastEnvelope = preview.envelope || null;
+    tracePreviewState.lastResponse = preview;
+    tracePreviewState.lastSubmitReport = null;
+    renderTraceContributionPreview(preview);
+    if (preview.queued) {
+      showToast('Trace queued', 'success');
+      if (currentTab === 'settings' && currentSettingsSubtab === 'trace-commons') {
+        loadTraceCommonsSettings();
+      }
+    }
+  }).catch(function(err) {
+    if (bodyEl) bodyEl.innerHTML = '<div class="empty-state">' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function requestTraceContributionPreview(enqueue) {
+  return apiFetch('/api/traces/preview', {
+    method: 'POST',
+    body: {
+      thread_id: currentThreadId,
+      include_message_text: tracePreviewState.includeMessageText,
+      include_tool_payloads: tracePreviewState.includeToolPayloads,
+      include_turn_count: tracePreviewState.includeTurnCount,
+      scope: tracePreviewState.scope,
+      enqueue: !!enqueue,
+    },
+  });
+}
+
+function queueTraceContribution() {
+  loadTraceContributionPreview(true);
+}
+
+function submitTraceContribution() {
+  if (!currentThreadId) return;
+  syncTracePreviewControls();
+  var bodyEl = document.getElementById('trace-preview-body');
+  if (bodyEl) bodyEl.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+  return requestTraceSubmitEndpoint().catch(function(err) {
+    if (err && (err.status === 404 || err.status === 405 || err.status === 501)) {
+      return requestTraceContributionPreview(true).then(function(preview) {
+        tracePreviewState.lastEnvelope = preview.envelope || null;
+        tracePreviewState.lastResponse = preview;
+        return apiFetch('/api/traces/flush?limit=25', { method: 'POST' }).then(function(report) {
+          return { preview: preview, flush: report, fallback: true };
+        });
+      });
+    }
+    throw err;
+  }).then(function(report) {
+    tracePreviewState.lastSubmitReport = report || {};
+    if (report && report.flush) traceLastFlushReport = report.flush;
+    renderTraceContributionPreview(tracePreviewState.lastResponse || report.preview || {});
+    showToast(traceSubmitToast(report), 'success');
+    if (currentTab === 'settings' && currentSettingsSubtab === 'trace-commons') {
+      loadTraceCommonsSettings();
+    }
+  }).catch(function(err) {
+    if (bodyEl) bodyEl.innerHTML = '<div class="empty-state">' + escapeHtml(err.message) + '</div>';
+    showToast('Trace submit failed: ' + err.message, 'error');
+  });
+}
+
+function requestTraceSubmitEndpoint() {
+  return apiFetch('/api/traces/submit', {
+    method: 'POST',
+    body: {
+      thread_id: currentThreadId,
+      include_message_text: tracePreviewState.includeMessageText,
+      include_tool_payloads: tracePreviewState.includeToolPayloads,
+      include_turn_count: tracePreviewState.includeTurnCount,
+      scope: tracePreviewState.scope,
+      user_previewed: !!tracePreviewState.lastResponse,
+      flush: true,
+    },
+  });
+}
+
+function traceSubmitToast(report) {
+  if (report && report.fallback && report.flush) {
+    return 'Trace queued and flushed: ' + (report.flush.submitted || 0) + ' submitted, ' + (report.flush.held || 0) + ' held';
+  }
+  if (report && report.submitted !== undefined) {
+    return 'Trace submitted: ' + (report.submitted || 0) + ' submitted, ' + (report.held || 0) + ' held';
+  }
+  return 'Trace submitted';
+}
+
+function renderTraceContributionPreview(preview) {
+  var bodyEl = document.getElementById('trace-preview-body');
+  if (!bodyEl) return;
+  var counts = preview.redaction_counts || {};
+  var countRows = Object.keys(counts).length === 0
+    ? '<span class="trace-pill">none</span>'
+    : Object.keys(counts).sort().map(function(key) {
+      return '<span class="trace-pill">' + escapeHtml(String(counts[key])) + ' ' + escapeHtml(key) + '</span>';
+    }).join('');
+  var envelope = preview.envelope || {};
+  var value = envelope.value || {};
+  var score = Number(value.submission_score || 0).toFixed(2);
+  var credit = Number(value.credit_points_pending || 0).toFixed(2);
+  var queued = preview.queued ? 'queued' : 'not queued';
+  var submitReport = tracePreviewState.lastSubmitReport;
+  bodyEl.innerHTML = ''
+    + '<div class="trace-stage-row">'
+    + traceStagePill('Preview', 'ready')
+    + traceStagePill('Queue', queued)
+    + traceStagePill('Submit / Flush', traceSubmitStageText(submitReport))
+    + traceStagePill('Credit', '+' + credit + ' pending')
+    + '</div>'
+    + '<div class="trace-preview-grid">'
+    + '<label><input type="checkbox" id="trace-preview-include-text"' + (tracePreviewState.includeMessageText ? ' checked' : '') + '> Redacted text</label>'
+    + '<label><input type="checkbox" id="trace-preview-include-payloads"' + (tracePreviewState.includeToolPayloads ? ' checked' : '') + '> Redacted payloads</label>'
+    + '<label>Turns <input type="number" id="trace-preview-turns" min="1" max="20" value="' + escapeHtml(String(tracePreviewState.includeTurnCount)) + '"></label>'
+    + '<label>Scope <select id="trace-preview-scope">'
+    + tracePreviewScopeOptions(tracePreviewState.scope)
+    + '</select></label>'
+    + '</div>'
+    + '<div class="trace-preview-metrics">'
+    + '<span class="trace-pill">risk ' + escapeHtml(preview.privacy_risk || 'unknown') + '</span>'
+    + '<span class="trace-pill">score ' + escapeHtml(score) + '</span>'
+    + '<span class="trace-pill">credit +' + escapeHtml(credit) + '</span>'
+    + countRows
+    + '</div>'
+    + tracePreviewHeldHtml(submitReport)
+    + tracePreviewCreditHtml(submitReport)
+    + '<pre class="trace-preview-text">' + escapeHtml(preview.preview_markdown || '') + '</pre>';
+
+  ['trace-preview-include-text', 'trace-preview-include-payloads', 'trace-preview-turns', 'trace-preview-scope'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', function() { syncTracePreviewControls(); });
+  });
+}
+
+function traceStagePill(label, value) {
+  return '<span class="trace-stage-pill"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></span>';
+}
+
+function traceSubmitStageText(report) {
+  if (!report) return 'idle';
+  var flush = report.flush || report;
+  if (flush.submitted !== undefined || flush.held !== undefined) {
+    return String(flush.submitted || 0) + ' sent, ' + String(flush.held || 0) + ' held';
+  }
+  return report.status || 'complete';
+}
+
+function tracePreviewHeldHtml(report) {
+  var flush = report && (report.flush || report);
+  if (!flush || !Array.isArray(flush.holds) || flush.holds.length === 0) return '';
+  return '<div class="trace-preview-callout">'
+    + '<div class="trace-preview-callout-title">Held reasons</div>'
+    + flush.holds.map(function(hold) {
+      return '<div>' + escapeHtml((hold.submission_id || '').substring(0, 8)) + ' ' + escapeHtml(hold.reason || 'held') + '</div>';
+    }).join('')
+    + '</div>';
+}
+
+function tracePreviewCreditHtml(report) {
+  var flush = report && (report.flush || report);
+  var summary = flush && flush.credit_notice;
+  if (!summary) return '';
+  var lines = Array.isArray(summary.recent_explanations) ? summary.recent_explanations : [];
+  return '<div class="trace-preview-callout">'
+    + '<div class="trace-preview-callout-title">Latest credit summary</div>'
+    + '<div>pending +' + escapeHtml(Number(summary.pending_credit || 0).toFixed(2)) + ' · final +' + escapeHtml(Number(summary.final_credit || 0).toFixed(2)) + '</div>'
+    + lines.slice(0, 3).map(function(line) { return '<div>' + escapeHtml(line) + '</div>'; }).join('')
+    + '</div>';
+}
+
+function tracePreviewScopeOptions(active) {
+  return ['debugging_evaluation', 'benchmark_only', 'ranking_training', 'model_training']
+    .map(function(scope) {
+      return '<option value="' + scope + '"' + (active === scope ? ' selected' : '') + '>' + scope.replace(/_/g, ' ') + '</option>';
+    })
+    .join('');
 }
 
 // --- Event Listener Registration (CSP-safe, no inline handlers) ---
@@ -8052,6 +8958,7 @@ document.getElementById('restart-btn').addEventListener('click', () => triggerRe
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
 document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
+document.getElementById('trace-preview-btn').addEventListener('click', () => openTraceContributionModal());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
@@ -8165,6 +9072,9 @@ document.addEventListener('click', function(e) {
     case 'copy-tee-report':
       copyTeeReport();
       break;
+    case 'trace-revoke':
+      revokeTraceSubmission(el.dataset.id);
+      break;
     case 'switch-language':
       if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
       break;
@@ -8217,9 +9127,25 @@ document.getElementById('confirm-modal-cancel-btn').addEventListener('click', cl
 document.getElementById('confirm-modal').addEventListener('click', function(e) {
   if (e.target === this) closeConfirmModal();
 });
+document.getElementById('trace-preview-cancel-btn').addEventListener('click', closeTraceContributionModal);
+document.getElementById('trace-preview-refresh-btn').addEventListener('click', function() {
+  loadTraceContributionPreview(false);
+});
+document.getElementById('trace-preview-queue-btn').addEventListener('click', function() {
+  queueTraceContribution();
+});
+document.getElementById('trace-preview-submit-btn').addEventListener('click', function() {
+  submitTraceContribution();
+});
+document.getElementById('trace-preview-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeTraceContributionModal();
+});
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
     closeConfirmModal();
+  }
+  if (e.key === 'Escape' && document.getElementById('trace-preview-modal').style.display === 'flex') {
+    closeTraceContributionModal();
   }
   if (e.key === 'Escape' && document.getElementById('provider-dialog').style.display === 'flex') {
     resetProviderForm();

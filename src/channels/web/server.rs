@@ -70,6 +70,11 @@ use crate::channels::web::handlers::settings::{
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
+use crate::channels::web::handlers::traces::{
+    traces_credit_handler, traces_flush_handler, traces_policy_get_handler,
+    traces_policy_put_handler, traces_preview_handler, traces_revoke_handler,
+    traces_submissions_handler, traces_submit_handler,
+};
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
@@ -663,6 +668,20 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Trace contributions
+        .route(
+            "/api/traces/policy",
+            get(traces_policy_get_handler).put(traces_policy_put_handler),
+        )
+        .route("/api/traces/preview", post(traces_preview_handler))
+        .route("/api/traces/submit", post(traces_submit_handler))
+        .route("/api/traces/flush", post(traces_flush_handler))
+        .route("/api/traces/credit", get(traces_credit_handler))
+        .route("/api/traces/submissions", get(traces_submissions_handler))
+        .route(
+            "/api/traces/submissions/{submission_id}/revoke",
+            post(traces_revoke_handler),
+        )
         // Engine v2
         .route("/api/engine/threads", get(engine_threads_handler))
         .route(

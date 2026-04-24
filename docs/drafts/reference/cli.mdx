@@ -144,6 +144,69 @@ ironclaw tool install ./my-tool.wasm
 ironclaw tool remove my-tool
 ```
 
+### traces
+
+Manage opt-in trace contributions.
+
+```bash
+ironclaw traces <SUBCOMMAND>
+```
+
+Trace contribution is disabled by default. `preview` converts an existing recorded trace into a redacted contribution envelope with consent, redaction, trace-card, value-card, scorecard, replayability, revocation, and credit metadata. Autonomous submission only runs after `opt-in` configures an explicit private ingestion endpoint.
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `opt-in` | Enable autonomous submission after local redaction |
+| `opt-out` | Disable autonomous submission |
+| `status` | Show the local contribution policy |
+| `preview` | Build a redacted contribution envelope from a recorded trace |
+| `enqueue` | Queue a redacted envelope for autonomous submission |
+| `flush-queue` | Submit eligible queued envelopes |
+| `credit` | Show local credit totals and explanations |
+| `submit` | Submit one redacted envelope to an explicit endpoint |
+| `list-submissions` | List local submission records |
+| `revoke` | Mark a submission revoked locally and optionally call a revocation endpoint |
+| `ingest-health` | Check a Trace Commons ingestion service `/health` endpoint |
+| `quarantine-list` | List centrally quarantined traces for reviewer/admin triage |
+| `review-decision` | Approve or reject a central quarantined trace |
+| `append-credit-event` | Append a delayed central credit ledger event |
+| `analytics-summary` | Show central Trace Commons analytics |
+| `maintenance-run` | Request central retention/revocation propagation maintenance |
+| `benchmark-convert` | Request central benchmark conversion for approved replayable traces |
+| `replay-dataset-export` | Export approved replay dataset metadata |
+| `audit-events` | List central Trace Commons audit events |
+| `list-traces` | List central trace metadata with reviewer filters |
+| `privacy-filter-canary` | Run a local Privacy Filter sidecar canary check |
+
+**Examples:**
+
+```bash
+ironclaw traces opt-in --endpoint https://trace-ingest.internal/v1/traces
+ironclaw traces preview --recorded-trace trace.json --output contribution.json
+ironclaw traces enqueue --envelope contribution.json
+ironclaw traces flush-queue
+ironclaw traces credit
+ironclaw traces ingest-health --endpoint https://trace-ingest.internal
+ironclaw traces quarantine-list --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces review-decision 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --endpoint https://trace-ingest.internal --decision approve --reason "redaction verified"
+ironclaw traces append-credit-event 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --endpoint https://trace-ingest.internal --event-type regression-catch --credit-points-delta 2.5 --reason "Caught replay regression"
+ironclaw traces analytics-summary --endpoint https://trace-ingest.internal --json
+ironclaw traces maintenance-run --endpoint https://trace-ingest.internal --purpose retention-reconciliation --dry-run
+ironclaw traces benchmark-convert --endpoint https://trace-ingest.internal --purpose regression-suite --consent-scope benchmark-only --status accepted --privacy-risk low --limit 100
+ironclaw traces replay-dataset-export --endpoint https://trace-ingest.internal --purpose regression-suite --consent-scope benchmark-only --privacy-risk low --limit 100 --output replay-dataset.json
+ironclaw traces audit-events --endpoint https://trace-ingest.internal --limit 50
+ironclaw traces list-traces --endpoint https://trace-ingest.internal --status accepted --privacy-risk low
+ironclaw traces privacy-filter-canary
+```
+
+`flush-queue` submits eligible queued traces under the standing opt-in policy and emits a credit notice when the configured interval is due. `credit` reports local pending/final credit and recent explanations. Central delayed credit events, such as benchmark use or regression catches, can be returned by the private ingestion API and reflected in the local ledger.
+
+Central reviewer/admin commands always require an explicit endpoint. Health accepts either a service base URL, `/health`, or `/v1/traces` URL; other central commands accept a service base URL or `/v1/traces` URL and derive the expected private API paths. Reviewer/admin commands use `--bearer-token-env` and fail cleanly on missing credentials or non-2xx responses, including older servers that do not yet implement maintenance or benchmark conversion endpoints. They do not change local opt-in defaults and do not upload raw traces.
+
+`maintenance-run` posts to `/v1/admin/maintenance` with an explicit `--purpose` and optional `--dry-run`. `benchmark-convert` posts to `/v1/benchmarks/convert` with `--purpose` plus consent/status/privacy filters. `replay-dataset-export` accepts the same export filters where supported and prints export, manifest, and audit identifiers when the server returns them. `privacy-filter-canary` is local only; it uses `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` and optional `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS` and refuses to pass without a configured sidecar.
+
 ### registry
 
 Manage the tool registry.

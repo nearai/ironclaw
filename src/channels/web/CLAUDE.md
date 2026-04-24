@@ -96,6 +96,37 @@ Extension lifecycle note:
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
 
+### Trace Contributions
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/traces/policy` | Get the authenticated user's trace contribution policy |
+| PUT | `/api/traces/policy` | Update the authenticated user's opt-in policy |
+| POST | `/api/traces/preview` | Build a locally redacted contribution envelope from owned thread history |
+| POST | `/api/traces/submit` | Build a locally redacted envelope from owned thread history, require preview acknowledgement, queue it, and optionally flush |
+| POST | `/api/traces/flush` | Submit eligible queued envelopes for the authenticated user |
+| GET | `/api/traces/credit` | Get local credit totals and ledger records |
+| GET | `/api/traces/submissions` | List local trace submission records |
+| POST | `/api/traces/submissions/{submission_id}/revoke` | Mark a contribution revoked and optionally call the private revocation API |
+
+The static UI exposes these through Settings → Trace Commons for standing opt-in/credit/revocation and through the chat composer Trace button for per-thread redacted preview and queueing. That settings tab also includes an internal reviewer/operator panel that calls a user-configured private ingestion service directly from the browser with a pasted reviewer/admin bearer token. The token is intentionally session-only and is not persisted by the static UI.
+
+Private ingestion service routes used by the operator panel:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Ingest service health |
+| GET | `/v1/analytics/summary` | Reviewer/admin tenant analytics |
+| GET | `/v1/traces` | Reviewer/admin trace metadata list with status, risk, tool, coverage, and limit filters |
+| POST | `/v1/traces/{submission_id}/revoke` | Mark a central trace revoked when the ingest service supports propagation |
+| GET | `/v1/review/quarantine` | Reviewer/admin quarantine queue |
+| POST | `/v1/review/{submission_id}/decision` | Approve/reject quarantined trace |
+| POST | `/v1/review/{submission_id}/credit-events` | Append delayed credit event |
+| GET | `/v1/datasets/replay` | Export approved replay dataset slice |
+| POST | `/v1/benchmarks/convert` | Convert approved replayable traces into benchmark candidates |
+| POST | `/v1/admin/maintenance` | Run tenant-scoped revocation propagation and export-cache maintenance |
+| GET | `/v1/audit/events` | List tenant audit events when available |
+
+The operator panel must keep calls API-mediated through the configured private ingestion service and degrade cleanly on `404`/`501` for older deployments that do not yet expose the newer operator endpoints.
+
 ### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
 | Method | Path | Description |
 |--------|------|-------------|
