@@ -28,6 +28,7 @@ use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
     ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
 };
+use crate::tools::tool_name_fitting::{PROVIDER_TOOL_NAME_LIMIT, fit_tool_name};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -146,10 +147,19 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Build a wire-ready `ToolDefinition`. The tool's raw name is fit into
+    /// the tightest length limit any supported LLM provider enforces (Bedrock
+    /// and OpenAI Responses both cap `tool.name` at 64 chars). The fit is a
+    /// no-op for names that already fit, so existing short-named tools are
+    /// unchanged; long-named MCP/WASM tools no longer break the wire.
+    ///
+    /// The fitted name round-trips back to the registered raw name through
+    /// the fitted-name alias branch in `resolve_key`, so dispatch continues
+    /// to resolve LLM-emitted tool calls to the correct registration.
     fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
         let schema = tool.schema();
         ToolDefinition {
-            name: schema.name,
+            name: fit_tool_name(&schema.name, PROVIDER_TOOL_NAME_LIMIT),
             description: schema.description,
             parameters: schema.parameters,
         }
@@ -284,7 +294,15 @@ impl ToolRegistry {
 
     /// Resolve a tool name to the key under which it is registered,
     /// trying the exact name first, then hyphen→underscore and
-    /// underscore→hyphen aliases.
+    /// underscore→hyphen aliases, and finally a fitted-name alias for
+    /// registered tools whose raw name exceeds the provider length limit.
+    ///
+    /// The fitted alias closes the loop opened by `tool_definition`: we send
+    /// a 64-char fitted name to the LLM, the LLM echoes that same fitted
+    /// name on its tool call, and this function walks back to the original
+    /// registration. The scan is bounded by the number of registered tools
+    /// with names longer than `PROVIDER_TOOL_NAME_LIMIT` — typically zero,
+    /// occasionally a handful from a verbose MCP server.
     fn resolve_key(tools: &HashMap<String, Arc<dyn Tool>>, name: &str) -> Option<String> {
         if tools.contains_key(name) {
             return Some(name.to_string());
@@ -298,6 +316,19 @@ impl ToolRegistry {
         let hyphen_alias = name.replace('_', "-");
         if hyphen_alias != name && tools.contains_key(&hyphen_alias) {
             return Some(hyphen_alias);
+        }
+        // Fitted-name alias: the LLM only ever saw the fit, so match any
+        // registered long name whose fit equals the lookup key. The outer
+        // check short-circuits the common case (short lookup name, no
+        // long-named tools need scanning) with an O(1) byte-length test.
+        if name.len() <= PROVIDER_TOOL_NAME_LIMIT {
+            for key in tools.keys() {
+                if key.len() > PROVIDER_TOOL_NAME_LIMIT
+                    && fit_tool_name(key, PROVIDER_TOOL_NAME_LIMIT) == name
+                {
+                    return Some(key.clone());
+                }
+            }
         }
         None
     }
@@ -1133,6 +1164,43 @@ mod tests {
     use crate::tools::registry::EchoTool;
     use crate::tools::tool::{EngineCompatibility, ToolDiscoverySummary};
 
+    /// A Tool whose `name()` returns an 89-char string — past both Bedrock
+    /// and OpenAI's 64-char cap. The const generic lets each test instance
+    /// be a distinct type with a distinct raw name, so two long-named
+    /// registrations in one process don't collide.
+    struct LongNameTool<const N: usize>;
+
+    fn long_name_tool<const N: usize>() -> LongNameTool<N> {
+        LongNameTool::<N>
+    }
+
+    impl<const N: usize> LongNameTool<N> {
+        const NAMES: &'static [&'static str] = &[
+            "some_mcp_server_name_that_is_quite_verbose_list_pull_requests_with_many_filters_applied_x",
+            "another_verbose_mcp_server_name_deeply_nested_tool_that_exceeds_sixty_four_chars_for_sure",
+        ];
+    }
+
+    #[async_trait::async_trait]
+    impl<const N: usize> Tool for LongNameTool<N> {
+        fn name(&self) -> &str {
+            Self::NAMES[N - 1]
+        }
+        fn description(&self) -> &str {
+            "long-name test fixture"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+            unreachable!("long-name fixture is never executed")
+        }
+    }
+
     #[tokio::test]
     async fn test_register_and_get() {
         let registry = ToolRegistry::new();
@@ -1752,5 +1820,67 @@ mod tests {
         let removed = registry.unregister("my-mcp-search").await;
         assert!(removed.is_some(), "unregister must resolve hyphen alias");
         assert!(!registry.has("my_mcp_search").await, "tool should be gone");
+    }
+
+    /// Over-length name reaches LLM providers as a ≤64-char fit.
+    #[tokio::test]
+    async fn tool_definitions_fit_names_longer_than_provider_limit() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(long_name_tool::<1>())).await;
+
+        let defs = registry.tool_definitions().await;
+        let def = defs
+            .iter()
+            .find(|d| d.name != "tool_info" && d.name.chars().count() <= PROVIDER_TOOL_NAME_LIMIT)
+            .expect("tool_definitions must emit a fitted name for long-named tools");
+        assert!(
+            def.name.chars().count() <= PROVIDER_TOOL_NAME_LIMIT,
+            "fitted name too long: {:?}",
+            def.name
+        );
+        assert!(
+            def.name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "fitted name must match provider charset: {:?}",
+            def.name
+        );
+    }
+
+    /// LLM emits the fitted name; dispatch routes back to the raw registration.
+    #[tokio::test]
+    async fn get_resolved_round_trips_fitted_name_to_raw_registration() {
+        use crate::tools::tool_name_fitting::{PROVIDER_TOOL_NAME_LIMIT, fit_tool_name};
+
+        let registry = ToolRegistry::new();
+        let tool = long_name_tool::<2>();
+        let raw = tool.name().to_string();
+        registry.register(Arc::new(tool)).await;
+
+        let fitted = fit_tool_name(&raw, PROVIDER_TOOL_NAME_LIMIT);
+        assert_ne!(fitted, raw, "precondition: name must require fitting");
+
+        let (key, _) = registry
+            .get_resolved(&fitted)
+            .await
+            .expect("fitted name must resolve to the raw registration");
+        assert_eq!(key, raw, "resolved key must be the original raw name");
+    }
+
+    /// Short names pass through unchanged — fit is a no-op, alias branch
+    /// must not perturb the existing hyphen/underscore behavior.
+    #[tokio::test]
+    async fn short_names_untouched_by_fit_and_alias() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let echo = defs
+            .iter()
+            .find(|d| d.name == "echo")
+            .expect("echo tool must appear verbatim in tool_definitions");
+        assert_eq!(echo.name, "echo");
+
+        assert!(registry.get("echo").await.is_some());
     }
 }

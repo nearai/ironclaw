@@ -18,6 +18,7 @@ pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
+pub mod tool_name_fitting;
 pub mod wasm;
 
 mod registry;
