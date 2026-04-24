@@ -34,13 +34,22 @@ const HASH_HEX_LEN: usize = 12;
 const HASH_SUFFIX_LEN: usize = 1 + HASH_HEX_LEN;
 
 /// Deterministically fit `name` into `limit` characters using an alphanumeric
-/// + underscore + dash charset. If `name` already fits, returned unchanged.
+/// + underscore charset (no dash). If `name` already fits, returned unchanged.
 ///
 /// Over-length input is truncated at a UTF-8 char boundary to `limit - 13`
 /// chars, joined to `_` + 12 hex chars of `SHA-256(name)`. Any non-
-/// `[A-Za-z0-9_-]` byte in the truncated prefix is normalized to `_` to keep
-/// the result inside the strict provider charset — mirrors the sanitization
-/// `mcp_tool_id` and `sanitize_tool_name` already apply upstream.
+/// `[A-Za-z0-9_]` character in the truncated prefix — including hyphens —
+/// is normalized to `_`. The hash hex is `[0-9a-f]` by construction, so
+/// **fitted names contain no hyphens**.
+///
+/// Hyphen-free output is load-bearing for dispatch: several LLM providers
+/// normalize `-` to `_` in tool names on the return path (the existing
+/// `ToolRegistry::resolve_key` hyphen/underscore alias already encodes
+/// this). If the fit preserved hyphens on a long raw key, the LLM would
+/// echo back an underscored variant that no `fit_tool_name(key, 64)`
+/// comparison inside `resolve_key` could match — silently breaking every
+/// long-named WASM tool whose raw manifest name happens to contain `-`.
+/// (MCP's upstream `mcp_tool_id` already strips hyphens to `_`.)
 ///
 /// Determinism is load-bearing: the fitted name becomes an alias key that
 /// `ToolRegistry::resolve_key` uses to route LLM-emitted tool calls back to
@@ -62,7 +71,12 @@ pub fn fit_tool_name(name: &str, limit: usize) -> String {
         .chars()
         .take(prefix_budget)
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            // Deliberately excludes `-`: LLM providers routinely normalize
+            // hyphens to underscores on the return path (see
+            // `ToolRegistry::resolve_key`'s hyphen/underscore alias). A
+            // fit that preserved hyphens would round-trip broken through
+            // any such provider for long hyphen-bearing raw keys.
+            if c.is_ascii_alphanumeric() || c == '_' {
                 c
             } else {
                 '_'
@@ -114,11 +128,14 @@ mod tests {
         let name = format!("some_mcp_server_name_{}", "x".repeat(100));
         let fitted = fit_tool_name(&name, PROVIDER_TOOL_NAME_LIMIT);
         assert!(fitted.chars().count() <= PROVIDER_TOOL_NAME_LIMIT);
+        // Tighter than the provider regex (`[a-zA-Z0-9_-]`): fitted output
+        // is deliberately hyphen-free so LLM `-` → `_` normalization on
+        // the return path is a no-op. See `fit_tool_name` docstring.
         assert!(
             fitted
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-            "fitted name must match [a-zA-Z0-9_-]: got {:?}",
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "fitted name must match [a-zA-Z0-9_]: got {:?}",
             fitted
         );
     }
@@ -153,7 +170,7 @@ mod tests {
         assert!(
             fitted
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
         );
     }
 
@@ -167,7 +184,22 @@ mod tests {
         assert!(
             fitted
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        );
+    }
+
+    /// Regression test for PR #2947 review: fitted names must be
+    /// hyphen-free so that LLM providers normalizing `-` → `_` on the
+    /// return path do not break dispatch on long hyphen-bearing raw keys
+    /// (primarily user-authored WASM tool manifests; MCP's upstream
+    /// `mcp_tool_id` already strips hyphens).
+    #[test]
+    fn fitted_name_has_no_hyphens() {
+        let name = format!("my-long-mcp-tool-{}", "x".repeat(80));
+        let fitted = fit_tool_name(&name, PROVIDER_TOOL_NAME_LIMIT);
+        assert!(
+            !fitted.contains('-'),
+            "fitted name must be hyphen-free: {fitted:?}"
         );
     }
 }

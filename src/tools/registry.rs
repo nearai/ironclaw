@@ -1838,11 +1838,14 @@ mod tests {
             "fitted name too long: {:?}",
             def.name
         );
+        // Tighter than the provider regex: fitted names are deliberately
+        // hyphen-free so LLM `-` → `_` normalization cannot break the
+        // resolve_key fitted-alias round-trip.
         assert!(
             def.name
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-            "fitted name must match provider charset: {:?}",
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "fitted name must match hyphen-free charset: {:?}",
             def.name
         );
     }
@@ -1864,6 +1867,54 @@ mod tests {
             .get_resolved(&fitted)
             .await
             .expect("fitted name must resolve to the raw registration");
+        assert_eq!(key, raw, "resolved key must be the original raw name");
+    }
+
+    /// Regression test for PR #2947 review: a long hyphen-bearing raw name
+    /// (typical of user-authored WASM tool manifests) must round-trip
+    /// through the fit even when the LLM normalizes the echoed name's
+    /// hyphens to underscores. The fit itself is now hyphen-free by
+    /// construction, so the LLM's normalization is a no-op.
+    #[tokio::test]
+    async fn get_resolved_round_trips_hyphen_bearing_long_name() {
+        use crate::tools::tool_name_fitting::{PROVIDER_TOOL_NAME_LIMIT, fit_tool_name};
+
+        struct HyphenLongTool;
+        #[async_trait::async_trait]
+        impl Tool for HyphenLongTool {
+            fn name(&self) -> &str {
+                "user-authored-wasm-tool-with-many-hyphens-in-its-name-to-trigger-fit-path"
+            }
+            fn description(&self) -> &str {
+                "hyphen long-name fixture"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        let raw = HyphenLongTool.name().to_string();
+        registry.register(Arc::new(HyphenLongTool)).await;
+
+        let fitted = fit_tool_name(&raw, PROVIDER_TOOL_NAME_LIMIT);
+        assert!(
+            !fitted.contains('-'),
+            "precondition: fit must be hyphen-free, got {fitted:?}"
+        );
+        assert!(fitted.chars().count() <= PROVIDER_TOOL_NAME_LIMIT);
+
+        let (key, _) = registry
+            .get_resolved(&fitted)
+            .await
+            .expect("LLM-emitted fitted name must resolve to the hyphen-bearing raw key");
         assert_eq!(key, raw, "resolved key must be the original raw name");
     }
 
