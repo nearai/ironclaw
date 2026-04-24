@@ -12,6 +12,8 @@ publish = false
 
 [dependencies]
 blake3 = "1"
+ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
@@ -21,4 +23,6 @@ wasmtime = "43.0.1"
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
 wat = "1"

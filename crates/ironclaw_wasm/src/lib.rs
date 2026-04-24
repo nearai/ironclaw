@@ -11,9 +11,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
+use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ResourceReservationId, ResourceUsage,
-    RuntimeKind,
+    RuntimeKind, VirtualPath,
 };
 use ironclaw_resources::ActiveResourceReservation;
 use rust_decimal::Decimal;
@@ -137,6 +139,14 @@ impl ModuleCacheKey {
     }
 }
 
+/// Prepared WASM module plus the descriptor and package-local module path it came from.
+#[derive(Debug, Clone)]
+pub struct PreparedWasmCapability {
+    pub descriptor: CapabilityDescriptor,
+    pub module: Arc<PreparedWasmModule>,
+    pub module_path: VirtualPath,
+}
+
 /// JSON capability invocation payload for the initial Reborn WASM ABI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityInvocation {
@@ -172,12 +182,23 @@ pub enum WasmError {
     InvalidConfig { reason: String },
     #[error("WASM runtime cache error: {reason}")]
     Cache { reason: String },
+    #[error("extension package error: {0}")]
+    Extension(Box<ExtensionError>),
+    #[error("filesystem error: {0}")]
+    Filesystem(Box<FilesystemError>),
     #[error("invalid WASM module: {reason}")]
     InvalidModule { reason: String },
     #[error("unsupported WASM import {module}.{name}; no privileged host imports are registered")]
     UnsupportedImport { module: String, name: String },
     #[error("WASM descriptor mismatch: {reason}")]
     DescriptorMismatch { reason: String },
+    #[error("extension {extension} uses runtime {actual:?}, not RuntimeKind::Wasm")]
+    ExtensionRuntimeMismatch {
+        extension: ExtensionId,
+        actual: RuntimeKind,
+    },
+    #[error("capability {capability} is not declared by this extension package")]
+    CapabilityNotDeclared { capability: CapabilityId },
     #[error("invalid WASM invocation: {reason}")]
     InvalidInvocation { reason: String },
     #[error("WASM invocation requires an active resource reservation")]
@@ -293,7 +314,9 @@ impl WasmRuntime {
             });
         }
 
-        if spec.export.trim().is_empty() {
+        if spec.export.trim().is_empty()
+            || !module.exports().any(|export| export.name() == spec.export)
+        {
             return Err(WasmError::MissingExport {
                 export: spec.export,
             });
@@ -305,6 +328,71 @@ impl WasmRuntime {
             export: spec.export,
             content_hash,
             module,
+        })
+    }
+
+    /// Prepare a WASM capability from a validated extension package manifest.
+    pub async fn prepare_extension_capability<F>(
+        &self,
+        fs: &F,
+        package: &ExtensionPackage,
+        capability_id: &CapabilityId,
+    ) -> Result<PreparedWasmCapability, WasmError>
+    where
+        F: RootFilesystem,
+    {
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| &descriptor.id == capability_id)
+            .cloned()
+            .ok_or_else(|| WasmError::CapabilityNotDeclared {
+                capability: capability_id.clone(),
+            })?;
+
+        if descriptor.runtime != RuntimeKind::Wasm {
+            return Err(WasmError::ExtensionRuntimeMismatch {
+                extension: package.id.clone(),
+                actual: descriptor.runtime,
+            });
+        }
+        if descriptor.provider != package.id {
+            return Err(WasmError::DescriptorMismatch {
+                reason: format!(
+                    "descriptor {} provider {} does not match package {}",
+                    descriptor.id, descriptor.provider, package.id
+                ),
+            });
+        }
+
+        let module_asset = match &package.manifest.runtime {
+            ExtensionRuntime::Wasm { module } => module,
+            other => {
+                return Err(WasmError::ExtensionRuntimeMismatch {
+                    extension: package.id.clone(),
+                    actual: other.kind(),
+                });
+            }
+        };
+        let module_path = module_asset
+            .resolve_under(&package.root)
+            .map_err(|error| WasmError::Extension(Box::new(error)))?;
+        let bytes = fs
+            .read_file(&module_path)
+            .await
+            .map_err(|error| WasmError::Filesystem(Box::new(error)))?;
+        let export = capability_export_name(&package.id, capability_id)?;
+        let module = self.prepare_cached(WasmModuleSpec {
+            provider: package.id.clone(),
+            capability: capability_id.clone(),
+            export,
+            bytes,
+        })?;
+
+        Ok(PreparedWasmCapability {
+            descriptor,
+            module,
+            module_path,
         })
     }
 
@@ -639,6 +727,24 @@ impl ResourceLimiter for WasmRuntimeLimiter {
     fn memories(&self) -> usize {
         10
     }
+}
+
+fn capability_export_name(
+    package_id: &ExtensionId,
+    capability_id: &CapabilityId,
+) -> Result<String, WasmError> {
+    let expected_prefix = format!("{}.", package_id.as_str());
+    capability_id
+        .as_str()
+        .strip_prefix(&expected_prefix)
+        .filter(|suffix| !suffix.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| WasmError::DescriptorMismatch {
+            reason: format!(
+                "capability {} is not prefixed by package {}",
+                capability_id, package_id
+            ),
+        })
 }
 
 fn validate_runtime_config(config: &WasmRuntimeConfig) -> Result<(), WasmError> {
