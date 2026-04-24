@@ -236,171 +236,335 @@
     }
   }
 
+  // Map a sandbox job / plan / onboarding status string to the Activity
+  // entry's success/failure marker. Keeps the listeners below free of
+  // three-level nested ternaries.
+  var STATUS_TO_ACTIVITY = {
+    completed: 'success',
+    ready: 'success',
+    failed: 'failure',
+    stuck: 'failure',
+    cancelled: 'failure',
+    denied: 'failure',
+  };
+
+  // `gate_resolved` uses its own resolution vocabulary — `expired` /
+  // `denied` / `cancelled` are failure paths, `approved` /
+  // `credential_provided` / `external_callback` are success. A shared
+  // fallback to `'success'` would mis-render `expired` as green.
+  // Emitters live in src/bridge/router.rs.
+  var GATE_RESOLUTION_STATUS = {
+    approved: 'success',
+    credential_provided: 'success',
+    external_callback: 'success',
+    denied: 'failure',
+    cancelled: 'failure',
+    expired: 'failure',
+  };
+
+  function formatReasoning(data) {
+    var body = data.narrative || '';
+    if (Array.isArray(data.decisions) && data.decisions.length > 0) {
+      body += (body ? '\n\n' : '')
+        + data.decisions.map(function (d) {
+          return '▸ ' + d.tool_name + ': ' + (d.rationale || '');
+        }).join('\n');
+    }
+    return body;
+  }
+
   function attachDebugListeners(es) {
-    es.addEventListener('status', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        addActivity('think', t('debug.activityStatus'), timeNow(), null, data.message || null, { labelKey: 'debug.activityStatus' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
+    // Wraps `addEventListener` so every activity listener gets identical
+    // JSON-parse + error-swallow + reconnect-counter housekeeping. Before
+    // extraction the block was copy-pasted ~25 times across this file and
+    // the `lastEventTime` / `totalEventsReceived` bookkeeping was the
+    // most likely drift target.
+    function on(name, handler) {
+      es.addEventListener(name, function (e) {
+        try { handler(JSON.parse(e.data)); } catch (_) { /* ignore */ }
+        lastEventTime = Date.now(); totalEventsReceived++;
+      });
+    }
+
+    on('status', function (data) {
+      addActivity('think', t('debug.activityStatus'), timeNow(), null, data.message || null, { labelKey: 'debug.activityStatus' });
     });
 
-    es.addEventListener('thinking', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        addActivity('think', t('debug.activityThinking'), timeNow(), null, data.message || null, { labelKey: 'debug.activityThinking' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
+    on('thinking', function (data) {
+      addActivity('think', t('debug.activityThinking'), timeNow(), null, data.message || null, { labelKey: 'debug.activityThinking' });
     });
 
-    es.addEventListener('tool_started', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var key = data.call_id || data.name;
-        var id = addActivity('tool', data.name || 'tool', timeNow(), 'pending');
-        pendingTools[key] = { id: id, start: Date.now(), name: data.name };
-        sessionStats.toolCalls++;
-        updateStatsDisplay();
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
+    on('tool_started', function (data) {
+      var key = data.call_id || data.name;
+      // `detail` carries the params summary (URL for http, query for
+      // web_search, etc.). Surface it immediately as the tool's
+      // Parameters section so args are visible even before the result
+      // lands — don't wait for `tool_completed` and don't hide args
+      // on success like we used to.
+      var extra = {};
+      if (data.detail) extra.params = data.detail;
+      var id = addActivity('tool', data.name || 'tool', timeNow(), 'pending', null, extra);
+      pendingTools[key] = { id: id, start: Date.now(), name: data.name };
+      sessionStats.toolCalls++;
+      updateStatsDisplay();
     });
 
-    es.addEventListener('tool_completed', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var key = data.call_id || data.name;
-        var pending = pendingTools[key];
-        var duration = pending ? (Date.now() - pending.start) : null;
-        var status = data.success ? 'success' : 'failure';
-        var meta = duration ? formatDuration(duration) : '';
+    on('tool_completed', function (data) {
+      var key = data.call_id || data.name;
+      var pending = pendingTools[key];
+      var duration = pending ? (Date.now() - pending.start) : null;
+      var status = data.success ? 'success' : 'failure';
+      var meta = duration ? formatDuration(duration) : '';
 
-        if (data.success) sessionStats.toolSuccess++;
-        else sessionStats.toolFailure++;
+      if (data.success) sessionStats.toolSuccess++;
+      else sessionStats.toolFailure++;
 
-        var extra = {};
-        if (data.parameters) extra.params = data.parameters;
-        if (data.error) extra.output = data.error;
+      var extra = {};
+      if (data.parameters) extra.params = data.parameters;
+      if (data.error) extra.output = data.error;
 
-        if (pending) {
-          updateActivity(pending.id, status, meta, extra);
-          // Keep entry briefly so tool_result / tool_result_full can still find it,
-          // then remove it.
-          setTimeout(function () {
-            delete pendingTools[key];
-          }, 5000);
-        } else {
-          addActivity('tool', data.name || 'tool', meta, status, null, extra);
+      if (pending) {
+        updateActivity(pending.id, status, meta, extra);
+        // Keep entry briefly so tool_result / tool_result_full can still find it,
+        // then remove it.
+        setTimeout(function () {
+          delete pendingTools[key];
+        }, 5000);
+      } else {
+        addActivity('tool', data.name || 'tool', meta, status, null, extra);
+      }
+      updateStatsDisplay();
+    });
+
+    on('tool_result', function (data) {
+      var key = data.call_id || data.name;
+      var pending = pendingTools[key];
+      if (pending) {
+        appendActivityOutput(pending.id, data.preview || '');
+      }
+    });
+
+    on('reasoning_update', function (data) {
+      // Wire shape is {tool_name, rationale} (see ToolDecisionDto). Earlier
+      // code read d.reason/d.chosen which do not exist on the wire.
+      addActivity('think', t('debug.activityReasoning'), timeNow(), null, formatReasoning(data), { labelKey: 'debug.activityReasoning' });
+    });
+
+    on('turn_cost', function (data) {
+      sessionStats.turns++;
+      sessionStats.inputTokens += data.input_tokens || 0;
+      sessionStats.outputTokens += data.output_tokens || 0;
+      var costVal = parseFloat(data.cost_usd);
+      if (!isNaN(costVal)) sessionStats.cost += costVal;
+
+      var costStr = (!isNaN(costVal) && costVal > 0) ? '$' + costVal.toFixed(4) : '';
+      var info = t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
+      if (costStr) info += '  ' + t('debug.infoCost') + ' ' + costStr;
+
+      addActivity('llm', t('debug.activityLlmCall') + ' #' + sessionStats.turns, '', null, null, { info: info, labelKey: 'debug.activityLlmCall' });
+      updateStatsDisplay();
+      // Refresh gateway stats to pick up latest model usage
+      fetchGatewayStats();
+    });
+
+    on('response', function (data) {
+      var preview = (data.content || '').substring(0, 100);
+      if ((data.content || '').length > 100) preview += '...';
+      addActivity('stream', t('debug.activityResponse'), timeNow(), 'success', preview, { labelKey: 'debug.activityResponse' });
+    });
+
+    on('error', function (data) {
+      addActivity('error', t('debug.activityError'), timeNow(), 'failure', data.message || null, { labelKey: 'debug.activityError' });
+    });
+
+    on('turn_metrics', function (data) {
+      var info = t('debug.infoModel') + ' ' + data.model;
+      info += '\n' + t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
+      if (data.cache_read_tokens) info += '  ' + t('debug.infoCache') + ' ' + formatNumber(data.cache_read_tokens) + 't';
+      var duration = data.duration_ms ? formatDuration(data.duration_ms) : '';
+      addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info, labelKey: 'debug.activityLlmCall' });
+    });
+
+    on('tool_result_full', function (data) {
+      var key = data.call_id || data.name;
+      var pending = pendingTools[key];
+      if (!pending) {
+        // Fallback: search by name for older events without call_id
+        var keys = Object.keys(pendingTools);
+        for (var i = 0; i < keys.length; i++) {
+          if (pendingTools[keys[i]].name === data.name) { pending = pendingTools[keys[i]]; break; }
         }
-        updateStatsDisplay();
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
+      }
+      if (pending) {
+        appendActivityOutput(pending.id, data.output || '');
+      }
     });
 
-    es.addEventListener('tool_result', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var key = data.call_id || data.name;
-        var pending = pendingTools[key];
-        if (pending) {
-          appendActivityOutput(pending.id, data.preview || '');
-        }
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('reasoning_update', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var body = data.narrative || '';
-        if (data.decisions && data.decisions.length > 0) {
-          body += '\n\n' + data.decisions.map(function (d) {
-            return (d.chosen ? '\u2713 ' : '\u2717 ') + d.tool_name + ': ' + (d.reason || '');
-          }).join('\n');
-        }
-        addActivity('think', t('debug.activityReasoning'), timeNow(), null, body, { labelKey: 'debug.activityReasoning' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('turn_cost', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        sessionStats.turns++;
-        sessionStats.inputTokens += data.input_tokens || 0;
-        sessionStats.outputTokens += data.output_tokens || 0;
-        var costVal = parseFloat(data.cost_usd);
-        if (!isNaN(costVal)) sessionStats.cost += costVal;
-
-        var costStr = (!isNaN(costVal) && costVal > 0) ? '$' + costVal.toFixed(4) : '';
-        var info = t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
-        if (costStr) info += '  ' + t('debug.infoCost') + ' ' + costStr;
-
-        addActivity('llm', t('debug.activityLlmCall') + ' #' + sessionStats.turns, '', null, null, { info: info, labelKey: 'debug.activityLlmCall' });
-        updateStatsDisplay();
-        // Refresh gateway stats to pick up latest model usage
-        fetchGatewayStats();
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('response', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var preview = (data.content || '').substring(0, 100);
-        if ((data.content || '').length > 100) preview += '...';
-        addActivity('stream', t('debug.activityResponse'), timeNow(), 'success', preview, { labelKey: 'debug.activityResponse' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('error', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        // SSE `error` carries only the sanitized message — the raw
-        // low-level detail (Monty/Python traceback, upstream HTTP body)
-        // stays server-side and is emitted at `debug!` level so it
-        // doesn't cross the SSE boundary to any authenticated consumer.
-        // Operators who need it flip `RUST_LOG=ironclaw::bridge::router=debug`
-        // or consult `/api/logs/events`.
-        var body = data.message || '';
-        addActivity('error', t('debug.activityError'), timeNow(), 'failure', body || null, { labelKey: 'debug.activityError' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('turn_metrics', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var info = t('debug.infoModel') + ' ' + data.model;
-        info += '\n' + t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
-        if (data.cache_read_tokens) info += '  ' + t('debug.infoCache') + ' ' + formatNumber(data.cache_read_tokens) + 't';
-        var duration = data.duration_ms ? formatDuration(data.duration_ms) : '';
-        addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info, labelKey: 'debug.activityLlmCall' });
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
-    es.addEventListener('tool_result_full', function (e) {
-      try {
-        var data = JSON.parse(e.data);
-        var key = data.call_id || data.name;
-        var pending = pendingTools[key];
-        if (!pending) {
-          // Fallback: search by name for older events without call_id
-          var keys = Object.keys(pendingTools);
-          for (var i = 0; i < keys.length; i++) {
-            if (pendingTools[keys[i]].name === data.name) { pending = pendingTools[keys[i]]; break; }
-          }
-        }
-        if (pending) {
-          appendActivityOutput(pending.id, data.output || '');
-        }
-      } catch (_) { /* ignore */ }
-      lastEventTime = Date.now(); totalEventsReceived++;
-    });
-
+    // `stream_chunk` has no JSON body we care about — just keep the
+    // reconnect-counter fresh. Stays outside `on()` (which always
+    // attempts JSON.parse).
     es.addEventListener('stream_chunk', function () {
       lastEventTime = Date.now(); totalEventsReceived++;
+    });
+
+    // ── CodeAct + warning coverage (debug-only backend events) ──
+
+    var PLAN_STEP_MARKS = {
+      completed: '[x]',
+      in_progress: '[~]',
+      failed: '[!]',
+    };
+
+    on('code_executed', function (data) {
+      var parts = [];
+      if (data.code) parts.push('# code\n' + data.code);
+      if (data.stdout) parts.push('# stdout\n' + data.stdout);
+      if (data.return_value !== undefined && data.return_value !== null) {
+        var rv = typeof data.return_value === 'string'
+          ? data.return_value
+          : JSON.stringify(data.return_value, null, 2);
+        parts.push('# return\n' + rv);
+      }
+      var meta = data.duration_ms ? formatDuration(data.duration_ms) : '';
+      addActivity('code', t('debug.activityCodeExecuted'), meta, 'success', parts.join('\n\n'), { labelKey: 'debug.activityCodeExecuted' });
+    });
+
+    on('warning', function (data) {
+      var body = (data.source ? data.source + '\n' : '') + (data.message || '');
+      addActivity('warn', t('debug.activityWarning'), timeNow(), 'failure', body, { labelKey: 'debug.activityWarning' });
+    });
+
+    // ── Approval / gate lifecycle ──
+
+    on('gate_required', function (data) {
+      var body = [
+        data.gate_name ? 'gate: ' + data.gate_name : '',
+        data.tool_name ? 'tool: ' + data.tool_name : '',
+        data.description || '',
+        data.parameters ? 'params: ' + data.parameters : '',
+      ].filter(Boolean).join('\n');
+      addActivity('gate', t('debug.activityGateRequired'), timeNow(), 'pending', body, { labelKey: 'debug.activityGateRequired' });
+    });
+
+    on('gate_resolved', function (data) {
+      var body = [
+        data.gate_name ? 'gate: ' + data.gate_name : '',
+        data.tool_name ? 'tool: ' + data.tool_name : '',
+        data.resolution ? 'resolution: ' + data.resolution : '',
+        data.message || '',
+      ].filter(Boolean).join('\n');
+      var status = GATE_RESOLUTION_STATUS[data.resolution] || null;
+      addActivity('gate', t('debug.activityGateResolved'), timeNow(), status, body, { labelKey: 'debug.activityGateResolved' });
+    });
+
+    on('approval_needed', function (data) {
+      var body = [
+        data.tool_name ? 'tool: ' + data.tool_name : '',
+        data.description || '',
+        data.parameters ? 'params: ' + data.parameters : '',
+      ].filter(Boolean).join('\n');
+      addActivity('gate', t('debug.activityApprovalNeeded'), timeNow(), 'pending', body, { labelKey: 'debug.activityApprovalNeeded' });
+    });
+
+    // ── Plan / skill / thread lifecycle ──
+
+    on('skill_activated', function (data) {
+      var names = Array.isArray(data.skill_names) ? data.skill_names : [];
+      var feedback = Array.isArray(data.feedback) ? data.feedback : [];
+      if (names.length === 0 && feedback.length === 0) return;
+      var body = names.join(', ');
+      if (feedback.length > 0) body += (body ? '\n' : '') + feedback.join('\n');
+      addActivity('skill', t('debug.activitySkillActivated'), timeNow(), 'success', body, { labelKey: 'debug.activitySkillActivated' });
+    });
+
+    on('plan_update', function (data) {
+      var steps = Array.isArray(data.steps) ? data.steps : [];
+      var body = (data.title ? data.title + '\n' : '') + steps.map(function (s) {
+        return (PLAN_STEP_MARKS[s.status] || '[ ]') + ' ' + (s.title || '');
+      }).join('\n');
+      var status = STATUS_TO_ACTIVITY[data.status] || null;
+      addActivity('plan', t('debug.activityPlanUpdate') + (data.status ? ' (' + data.status + ')' : ''), timeNow(), status, body, { labelKey: 'debug.activityPlanUpdate' });
+    });
+
+    on('thread_state_changed', function (data) {
+      var body = (data.from_state || '?') + ' → ' + (data.to_state || '?')
+        + (data.reason ? '\n' + data.reason : '');
+      addActivity('state', t('debug.activityThreadState'), timeNow(), null, body, { labelKey: 'debug.activityThreadState' });
+    });
+
+    on('child_thread_spawned', function (data) {
+      var body = (data.child_thread_id ? 'id: ' + data.child_thread_id + '\n' : '')
+        + (data.goal || '');
+      addActivity('state', t('debug.activityChildSpawned'), timeNow(), null, body, { labelKey: 'debug.activityChildSpawned' });
+    });
+
+    on('mission_thread_spawned', function (data) {
+      var body = [
+        data.mission_name ? 'mission: ' + data.mission_name : '',
+        data.mission_id ? 'mission_id: ' + data.mission_id : '',
+        data.thread_id ? 'thread_id: ' + data.thread_id : '',
+      ].filter(Boolean).join('\n');
+      addActivity('state', t('debug.activityMissionSpawned'), timeNow(), null, body, { labelKey: 'debug.activityMissionSpawned' });
+    });
+
+    on('onboarding_state', function (data) {
+      var body = [
+        data.extension_name ? 'extension: ' + data.extension_name : '',
+        data.state ? 'state: ' + data.state : '',
+        data.message || '',
+        data.instructions || '',
+      ].filter(Boolean).join('\n');
+      var status = STATUS_TO_ACTIVITY[data.state] || null;
+      addActivity('state', t('debug.activityOnboarding'), timeNow(), status, body, { labelKey: 'debug.activityOnboarding' });
+    });
+
+    on('image_generated', function (data) {
+      addActivity('image', t('debug.activityImage'), timeNow(), 'success', data.path || data.event_id || '(image)', { labelKey: 'debug.activityImage' });
+    });
+
+    on('suggestions', function (data) {
+      var items = Array.isArray(data.suggestions) ? data.suggestions : [];
+      if (items.length === 0) return;
+      addActivity('think', t('debug.activitySuggestions'), timeNow(), null, items.join('\n'), { labelKey: 'debug.activitySuggestions' });
+    });
+
+    // ── Sandbox job events (CodeAct runs in Docker) ──
+
+    function jobLabel(key, data) {
+      return t(key) + (data.job_id ? ' (' + shortId(data.job_id) + ')' : '');
+    }
+
+    on('job_message', function (data) {
+      var body = (data.role ? data.role + ': ' : '') + (data.content || '');
+      addActivity('job', jobLabel('debug.activityJobMessage', data), timeNow(), null, body, { labelKey: 'debug.activityJobMessage' });
+    });
+
+    on('job_tool_use', function (data) {
+      var body = (data.tool_name ? 'tool: ' + data.tool_name + '\n' : '')
+        + (data.input !== undefined ? JSON.stringify(data.input, null, 2) : '');
+      addActivity('job', jobLabel('debug.activityJobToolUse', data), timeNow(), 'pending', body, { labelKey: 'debug.activityJobToolUse' });
+    });
+
+    on('job_tool_result', function (data) {
+      var body = (data.tool_name ? data.tool_name + '\n' : '') + (data.output || '');
+      addActivity('job', jobLabel('debug.activityJobToolResult', data), timeNow(), 'success', body, { labelKey: 'debug.activityJobToolResult' });
+    });
+
+    on('job_status', function (data) {
+      addActivity('job', jobLabel('debug.activityJobStatus', data), timeNow(), null, data.message || '', { labelKey: 'debug.activityJobStatus' });
+    });
+
+    on('job_result', function (data) {
+      var status = STATUS_TO_ACTIVITY[data.status] || null;
+      var body = [
+        data.status ? 'status: ' + data.status : '',
+        data.session_id ? 'session: ' + data.session_id : '',
+      ].filter(Boolean).join('\n');
+      addActivity('job', jobLabel('debug.activityJobResult', data), timeNow(), status, body, { labelKey: 'debug.activityJobResult' });
+    });
+
+    on('job_reasoning', function (data) {
+      addActivity('job', jobLabel('debug.activityJobReasoning', data), timeNow(), null, formatReasoning(data), { labelKey: 'debug.activityJobReasoning' });
     });
   }
 
@@ -703,7 +867,12 @@
 
     var icon = document.createElement('span');
     icon.className = 'debug-activity-icon ' + entry.type;
-    var iconMap = { llm: '\u25CF', tool: '\u25C6', think: '\u25CB', stream: '\u25CF', error: '\u25CF' };
+    var iconMap = {
+      llm: '\u25CF', tool: '\u25C6', think: '\u25CB', stream: '\u25CF',
+      error: '\u25CF', code: '\u25BC', warn: '\u25B2', gate: '\u25A0',
+      skill: '\u2605', plan: '\u2713', state: '\u25B6', image: '\u2600',
+      job: '\u2699'
+    };
     icon.textContent = iconMap[entry.type] || '\u25CB';
 
     var label = document.createElement('span');
@@ -1289,6 +1458,11 @@
     var m = String(d.getMinutes()).padStart(2, '0');
     var s = String(d.getSeconds()).padStart(2, '0');
     return h + ':' + m + ':' + s;
+  }
+
+  function shortId(id) {
+    if (!id || typeof id !== 'string') return '';
+    return id.length > 8 ? id.substring(0, 8) : id;
   }
 
   // ── Public API ──

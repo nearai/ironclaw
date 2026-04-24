@@ -136,7 +136,10 @@ pub async fn execute_action_calls(
                     call_id: call.id.clone(),
                     error: format!("no lease for action '{}'", call.action_name),
                     duration_ms: 0,
-                    params_summary: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
                 };
                 preflight_results.push(PreflightOutcome::Error {
                     index: idx,
@@ -426,7 +429,10 @@ fn classify_exec_result(
                     } else {
                         execution_duration_ms
                     },
-                    params_summary: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
                 }
             } else {
                 EventKind::ActionExecuted {
@@ -434,7 +440,10 @@ fn classify_exec_result(
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     duration_ms: action_result.duration.as_millis() as u64,
-                    params_summary: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
                 }
             };
             (action_result, event)
@@ -493,7 +502,10 @@ fn classify_exec_result(
                 call_id: call.id.clone(),
                 error: e.to_string(),
                 duration_ms: execution_duration_ms,
-                params_summary: None,
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &call.parameters,
+                ),
             };
             (error_result, event)
         }

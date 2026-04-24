@@ -84,7 +84,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.92+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
 
