@@ -123,7 +123,45 @@ Rules:
 
 ---
 
-## 7. Minimum V1 API sketch
+## 7. Initial JSON ABI
+
+The first structured invocation ABI is intentionally small and pointer/length based. It is not WASI and does not grant filesystem, network, secret, or process authority.
+
+A JSON-capable guest exports:
+
+```text
+memory                         exported linear memory
+alloc(len: i32) -> i32          guest allocator for host-written input bytes
+<capability_export>(ptr, len) -> i32 status
+output_ptr() -> i32             pointer to guest output bytes
+output_len() -> i32             length of guest output bytes
+```
+
+Host invocation flow:
+
+```text
+1. validate CapabilityDescriptor runtime/provider/capability
+2. validate CapabilityInvocation.input against descriptor.parameters_schema
+3. instantiate a fresh module instance
+4. call alloc(input_json_len)
+5. write serialized JSON input bytes into guest memory
+6. call the configured capability export
+7. read output_ptr/output_len
+8. enforce max_output_bytes before parsing
+9. parse output bytes as JSON
+10. return CapabilityResult or structured WasmError
+```
+
+Status contract:
+
+- `status == 0`: output bytes are the JSON capability result.
+- `status != 0`: output bytes should be a JSON error object; the host surfaces `WasmError::GuestError`.
+
+This ABI is a V1 compatibility layer. It can coexist with, or be replaced by, Component Model/WIT once the host ABI is mature enough to freeze.
+
+---
+
+## 8. Minimum V1 API sketch
 
 ```rust
 pub struct WasmRuntime;
@@ -135,31 +173,49 @@ pub struct WasmModuleSpec {
     pub bytes: Vec<u8>,
 }
 
+pub struct CapabilityInvocation {
+    pub input: serde_json::Value,
+}
+
+pub struct CapabilityResult {
+    pub output: serde_json::Value,
+    pub reservation_id: ResourceReservationId,
+    pub usage: ResourceUsage,
+    pub fuel_consumed: u64,
+    pub output_bytes: u64,
+}
+
 impl WasmRuntime {
     pub fn prepare(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError>;
-    pub fn invoke_i32(
+    pub fn invoke_json(
         &self,
         module: &PreparedWasmModule,
         descriptor: &CapabilityDescriptor,
-        reservation: &ResourceReservation,
-        input: i32,
-    ) -> Result<WasmInvocationResult<i32>, WasmError>;
+        reservation: Option<&ResourceReservation>,
+        invocation: CapabilityInvocation,
+    ) -> Result<CapabilityResult, WasmError>;
 }
 ```
 
-The initial `invoke_i32` shape is only a tiny vertical-slice ABI. It can later be replaced or supplemented by component-model/WIT invocation once the host ABI is locked.
+`invoke_i32` may remain as a tiny internal/test vertical slice, but user-facing capability execution should move through `invoke_json` until a stronger Component Model ABI replaces it.
 
 ---
 
-## 8. Error contract
+## 9. Error contract
 
 Minimum errors:
 
 ```rust
 WasmError::InvalidModule
+WasmError::UnsupportedImport
 WasmError::DescriptorMismatch
+WasmError::InvalidInvocation
 WasmError::MissingReservation
 WasmError::MissingExport
+WasmError::MissingMemory
+WasmError::GuestAllocation
+WasmError::GuestError
+WasmError::InvalidGuestOutput
 WasmError::FuelExhausted
 WasmError::OutputLimitExceeded
 WasmError::Trap
@@ -169,7 +225,7 @@ Errors must not include raw host paths or secret material.
 
 ---
 
-## 9. Minimum TDD coverage
+## 10. Minimum TDD coverage
 
 Local contract tests should prove:
 
@@ -179,6 +235,11 @@ Local contract tests should prove:
 - descriptor provider/capability must match the prepared module
 - invocation requires a reservation
 - exported function is invoked successfully
+- JSON ABI writes input into guest memory and reads JSON output
+- JSON ABI validates invocation input against the descriptor schema before guest execution
+- guest non-zero status becomes a structured guest error
+- invalid guest JSON output fails closed
+- ABI memory/allocator/output accessor exports are required
 - output byte limit is enforced
 - fuel limit stops a runaway module
 - invocation returns actual usage suitable for resource reconciliation
@@ -186,7 +247,7 @@ Local contract tests should prove:
 
 ---
 
-## 10. Non-goals
+## 11. Non-goals
 
 Do not add in this first crate:
 
