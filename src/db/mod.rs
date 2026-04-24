@@ -24,6 +24,11 @@ pub mod libsql;
 #[cfg(feature = "libsql")]
 pub mod libsql_migrations;
 
+mod trace_corpus_common;
+
+#[cfg(feature = "postgres")]
+mod trace_corpus_pg;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1212,6 +1217,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + crate::trace_corpus_storage::TraceCorpusStore
     + Send
     + Sync
 {

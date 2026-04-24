@@ -14,6 +14,7 @@ mod routines;
 mod sandbox;
 mod settings;
 mod tool_failures;
+mod trace_corpus;
 mod users;
 mod workspace;
 

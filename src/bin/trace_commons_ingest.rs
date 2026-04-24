@@ -12,11 +12,28 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, extract::Path as AxumPath, extract::State};
 use chrono::{DateTime, Utc};
+use ironclaw::config::{DatabaseBackend, DatabaseConfig};
+use ironclaw::db::Database;
 use ironclaw::trace_contribution::{
     ConsentScope, EmbeddingAnalysisMetadata, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
     TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
     TraceSubmissionStatusUpdate, apply_credit_estimate_to_envelope,
     canonical_summary_for_embedding, rescrub_trace_envelope,
+};
+use ironclaw::trace_corpus_storage::{
+    TraceAuditAction as StorageTraceAuditAction,
+    TraceAuditEventWrite as StorageTraceAuditEventWrite,
+    TraceAuditSafeMetadata as StorageTraceAuditSafeMetadata,
+    TraceCorpusStatus as StorageTraceCorpusStatus,
+    TraceCreditEventType as StorageTraceCreditEventType,
+    TraceCreditEventWrite as StorageTraceCreditEventWrite,
+    TraceCreditSettlementState as StorageTraceCreditSettlementState,
+    TraceDerivedRecordWrite as StorageTraceDerivedRecordWrite,
+    TraceDerivedStatus as StorageTraceDerivedStatus,
+    TraceObjectArtifactKind as StorageTraceObjectArtifactKind,
+    TraceObjectRefWrite as StorageTraceObjectRefWrite,
+    TraceSubmissionWrite as StorageTraceSubmissionWrite,
+    TraceTombstoneWrite as StorageTraceTombstoneWrite, TraceWorkerKind as StorageTraceWorkerKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,7 +46,7 @@ const MAX_INGEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    let state = Arc::new(AppState::from_env()?);
+    let state = Arc::new(AppState::from_env().await?);
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
@@ -47,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     root: PathBuf,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
+    db_mirror: Option<Arc<dyn Database>>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +98,7 @@ impl TokenRole {
 }
 
 impl AppState {
-    fn from_env() -> anyhow::Result<Self> {
+    async fn from_env() -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -93,8 +111,57 @@ impl AppState {
         Ok(Self {
             root,
             tokens: Arc::new(tokens),
+            db_mirror: trace_corpus_db_mirror_from_env().await?,
         })
     }
+}
+
+async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
+    if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
+        return Ok(None);
+    }
+
+    let backend = std::env::var("DATABASE_BACKEND")
+        .unwrap_or_else(|_| DatabaseBackend::default().to_string())
+        .parse::<DatabaseBackend>()
+        .map_err(|message| {
+            anyhow::anyhow!("invalid DATABASE_BACKEND for trace mirror: {message}")
+        })?;
+    let config = match backend {
+        DatabaseBackend::LibSql => {
+            let path = std::env::var("LIBSQL_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| ironclaw::config::default_libsql_path());
+            let path = path.to_string_lossy().into_owned();
+            let turso_url = std::env::var("LIBSQL_URL").ok();
+            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+            DatabaseConfig::from_libsql_path(&path, turso_url.as_deref(), turso_token.as_deref())
+        }
+        DatabaseBackend::Postgres => {
+            let url = std::env::var("DATABASE_URL").context(
+                "TRACE_COMMONS_DB_DUAL_WRITE requires DATABASE_URL when DATABASE_BACKEND=postgres",
+            )?;
+            let pool_size = std::env::var("DATABASE_POOL_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(5);
+            DatabaseConfig::from_postgres_url(&url, pool_size)
+        }
+    };
+    let db = ironclaw::db::connect_from_config(&config)
+        .await
+        .context("failed to connect Trace Commons DB dual-write mirror")?;
+    tracing::info!(backend = %backend, "Trace Commons DB dual-write mirror enabled");
+    Ok(Some(db))
+}
+
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key).ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn app(state: Arc<AppState>) -> Router {
@@ -301,6 +368,11 @@ async fn submit_trace_handler(
         TraceCommonsAuditEvent::submitted(&record),
     )
     .map_err(internal_error)?;
+    if let Err(error) =
+        mirror_submission_to_db(&state, &tenant, &record, &derived_record, &envelope).await
+    {
+        tracing::warn!(%error, submission_id = %record.submission_id, "Trace Commons DB dual-write mirror failed");
+    }
 
     Ok(Json(receipt_from_record(&record)))
 }
@@ -310,7 +382,7 @@ async fn revoke_trace_handler(
     headers: HeaderMap,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<StatusCode> {
-    revoke_submission(&state, &headers, submission_id)
+    revoke_submission(&state, &headers, submission_id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -323,10 +395,10 @@ async fn revoke_trace_body_handler(
     headers: HeaderMap,
     Json(body): Json<RevokeTraceBody>,
 ) -> ApiResult<StatusCode> {
-    revoke_submission(&state, &headers, body.submission_id)
+    revoke_submission(&state, &headers, body.submission_id).await
 }
 
-fn revoke_submission(
+async fn revoke_submission(
     state: &AppState,
     headers: &HeaderMap,
     submission_id: Uuid,
@@ -341,6 +413,7 @@ fn revoke_submission(
     };
     write_revocation(&state.root, &tombstone).map_err(internal_error)?;
 
+    let mut mirrored_record = None;
     if let Some(mut record) = read_submission_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
     {
@@ -353,6 +426,7 @@ fn revoke_submission(
         record.status = TraceCorpusStatus::Revoked;
         record.credit_points_final = Some(0.0);
         write_submission_record(&state.root, &record).map_err(internal_error)?;
+        mirrored_record = Some(record);
     }
     if let Some(mut derived) = read_derived_record(&state.root, &tenant.tenant_id, submission_id)
         .map_err(internal_error)?
@@ -367,6 +441,11 @@ fn revoke_submission(
         TraceCommonsAuditEvent::revoked(&tenant, submission_id),
     )
     .map_err(internal_error)?;
+    if let Err(error) =
+        mirror_revocation_to_db(state, &tenant, submission_id, mirrored_record.as_ref()).await
+    {
+        tracing::warn!(%error, %submission_id, "Trace Commons DB dual-write revocation mirror failed");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1397,6 +1476,224 @@ fn store_envelope(
     let path = root.join(&object_key);
     write_json_file(&path, envelope, "trace contribution envelope")?;
     Ok(object_key)
+}
+
+async fn mirror_submission_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    record: &TraceCommonsSubmissionRecord,
+    derived_record: &TraceCommonsDerivedRecord,
+    envelope: &TraceContributionEnvelope,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let envelope_json = serde_json::to_string_pretty(envelope)
+        .context("failed to serialize trace envelope for DB mirror hashing")?;
+    let object_ref_id = deterministic_trace_uuid("submitted-envelope", record);
+    let derived_id = deterministic_trace_uuid("derived-precheck", record);
+    let content_sha256 = sha256_prefixed(&envelope_json);
+    let privacy_risk = serde_storage_string(&record.privacy_risk)?;
+    let consent_scopes = consent_scope_storage_strings(&record.consent_scopes)?;
+    let credit_account_ref = envelope
+        .contributor
+        .credit_account_ref
+        .clone()
+        .or_else(|| record.contributor_pseudonym.clone())
+        .unwrap_or_else(|| record.auth_principal_ref.clone());
+
+    db.upsert_trace_submission(StorageTraceSubmissionWrite {
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        auth_principal_ref: record.auth_principal_ref.clone(),
+        contributor_pseudonym: record.contributor_pseudonym.clone(),
+        submitted_tenant_scope_ref: record.submitted_tenant_scope_ref.clone(),
+        schema_version: envelope.schema_version.clone(),
+        consent_policy_version: envelope.consent.policy_version.clone(),
+        consent_scopes: consent_scopes.clone(),
+        allowed_uses: consent_scopes,
+        retention_policy_id: "private_corpus_revocable".to_string(),
+        status: storage_corpus_status(record.status),
+        privacy_risk: privacy_risk.clone(),
+        redaction_pipeline_version: envelope.privacy.redaction_pipeline_version.clone(),
+        redaction_hash: envelope.privacy.redaction_hash.clone(),
+        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
+        submission_score: Some(record.submission_score),
+        credit_points_pending: Some(record.credit_points_pending),
+        credit_points_final: record.credit_points_final,
+        expires_at: None,
+    })
+    .await
+    .context("failed to mirror trace submission metadata")?;
+
+    db.append_trace_object_ref(StorageTraceObjectRefWrite {
+        object_ref_id,
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "trace_commons_file_store".to_string(),
+        object_key: record.object_key.clone(),
+        content_sha256: content_sha256.clone(),
+        encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
+        size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
+        compression: None,
+        created_by_job_id: None,
+    })
+    .await
+    .context("failed to mirror trace object ref")?;
+
+    db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
+        derived_id,
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: storage_derived_status(record.status),
+        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+        worker_version: "trace_commons_ingest_v1".to_string(),
+        input_object_ref: Some(ironclaw::trace_corpus_storage::TenantScopedTraceObjectRef {
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            object_ref_id,
+        }),
+        input_hash: content_sha256,
+        output_object_ref: None,
+        canonical_summary: Some(derived_record.canonical_summary.clone()),
+        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
+        task_success: Some(derived_record.task_success.clone()),
+        privacy_risk: Some(privacy_risk.clone()),
+        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
+        duplicate_score: Some(derived_record.duplicate_score),
+        novelty_score: Some(derived_record.novelty_score),
+        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
+            analysis
+                .cluster_id
+                .clone()
+                .or_else(|| analysis.nearest_cluster_id.clone())
+        }),
+    })
+    .await
+    .context("failed to mirror trace derived metadata")?;
+
+    db.append_trace_audit_event(StorageTraceAuditEventWrite {
+        audit_event_id: deterministic_trace_uuid("submit-audit", record),
+        tenant_id: record.tenant_id.clone(),
+        actor_principal_ref: record.auth_principal_ref.clone(),
+        actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
+        action: StorageTraceAuditAction::Submit,
+        reason: None,
+        request_id: None,
+        submission_id: Some(record.submission_id),
+        object_ref_id: Some(object_ref_id),
+        export_manifest_id: None,
+        decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
+        metadata: StorageTraceAuditSafeMetadata::Submission {
+            status: storage_corpus_status(record.status),
+            privacy_risk: privacy_risk.clone(),
+        },
+    })
+    .await
+    .context("failed to mirror trace audit event")?;
+
+    if record.status == TraceCorpusStatus::Accepted && record.credit_points_pending > 0.0 {
+        db.append_trace_credit_event(StorageTraceCreditEventWrite {
+            credit_event_id: deterministic_trace_uuid("accepted-credit", record),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            trace_id: record.trace_id,
+            credit_account_ref,
+            event_type: StorageTraceCreditEventType::Accepted,
+            points_delta: format!("{:.4}", record.credit_points_pending),
+            reason: "Accepted by Trace Commons ingest privacy checks.".to_string(),
+            external_ref: None,
+            actor_principal_ref: record.auth_principal_ref.clone(),
+            actor_role: "system".to_string(),
+            settlement_state: StorageTraceCreditSettlementState::Pending,
+        })
+        .await
+        .context("failed to mirror trace credit event")?;
+    }
+
+    Ok(())
+}
+
+async fn mirror_revocation_to_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    record: Option<&TraceCommonsSubmissionRecord>,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+
+    db.update_trace_submission_status(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceCorpusStatus::Revoked,
+        &tenant.principal_ref,
+        Some("contributor_revocation"),
+    )
+    .await
+    .context("failed to mirror trace revocation status")?;
+
+    if let Some(record) = record {
+        db.write_trace_tombstone(StorageTraceTombstoneWrite {
+            tombstone_id: deterministic_trace_uuid("revocation-tombstone", record),
+            tenant_id: record.tenant_id.clone(),
+            submission_id: record.submission_id,
+            trace_id: Some(record.trace_id),
+            redaction_hash: None,
+            canonical_summary_hash: None,
+            reason: "contributor_revocation".to_string(),
+            effective_at: Utc::now(),
+            retain_until: None,
+            created_by_principal_ref: tenant.principal_ref.clone(),
+        })
+        .await
+        .context("failed to mirror trace revocation tombstone")?;
+    }
+
+    Ok(())
+}
+
+fn deterministic_trace_uuid(label: &str, record: &TraceCommonsSubmissionRecord) -> Uuid {
+    let input = format!(
+        "ironclaw.trace_commons.{label}:{}:{}",
+        record.tenant_id, record.submission_id
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
+}
+
+fn storage_corpus_status(status: TraceCorpusStatus) -> StorageTraceCorpusStatus {
+    match status {
+        TraceCorpusStatus::Accepted => StorageTraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined => StorageTraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::Rejected => StorageTraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked => StorageTraceCorpusStatus::Revoked,
+    }
+}
+
+fn storage_derived_status(status: TraceCorpusStatus) -> StorageTraceDerivedStatus {
+    match status {
+        TraceCorpusStatus::Revoked => StorageTraceDerivedStatus::Revoked,
+        TraceCorpusStatus::Rejected => StorageTraceDerivedStatus::Invalidated,
+        TraceCorpusStatus::Accepted | TraceCorpusStatus::Quarantined => {
+            StorageTraceDerivedStatus::Current
+        }
+    }
+}
+
+fn consent_scope_storage_strings(scopes: &[ConsentScope]) -> anyhow::Result<Vec<String>> {
+    scopes.iter().map(serde_storage_string).collect()
+}
+
+fn serde_storage_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
+    let value = serde_json::to_value(value).context("failed to serialize storage enum")?;
+    value
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("storage enum did not serialize to a string"))
 }
 
 fn write_submission_record(
@@ -3068,8 +3365,13 @@ mod tests {
     use ironclaw::trace_contribution::{
         DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
     };
+    use ironclaw::trace_corpus_storage::TraceCorpusStore;
 
     fn test_state(root: PathBuf) -> Arc<AppState> {
+        test_state_with_db(root, None)
+    }
+
+    fn test_state_with_db(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
         let mut tokens = BTreeMap::new();
         insert_token(&mut tokens, "tenant-a", "token-a", TokenRole::Contributor);
         insert_token(&mut tokens, "tenant-a", "token-a-2", TokenRole::Contributor);
@@ -3089,6 +3391,7 @@ mod tests {
         Arc::new(AppState {
             root,
             tokens: Arc::new(tokens),
+            db_mirror,
         })
     }
 
@@ -3166,6 +3469,67 @@ mod tests {
             .expect("stored envelope reads");
         assert!(stored.contains("server-rescrub-v1"));
         assert!(!stored.contains("/tmp/ironclaw/private/token.txt"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn submit_dual_writes_to_db_mirror_when_configured() {
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_temp = tempfile::tempdir().expect("db temp dir");
+        let db_path = db_temp.path().join("trace-mirror.db");
+        let db = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("create libsql mirror"),
+        );
+        db.run_migrations().await.expect("run migrations");
+        let state = test_state_with_db(
+            temp.path().to_path_buf(),
+            Some(db.clone() as Arc<dyn Database>),
+        );
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        let submission_id = envelope.submission_id;
+
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            Json(envelope),
+        )
+        .await
+        .expect("submission succeeds");
+
+        assert_eq!(receipt.status, "accepted");
+        let mirrored = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("mirror query succeeds")
+            .expect("mirrored submission exists");
+        assert_eq!(mirrored.status, StorageTraceCorpusStatus::Accepted);
+        assert!(
+            db.get_trace_submission("tenant-b", submission_id)
+                .await
+                .expect("tenant-isolated mirror query succeeds")
+                .is_none()
+        );
+
+        let status = revoke_trace_handler(
+            State(state),
+            auth_headers("token-a"),
+            AxumPath(submission_id),
+        )
+        .await
+        .expect("revocation succeeds");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let revoked = db
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("revoked mirror query succeeds")
+            .expect("mirrored submission remains queryable");
+        assert_eq!(revoked.status, StorageTraceCorpusStatus::Revoked);
+        assert!(revoked.revoked_at.is_some());
     }
 
     #[tokio::test]
