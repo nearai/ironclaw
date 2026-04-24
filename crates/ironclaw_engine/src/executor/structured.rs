@@ -105,7 +105,7 @@ pub async fn execute_action_calls(
 
         // 2. Find the action definition and check policy
         let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
+            .available_actions(std::slice::from_ref(&lease), context)
             .await?
             .into_iter()
             .find(|a| action_name_matches(&a.name, &call.action_name));
@@ -514,8 +514,17 @@ mod tests {
         async fn available_actions(
             &self,
             _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 

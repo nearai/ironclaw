@@ -126,6 +126,7 @@ def signals_tool_intent(text):
         "read the", "write the", "create", "run the", "execute",
         "query", "retrieve", "add it", "add the", "add this",
         "add that", "update the", "delete", "remove the", "look into",
+        "stop", "pause", "cancel", "halt", "disable",
     ]
 
     for prefix in PREFIXES:
@@ -161,10 +162,33 @@ def signals_execution_intent(text):
         "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
         "send it", "send that", "send the ",
         "fetch it", "fetch that", "fetch the ",
+        "stop it", "stop that", "stop this", "stop the ",
+        "pause it", "pause that", "pause this", "pause the ",
+        "cancel it", "cancel that", "cancel this", "cancel the ",
+        "halt it", "halt that", "halt this", "halt the ",
+        "disable it", "disable that", "disable this", "disable the ",
         "please run ", "please execute ", "please fetch ",
         "please send ", "please deploy ",
+        "please stop ", "please pause ", "please cancel ",
+        "please halt ", "please disable ",
     ]
-    return any(phrase in lower for phrase in EXEC_PHRASES)
+    if any(phrase in lower for phrase in EXEC_PHRASES):
+        return True
+
+    # Bare imperative commands at the start of the message.
+    # "stop pinging", "stop", "pause", "cancel" are unambiguous commands
+    # that don't match the "verb + pronoun/article" pattern above.
+    # Checking startswith avoids false positives like "I can't stop".
+    # Strip trailing punctuation so "Stop." and "cancel!" still match.
+    trimmed = lower.strip().rstrip(".,!?;:")
+    IMPERATIVE_STARTS = ["stop ", "pause ", "cancel ", "halt ", "disable "]
+    BARE_COMMANDS = ["stop", "pause", "cancel", "halt", "disable"]
+    if trimmed in BARE_COMMANDS:
+        return True
+    if any(trimmed.startswith(s) for s in IMPERATIVE_STARTS):
+        return True
+
+    return False
 
 
 def format_output(result, max_chars=8000):

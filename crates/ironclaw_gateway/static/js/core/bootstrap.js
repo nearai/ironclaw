@@ -88,7 +88,6 @@ Object.defineProperty(window, 'currentThreadId', {
 });
 let currentThreadIsReadOnly = false;
 const threadChannelHints = new Map();
-let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;

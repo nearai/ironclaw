@@ -236,6 +236,7 @@ impl EffectExecutor for InstallThenAliasEffects {
     async fn available_actions(
         &self,
         _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
         Ok(vec![
             ActionDef {
@@ -253,6 +254,14 @@ impl EffectExecutor for InstallThenAliasEffects {
                 requires_approval: false,
             },
         ])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
     }
 }
 
@@ -348,6 +357,7 @@ impl EffectExecutor for GateMockEffects {
     async fn available_actions(
         &self,
         _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
     ) -> Result<Vec<ActionDef>, EngineError> {
         // requires_approval: false — the gate check is done by the mock's
         // execute_action() returning GatePaused, not by the PolicyEngine.
@@ -374,6 +384,14 @@ impl EffectExecutor for GateMockEffects {
                 requires_approval: false,
             },
         ])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
     }
 }
 

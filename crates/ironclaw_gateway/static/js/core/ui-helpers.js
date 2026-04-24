@@ -251,7 +251,6 @@ document.getElementById('restart-confirm-btn').addEventListener('click', () => c
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
-document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
@@ -334,7 +333,7 @@ document.addEventListener('click', function(e) {
       crBackToOverview();
       break;
     case 'cr-close-detail':
-      document.getElementById('cr-detail').style.display = 'none';
+      closeCrDetail();
       break;
     case 'cr-att-click':
       if (el.dataset.project) drillIntoProject(el.dataset.project);
@@ -342,12 +341,15 @@ document.addEventListener('click', function(e) {
     case 'cr-new-project':
       crNewProject();
       break;
+    case 'open-project-mission':
+      openMissionFromProjects(el.dataset.id);
+      break;
     case 'open-mission':
       openMissionDetail(el.dataset.id);
       break;
     case 'close-mission-detail':
       if (crCurrentProjectId) {
-        document.getElementById('cr-detail').style.display = 'none';
+        closeCrDetail();
       } else {
         closeMissionDetail();
       }
@@ -369,7 +371,7 @@ document.addEventListener('click', function(e) {
       break;
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
-      else document.getElementById('cr-detail').style.display = 'none';
+      else closeCrDetail();
       break;
     case 'open-active-work':
       if (el.dataset.kind === 'job') {

@@ -30,6 +30,8 @@ use monty::{
 };
 use tracing::{debug, warn};
 
+use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
+use super::thread_context::thread_execution_context;
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
 use crate::memory::RetrievalEngine;
@@ -45,108 +47,9 @@ use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
-use ironclaw_common::ValidTimezone;
-
-use super::scripting::{execute_code, json_to_monty, monty_to_json, monty_to_string};
 
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
-
-/// Action name of the `thread_metadata_set` tool. Kept in one place so the
-/// post-execution hook below and any future refactors stay in sync.
-const THREAD_METADATA_SET_ACTION: &str = "thread_metadata_set";
-
-/// Max length (chars) of the compact thread-state system message appended
-/// before each LLM call. Prevents a skill from blowing up the context
-/// window by writing megabytes of metadata — the tool itself caps patch
-/// size, but compounded namespaces could still grow.
-const THREAD_METADATA_PROMPT_MAX_CHARS: usize = 1024;
-
-/// If the successful action was `thread_metadata_set`, apply the patch it
-/// echoed back in its output to the in-memory `thread.metadata`. The tool
-/// itself does not persist — the next `save_thread` on the running executor
-/// carries the mutation to disk.
-///
-/// Semantics: replace-at-top-level-key. Each top-level key in the patch
-/// overwrites the matching key in `thread.metadata` wholesale. See the
-/// tool's module doc for the rationale (namespace-per-skill, no silent
-/// cross-skill drops).
-fn apply_thread_metadata_set_output(
-    thread: &mut Thread,
-    action_name: &str,
-    output: &serde_json::Value,
-) {
-    if action_name != THREAD_METADATA_SET_ACTION {
-        return;
-    }
-    let patch_str = match output {
-        serde_json::Value::String(s) => s.as_str(),
-        _ => return,
-    };
-    let patch: serde_json::Value = match serde_json::from_str(patch_str) {
-        Ok(v) => v,
-        Err(e) => {
-            debug!("thread_metadata_set output parse failed: {e}");
-            return;
-        }
-    };
-    let Some(patch_obj) = patch.as_object() else {
-        return;
-    };
-
-    // Ensure thread.metadata is an object before merging.
-    if !thread.metadata.is_object() {
-        thread.metadata = serde_json::Value::Object(serde_json::Map::new());
-    }
-    if let Some(meta_obj) = thread.metadata.as_object_mut() {
-        for (k, v) in patch_obj {
-            meta_obj.insert(k.clone(), v.clone());
-        }
-    }
-    thread.updated_at = chrono::Utc::now();
-}
-
-/// Build the compact thread-state section merged into the leading system
-/// message just before each LLM call. Returns `None` when `thread.metadata`
-/// is empty or contains only engine-internal housekeeping (e.g. the
-/// `runtime_checkpoint` blob the orchestrator stashes for resume).
-///
-/// The format is intentionally terse — one line of compact JSON — because
-/// it will be re-sent on every LLM turn.
-fn thread_metadata_prompt_section(thread: &Thread) -> Option<String> {
-    let obj = thread.metadata.as_object()?;
-    // Skip engine-internal keys so the LLM only sees skill-written state.
-    const SKIP: &[&str] = &[
-        "runtime_checkpoint",
-        "orchestrator_version",
-        "active_skills",
-        "pending_approval",
-        "user_timezone",
-        "source_channel",
-    ];
-    let filtered: serde_json::Map<String, serde_json::Value> = obj
-        .iter()
-        .filter(|(k, _)| !SKIP.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    if filtered.is_empty() {
-        return None;
-    }
-
-    let compact = serde_json::to_string(&serde_json::Value::Object(filtered)).ok()?;
-    let compact = if compact.chars().count() > THREAD_METADATA_PROMPT_MAX_CHARS {
-        let truncated: String = compact
-            .chars()
-            .take(THREAD_METADATA_PROMPT_MAX_CHARS)
-            .collect();
-        format!("{truncated}…")
-    } else {
-        compact
-    };
-    Some(format!(
-        "thread_state: {compact}\n(Patch via thread_metadata_set; replace-at-top-level-key.)"
-    ))
-}
 
 /// Well-known title for orchestrator code in the Store.
 pub const ORCHESTRATOR_TITLE: &str = "orchestrator:main";
@@ -160,24 +63,6 @@ pub struct OrchestratorResult {
     pub outcome: ThreadOutcome,
     /// Total tokens used by LLM calls within the orchestrator.
     pub tokens_used: TokenUsage,
-}
-
-/// Extract source_channel from thread metadata (set by ConversationManager).
-fn thread_source_channel(thread: &Thread) -> Option<String> {
-    thread
-        .metadata
-        .get("source_channel")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract and validate user_timezone from thread metadata (set by bridge router).
-fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
-    thread
-        .metadata
-        .get("user_timezone")
-        .and_then(|v| v.as_str())
-        .and_then(ValidTimezone::parse)
 }
 
 fn normalize_pause_outcome(
@@ -578,7 +463,11 @@ pub async fn execute_orchestrator(
     let tracker = LimitedTracker::new(orchestrator_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
@@ -720,7 +609,7 @@ pub async fn execute_orchestrator(
 
                 // Resume the orchestrator VM
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -750,7 +639,7 @@ pub async fn execute_orchestrator(
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lookup.resume(
                         NameLookupResult::Undefined,
-                        PrintWriter::Collect(&mut stdout),
+                        PrintWriter::CollectString(&mut stdout),
                     )
                 })) {
                     Ok(Ok(p)) => progress = p,
@@ -809,32 +698,10 @@ async fn handle_llm_complete(
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
-    let mut messages = explicit_messages
+    let messages = explicit_messages
         .as_ref()
         .and_then(json_to_thread_messages)
         .unwrap_or_else(|| thread.messages.clone());
-
-    // Surface a compact `thread_state: {…}` section so the LLM sees
-    // current thread metadata on every turn and can patch it via
-    // `thread_metadata_set`. Engine-internal keys are filtered out —
-    // see `thread_metadata_prompt_section`.
-    //
-    // Must merge into the existing leading system message rather than
-    // appending a trailing one: several LLM providers (NearAI/Qwen in
-    // particular) reject requests where a system message appears after
-    // any non-system message — "System message must be at the beginning".
-    if let Some(section) = thread_metadata_prompt_section(thread) {
-        use crate::types::message::MessageRole;
-        match messages.first_mut() {
-            Some(first) if first.role == MessageRole::System => {
-                first.content.push_str("\n\n");
-                first.content.push_str(&section);
-            }
-            _ => {
-                messages.insert(0, ThreadMessage::system(section));
-            }
-        }
-    }
 
     if let Err(e) = reconcile_dynamic_tool_lease(
         thread,
@@ -849,9 +716,10 @@ async fn handle_llm_complete(
     }
 
     let active_leases = deps.leases.active_for_thread(thread.id).await;
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
     let actions = deps
         .effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, &actions_context)
         .await
         .unwrap_or_default();
 
@@ -951,18 +819,7 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: None,
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-        thread_metadata: thread.metadata.clone(),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), None);
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -1127,18 +984,7 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let exec_ctx = ThreadExecutionContext {
-        thread_id: thread.id,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: thread.user_id.clone(),
-        step_id: StepId::new(),
-        current_call_id: Some(call_id.clone()),
-        source_channel: thread_source_channel(thread),
-        user_timezone: thread_user_timezone(thread),
-        thread_goal: Some(thread.goal.clone()),
-        thread_metadata: thread.metadata.clone(),
-    };
+    let exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1186,7 +1032,7 @@ async fn handle_execute_action(
 
     // 2. Check policy
     let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
+        .available_actions(std::slice::from_ref(&lease), &exec_ctx)
         .await
         .ok()
         .and_then(|actions| actions.into_iter().find(|a| a.name == name));
@@ -1340,7 +1186,6 @@ async fn handle_execute_action(
                     &name,
                     &r.output,
                 );
-                apply_thread_metadata_set_output(thread, &name, &r.output);
             }
             let result = serde_json::json!({
                 "action_name": r.action_name,
@@ -1528,8 +1373,9 @@ async fn handle_execute_actions_parallel(
         };
 
         // Check policy
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let action_def = effects
-            .available_actions(std::slice::from_ref(&lease))
+            .available_actions(std::slice::from_ref(&lease), &exec_ctx)
             .await
             .ok()
             .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
@@ -1688,23 +1534,7 @@ async fn handle_execute_actions_parallel(
         // Single call: execute directly
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
-        let exec_ctx = ThreadExecutionContext {
-            thread_id: thread.id,
-            thread_type: thread.thread_type,
-            project_id: thread.project_id,
-            user_id: thread.user_id.clone(),
-            step_id,
-            current_call_id: Some(pc.call_id.clone()),
-            // Read source_channel from thread metadata so downstream tools
-            // (e.g. mission_create) can default notify_channels to the
-            // originating channel. Hardcoding `None` here was a bug — it
-            // silently dropped the gateway routing for any tool dispatched
-            // through the parallel batch path.
-            source_channel: thread_source_channel(thread),
-            user_timezone: thread_user_timezone(thread),
-            thread_goal: Some(thread.goal.clone()),
-            thread_metadata: thread.metadata.clone(),
-        };
+        let exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1728,29 +1558,13 @@ async fn handle_execute_actions_parallel(
         let effects = effects.clone();
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
-        let parallel_source_channel = thread_source_channel(thread);
-        let parallel_user_timezone = thread_user_timezone(thread);
-        let parallel_thread_metadata = thread.metadata.clone();
-
         for (idx, lease) in runnable {
             let pc_name = parsed[idx].name.clone();
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let exec_ctx = ThreadExecutionContext {
-                thread_id: thread.id,
-                thread_type: thread.thread_type,
-                project_id: thread.project_id,
-                user_id: thread.user_id.clone(),
-                step_id,
-                current_call_id: Some(pc_call_id.clone()),
-                // See comment above — read from thread metadata, not None.
-                source_channel: parallel_source_channel.clone(),
-                user_timezone: parallel_user_timezone,
-                thread_goal: Some(thread.goal.clone()),
-                thread_metadata: parallel_thread_metadata.clone(),
-            };
+            let exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -1792,15 +1606,9 @@ async fn handle_execute_actions_parallel(
         let result_json = slot_results[idx].take().unwrap_or(
             serde_json::json!({"is_error": true, "output": {"error": "execution slot empty"}}),
         );
-        let output = slot_outputs[idx]
+        let _output = slot_outputs[idx]
             .take()
             .unwrap_or(serde_json::json!({"error": "no output"}));
-
-        // ActionExecuted (non-error) events gate the metadata-patch hook —
-        // parallel calls that failed their tool body still arrive with a
-        // `result_json.is_error == true`, but the event kind is the
-        // authoritative "did this side effect succeed" signal.
-        let succeeded = matches!(slot_events[idx], Some(EventKind::ActionExecuted { .. }));
 
         if let Some(event) = slot_events[idx].take() {
             let ev = ThreadEvent::new(thread.id, event);
@@ -1808,10 +1616,6 @@ async fn handle_execute_actions_parallel(
                 let _ = tx.send(ev.clone());
             }
             thread.events.push(ev);
-        }
-
-        if succeeded {
-            apply_thread_metadata_set_output(thread, &parsed[idx].name, &output);
         }
 
         results_json.push(result_json.clone());
@@ -2191,7 +1995,11 @@ async fn handle_get_actions(
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
-    match effects.available_actions(&active_leases).await {
+    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    match effects
+        .available_actions(&active_leases, &actions_context)
+        .await
+    {
         Ok(actions) => {
             let actions_json: Vec<serde_json::Value> = actions
                 .iter()
@@ -3057,7 +2865,7 @@ mod tests {
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
         let mut progress = runner
-            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .start(vec![], tracker, PrintWriter::CollectString(&mut stdout))
             .expect("Failed to start orchestrator test");
 
         loop {
@@ -3068,7 +2876,7 @@ mod tests {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         );
                         return val;
                     }
@@ -3077,14 +2885,14 @@ mod tests {
                         _ => ExtFunctionResult::Return(MontyObject::None),
                     };
                     progress = call
-                        .resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        .resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         .expect("resume failed");
                 }
                 RunProgress::NameLookup(lookup) => {
                     progress = lookup
                         .resume(
                             NameLookupResult::Undefined,
-                            PrintWriter::Collect(&mut stdout),
+                            PrintWriter::CollectString(&mut stdout),
                         )
                         .expect("name lookup resume failed");
                 }
@@ -3289,6 +3097,114 @@ mod tests {
         // "If you want, I can fetch..." uses "I can" which is not a V1 prefix
         assert!(!eval_python_bool(
             r#"signals_tool_intent("If you want, I can next fetch a cleaner update.")"#
+        ));
+    }
+
+    // ── Stop / pause / cancel intent (mission lifecycle) ─────────
+
+    #[test]
+    fn signals_tool_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll stop the mission now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me pause the ticker.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll cancel the monitoring.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to halt the recurring task.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I will disable the mission.")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_stop_discussion() {
+        // "let me explain" is in EXCLUSIONS — blocks the entire text
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain how to stop the mission.")"#
+        ));
+        // Past tense should not trigger
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I already stopped the mission.")"#
+        ));
+    }
+
+    // ── Execution intent: stop / pause / cancel ────────────────
+
+    #[test]
+    fn signals_execution_intent_stop_pause_cancel() {
+        assert!(eval_python_bool(r#"signals_execution_intent("stop it")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("pause the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("cancel that")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please stop the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please pause everything")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop() {
+        // Bare imperative commands — the exact user messages from #2808
+        assert!(eval_python_bool(r#"signals_execution_intent("stop")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging")"#
+        ));
+        assert!(eval_python_bool(r#"signals_execution_intent("pause")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("halt")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_no_false_positive_stop_in_sentence() {
+        // "stop" mid-sentence should NOT trigger — only at the start
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("I can't stop thinking about it")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_execution_intent("how do I stop a mission?")"#
+        ));
+    }
+
+    #[test]
+    fn signals_execution_intent_halt_disable_phrases() {
+        // "halt/disable" pronoun+article phrases and "please halt/disable"
+        assert!(eval_python_bool(r#"signals_execution_intent("halt that")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable it")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("disable the ticker")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please halt the mission")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("please disable the routine")"#
+        ));
+        // Bare "disable" command
+        assert!(eval_python_bool(r#"signals_execution_intent("disable")"#));
+    }
+
+    #[test]
+    fn signals_execution_intent_bare_stop_with_punctuation() {
+        // Bare commands with trailing punctuation must still match
+        assert!(eval_python_bool(r#"signals_execution_intent("stop.")"#));
+        assert!(eval_python_bool(r#"signals_execution_intent("cancel!")"#));
+        assert!(eval_python_bool(
+            r#"signals_execution_intent("stop pinging.")"#
         ));
     }
 
@@ -3772,7 +3688,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
         ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }

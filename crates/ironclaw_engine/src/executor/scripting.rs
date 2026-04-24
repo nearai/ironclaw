@@ -432,7 +432,7 @@ pub async fn execute_code_with_skills(
     // resolves the name before calling it, and Undefined → NameError.
     let active_leases = leases.active_for_thread(thread.id).await;
     let mut known_actions: std::collections::HashSet<String> = effects
-        .available_actions(&active_leases)
+        .available_actions(&active_leases, context)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -481,7 +481,11 @@ pub async fn execute_code_with_skills(
     let tracker = LimitedTracker::new(default_limits());
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runner.start(input_values, tracker, PrintWriter::Collect(&mut stdout))
+        runner.start(
+            input_values,
+            tracker,
+            PrintWriter::CollectString(&mut stdout),
+        )
     }));
 
     let mut progress = match run_result {
@@ -624,7 +628,7 @@ pub async fn execute_code_with_skills(
                 if let Some(ext_result) = sync_result {
                     // Sync resume for builtins
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                        call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
@@ -662,7 +666,7 @@ pub async fn execute_code_with_skills(
                 // resume_pending and continue — no preflight needed.
                 if pending_futures.contains_key(&monty_call_id) {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        call.resume_pending(PrintWriter::Collect(&mut stdout))
+                        call.resume_pending(PrintWriter::CollectString(&mut stdout))
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
@@ -748,7 +752,7 @@ pub async fn execute_code_with_skills(
 
                         // Resume with pending future — Python gets ExternalFuture
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            call.resume_pending(PrintWriter::Collect(&mut stdout))
+                            call.resume_pending(PrintWriter::CollectString(&mut stdout))
                         })) {
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
@@ -783,7 +787,7 @@ pub async fn execute_code_with_skills(
                     PreflightResult::Denied(ext_result) => {
                         // Resume with error — Python sees an exception
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            call.resume(ext_result, PrintWriter::Collect(&mut stdout))
+                            call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
                         })) {
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
@@ -881,7 +885,7 @@ pub async fn execute_code_with_skills(
                 }
 
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    resolve.resume(results, PrintWriter::Collect(&mut stdout))
+                    resolve.resume(results, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -934,7 +938,7 @@ pub async fn execute_code_with_skills(
                 };
 
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    lookup.resume(result, PrintWriter::Collect(&mut stdout))
+                    lookup.resume(result, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -989,7 +993,7 @@ pub async fn execute_code_with_skills(
                     ))
                 });
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    os_call.resume(reply, PrintWriter::Collect(&mut stdout))
+                    os_call.resume(reply, PrintWriter::CollectString(&mut stdout))
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
@@ -1147,7 +1151,7 @@ async fn preflight_action(
     };
 
     let action_def = effects
-        .available_actions(std::slice::from_ref(&lease))
+        .available_actions(std::slice::from_ref(&lease), context)
         .await
         .ok()
         .and_then(|actions| actions.into_iter().find(|a| a.name == action_name));
@@ -1980,8 +1984,17 @@ mod tests {
         async fn available_actions(
             &self,
             _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 
