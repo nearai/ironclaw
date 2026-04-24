@@ -1488,6 +1488,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extensions_list_handler_falls_back_to_legacy_active_name_when_user_has_no_instance()
+     {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (ext_mgr, db, _secrets, state, _db_dir, _tools_dir, channels_dir) =
+            make_multi_tenant_extension_test_fixture().await;
+        insert_test_user(&db, "tenant-a", "member").await;
+        insert_test_user(&db, "tenant-b", "member").await;
+        std::fs::write(channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "setup": { "required_secrets": [{ "name": "BOT_TOKEN", "prompt": "Enter bot token" }] },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+        db.create_channel_instance(&crate::db::ChannelInstanceRecord {
+            id: uuid::Uuid::new_v4(),
+            user_id: "tenant-b".to_string(),
+            channel_kind: "telegram".to_string(),
+            instance_key: "telegram".to_string(),
+            display_name: "Tenant B Telegram".to_string(),
+            is_primary: true,
+            enabled: true,
+            config: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            last_error: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create tenant-b instance");
+        ext_mgr
+            .set_active_channels(vec!["telegram".to_string()])
+            .await;
+
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req_tenant_a = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("tenant-a request");
+        req_tenant_a.extensions_mut().insert(UserIdentity {
+            user_id: "tenant-a".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let resp_tenant_a = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req_tenant_a)
+            .await
+            .expect("tenant-a response");
+        assert_eq!(resp_tenant_a.status(), StatusCode::OK);
+        let body_tenant_a = axum::body::to_bytes(resp_tenant_a.into_body(), 1024 * 64)
+            .await
+            .expect("tenant-a body");
+        let parsed_tenant_a: serde_json::Value =
+            serde_json::from_slice(&body_tenant_a).expect("tenant-a json");
+        let telegram_tenant_a = parsed_tenant_a["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("tenant-a telegram entry");
+        assert_eq!(telegram_tenant_a["active"], true);
+    }
+
+    #[tokio::test]
     async fn test_extensions_list_handler_isolates_owner_binding_status_per_tenant_instance() {
         use crate::secrets::CreateSecretParams;
         use axum::body::Body;

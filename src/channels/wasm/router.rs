@@ -295,6 +295,14 @@ async fn health_handler(State(state): State<RouterState>) -> impl IntoResponse {
     })
 }
 
+fn is_valid_webhook_dispatch_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('/')
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && !path.contains("..")
+}
+
 /// Generic webhook handler that routes to the appropriate WASM channel.
 async fn webhook_handler(
     State(state): State<RouterState>,
@@ -304,6 +312,16 @@ async fn webhook_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    if !is_valid_webhook_dispatch_path(&path) {
+        tracing::warn!(path = %path, "Rejected invalid webhook dispatch path");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid webhook path",
+            })),
+        );
+    }
+
     let full_path = format!("/webhook/{}", path);
 
     tracing::info!(
@@ -1483,6 +1501,25 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Valid Telegram webhook secret should not return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_invalid_dispatch_key_path_segments() {
+        let app = create_wasm_channel_router(Arc::new(WasmChannelRouter::new()), None);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/tenant-a..telegram")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Invalid dispatch-key path segments should be rejected at the webhook boundary"
         );
     }
 
