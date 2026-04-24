@@ -187,7 +187,7 @@ fn summarize_extension(
     } else {
         None
     };
-    let action_preview = action_preview_for_extension(extension, latent_action_preview);
+    let action_preview = action_preview_for_extension(extension, latent_action_preview, status);
 
     Some(CapabilitySummary {
         name: extension.name.clone(),
@@ -257,11 +257,28 @@ pub(crate) fn capability_status_for_extension(
 fn action_preview_for_extension(
     extension: &InstalledExtension,
     latent_action_preview: Option<&Vec<String>>,
+    status: CapabilityStatus,
 ) -> Vec<String> {
-    if !extension.tools.is_empty() {
-        return extension.tools.clone();
+    const MAX_ACTION_PREVIEW: usize = 3;
+
+    if !matches!(
+        status,
+        CapabilityStatus::NeedsAuth
+            | CapabilityStatus::NeedsSetup
+            | CapabilityStatus::Inactive
+            | CapabilityStatus::Latent
+            | CapabilityStatus::AvailableNotInstalled
+    ) {
+        return Vec::new();
     }
-    latent_action_preview.cloned().unwrap_or_default()
+
+    let mut preview = if !extension.tools.is_empty() {
+        extension.tools.clone()
+    } else {
+        latent_action_preview.cloned().unwrap_or_default()
+    };
+    preview.truncate(MAX_ACTION_PREVIEW);
+    preview
 }
 
 fn latent_action_previews(latent_actions: &[LatentProviderAction]) -> HashMap<String, Vec<String>> {
@@ -280,6 +297,7 @@ fn latent_action_previews(latent_actions: &[LatentProviderAction]) -> HashMap<St
 fn summarize_latent_only_providers(
     latent_actions: &[LatentProviderAction],
 ) -> Vec<CapabilitySummary> {
+    const MAX_ACTION_PREVIEW: usize = 3;
     let mut summaries = BTreeMap::<String, CapabilitySummary>::new();
 
     for latent in latent_actions {
@@ -294,7 +312,9 @@ fn summarize_latent_only_providers(
             routing_hint: None,
         });
         let canonical_name = latent.action_name.replace('-', "_");
-        if !summary.action_preview.contains(&canonical_name) {
+        if summary.action_preview.len() < MAX_ACTION_PREVIEW
+            && !summary.action_preview.contains(&canonical_name)
+        {
             summary.action_preview.push(canonical_name);
         }
     }
@@ -458,6 +478,55 @@ mod tests {
         assert_eq!(projected[0].name, "gmail");
         assert_eq!(projected[0].status, CapabilityStatus::Inactive);
         assert_eq!(projected[0].action_preview, vec!["gmail_send".to_string()]);
+    }
+
+    #[test]
+    fn ready_scoped_channels_do_not_clone_tool_lists_into_capability_payload() {
+        let mut telegram = installed_extension("telegram", ExtensionKind::WasmChannel);
+        telegram.tools = vec![
+            "telegram_send".into(),
+            "telegram_history".into(),
+            "telegram_delete".into(),
+        ];
+
+        let snapshot = CapabilityRuntimeSnapshot {
+            extensions: vec![telegram],
+            latent_actions: Vec::new(),
+            channel_routes: HashMap::from([("telegram".to_string(), "actor".to_string())]),
+        };
+
+        let projected = CapabilityProjector::project_snapshot(snapshot, &[]);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].status, CapabilityStatus::ReadyScoped);
+        assert!(projected[0].action_preview.is_empty());
+    }
+
+    #[test]
+    fn activatable_previews_are_capped_to_prompt_slice() {
+        let mut gmail = available_extension("gmail");
+        gmail.tools = vec![
+            "gmail_send".into(),
+            "gmail_read".into(),
+            "gmail_archive".into(),
+            "gmail_delete".into(),
+        ];
+
+        let snapshot = CapabilityRuntimeSnapshot {
+            extensions: vec![gmail],
+            latent_actions: Vec::new(),
+            channel_routes: HashMap::new(),
+        };
+
+        let projected = CapabilityProjector::project_snapshot(snapshot, &[]);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].action_preview,
+            vec![
+                "gmail_send".to_string(),
+                "gmail_read".to_string(),
+                "gmail_archive".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -78,7 +78,43 @@ pub async fn execute_action_calls(
     // the entire batch immediately. Denied/no-lease calls become error results.
 
     for (idx, call) in calls.iter().enumerate() {
-        // 1. Find the lease for this action (read-only lookup for policy check)
+        // 1. Find the action definition from the callable inventory.
+        let action_def = available_actions
+            .iter()
+            .find(|action| action.matches_name(&call.action_name));
+
+        let Some(action_def) = action_def else {
+            let error = format!(
+                "action '{}' is not callable in this execution context",
+                call.action_name
+            );
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"error": error}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ActionFailed {
+                step_id: context.step_id,
+                action_name: call.action_name.clone(),
+                call_id: call.id.clone(),
+                error: error_result.output["error"]
+                    .as_str()
+                    .unwrap_or("action is not callable in this execution context")
+                    .to_string(),
+                duration_ms: 0,
+                params_summary: None,
+            };
+            preflight_results.push(PreflightOutcome::Error {
+                index: idx,
+                result: error_result,
+                event,
+            });
+            continue;
+        };
+
+        // 2. Find the lease for this action (read-only lookup for policy check)
         let lease = match leases
             .find_lease_for_action(thread.id, &call.action_name)
             .await
@@ -111,76 +147,70 @@ pub async fn execute_action_calls(
             }
         };
 
-        // 2. Find the action definition and check policy
-        let action_def = available_actions
-            .iter()
-            .find(|action| action.matches_name(&call.action_name));
-
-        if let Some(action_def) = action_def {
-            let decision = policy.evaluate(action_def, &lease, capability_policies);
-            match decision {
-                PolicyDecision::Deny { reason } => {
-                    let error_result = ActionResult {
-                        call_id: call.id.clone(),
-                        action_name: call.action_name.clone(),
-                        output: serde_json::json!({"error": format!("denied: {reason}")}),
-                        is_error: true,
-                        duration: std::time::Duration::ZERO,
-                    };
-                    let event = EventKind::ActionFailed {
-                        step_id: context.step_id,
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        error: reason,
-                        duration_ms: 0,
-                        params_summary: None,
-                    };
-                    preflight_results.push(PreflightOutcome::Error {
-                        index: idx,
-                        result: error_result,
-                        event,
-                    });
-                    continue;
-                }
-                PolicyDecision::RequireApproval { .. } => {
-                    // Collect error results from earlier preflight failures
-                    for pf in preflight_results {
-                        if let PreflightOutcome::Error { result, event, .. } = pf {
-                            early_results.push(result);
-                            early_events.push(event);
-                        }
-                    }
-                    early_events.push(EventKind::ApprovalRequested {
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        parameters: Some(call.parameters.clone()),
-                        description: None,
-                        allow_always: None,
-                        gate_name: None,
-                        params_summary: crate::types::event::summarize_params(
-                            &call.action_name,
-                            &call.parameters,
-                        ),
-                    });
-                    return Ok(ActionBatchResult {
-                        results: early_results,
-                        events: early_events,
-                        need_approval: Some(ThreadOutcome::GatePaused {
-                            gate_name: "approval".into(),
-                            action_name: call.action_name.clone(),
-                            call_id: call.id.clone(),
-                            parameters: call.parameters.clone(),
-                            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
-                            resume_output: None,
-                            paused_lease: None,
-                        }),
-                    });
-                }
-                PolicyDecision::Allow => {}
+        // 3. Check policy for the callable action.
+        let decision = policy.evaluate(action_def, &lease, capability_policies);
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                let error_result = ActionResult {
+                    call_id: call.id.clone(),
+                    action_name: call.action_name.clone(),
+                    output: serde_json::json!({"error": format!("denied: {reason}")}),
+                    is_error: true,
+                    duration: std::time::Duration::ZERO,
+                };
+                let event = EventKind::ActionFailed {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    error: reason,
+                    duration_ms: 0,
+                    params_summary: None,
+                };
+                preflight_results.push(PreflightOutcome::Error {
+                    index: idx,
+                    result: error_result,
+                    event,
+                });
+                continue;
             }
+            PolicyDecision::RequireApproval { .. } => {
+                // Collect error results from earlier preflight failures
+                for pf in preflight_results {
+                    if let PreflightOutcome::Error { result, event, .. } = pf {
+                        early_results.push(result);
+                        early_events.push(event);
+                    }
+                }
+                early_events.push(EventKind::ApprovalRequested {
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    parameters: Some(call.parameters.clone()),
+                    description: None,
+                    allow_always: None,
+                    gate_name: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                });
+                return Ok(ActionBatchResult {
+                    results: early_results,
+                    events: early_events,
+                    need_approval: Some(ThreadOutcome::GatePaused {
+                        gate_name: "approval".into(),
+                        action_name: call.action_name.clone(),
+                        call_id: call.id.clone(),
+                        parameters: call.parameters.clone(),
+                        resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+                        resume_output: None,
+                        paused_lease: None,
+                    }),
+                });
+            }
+            PolicyDecision::Allow => {}
         }
 
-        // 3. Atomically find + consume a lease use under a single write lock.
+        // 4. Atomically find + consume a lease use under a single write lock.
         // This avoids the TOCTOU race where a concurrent call could exhaust
         // the lease between our read-only find (step 1) and this consume.
         let lease = leases
@@ -1463,5 +1493,106 @@ mod tests {
             serde_json::json!("gmail_send")
         );
         assert!(!result.results[0].is_error);
+    }
+
+    struct DiscoverableOnlyEffects {
+        executed: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for DiscoverableOnlyEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            _params: serde_json::Value,
+            _lease: &CapabilityLease,
+            _ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            self.executed.lock().unwrap().push(name.to_string());
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: name.to_string(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(Vec::new())
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: Vec::new(),
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    discovery: None,
+                }],
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_rejects_discoverable_only_actions() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let executed = Arc::new(Mutex::new(Vec::new()));
+        let effects: Arc<dyn EffectExecutor> = Arc::new(DiscoverableOnlyEffects {
+            executed: Arc::clone(&executed),
+        });
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_discoverable_only".into(),
+            action_name: "gmail_send".into(),
+            parameters: serde_json::json!({"to": "person@example.com"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].is_error);
+        assert!(
+            result.results[0].output["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not callable in this execution context")
+        );
+        assert!(executed.lock().unwrap().is_empty());
     }
 }

@@ -25,17 +25,18 @@ fn mission_action(
     parameters_schema: serde_json::Value,
     summary: Option<ActionDiscoverySummary>,
 ) -> ActionDef {
+    let discovery = summary.map(|summary| ActionDiscoveryMetadata {
+        name: name.to_string(),
+        summary: Some(summary),
+        schema_override: None,
+    });
     ActionDef {
         name: name.to_string(),
         description: description.to_string(),
         parameters_schema,
         effects: vec![],
         requires_approval: false,
-        discovery: Some(ActionDiscoveryMetadata {
-            name: name.to_string(),
-            summary,
-            schema_override: None,
-        }),
+        discovery,
     }
 }
 
@@ -215,7 +216,7 @@ mod tests {
         assert!(!props.contains_key("config"));
 
         let list = action("mission_list");
-        assert!(list.discovery.is_some());
+        assert!(list.discovery.is_none());
         assert!(list.discovery_summary().is_none());
         assert_eq!(list.discovery_schema(), &list.parameters_schema);
     }

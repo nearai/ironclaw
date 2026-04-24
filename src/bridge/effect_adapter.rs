@@ -7033,7 +7033,7 @@ Use this skill to set up a Pika meeting.
             .iter()
             .find(|action| action.name == "mission_list")
             .expect("mission_list should be advertised");
-        assert!(mission_list.discovery.is_some());
+        assert!(mission_list.discovery.is_none());
         assert!(mission_list.discovery_summary().is_none());
     }
 
