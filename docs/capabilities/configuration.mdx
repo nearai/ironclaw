@@ -1,0 +1,352 @@
+---
+title: Configuration
+sidebarTitle: Configuration
+description: Complete environment variable reference for IronClaw
+---
+
+IronClaw is configured primarily through environment variables. This page documents all available configuration options.
+
+## Two-Layer Configuration
+
+IronClaw uses a two-layer configuration system:
+
+<AccordionGroup>
+  <Accordion title="Layer 1: ~/.ironclaw/.env (Bootstrap)" icon="file">
+    Contains settings needed **before** database connection:
+
+    - `DATABASE_BACKEND` — Which database to use
+    - `DATABASE_URL` — PostgreSQL connection string
+    - `LIBSQL_PATH` — libSQL database file path
+    - `LLM_BACKEND` — Which LLM provider to use
+    - `NEARAI_API_KEY` — NEAR AI Cloud API key (if using that mode)
+
+    Written automatically by the onboarding wizard.
+  </Accordion>
+
+  <Accordion title="Layer 2: Database Settings" icon="database">
+    All other settings are stored in the database and loaded at runtime:
+
+    - Channel configuration
+    - Model selection
+    - Embeddings settings
+    - Skills configuration
+    - Heartbeat settings
+
+    Managed through the wizard or `ironclaw config` command.
+  </Accordion>
+</AccordionGroup>
+
+## Configuration Categories
+
+<CardGroup cols={2}>
+  <Card title="Agent Settings" icon="bot" href="#agent-settings">
+    AGENT_NAME, MAX_PARALLEL_JOBS, timeouts, cost limits
+  </Card>
+
+  <Card title="Database" icon="database" href="#database">
+    DATABASE_BACKEND, DATABASE_URL, LIBSQL_PATH
+  </Card>
+
+  <Card title="LLM / Inference" icon="brain" href="#llm--inference">
+    NEARAI_*, ANTHROPIC_*, OPENAI_*, OLLAMA_*
+  </Card>
+
+  <Card title="Channels" icon="message-square" href="#channels">
+    GATEWAY_*, HTTP_*, TELEGRAM_*, SIGNAL_*
+  </Card>
+
+  <Card title="Embeddings" icon="search" href="#embeddings">
+    EMBEDDING_*, OPENAI_API_KEY
+  </Card>
+
+  <Card title="Sandbox" icon="container" href="#sandbox">
+    SANDBOX_*, CLAUDE_CODE_*
+  </Card>
+
+  <Card title="Skills" icon="puzzle" href="#skills">
+    SKILLS_*, catalog URL, auto-discovery
+  </Card>
+
+  <Card title="Security" icon="shield" href="#security">
+    SECRETS_MASTER_KEY, IRONCLAW_BASE_DIR
+  </Card>
+</CardGroup>
+
+## Agent Settings
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `AGENT_NAME` | string | `ironclaw` | Agent name displayed in responses |
+| `AGENT_MAX_PARALLEL_JOBS` | int | `5` | Maximum concurrent jobs |
+| `AGENT_JOB_TIMEOUT_SECS` | int | `300` | Job timeout in seconds |
+| `AGENT_STUCK_THRESHOLD_SECS` | int | `60` | Time before job considered stuck |
+| `SELF_REPAIR_CHECK_INTERVAL_SECS` | int | `30` | Self-repair check frequency |
+| `SELF_REPAIR_MAX_ATTEMPTS` | int | `3` | Max repair attempts per job |
+| `AGENT_USE_PLANNING` | bool | `true` | Enable planning before tool execution |
+| `SESSION_IDLE_TIMEOUT_SECS` | int | `3600` | Session idle timeout |
+| `ALLOW_LOCAL_TOOLS` | bool | `false` | Allow filesystem/shell tools directly |
+| `MAX_COST_PER_DAY_CENTS` | int | — | Daily spend limit (cents, e.g., 10000 = $100) |
+| `MAX_ACTIONS_PER_HOUR` | int | — | Hourly action limit |
+| `AGENT_MAX_TOOL_ITERATIONS` | int | `50` | Max tool calls per loop |
+| `AGENT_AUTO_APPROVE_TOOLS` | bool | `false` | Skip tool approval (for benchmarks) |
+
+## Database
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DATABASE_BACKEND` | enum | `postgres` | Backend: `postgres` or `libsql` |
+| `DATABASE_URL` | string | — | PostgreSQL connection URL |
+| `DATABASE_POOL_SIZE` | int | `10` | Connection pool size |
+| `DATABASE_SSLMODE` | enum | `prefer` | TLS mode: `disable`, `prefer`, `require` |
+| `LIBSQL_PATH` | path | `~/.ironclaw/ironclaw.db` | libSQL database file |
+| `LIBSQL_URL` | URL | — | Turso cloud sync URL |
+| `LIBSQL_AUTH_TOKEN` | string | — | Turso auth token |
+
+### PostgreSQL Example
+
+```bash
+export DATABASE_BACKEND=postgres
+export DATABASE_URL="postgres://user:pass@localhost/ironclaw"
+export DATABASE_SSLMODE=require
+```
+
+### libSQL Example
+
+```bash
+export DATABASE_BACKEND=libsql
+export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
+```
+
+### Turso Example
+
+```bash
+export DATABASE_BACKEND=libsql
+export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
+export LIBSQL_URL="libsql://your-db.turso.io"
+export LIBSQL_AUTH_TOKEN="your-auth-token"
+```
+
+## LLM / Inference
+
+### NEAR AI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `NEARAI_BASE_URL` | URL | `https://private.near.ai` | NEAR AI Chat API base URL |
+| `NEARAI_SESSION_TOKEN` | string | — | Session token for OAuth mode |
+| `NEARAI_API_KEY` | string | — | API key for Cloud mode |
+| `NEARAI_MODEL` | string | — | Default model (e.g., `claude-sonnet-4-20250514`) |
+| `NEARAI_CHEAP_MODEL` | string | — | Cheaper model for simple tasks |
+| `NEARAI_FALLBACK_MODEL` | string | — | Fallback if primary fails |
+
+### Anthropic
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ANTHROPIC_API_KEY` | string | — | API key from console.anthropic.com |
+| `ANTHROPIC_BASE_URL` | URL | — | Custom base URL (optional) |
+
+### OpenAI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OPENAI_API_KEY` | string | — | API key from platform.openai.com |
+| `OPENAI_BASE_URL` | URL | — | Custom base URL (optional) |
+
+### Ollama
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OLLAMA_BASE_URL` | URL | `http://localhost:11434` | Ollama server URL |
+
+### OpenAI-Compatible
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LLM_BACKEND` | string | — | Set to `openai_compatible` |
+| `LLM_BASE_URL` | URL | — | API endpoint (e.g., `https://api.openrouter.ai`) |
+| `LLM_API_KEY` | string | — | API key |
+| `LLM_EXTRA_HEADERS` | string | — | Extra headers (format: `Key:Value,Key2:Value2`) |
+
+### Tinfoil
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `TINFOIL_API_KEY` | string | — | Tinfoil API key |
+| `TINFOIL_MODEL` | string | `kimi-k2-5` | Model to use |
+
+## Channels
+
+### Web Gateway
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GATEWAY_ENABLED` | bool | `true` | Enable web UI |
+| `GATEWAY_HOST` | string | `127.0.0.1` | Bind host (`0.0.0.0` for LAN) |
+| `GATEWAY_PORT` | int | `3000` | Port number |
+| `GATEWAY_AUTH_TOKEN` | string | random | Bearer token for auth |
+| `GATEWAY_USER_ID` | string | `default` | Default user ID |
+
+### HTTP Webhook
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `HTTP_HOST` | string | `0.0.0.0` | Bind host |
+| `HTTP_PORT` | int | `8080` | Port number |
+| `HTTP_WEBHOOK_SECRET` | string | — | Shared secret for validation |
+| `HTTP_USER_ID` | string | `http` | Default user ID |
+
+<Warning>
+The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external webhook delivery, set `HTTP_HOST=127.0.0.1`.
+</Warning>
+
+### Terminal UI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CLI_ENABLED` | bool | `true` | Enable TUI on startup |
+
+### WASM Channels
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WASM_CHANNELS_ENABLED` | bool | `true` | Enable WASM channels |
+| `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels` | Channel modules directory |
+| `TELEGRAM_OWNER_ID` | int | — | Telegram owner user ID (legacy) |
+
+### Signal
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SIGNAL_HTTP_URL` | URL | — | signal-cli daemon URL |
+| `SIGNAL_ACCOUNT` | string | — | Phone number (+1234567890) |
+| `SIGNAL_ALLOW_FROM` | list | — | Allowed senders (comma-separated) |
+| `SIGNAL_ALLOW_FROM_GROUPS` | list | — | Allowed groups |
+| `SIGNAL_DM_POLICY` | enum | `pairing` | DM policy: `open`, `allowlist`, `pairing` |
+| `SIGNAL_GROUP_POLICY` | enum | `allowlist` | Group policy: `allowlist`, `open`, `disabled` |
+| `SIGNAL_IGNORE_ATTACHMENTS` | bool | `false` | Skip attachment-only messages |
+| `SIGNAL_IGNORE_STORIES` | bool | `true` | Skip story messages |
+
+## Embeddings
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `EMBEDDING_ENABLED` | bool | `true` | Enable semantic search |
+| `EMBEDDING_PROVIDER` | enum | `openai` | Provider: `openai` or `nearai` |
+| `EMBEDDING_MODEL` | string | `text-embedding-3-small` | Embedding model |
+| `OPENAI_API_KEY` | string | — | Required if using OpenAI embeddings |
+
+## Sandbox
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SANDBOX_ENABLED` | bool | `true` | Enable Docker sandbox |
+| `SANDBOX_POLICY` | enum | `readonly` | Policy: `readonly`, `workspace_write`, `full_access` |
+| `SANDBOX_TIMEOUT_SECS` | int | `120` | Command timeout |
+| `SANDBOX_MEMORY_LIMIT_MB` | int | `2048` | Memory limit per container |
+| `SANDBOX_CPU_SHARES` | int | `1024` | CPU shares (relative weight) |
+| `SANDBOX_IMAGE` | string | `ironclaw-worker:latest` | Docker image |
+| `SANDBOX_AUTO_PULL` | bool | `true` | Auto-pull missing images |
+| `SANDBOX_EXTRA_DOMAINS` | list | — | Additional allowed domains |
+
+## Claude Code
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CLAUDE_CODE_ENABLED` | bool | `false` | Enable Claude Code mode |
+| `CLAUDE_CONFIG_DIR` | path | `~/.claude` | Claude config directory |
+| `CLAUDE_CODE_MODEL` | string | `sonnet` | Claude model |
+| `CLAUDE_CODE_MAX_TURNS` | int | `50` | Max agentic turns |
+| `CLAUDE_CODE_MEMORY_LIMIT_MB` | int | `4096` | Container memory limit |
+| `CLAUDE_CODE_ALLOWED_TOOLS` | list | — | Allowed tool patterns |
+
+## Skills
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SKILLS_ENABLED` | bool | `true` | Enable skills system |
+| `SKILLS_MAX_TOKENS` | int | `4000` | Max prompt budget |
+| `SKILLS_CATALOG_URL` | URL | `https://clawhub.dev` | ClawHub registry URL |
+| `SKILLS_AUTO_DISCOVER` | bool | `true` | Auto-scan skill directories |
+
+## Heartbeat
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `HEARTBEAT_ENABLED` | bool | `false` | Enable periodic execution |
+| `HEARTBEAT_INTERVAL_SECS` | int | `1800` | Interval in seconds (30 min) |
+| `HEARTBEAT_NOTIFY_CHANNEL` | string | `tui` | Notification channel |
+| `HEARTBEAT_NOTIFY_USER` | string | `default` | Notify user ID |
+
+## Routines
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ROUTINES_ENABLED` | bool | `true` | Enable scheduled/reactive tasks |
+| `ROUTINES_CRON_INTERVAL` | int | `60` | Cron tick interval (seconds) |
+| `ROUTINES_MAX_CONCURRENT` | int | `3` | Max concurrent routines |
+
+## Security
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SECRETS_MASTER_KEY` | string | — | Master key for encryption (env var mode) |
+| `IRONCLAW_BASE_DIR` | path | `~/.ironclaw` | Data directory |
+| `IRONCLAW_OAUTH_CALLBACK_URL` | URL | `http://127.0.0.1:9876` | OAuth callback URL |
+
+## Environment File Example
+
+Create `~/.ironclaw/.env`:
+
+```bash
+# Database
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/home/user/.ironclaw/ironclaw.db
+
+# LLM (NEAR AI)
+LLM_BACKEND=nearai
+
+# Web Gateway
+GATEWAY_ENABLED=true
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3000
+
+# Optional: Persistent auth token
+GATEWAY_AUTH_TOKEN=your-secure-token-here
+
+# Sandbox
+SANDBOX_ENABLED=true
+SANDBOX_POLICY=workspace_write
+
+# Heartbeat
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_SECS=1800
+```
+
+## Configuration Commands
+
+```bash
+# View current config
+ironclaw config list
+
+# Get specific value
+ironclaw config get llm.backend
+
+# Set value
+ironclaw config set llm.backend nearai
+
+# Delete value (reset to default)
+ironclaw config delete llm.backend
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Database Backends" icon="database" href="/setup/database">
+    PostgreSQL vs libSQL comparison
+  </Card>
+
+  <Card title="LLM Providers" icon="brain" href="/providers">
+    Provider-specific configuration
+  </Card>
+</CardGroup>

@@ -51,6 +51,8 @@
                     "group": "Core Capabilities",
                     "pages": [
                       "security",
+                      "capabilities/database",
+                      "capabilities/configuration",
                       {
                         "group": "Memory",
                         "pages": [
