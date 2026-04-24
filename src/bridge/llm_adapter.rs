@@ -422,7 +422,7 @@ fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
         || action.discovery_schema() != &action.parameters_schema;
     let description = if has_discovery_hint {
         format!(
-            "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+            "{} (call tool_info(name=\"{}\", detail=\"summary\") for rules/examples or detail=\"schema\" for the full discovery schema)",
             action.description,
             action.discovery_name()
         )
@@ -874,7 +874,11 @@ mod tests {
         };
 
         let tool_def = action_def_to_tool_def(&action);
-        assert!(tool_def.description.contains("tool_info"));
+        assert!(
+            tool_def
+                .description
+                .contains("tool_info(name=\"gmail_send\", detail=\"summary\")")
+        );
         assert!(tool_def.parameters["properties"].get("subject").is_none());
     }
 
