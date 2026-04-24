@@ -65,6 +65,21 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
+fn apply_snapshot_inventory(
+    exec_ctx: &mut ThreadExecutionContext,
+    inventory: Option<Arc<crate::types::capability::ActionInventory>>,
+) -> Arc<[crate::types::capability::ActionDef]> {
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
+    if let Some(inventory) = inventory {
+        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        exec_ctx.available_action_inventory_snapshot = Some(inventory);
+    }
+    available_actions
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -982,16 +997,21 @@ async fn handle_execute_action(
 
     let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
     let active_leases = leases.active_for_thread(thread.id).await;
-    let inventory = Arc::new(
-        effects
-            .available_action_inventory(&active_leases, &exec_ctx)
-            .await
-            .unwrap_or_default(),
-    );
-    let available_actions: Arc<[crate::types::capability::ActionDef]> =
-        inventory.inline.clone().into();
-    exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
-    exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &exec_ctx)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                action = %name,
+                "failed to load action inventory for orchestrator action execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions = apply_snapshot_inventory(&mut exec_ctx, inventory);
 
     // Helper: emit event only. The orchestrator owns transcript recording.
     let emit_and_record = |thread: &mut Thread,
@@ -1337,14 +1357,24 @@ async fn handle_execute_actions_parallel(
     let step_id = StepId::new();
     let actions_context = thread_execution_context(thread, step_id, None);
     let active_leases = leases.active_for_thread(thread.id).await;
-    let inventory = Arc::new(
-        effects
-            .available_action_inventory(&active_leases, &actions_context)
-            .await
-            .unwrap_or_default(),
-    );
-    let available_actions: Arc<[crate::types::capability::ActionDef]> =
-        inventory.inline.clone().into();
+    let inventory = match effects
+        .available_action_inventory(&active_leases, &actions_context)
+        .await
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                step_id = ?step_id,
+                "failed to load action inventory for orchestrator parallel execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions: Arc<[crate::types::capability::ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies. Denied → error result. Approval → interrupt.
@@ -1392,7 +1422,10 @@ async fn handle_execute_actions_parallel(
 
         // Check policy
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
         let action_def = available_actions
             .iter()
             .find(|a| a.matches_name(&pc.name))
@@ -1561,8 +1594,10 @@ async fn handle_execute_actions_parallel(
             .map(|action| action.name.clone())
             .unwrap_or_else(|| pc.name.clone());
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
-        exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
+        if let Some(ref inventory) = inventory {
+            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+        }
         let ps = summarize_params(&action_name, &pc.params);
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -1597,8 +1632,10 @@ async fn handle_execute_actions_parallel(
             let effects = effects.clone();
             let lease = lease.clone();
             let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
-            exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
-            exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(&inventory));
+            if let Some(ref inventory) = inventory {
+                exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+                exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+            }
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
@@ -3736,6 +3773,56 @@ mod tests {
         }
     }
 
+    struct InventoryErrorEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for InventoryErrorEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({
+                    "has_action_snapshot": ctx.available_actions_snapshot.is_some(),
+                    "has_inventory_snapshot": ctx.available_action_inventory_snapshot.is_some(),
+                }),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Err(EngineError::Effect {
+                reason: "inventory failed".into(),
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
     #[tokio::test]
     async fn llm_complete_forwards_model_from_explicit_config() {
         let concrete = Arc::new(ModelCapturingLlm {
@@ -3823,6 +3910,63 @@ mod tests {
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0], None);
+    }
+
+    #[tokio::test]
+    async fn execute_action_does_not_set_empty_snapshots_when_inventory_fetch_fails() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(InventoryErrorEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test action inventory fallback",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                crate::types::capability::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant lease");
+
+        let result = handle_execute_action(
+            &[
+                MontyObject::String("echo".into()),
+                json_to_monty(&serde_json::json!({})),
+            ],
+            &[(
+                MontyObject::String("call_id".into()),
+                MontyObject::String("call-1".into()),
+            )],
+            &mut thread,
+            &effects,
+            &leases,
+            &policy,
+            None,
+        )
+        .await;
+
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_execute_action did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        assert_eq!(json["is_error"], serde_json::json!(false));
+        assert_eq!(
+            json["output"],
+            serde_json::json!({
+                "has_action_snapshot": false,
+                "has_inventory_snapshot": false,
+            })
+        );
     }
 
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────

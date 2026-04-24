@@ -432,13 +432,28 @@ pub async fn execute_code_with_skills(
     // Without this, `mission_list()` in code raises NameError because Monty
     // resolves the name before calling it, and Undefined → NameError.
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions: Arc<[ActionDef]> = effects
-        .available_actions(&active_leases, context)
+    let inventory = match effects
+        .available_action_inventory(&active_leases, context)
         .await
-        .unwrap_or_default()
-        .into();
+    {
+        Ok(inventory) => Some(Arc::new(inventory)),
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                "failed to load action inventory for scripting execution: {error}"
+            );
+            None
+        }
+    };
+    let available_actions: Arc<[ActionDef]> = inventory
+        .as_ref()
+        .map(|inventory| inventory.inline.clone().into())
+        .unwrap_or_else(|| Arc::from([]));
     let mut execution_context = context.clone();
-    execution_context.available_actions_snapshot = Some(Arc::clone(&available_actions));
+    if let Some(ref inventory) = inventory {
+        execution_context.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        execution_context.available_action_inventory_snapshot = Some(Arc::clone(inventory));
+    }
     let mut known_actions: std::collections::HashSet<String> = available_actions
         .iter()
         .map(|action| action.name.clone())
@@ -2109,16 +2124,22 @@ mod tests {
                     .get("name")
                     .and_then(|value| value.as_str())
                     .unwrap_or_default();
-                match ctx.available_actions_snapshot.as_ref().and_then(|actions| {
-                    actions.iter().find(|action| action.matches_name(requested))
-                }) {
+                match ctx
+                    .available_action_inventory_snapshot
+                    .as_ref()
+                    .and_then(|inventory| {
+                        inventory
+                            .inline
+                            .iter()
+                            .find(|action| action.matches_name(requested))
+                    }) {
                     Some(action) => serde_json::json!({
                         "name": action.name,
                         "summary": {
                             "always_required": ["name", "goal", "cadence"]
                         }
                     }),
-                    None => serde_json::json!({"error": "missing action snapshot"}),
+                    None => serde_json::json!({"error": "missing inventory snapshot"}),
                 }
             } else {
                 serde_json::json!({"error": format!("unexpected action '{action_name}'")})
@@ -2138,25 +2159,38 @@ mod tests {
             _leases: &[CapabilityLease],
             _context: &ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
-            Ok(vec![
-                test_action("tool_info"),
-                ActionDef {
-                    name: "mission_create".into(),
-                    description: "Create a mission".into(),
-                    parameters_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "goal": {"type": "string"},
-                            "cadence": {"type": "string"}
-                        },
-                        "required": ["name", "goal", "cadence"]
-                    }),
-                    effects: vec![EffectType::WriteLocal],
-                    requires_approval: false,
-                    discovery: None,
-                },
-            ])
+            Ok(self
+                .available_action_inventory(_leases, _context)
+                .await?
+                .inline)
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: vec![
+                    test_action("tool_info"),
+                    ActionDef {
+                        name: "mission_create".into(),
+                        description: "Create a mission".into(),
+                        parameters_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "goal": {"type": "string"},
+                                "cadence": {"type": "string"}
+                            },
+                            "required": ["name", "goal", "cadence"]
+                        }),
+                        effects: vec![EffectType::WriteLocal],
+                        requires_approval: false,
+                        discovery: None,
+                    },
+                ],
+            })
         }
 
         async fn available_capabilities(

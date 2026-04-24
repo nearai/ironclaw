@@ -1073,7 +1073,7 @@ impl EffectBridgeAdapter {
         if resolved_name.is_none()
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
             && let Some(latent_execution) = auth_mgr
-                .execute_latent_extension_action(action_name, &context.user_id)
+                .execute_latent_extension_action(canonical_action_name, &context.user_id)
                 .await
         {
             match latent_execution {
@@ -4629,6 +4629,99 @@ mod tests {
             "latent WASM tool should appear in available_actions so the LLM can call it and trigger auth; got: {:?}",
             actions.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn latent_action_dispatch_uses_canonical_snapshot_name() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("tools")).expect("tools dir");
+        std::fs::write(
+            dir.path().join("tools").join("latent_tool.wasm"),
+            b"fake-wasm",
+        )
+        .expect("write wasm");
+        std::fs::write(
+            dir.path()
+                .join("tools")
+                .join("latent_tool.capabilities.json"),
+            r#"{"description":"latent adapter test"}"#,
+        )
+        .expect("write capabilities");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![],
+        ));
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let actions = adapter
+            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
+            .await
+            .expect("actions");
+        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_latent"));
+        ctx.available_actions_snapshot = Some(actions.into());
+
+        let result = adapter
+            .execute_action("latent-tool", serde_json::json!({}), &lease(), &ctx)
+            .await;
+
+        match result {
+            Err(EngineError::Effect { reason }) => {
+                assert!(
+                    reason.contains("Activation failed"),
+                    "latent action should resolve through the canonical snapshot name before activation; got {reason}"
+                );
+            }
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert!(
+                        !credential_name.as_str().is_empty(),
+                        "latent action should resolve through canonical snapshot name"
+                    );
+                }
+                other => panic!("expected authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected latent action activation/auth path, got {other:?}"),
+        }
     }
 
     #[tokio::test]
