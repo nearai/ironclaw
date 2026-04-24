@@ -51,6 +51,37 @@ use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
 
+/// Optional deploy-time override for the compiled-in orchestrator, loaded
+/// once from `ORCHESTRATOR_DEFAULT_PATH`. Downstream forks whose agent flow
+/// depends on different intent-classification heuristics (e.g. the stock
+/// `signals_execution_intent` classifier triggers extra tool calls a
+/// domain-specific deploy doesn't want) can point this env var at a
+/// replacement `default.py`. Unset → compiled-in default.
+///
+/// Read once at first access to match the rest of the engine's config
+/// surface and avoid per-turn filesystem I/O.
+static ORCHESTRATOR_OVERRIDE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| {
+        let path = std::env::var("ORCHESTRATOR_DEFAULT_PATH").ok()?;
+        let contents = std::fs::read_to_string(&path).ok()?;
+        if contents.trim().is_empty() {
+            None
+        } else {
+            Some(contents)
+        }
+    });
+
+/// Returns the active "v0" orchestrator source — the env-var override if
+/// `ORCHESTRATOR_DEFAULT_PATH` is set and readable, else the compiled-in
+/// `DEFAULT_ORCHESTRATOR`. Runtime loader/seed paths call this so a
+/// downstream deploy's `default.py` flows through every code path that
+/// would otherwise reach the `include_str!` constant.
+pub(crate) fn default_orchestrator() -> &'static str {
+    ORCHESTRATOR_OVERRIDE
+        .as_deref()
+        .unwrap_or(DEFAULT_ORCHESTRATOR)
+}
+
 /// Well-known title for orchestrator code in the Store.
 pub const ORCHESTRATOR_TITLE: &str = "orchestrator:main";
 
@@ -228,19 +259,19 @@ pub async fn load_orchestrator(
 ) -> (String, u64) {
     if !allow_self_modify {
         debug!("orchestrator self-modification disabled, using compiled-in default (v0)");
-        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+        return (default_orchestrator().to_string(), 0);
     }
 
     let Some(store) = store else {
         debug!("using compiled-in default orchestrator (v0, no store)");
-        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+        return (default_orchestrator().to_string(), 0);
     };
 
     let docs = match store.list_shared_memory_docs(project_id).await {
         Ok(d) => d,
         Err(_) => {
             debug!("using compiled-in default orchestrator (v0, store error)");
-            return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+            return (default_orchestrator().to_string(), 0);
         }
     };
 
@@ -259,7 +290,7 @@ pub fn load_orchestrator_from_docs(
     allow_self_modify: bool,
 ) -> (String, u64) {
     if !allow_self_modify {
-        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+        return (default_orchestrator().to_string(), 0);
     }
 
     // Find all orchestrator versions, sorted by version number descending
@@ -283,7 +314,7 @@ pub fn load_orchestrator_from_docs(
 
     if versions.is_empty() {
         debug!("using compiled-in default orchestrator (v0)");
-        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+        return (default_orchestrator().to_string(), 0);
     }
 
     // Check failure count for the latest version
@@ -318,7 +349,7 @@ pub fn load_orchestrator_from_docs(
 
     // All versions failed — fall back to compiled-in default
     debug!("all orchestrator versions failed, using compiled-in default (v0)");
-    (DEFAULT_ORCHESTRATOR.to_string(), 0)
+    (default_orchestrator().to_string(), 0)
 }
 
 /// Record a failure for the current orchestrator version.
@@ -3273,6 +3304,14 @@ mod tests {
         assert_eq!(version, 0);
         assert!(code.contains("run_loop"));
         assert!(code.contains("__llm_complete__"));
+    }
+
+    #[test]
+    fn default_orchestrator_falls_back_to_compiled_in_when_env_unset() {
+        // Tests run without ORCHESTRATOR_DEFAULT_PATH set — the helper
+        // must return the compiled-in constant verbatim. Guards against
+        // an override LazyLock that silently mangles the default.
+        assert_eq!(default_orchestrator(), DEFAULT_ORCHESTRATOR);
     }
 
     #[tokio::test]

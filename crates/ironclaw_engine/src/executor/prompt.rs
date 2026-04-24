@@ -80,6 +80,30 @@ const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md")
 /// The strategy/closing block (after tool listing).
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
 
+/// Optional deploy-time override for the compiled-in preamble, loaded once
+/// from `CODEACT_PREAMBLE_PATH`. Same pattern as `AGENTS_SEED` — downstream
+/// forks whose agent flow diverges from the upstream prompt's discipline
+/// (e.g. a deploy that wants raw tool output in `FINAL()` rather than
+/// Markdown reformatting) can point this env var at a markdown file and
+/// replace the preamble wholesale. Unset → compiled-in default.
+static CODEACT_PREAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("CODEACT_PREAMBLE_PATH"));
+
+/// Optional deploy-time override for the compiled-in postamble, loaded once
+/// from `CODEACT_POSTAMBLE_PATH`. See `CODEACT_PREAMBLE_OVERRIDE`.
+static CODEACT_POSTAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("CODEACT_POSTAMBLE_PATH"));
+
+fn load_override_file(env_var: &str) -> Option<String> {
+    let path = std::env::var(env_var).ok()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    if contents.trim().is_empty() {
+        None
+    } else {
+        Some(contents)
+    }
+}
+
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
 
@@ -161,27 +185,33 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
-    build_codeact_system_prompt_with_identity(
+    build_codeact_system_prompt_with_overrides(
         actions,
         capabilities,
         overlay,
         platform,
         AGENTS_SEED.as_deref(),
+        CODEACT_PREAMBLE_OVERRIDE.as_deref(),
+        CODEACT_POSTAMBLE_OVERRIDE.as_deref(),
     )
 }
 
-/// Testable core that accepts an explicit identity string instead of reading
-/// the `AGENTS_SEED_PATH` env var. The env-var path is exercised in
+/// Testable core that accepts explicit override strings instead of reading
+/// env vars. The env-var path is exercised in
 /// `build_codeact_system_prompt_inner`; tests call this helper directly so
 /// they don't race on process-wide `LazyLock` state.
-fn build_codeact_system_prompt_with_identity(
+fn build_codeact_system_prompt_with_overrides(
     actions: &[ActionDef],
     capabilities: &[CapabilitySummary],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
     identity: Option<&str>,
+    preamble_override: Option<&str>,
+    postamble_override: Option<&str>,
 ) -> String {
-    let mut prompt = String::from(CODEACT_PREAMBLE);
+    let preamble = preamble_override.unwrap_or(CODEACT_PREAMBLE);
+    let postamble = postamble_override.unwrap_or(CODEACT_POSTAMBLE);
+    let mut prompt = String::from(preamble);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -244,7 +274,7 @@ fn build_codeact_system_prompt_with_identity(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(postamble);
     prompt
 }
 
@@ -309,12 +339,14 @@ mod tests {
 
     #[test]
     fn identity_injected_when_agents_seed_set() {
-        let prompt = build_codeact_system_prompt_with_identity(
+        let prompt = build_codeact_system_prompt_with_overrides(
             &[],
             &[],
             None,
             None,
             Some("You are the Abound remittance assistant."),
+            None,
+            None,
         );
         assert!(prompt.contains("## Agent Identity"));
         assert!(prompt.contains("You are the Abound remittance assistant."));
@@ -322,9 +354,63 @@ mod tests {
 
     #[test]
     fn identity_absent_when_agents_seed_unset() {
-        let prompt =
-            build_codeact_system_prompt_with_identity(&[], &[], None, None, None);
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[], &[], None, None, None, None, None,
+        );
         assert!(!prompt.contains("## Agent Identity"));
+    }
+
+    #[test]
+    fn preamble_override_replaces_compiled_in() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("# Custom preamble\n\nRespond with plain text for simple messages."),
+            None,
+        );
+        assert!(prompt.contains("# Custom preamble"));
+        assert!(prompt.contains("Respond with plain text for simple messages."));
+        // The stock preamble's "Python REPL environment" marker must not leak through.
+        assert!(!prompt.contains("Python REPL environment"));
+    }
+
+    #[test]
+    fn postamble_override_replaces_compiled_in() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some("## Custom postamble\n\nPass raw tool results to FINAL() unchanged."),
+        );
+        assert!(prompt.contains("## Custom postamble"));
+        assert!(prompt.contains("Pass raw tool results to FINAL() unchanged."));
+        // The stock postamble's "Strategy" marker must not leak through.
+        assert!(!prompt.contains("Strategy"));
+    }
+
+    #[test]
+    fn overrides_compose_with_identity_and_tools() {
+        let prompt = build_codeact_system_prompt_with_overrides(
+            &[],
+            &[],
+            None,
+            None,
+            Some("Abound assistant."),
+            Some("# PRE"),
+            Some("# POST"),
+        );
+        // Order: preamble → identity → (no overlay) → (no tools) → postamble
+        let pre_idx = prompt.find("# PRE").expect("preamble present");
+        let identity_idx = prompt.find("## Agent Identity").expect("identity present");
+        let post_idx = prompt.find("# POST").expect("postamble present");
+        assert!(pre_idx < identity_idx);
+        assert!(identity_idx < post_idx);
     }
 
     #[tokio::test]
