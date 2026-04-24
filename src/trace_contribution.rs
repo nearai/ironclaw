@@ -3930,7 +3930,7 @@ fn mark_trace_credit_noticed_if_due(
     let mut records = read_local_trace_records_for_scope(scope)?;
     if records
         .iter()
-        .all(|record| record.status != LocalTraceSubmissionStatus::Submitted)
+        .all(|record| !trace_record_noticeable(record))
     {
         return Ok(None);
     }
@@ -3939,7 +3939,7 @@ fn mark_trace_credit_noticed_if_due(
     let interval = chrono::Duration::hours(i64::from(interval_hours));
     let notice_due = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .filter(|record| trace_record_noticeable(record))
         .any(|record| {
             record
                 .last_credit_notice_at
@@ -3953,12 +3953,16 @@ fn mark_trace_credit_noticed_if_due(
 
     let summary = trace_credit_summary(&records);
     for record in &mut records {
-        if record.status == LocalTraceSubmissionStatus::Submitted {
+        if trace_record_noticeable(record) {
             record.last_credit_notice_at = Some(now);
         }
     }
     write_local_trace_records_for_scope(scope, &records)?;
     Ok(Some(summary))
+}
+
+fn trace_record_noticeable(record: &LocalTraceSubmissionRecord) -> bool {
+    record.status == LocalTraceSubmissionStatus::Submitted || !record.credit_events.is_empty()
 }
 
 fn write_local_trace_records_for_scope(
@@ -4740,6 +4744,125 @@ mod tests {
             trace_submission_status_endpoint("https://trace.example.com/api/v1/traces?x=1")
                 .expect("endpoint parses"),
             "https://trace.example.com/api/v1/contributors/me/submission-status"
+        );
+    }
+
+    #[test]
+    fn delayed_credit_sync_resets_notice_and_notice_marks_records() {
+        let scope = format!("trace-credit-sync-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: None,
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: Some(Utc::now()),
+            }],
+        )
+        .expect("local record writes");
+
+        let changed = apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "accepted".to_string(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(2.0),
+                credit_points_ledger: 1.0,
+                credit_points_total: Some(2.0),
+                explanation: vec!["Accepted after privacy checks.".to_string()],
+                delayed_credit_explanations: vec!["Regression coverage bonus: +1.0.".to_string()],
+            }],
+        )
+        .expect("status sync applies");
+        assert_eq!(changed, 1);
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(records[0].credit_points_final, Some(2.0));
+        assert!(records[0].last_credit_notice_at.is_none());
+        assert_eq!(records[0].credit_events.len(), 1);
+
+        let notice = mark_trace_credit_noticed_if_due(Some(&scope), 168)
+            .expect("notice check succeeds")
+            .expect("notice should be due after changed credit");
+        assert_eq!(notice.pending_credit, 1.0);
+        assert_eq!(notice.final_credit, 2.0);
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .any(|reason| reason.contains("Regression coverage bonus"))
+        );
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert!(records[0].last_credit_notice_at.is_some());
+    }
+
+    #[test]
+    fn revoked_credit_change_still_produces_a_notice() {
+        let scope = format!("trace-credit-revoked-test-{}", Uuid::new_v4());
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        write_local_trace_records_for_scope(
+            Some(&scope),
+            &[LocalTraceSubmissionRecord {
+                submission_id,
+                trace_id,
+                endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+                status: LocalTraceSubmissionStatus::Submitted,
+                server_status: Some("accepted".to_string()),
+                submitted_at: Some(Utc::now()),
+                revoked_at: None,
+                privacy_risk: "low".to_string(),
+                redaction_counts: BTreeMap::new(),
+                credit_points_pending: 1.0,
+                credit_points_final: Some(1.0),
+                credit_explanation: vec!["Accepted locally.".to_string()],
+                credit_events: Vec::new(),
+                last_credit_notice_at: Some(Utc::now()),
+            }],
+        )
+        .expect("local record writes");
+
+        apply_remote_trace_submission_statuses_for_scope(
+            Some(&scope),
+            &[TraceSubmissionStatusUpdate {
+                submission_id,
+                trace_id,
+                status: "revoked".to_string(),
+                credit_points_pending: 0.0,
+                credit_points_final: Some(0.0),
+                credit_points_ledger: 0.0,
+                credit_points_total: Some(0.0),
+                explanation: vec!["Submission revoked.".to_string()],
+                delayed_credit_explanations: Vec::new(),
+            }],
+        )
+        .expect("status sync applies");
+
+        let notice = mark_trace_credit_noticed_if_due(Some(&scope), 168)
+            .expect("notice check succeeds")
+            .expect("revoked credit delta should still be noticeable");
+        assert_eq!(notice.submissions_revoked, 1);
+        assert_eq!(notice.final_credit, 0.0);
+        assert!(
+            notice
+                .recent_explanations
+                .iter()
+                .any(|reason| reason.contains("Submission revoked"))
         );
     }
 

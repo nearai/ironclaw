@@ -2362,7 +2362,7 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
     let mut records = read_local_records()?;
     if records
         .iter()
-        .all(|record| record.status != LocalSubmissionStatus::Submitted)
+        .all(|record| !local_record_noticeable_for_credit(record))
     {
         return Ok(());
     }
@@ -2371,7 +2371,7 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
     let interval = chrono::Duration::hours(i64::from(policy.credit_notice_interval_hours));
     let notice_due = records
         .iter()
-        .filter(|record| record.status == LocalSubmissionStatus::Submitted)
+        .filter(|record| local_record_noticeable_for_credit(record))
         .any(|record| {
             record
                 .last_credit_notice_at
@@ -2393,11 +2393,15 @@ fn maybe_print_credit_notice(policy: &StandingTraceContributionPolicy) -> anyhow
     }
 
     for record in &mut records {
-        if record.status == LocalSubmissionStatus::Submitted {
+        if local_record_noticeable_for_credit(record) {
             record.last_credit_notice_at = Some(now);
         }
     }
     write_local_records(&records)
+}
+
+fn local_record_noticeable_for_credit(record: &LocalSubmissionRecord) -> bool {
+    record.status == LocalSubmissionStatus::Submitted || !record.credit_events.is_empty()
 }
 
 enum QueueEligibility {
