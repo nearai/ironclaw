@@ -74,11 +74,15 @@
   flex: 1;
 }
 
-.tab-bar .docs-link-btn {
+/* docs-link / status-logs-btn styling applies whether the element sits
+   in its original .tab-bar home OR has been relocated into the mobile
+   drawer footer by mobile-menu.js. Without :is(), the Docs pill-button
+   chrome would vanish on mobile. */
+:is(.tab-bar, .mobile-menu-footer) .docs-link-btn {
   text-decoration: none;
 }
 
-.tab-bar .status-logs-btn {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn {
   padding: 4px 10px;
   background: none;
   border: 1px solid var(--border);
@@ -91,12 +95,12 @@
   transition: color 0.2s, border-color 0.2s, background 0.2s;
 }
 
-.tab-bar .status-logs-btn:hover {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn:hover {
   color: var(--text);
   border-color: var(--text-secondary);
 }
 
-.tab-bar .status-logs-btn.active {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn.active {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-tee-bg);
