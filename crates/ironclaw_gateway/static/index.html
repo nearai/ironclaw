@@ -154,6 +154,31 @@
 
   <!-- Main App (hidden until authenticated) -->
   <div id="app">
+    <!-- Mobile-only header (hidden on desktop via CSS). Populated/toggled by mobile-menu.js. -->
+    <header class="mobile-header" role="banner">
+      <button id="hamburger-btn" class="hamburger-btn" type="button"
+              aria-label="Open menu" aria-expanded="false" aria-controls="mobile-menu">
+        <span></span><span></span><span></span>
+      </button>
+      <span class="mobile-title">IronClaw</span>
+      <div class="mobile-status" aria-live="polite">
+        <span class="dot" id="mobile-sse-dot"></span>
+      </div>
+    </header>
+    <div class="mobile-menu-backdrop" id="mobile-menu-backdrop"></div>
+    <aside class="mobile-menu" id="mobile-menu" role="dialog"
+           aria-label="Navigation menu" aria-hidden="true">
+      <nav class="mobile-menu-nav" id="mobile-menu-nav" aria-label="Primary"></nav>
+      <section class="mobile-menu-threads" aria-label="Conversations">
+        <div class="mobile-menu-threads-header">
+          <span data-i18n="chat.conversations">Conversations</span>
+          <button id="mobile-new-thread-btn" class="mobile-new-thread-btn" type="button"
+                  data-i18n="chat.newThread">+ New</button>
+        </div>
+        <div id="mobile-thread-list" class="mobile-thread-list"></div>
+      </section>
+      <footer class="mobile-menu-footer" id="mobile-menu-footer"></footer>
+    </aside>
     <!-- Tab Bar -->
     <div class="tab-bar">
       <div class="tab-indicator" id="tab-indicator"></div>
