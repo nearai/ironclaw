@@ -97,7 +97,6 @@ If API calls fail with auth errors, say: "It looks like your account isn't fully
 
 ## Payment Reasons
 - Family Maintenance
-- Gift
 - Education Support
 - Medical Support
 
