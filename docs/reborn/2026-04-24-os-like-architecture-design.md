@@ -84,43 +84,60 @@ These laws should be copied into any implementation plan and crate-level docs.
 
 ---
 
-## 4. Top-level shape
+## 4. Top-level shape: OS/service model, not a forced 3-box model
+
+This design should not be presented as a canonical 3-box architecture. The 3-box framing was useful while deciding what not to put in the kernel, but the Miro architecture is more concrete: it is a small host plus system-service crates plus extension userland.
 
 ```text
+                 extensions/
 +--------------------------------------------------------------+
-|                         Extensions                           |
-|--------------------------------------------------------------|
-| agent_loop/* | gateway | tui | portfolio | browser | ...    |
-| first-party and third-party executable modules               |
+| agent_loop_tools | agent_loop_codeact | gateway | tui | ...  |
+| first-party and third-party executable userland              |
 +-----------------------------↑--------------------------------+
                               |
+                              | narrow host API:
                               | capabilities, config, mounts,
-                              | dispatch/spawn contracts
+                              | dispatch/spawn, events, fs/auth/network
                               |
 +-----------------------------|--------------------------------+
-|                         Kernel Host                          |
+|                      ironclaw_kernel                         |
 |--------------------------------------------------------------|
-| ExtensionManager | Filesystem | Processes | Auth | Network   |
-| event bus | user/tenant scope wiring | mount wiring          |
+| host composition | boot | scope wiring | event bus wiring     |
+| ExtensionManager initially lives here if kept narrow         |
 +-----------------------------↑--------------------------------+
                               |
-                              | stable system contracts
+                              | composes system-service crates
                               |
-+-----------------------------|--------------------------------+
-|                    Durable Filesystem State                  |
-|--------------------------------------------------------------|
-| /system | /users | /projects | /memory | /extensions | ...  |
-| local mounts, db mounts, remote mounts, generated state      |
+        +---------------------+---------------------+
+        |                     |                     |
++-------|------+      +-------|------+      +-------|------+
+| filesystem  |      | processes    |      | auth         |
+| mounts      |      | dispatch     |      | identity     |
+| durable API |      | spawn        |      | secret refs  |
++-------↑------+      +-------↑------+      +-------↑------+
+        |                     |                     |
+        |              +------|-------+             |
+        |              | network      |             |
+        |              | egress/API   |             |
+        |              +------↑-------+             |
+        |                     |                     |
++-------|---------------------|---------------------|------+
+|        mounted durable state + mediated external world       |
+| /system | /users | /projects | /memory | remote APIs | ... |
 +--------------------------------------------------------------+
 ```
 
-This is conceptually a 3-box model:
+The important architectural unit is not “box 1/2/3”. The important unit is the service boundary:
 
-- **Extensions** = executable userland
-- **Kernel Host** = system services and runtime composition
-- **Durable Filesystem State** = persistence and mount surface
+- **extensions/** = executable userland and product behavior
+- **ironclaw_kernel** = composition, boot, scope wiring, and event bus wiring
+- **ironclaw_filesystem** = durable path/mount API
+- **ironclaw_processes** = live execution, dispatch/spawn, process lifecycle, sandbox execution
+- **ironclaw_auth** = identity, credentials, secret handles, short-lived injection
+- **ironclaw_network** = mediated outbound network
+- **mounted state / external world** = storage and external effects behind service boundaries
 
-The kernel host acts like a small OS around a mounted filesystem.
+This is closer to an OS design than an application-layer control-plane design. The kernel host should act like a small OS compositor around explicit services, not like a smart runtime that owns product behavior.
 
 ---
 
@@ -870,12 +887,12 @@ This sequencing preserves the OS-like shape early instead of reintroducing produ
 
 ## 21. Final recommendation
 
-This revised architecture is stronger than the earlier “smart kernel” direction.
+This revised architecture is stronger than both the earlier “smart kernel” direction and the forced 3-box framing.
 
 It keeps the most valuable properties:
 
 - small kernel host
-- explicit system services
+- explicit system-service crates instead of a vague middle box
 - first-party extensions for agent loop, gateway, and TUI
 - filesystem as the primary persistence surface
 - clear separation between extension, process, and thread
