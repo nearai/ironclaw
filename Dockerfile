@@ -47,7 +47,7 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --profile dist --recipe-path recipe.json
+RUN cargo chef cook --profile dist --recipe-path recipe.json --no-default-features --features full
 
 # Stage 4: Build the actual binary (only recompiles ironclaw source)
 FROM deps AS builder
