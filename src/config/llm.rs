@@ -140,15 +140,10 @@ impl LlmConfig {
             .llm_custom_providers
             .iter()
             .any(|c| c.id == provider.provider_id);
-        let api_key_required = if is_custom {
-            true
-        } else if matches!(provider.protocol, ProviderProtocol::Ollama) {
+        let api_key_required = if matches!(provider.protocol, ProviderProtocol::Ollama) {
             false
         } else {
-            ProviderRegistry::load()
-                .find(&provider.provider_id)
-                .map(|def| def.api_key_required)
-                .unwrap_or(true)
+            provider.api_key_required
         };
 
         // Custom providers have no hardcoded base URL in the client layer —
@@ -646,6 +641,7 @@ impl LlmConfig {
         Ok(RegistryProviderConfig {
             protocol,
             provider_id: custom.id.clone(),
+            api_key_required: !matches!(protocol, ProviderProtocol::Ollama),
             api_key,
             base_url,
             model,
@@ -873,6 +869,7 @@ impl LlmConfig {
         Ok(RegistryProviderConfig {
             protocol,
             provider_id: canonical_id.to_string(),
+            api_key_required,
             api_key,
             base_url,
             model,
@@ -2727,6 +2724,34 @@ mod tests {
             provider.api_key.is_none(),
             "local mock endpoints should not require an API key"
         );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_unknown_backend_using_openai_compatible_without_api_key() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "some_custom_provider");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8080/v1");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("unknown backend should inherit openai_compatible auth policy");
+        assert_eq!(cfg.backend, "openai_compatible");
+        let provider = cfg.provider.expect("provider config");
+        assert_eq!(provider.provider_id, "openai_compatible");
+        assert!(
+            provider.api_key.is_none(),
+            "unknown backend resolved via openai_compatible must not require an API key"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+        }
     }
 
     #[test]
