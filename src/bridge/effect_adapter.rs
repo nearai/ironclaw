@@ -272,17 +272,24 @@ impl EffectBridgeAdapter {
         let Some(auth_manager) = auth_manager.as_ref() else {
             return true;
         };
-        let Some(extensions) = self
-            .fetch_extension_list(Some(auth_manager.as_ref()), context)
+
+        let extensions = match auth_manager
+            .list_capability_extensions(&context.user_id)
             .await
-        else {
-            return true;
+        {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    extension_name = requested_name,
+                    error = %error,
+                    "failed to load extension inventory for tool_activate approval; requiring approval"
+                );
+                return true;
+            }
         };
 
-        extensions
-            .into_iter()
-            .find(|extension| extension_name_matches(&extension.name, requested_name))
-            .is_some_and(|extension| !extension.installed)
+        matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
     }
 
     async fn user_permission_for_tool(
@@ -1784,6 +1791,25 @@ fn extension_name_matches(extension_name: &str, requested_name: &str) -> bool {
         .any(|candidate| requested_candidates.contains(&candidate))
 }
 
+fn matching_extension_requires_install_approval(
+    requested_name: &str,
+    extensions: &[InstalledExtension],
+) -> Option<bool> {
+    let mut saw_match = false;
+
+    for extension in extensions {
+        if !extension_name_matches(&extension.name, requested_name) {
+            continue;
+        }
+        if extension.installed {
+            return Some(false);
+        }
+        saw_match = true;
+    }
+
+    saw_match.then_some(true)
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for EffectBridgeAdapter {
     async fn execute_action(
@@ -2557,6 +2583,7 @@ pub(crate) fn is_v1_auth_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::context::JobContext;
+    use crate::extensions::ExtensionKind;
     use crate::tools::{Tool, ToolError, ToolOutput};
     use async_trait::async_trait;
 
@@ -2571,6 +2598,24 @@ mod tests {
             Arc::new(SafetyLayer::new(&config)),
             Arc::new(HookRegistry::default()),
         )
+    }
+
+    fn installed_extension(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            name: name.to_string(),
+            kind: ExtensionKind::McpServer,
+            display_name: Some(name.to_string()),
+            description: Some(format!("{name} integration")),
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: None,
+            version: None,
+        }
     }
 
     /// Verify that reset_call_count resets the counter to zero,
@@ -4541,6 +4586,52 @@ mod tests {
         assert!(!is_v1_auth_tool("http"));
         assert!(!is_v1_auth_tool("tool_search"));
         assert!(!is_v1_auth_tool("tool_list"));
+    }
+
+    #[test]
+    fn install_approval_prefers_installed_alias_over_registry_only_match() {
+        let installed = installed_extension("linear-server");
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("linear_server")
+        };
+
+        let decision = matching_extension_requires_install_approval(
+            "linear_server",
+            &[registry_only, installed],
+        );
+
+        assert_eq!(decision, Some(false));
+    }
+
+    #[test]
+    fn install_approval_requires_confirmation_for_uninstalled_match() {
+        let registry_only = InstalledExtension {
+            installed: false,
+            active: false,
+            authenticated: false,
+            has_auth: true,
+            tools: Vec::new(),
+            ..installed_extension("web_search")
+        };
+
+        let decision = matching_extension_requires_install_approval("web_search", &[registry_only]);
+
+        assert_eq!(decision, Some(true));
+    }
+
+    #[test]
+    fn install_approval_ignores_unknown_extension_names() {
+        let decision = matching_extension_requires_install_approval(
+            "missing_tool",
+            &[installed_extension("web_search")],
+        );
+
+        assert_eq!(decision, None);
     }
 
     // ── Pre-flight auth gate integration test ─────────────────
