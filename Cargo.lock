@@ -4122,12 +4122,16 @@ name = "ironclaw_wasm"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
  "rust_decimal",
  "rust_decimal_macros",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "wasmtime",
  "wat",
 ]
