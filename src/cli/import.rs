@@ -3,11 +3,12 @@
 #[cfg(feature = "migrate")]
 /// **Deprecated**: use [`MigrateCommand`](crate::cli::migrate::MigrateCommand) instead.
 /// This alias will be removed in a future release.
+#[deprecated(note = "use `ironclaw migrate` instead; removed in a future release")]
 pub type ImportCommand = crate::cli::migrate::MigrateCommand;
 
 #[cfg(feature = "migrate")]
 pub async fn run_import_command(
-    cmd: &ImportCommand,
+    cmd: &crate::cli::migrate::MigrateCommand,
     config: &crate::config::Config,
 ) -> anyhow::Result<()> {
     crate::cli::run_migrate_command(cmd, config).await

@@ -1,6 +1,7 @@
 #![cfg(all(feature = "migrate", feature = "libsql"))]
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use ironclaw::bridge::HybridStore;
@@ -12,18 +13,22 @@ use ironclaw::migrate::MigrationServices;
 use ironclaw::secrets::{LibSqlSecretsStore, SecretsCrypto, SecretsStore};
 use ironclaw::workspace::{Workspace, WorkspaceSettingsAdapter};
 use ironclaw_engine::{Project, Store};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-async fn make_services() -> (MigrationServices, TempDir) {
-    let dir = TempDir::new().expect("tempdir");
-    let db_path = dir.path().join("target.db");
-    let backend = Arc::new(LibSqlBackend::new_local(&db_path).await.expect("new_local"));
+fn test_master_key() -> SecretString {
+    SecretString::from(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+    )
+}
+
+async fn make_services_for_db_path(db_path: &Path, user_id: &str) -> MigrationServices {
+    let backend = Arc::new(LibSqlBackend::new_local(db_path).await.expect("new_local"));
     backend.run_migrations().await.expect("migrations");
 
     let db: Arc<dyn Database> = backend.clone();
-    let workspace = Arc::new(Workspace::new_with_db("alice", Arc::clone(&db)));
+    let workspace = Arc::new(Workspace::new_with_db(user_id.to_string(), Arc::clone(&db)));
     let settings_adapter = Arc::new(WorkspaceSettingsAdapter::new(
         Arc::clone(&workspace),
         Arc::clone(&db),
@@ -34,35 +39,51 @@ async fn make_services() -> (MigrationServices, TempDir) {
         .expect("seed system config");
     let settings_store: Arc<dyn SettingsStore + Send + Sync> = settings_adapter;
 
-    let crypto = Arc::new(
-        SecretsCrypto::new(SecretString::from(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-        ))
-        .expect("crypto"),
-    );
+    let crypto = Arc::new(SecretsCrypto::new(test_master_key()).expect("crypto"));
     let secrets_store: Arc<dyn SecretsStore + Send + Sync> =
         Arc::new(LibSqlSecretsStore::new(backend.shared_db(), crypto));
 
     let engine_store = Arc::new(HybridStore::new(Some(Arc::clone(&workspace))));
     engine_store.load_state_from_workspace().await;
-    let project = Project::new("alice", "default", "test project");
+    let project = Project::new(user_id, "default", "test project");
     let project_id = project.id;
     Store::save_project(engine_store.as_ref(), &project)
         .await
         .expect("save project");
 
-    (
-        MigrationServices {
-            user_id: "alice".to_string(),
-            db,
-            workspace,
-            settings_store,
-            secrets_store,
-            engine_store,
-            project_id,
-        },
-        dir,
-    )
+    MigrationServices {
+        user_id: user_id.to_string(),
+        db,
+        workspace,
+        settings_store,
+        secrets_store,
+        engine_store,
+        project_id,
+    }
+}
+
+async fn make_services() -> (MigrationServices, TempDir) {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("target.db");
+    let services = make_services_for_db_path(&db_path, "alice").await;
+    (services, dir)
+}
+
+async fn load_services_from_config(
+    db_path: &Path,
+    base_dir: &Path,
+    user_id: &str,
+) -> MigrationServices {
+    let mut config = ironclaw::config::Config::for_testing(
+        db_path.to_path_buf(),
+        base_dir.join("skills"),
+        base_dir.join("installed-skills"),
+    );
+    config.owner_id = user_id.to_string();
+    config.secrets.master_key = Some(test_master_key());
+    MigrationServices::from_config(&config, user_id.to_string())
+        .await
+        .expect("load services from config")
 }
 
 async fn create_openclaw_source(root: &Path) {
@@ -368,5 +389,91 @@ async fn rerun_migration_is_idempotent() {
     assert!(
         stats2.skipped > 0 || stats2.workspace_documents == 0,
         "re-run should skip unchanged documents or write zero new ones"
+    );
+}
+
+#[test]
+fn migrate_binary_dispatches_through_main() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let base_dir = TempDir::new().expect("base tempdir");
+    let source = TempDir::new().expect("source tempdir");
+    runtime.block_on(create_openclaw_source(source.path()));
+
+    let db_path = base_dir.path().join("binary-migrate.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_ironclaw"))
+        .args(["migrate", "openclaw", "--path"])
+        .arg(source.path())
+        .args(["--user-id", "alice"])
+        .env("IRONCLAW_BASE_DIR", base_dir.path())
+        .env("DATABASE_BACKEND", "libsql")
+        .env("DATABASE_URL", "unused://libsql")
+        .env("LIBSQL_PATH", &db_path)
+        .env("SECRETS_MASTER_KEY", test_master_key().expose_secret())
+        .current_dir(base_dir.path())
+        .output()
+        .expect("run ironclaw migrate");
+
+    assert!(
+        output.status.success(),
+        "migrate command failed:\nstdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Migration complete: OpenClaw"),
+        "migrate output did not print the CLI summary:\n{stdout}"
+    );
+
+    let services = runtime.block_on(load_services_from_config(
+        &db_path,
+        base_dir.path(),
+        "alice",
+    ));
+    let threads = runtime
+        .block_on(Store::list_threads(
+            services.engine_store.as_ref(),
+            services.project_id,
+            "alice",
+        ))
+        .expect("list threads");
+    assert_eq!(
+        threads.len(),
+        1,
+        "binary migrate should persist imported thread"
+    );
+
+    let imported_doc = runtime
+        .block_on(
+            services
+                .workspace
+                .read("imports/openclaw/root/workspace/notes.md"),
+        )
+        .expect("imported workspace doc");
+    assert!(imported_doc.content.contains("OpenClaw workspace doc"));
+}
+
+#[test]
+fn import_help_mentions_deprecation() {
+    let base_dir = TempDir::new().expect("base tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_ironclaw"))
+        .args(["import", "--help"])
+        .env("IRONCLAW_BASE_DIR", base_dir.path())
+        .current_dir(base_dir.path())
+        .output()
+        .expect("run ironclaw import --help");
+
+    assert!(
+        output.status.success(),
+        "import --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Deprecated alias for `ironclaw migrate`")
+            && stdout.contains("will be removed in a future release"),
+        "import help did not mention deprecation:\n{stdout}"
     );
 }

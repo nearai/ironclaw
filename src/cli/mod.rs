@@ -47,6 +47,7 @@ pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "migrate")]
+#[allow(deprecated)]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
@@ -327,8 +328,13 @@ pub enum Command {
 
     /// Deprecated alias for `ironclaw migrate`
     #[cfg(feature = "migrate")]
-    #[command(subcommand, hide = true)]
-    Import(ImportCommand),
+    #[command(
+        subcommand,
+        hide = true,
+        about = "Deprecated alias for `ironclaw migrate`",
+        long_about = "Deprecated alias for `ironclaw migrate`.\n\nUse `ironclaw migrate ...` instead. This alias will be removed in a future release."
+    )]
+    Import(migrate::MigrateCommand),
 
     /// Authenticate with a provider (re-login)
     #[command(
