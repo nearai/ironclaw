@@ -84,16 +84,17 @@ impl CapabilityProjector {
         let mut summaries = BTreeMap::<String, PrioritizedSummary>::new();
         let mut registry_only = Vec::new();
         let mut installed_keys = HashSet::new();
-        let latent_provider_keys = latent_provider_keys(&snapshot.latent_actions);
+        let latent_action_previews = latent_action_previews(&snapshot.latent_actions);
 
         for extension in snapshot.extensions {
             let normalized_key = normalized_capability_key(&extension.name);
             if extension.installed {
                 installed_keys.insert(normalized_key.clone());
-                if latent_provider_keys.contains(&normalized_key) {
-                    continue;
-                }
-                if let Some(summary) = summarize_extension(&extension, &snapshot.channel_routes) {
+                if let Some(summary) = summarize_extension(
+                    &extension,
+                    &snapshot.channel_routes,
+                    latent_action_previews.get(&normalized_key),
+                ) {
                     upsert_summary(&mut summaries, summary, ProjectionSource::InstalledRuntime);
                 }
             } else {
@@ -107,9 +108,21 @@ impl CapabilityProjector {
                 continue;
             }
 
-            if let Some(summary) = summarize_extension(&extension, &snapshot.channel_routes) {
+            if let Some(summary) = summarize_extension(
+                &extension,
+                &snapshot.channel_routes,
+                latent_action_previews.get(&normalized_key),
+            ) {
                 upsert_summary(&mut summaries, summary, ProjectionSource::RegistryOnly);
             }
+        }
+
+        for summary in summarize_latent_only_providers(&snapshot.latent_actions) {
+            let normalized_key = normalized_capability_key(&summary.name);
+            if installed_keys.contains(&normalized_key) || summaries.contains_key(&normalized_key) {
+                continue;
+            }
+            upsert_summary(&mut summaries, summary, ProjectionSource::RegistryOnly);
         }
 
         summaries
@@ -154,6 +167,7 @@ fn normalized_capability_key(name: &str) -> String {
 fn summarize_extension(
     extension: &InstalledExtension,
     channel_routes: &HashMap<String, String>,
+    latent_action_preview: Option<&Vec<String>>,
 ) -> Option<CapabilitySummary> {
     let status =
         capability_status_for_extension(extension, channel_routes.contains_key(&extension.name));
@@ -173,6 +187,7 @@ fn summarize_extension(
     } else {
         None
     };
+    let action_preview = action_preview_for_extension(extension, latent_action_preview);
 
     Some(CapabilitySummary {
         name: extension.name.clone(),
@@ -184,6 +199,7 @@ fn summarize_extension(
         },
         status,
         description: extension.description.clone(),
+        action_preview,
         routing_hint,
     })
 }
@@ -238,11 +254,52 @@ pub(crate) fn capability_status_for_extension(
     CapabilityStatus::Ready
 }
 
-fn latent_provider_keys(latent_actions: &[LatentProviderAction]) -> HashSet<String> {
-    latent_actions
-        .iter()
-        .map(|latent| normalized_capability_key(&latent.provider_extension))
-        .collect()
+fn action_preview_for_extension(
+    extension: &InstalledExtension,
+    latent_action_preview: Option<&Vec<String>>,
+) -> Vec<String> {
+    if !extension.tools.is_empty() {
+        return extension.tools.clone();
+    }
+    latent_action_preview.cloned().unwrap_or_default()
+}
+
+fn latent_action_previews(latent_actions: &[LatentProviderAction]) -> HashMap<String, Vec<String>> {
+    let mut previews = HashMap::<String, Vec<String>>::new();
+    for latent in latent_actions {
+        let key = normalized_capability_key(&latent.provider_extension);
+        let preview = previews.entry(key).or_default();
+        let canonical_name = latent.action_name.replace('-', "_");
+        if !preview.contains(&canonical_name) {
+            preview.push(canonical_name);
+        }
+    }
+    previews
+}
+
+fn summarize_latent_only_providers(
+    latent_actions: &[LatentProviderAction],
+) -> Vec<CapabilitySummary> {
+    let mut summaries = BTreeMap::<String, CapabilitySummary>::new();
+
+    for latent in latent_actions {
+        let key = normalized_capability_key(&latent.provider_extension);
+        let summary = summaries.entry(key).or_insert_with(|| CapabilitySummary {
+            name: latent.provider_extension.clone(),
+            display_name: None,
+            kind: CapabilitySummaryKind::Provider,
+            status: CapabilityStatus::AvailableNotInstalled,
+            description: Some(latent.description.clone()),
+            action_preview: Vec::new(),
+            routing_hint: None,
+        });
+        let canonical_name = latent.action_name.replace('-', "_");
+        if !summary.action_preview.contains(&canonical_name) {
+            summary.action_preview.push(canonical_name);
+        }
+    }
+
+    summaries.into_values().collect()
 }
 
 pub(crate) const fn is_channel_extension_kind(kind: ExtensionKind) -> bool {
@@ -366,7 +423,14 @@ mod tests {
         assert_eq!(by_name["slack"].status, CapabilityStatus::NeedsAuth);
         assert_eq!(by_name["github"].status, CapabilityStatus::NeedsSetup);
         assert_eq!(by_name["notion"].status, CapabilityStatus::Inactive);
-        assert!(!by_name.contains_key("gmail"));
+        assert_eq!(
+            by_name["gmail"].status,
+            CapabilityStatus::AvailableNotInstalled
+        );
+        assert_eq!(
+            by_name["gmail"].action_preview,
+            vec!["gmail_send".to_string()]
+        );
         assert_eq!(
             by_name["linear"].status,
             CapabilityStatus::AvailableNotInstalled
@@ -379,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_latent_entries_stay_out_of_capability_background() {
+    fn installed_latent_entries_surface_once_with_action_preview() {
         let mut inactive = installed_extension("gmail", ExtensionKind::WasmTool);
         inactive.active = false;
 
@@ -390,7 +454,10 @@ mod tests {
         };
 
         let projected = CapabilityProjector::project_snapshot(snapshot, &[]);
-        assert!(projected.is_empty());
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].name, "gmail");
+        assert_eq!(projected[0].status, CapabilityStatus::Inactive);
+        assert_eq!(projected[0].action_preview, vec!["gmail_send".to_string()]);
     }
 
     #[test]

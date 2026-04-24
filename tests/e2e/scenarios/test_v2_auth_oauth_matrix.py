@@ -247,6 +247,26 @@ async def _seed_mock_llm_api_url(mock_llm_server: str, mock_api_url: str) -> Non
     response.raise_for_status()
 
 
+async def _pin_mock_llm_settings(base_url: str, mock_llm_server: str) -> None:
+    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    writes = [
+        ("llm_backend", "openai_compatible"),
+        ("openai_compatible_base_url", mock_llm_server),
+        ("selected_model", "mock-model"),
+    ]
+    async with httpx.AsyncClient() as client:
+        for key, value in writes:
+            response = await client.put(
+                f"{base_url}/api/settings/{key}",
+                headers=headers,
+                json={"value": value},
+                timeout=15,
+            )
+            assert response.status_code in (200, 201, 204), (
+                f"failed to pin {key}: {response.status_code} {response.text[:300]}"
+            )
+
+
 async def _start_auth_matrix_server(
     ironclaw_binary: str,
     mock_llm_server: str,
@@ -312,6 +332,7 @@ async def _start_auth_matrix_server(
             "CLI_ENABLED": "false",
             "LLM_BACKEND": "openai_compatible",
             "LLM_BASE_URL": mock_llm_server,
+            "LLM_API_KEY": "mock-api-key",
             "LLM_MODEL": "mock-model",
             "DATABASE_BACKEND": "libsql",
             "LIBSQL_PATH": db_path,
@@ -351,6 +372,7 @@ async def _start_auth_matrix_server(
         base_url = f"http://127.0.0.1:{gateway_port}"
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            await _pin_mock_llm_settings(base_url, mock_llm_server)
             await _seed_mock_llm_api_url(mock_llm_server, mock_api_url)
             return {
                 "base_url": base_url,
@@ -458,6 +480,7 @@ async def _start_auth_matrix_repl(
             "CLI_MODE": "repl",
             "LLM_BACKEND": "openai_compatible",
             "LLM_BASE_URL": mock_llm_server,
+            "LLM_API_KEY": "mock-api-key",
             "LLM_MODEL": "mock-model",
             "DATABASE_BACKEND": "libsql",
             "LIBSQL_PATH": os.path.join(db_tmpdir.name, "auth-matrix-repl.db"),

@@ -79,6 +79,9 @@ impl ActionProjector {
             if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
                 continue;
             }
+            if hidden_from_model_callable_surface(tool.name()) {
+                continue;
+            }
 
             if let Some(provider_extension) = tool.provider_extension() {
                 let Some(extension_statuses) = extension_statuses else {
@@ -138,38 +141,13 @@ impl ActionProjector {
             }
         }
 
-        // Surface installed-but-not-yet-ready provider tools (primarily
-        // WASM tools pending OAuth) as callable actions. Without this,
-        // unauthenticated WASM tools are invisible to the LLM — they're
-        // registered in `tool_registry` only after activation, which
-        // requires auth first — so the LLM never calls them and the
-        // auth-on-first-call gate never fires. See issue #2883.
-        if let Some(auth_manager) = auth_manager {
-            for latent in auth_manager.latent_provider_actions(&context.user_id).await {
-                // Normalize hyphen→underscore to match the first loop's
-                // `td.name.replace('-', '_')`. This keeps the action name
-                // stable for the LLM before and after auth (registered
-                // tools surface as underscores) and ensures the `seen`
-                // dedup correctly suppresses overlap with tools already
-                // added above.
-                let name = latent.action_name.replace('-', "_");
-                if !seen.insert(name.clone()) {
-                    continue;
-                }
-                actions.push(ActionDef {
-                    name,
-                    description: latent.description,
-                    parameters_schema: latent.parameters_schema,
-                    effects: vec![],
-                    requires_approval: false,
-                    discovery: None,
-                });
-            }
-        }
-
         actions.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(actions)
     }
+}
+
+fn hidden_from_model_callable_surface(tool_name: &str) -> bool {
+    matches!(tool_name, "tool_install" | "tool-install")
 }
 
 fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
@@ -320,6 +298,9 @@ mod tests {
 
     struct DiscoveryTool;
     struct PlainTool;
+    struct BuiltinTool {
+        name: &'static str,
+    }
 
     #[async_trait]
     impl crate::tools::Tool for DiscoveryTool {
@@ -376,6 +357,29 @@ mod tests {
 
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {"id": {"type": "string"}}})
+        }
+
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!("not needed")
+        }
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for BuiltinTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Built-in helper"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
         }
 
         async fn execute(
@@ -579,5 +583,38 @@ mod tests {
             !actions.iter().any(|a| a == "latent_send"),
             "Not-installed provider tool should be omitted from available_actions, got: {actions:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn tool_install_hidden_from_model_callable_surface() {
+        let tools = std::sync::Arc::new(ToolRegistry::new());
+        tools
+            .register(std::sync::Arc::new(BuiltinTool {
+                name: "tool_install",
+            }))
+            .await;
+        tools
+            .register(std::sync::Arc::new(BuiltinTool {
+                name: "tool_activate",
+            }))
+            .await;
+
+        let actions = ActionProjector::project_actions(
+            tools.as_ref(),
+            None,
+            None,
+            &[],
+            &test_context(),
+            None,
+        )
+        .await
+        .expect("project should succeed");
+        let action_names = actions
+            .into_iter()
+            .map(|action| action.name)
+            .collect::<Vec<_>>();
+
+        assert!(!action_names.iter().any(|name| name == "tool_install"));
+        assert!(action_names.iter().any(|name| name == "tool_activate"));
     }
 }

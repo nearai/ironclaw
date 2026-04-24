@@ -1,8 +1,12 @@
 //! System prompt construction for the execution loop.
 //!
 //! Builds a CodeAct/RLM system prompt that instructs the LLM to write
-//! Python code in ```repl blocks while keeping non-callable capability
-//! background in one canonical always-on location.
+//! Python code in ```repl blocks while keeping the model-facing surfaces
+//! separated:
+//! - callable actions stay in the normal tool inventory
+//! - contextual capability background stays in one canonical always-on section
+//! - blocked managed integrations are rendered separately under
+//!   `Activatable Integrations`
 //!
 //! Prompt templates live in `crates/ironclaw_engine/prompts/` as plain
 //! markdown files for easy inspection and iteration. They are embedded
@@ -85,6 +89,8 @@ const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt 
 const CODEACT_LEGACY_OPENING: &str = "You are an AI assistant with a Python REPL environment.";
 const CODEACT_STRATEGY_HEADING: &str = "\n## Strategy\n";
 const CODEACT_CAPABILITIES_HEADING: &str = "\n## Available capabilities (background status)\n";
+const CODEACT_BACKGROUND_CAPABILITIES_HEADING: &str = "\n## Capabilities\n";
+const CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING: &str = "\n## Activatable Integrations\n";
 const PRIOR_KNOWLEDGE_HEADING: &str = "\n\n## Prior Knowledge (from completed threads)\n";
 const ACTIVE_SKILLS_HEADING: &str = "\n\n## Active Skills\n";
 const MISSING_SKILLS_PREFIX: &str =
@@ -160,27 +166,26 @@ fn build_codeact_system_prompt_inner(
         prompt.push_str(overlay);
     }
 
-    if !capabilities.is_empty() {
-        prompt.push_str("\n## Available capabilities (background status)\n\n");
-        for capability in capabilities {
-            prompt.push_str(&format!(
-                "- `{}` [{}] — {}",
-                capability.name,
-                capability_kind_label(capability.kind),
-                capability_status_label(capability.status)
-            ));
-            if let Some(display_name) = &capability.display_name
-                && display_name != &capability.name
-            {
-                prompt.push_str(&format!(" ({display_name})"));
-            }
-            if let Some(routing_hint) = &capability.routing_hint {
-                prompt.push_str(&format!(". {routing_hint}"));
-            }
-            if let Some(description) = &capability.description {
-                prompt.push_str(&format!(". {description}"));
-            }
-            prompt.push('\n');
+    let (activatable_integrations, background_capabilities): (Vec<_>, Vec<_>) = capabilities
+        .iter()
+        .partition(|capability| is_activatable_integration(capability));
+
+    if !background_capabilities.is_empty() {
+        prompt.push_str(CODEACT_BACKGROUND_CAPABILITIES_HEADING);
+        prompt.push('\n');
+        for capability in background_capabilities {
+            prompt.push_str(&render_background_capability(capability));
+        }
+    }
+
+    if !activatable_integrations.is_empty() {
+        prompt.push_str(CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING);
+        prompt.push('\n');
+        prompt.push_str(
+            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn.\n\n",
+        );
+        for capability in activatable_integrations {
+            prompt.push_str(&render_activatable_integration(capability));
         }
     }
 
@@ -280,6 +285,80 @@ const fn capability_kind_label(kind: CapabilitySummaryKind) -> &'static str {
         CapabilitySummaryKind::Provider => "provider",
         CapabilitySummaryKind::Runtime => "runtime",
     }
+}
+
+fn is_activatable_integration(capability: &CapabilitySummary) -> bool {
+    matches!(
+        capability.kind,
+        CapabilitySummaryKind::Provider | CapabilitySummaryKind::Channel
+    ) && matches!(
+        capability.status,
+        CapabilityStatus::NeedsAuth
+            | CapabilityStatus::NeedsSetup
+            | CapabilityStatus::Inactive
+            | CapabilityStatus::Latent
+            | CapabilityStatus::AvailableNotInstalled
+    )
+}
+
+fn render_background_capability(capability: &CapabilitySummary) -> String {
+    let mut line = format!(
+        "- `{}` [{}] — {}",
+        capability.name,
+        capability_kind_label(capability.kind),
+        capability_status_label(capability.status)
+    );
+    if let Some(display_name) = &capability.display_name
+        && display_name != &capability.name
+    {
+        line.push_str(&format!(" ({display_name})"));
+    }
+    if let Some(routing_hint) = &capability.routing_hint {
+        line.push_str(&format!(". {routing_hint}"));
+    }
+    if let Some(description) = &capability.description {
+        line.push_str(&format!(". {description}"));
+    }
+    line.push('\n');
+    line
+}
+
+fn render_activatable_integration(capability: &CapabilitySummary) -> String {
+    let mut line = format!(
+        "- `{}` [{}]",
+        capability.name,
+        capability_kind_label(capability.kind)
+    );
+    if let Some(display_name) = &capability.display_name
+        && display_name != &capability.name
+    {
+        line.push_str(&format!(" ({display_name})"));
+    }
+    if let Some(description) = &capability.description {
+        line.push_str(&format!(" — {description}"));
+    }
+    if !capability.action_preview.is_empty() {
+        line.push_str(&format!(
+            ". Unlocks: {}",
+            format_action_preview(&capability.action_preview)
+        ));
+    }
+    line.push('\n');
+    line
+}
+
+fn format_action_preview(actions: &[String]) -> String {
+    const MAX_PREVIEW: usize = 3;
+
+    let mut rendered = actions
+        .iter()
+        .take(MAX_PREVIEW)
+        .map(|action| format!("`{action}`"))
+        .collect::<Vec<_>>();
+    if actions.len() > MAX_PREVIEW {
+        rendered.push(format!("+{} more", actions.len() - MAX_PREVIEW));
+    }
+    rendered.join(", ")
 }
 
 /// Load the prompt overlay from the Store, if one exists for this project.
@@ -440,6 +519,7 @@ mod tests {
                     kind: crate::types::capability::CapabilitySummaryKind::Channel,
                     status: CapabilityStatus::ReadyScoped,
                     description: Some("Telegram notifications".into()),
+                    action_preview: Vec::new(),
                     routing_hint: Some("Usable through message".into()),
                 },
                 CapabilitySummary {
@@ -448,6 +528,7 @@ mod tests {
                     kind: crate::types::capability::CapabilitySummaryKind::Provider,
                     status: CapabilityStatus::NeedsAuth,
                     description: Some("Slack workspace integration".into()),
+                    action_preview: vec!["slack_send".into(), "slack_history".into()],
                     routing_hint: None,
                 },
             ],
@@ -455,12 +536,14 @@ mod tests {
             None,
         );
 
-        assert!(prompt.contains("## Available capabilities (background status)"));
+        assert!(prompt.contains("## Capabilities"));
         assert!(prompt.contains("`telegram` [channel]"));
         assert!(prompt.contains("ready_scoped"));
         assert!(prompt.contains("Usable through message"));
+        assert!(prompt.contains("## Activatable Integrations"));
         assert!(prompt.contains("`slack` [provider]"));
-        assert!(prompt.contains("needs_auth"));
+        assert!(prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
     }
 
     #[test]
@@ -492,6 +575,7 @@ mod tests {
                 kind: CapabilitySummaryKind::Channel,
                 status: CapabilityStatus::ReadyScoped,
                 description: None,
+                action_preview: Vec::new(),
                 routing_hint: Some("Usable through message".into()),
             }],
             &[],
@@ -521,6 +605,7 @@ mod tests {
                 kind: CapabilitySummaryKind::Provider,
                 status: CapabilityStatus::NeedsAuth,
                 description: None,
+                action_preview: vec!["slack_send".into()],
                 routing_hint: None,
             }],
             &[],
@@ -564,6 +649,7 @@ mod tests {
                 kind: CapabilitySummaryKind::Provider,
                 status: CapabilityStatus::NeedsAuth,
                 description: None,
+                action_preview: vec!["slack_send".into()],
                 routing_hint: None,
             }],
             &[],

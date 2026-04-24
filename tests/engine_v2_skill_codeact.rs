@@ -960,6 +960,7 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
             kind: ironclaw_engine::CapabilitySummaryKind::Provider,
             status: ironclaw_engine::CapabilityStatus::NeedsAuth,
             description: Some("Slack workspace integration".into()),
+            action_preview: vec!["slack_send".into()],
             routing_hint: None,
         }],
     );
@@ -1078,9 +1079,10 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
     assert!(post_compaction_system_prompt.contains("Active Skills"));
     assert!(post_compaction_system_prompt.contains("/missing"));
     assert!(post_compaction_system_prompt.contains("`slack` [provider]"));
+    assert!(post_compaction_system_prompt.contains("tool_activate(name=\"<integration>\")"));
     assert_eq!(
         post_compaction_system_prompt
-            .matches("## Available capabilities (background status)")
+            .matches("## Activatable Integrations")
             .count(),
         1
     );
@@ -1105,9 +1107,10 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
     assert!(resumed_system_prompt.contains("Active Skills"));
     assert!(resumed_system_prompt.contains("/missing"));
     assert!(resumed_system_prompt.contains("`slack` [provider]"));
+    assert!(resumed_system_prompt.contains("tool_activate(name=\"<integration>\")"));
     assert_eq!(
         resumed_system_prompt
-            .matches("## Available capabilities (background status)")
+            .matches("## Activatable Integrations")
             .count(),
         1
     );

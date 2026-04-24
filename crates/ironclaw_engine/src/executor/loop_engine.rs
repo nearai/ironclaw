@@ -827,6 +827,7 @@ mod tests {
                     kind: CapabilitySummaryKind::Channel,
                     status: CapabilityStatus::ReadyScoped,
                     description: Some("Telegram notifications".into()),
+                    action_preview: Vec::new(),
                     routing_hint: Some("Usable through message".into()),
                 }])
             }
@@ -870,7 +871,7 @@ mod tests {
         let seen = llm.seen_messages.lock().unwrap();
         let system_prompt = &seen[0][0].content;
         assert!(!system_prompt.contains("## Available tools (call as Python functions)"));
-        assert!(system_prompt.contains("## Available capabilities (background status)"));
+        assert!(system_prompt.contains("## Capabilities"));
         assert!(system_prompt.contains("`telegram`"));
         assert!(system_prompt.contains("ready_scoped"));
         assert!(system_prompt.contains("Usable through message"));
@@ -938,6 +939,7 @@ mod tests {
                     kind: CapabilitySummaryKind::Provider,
                     status: CapabilityStatus::NeedsAuth,
                     description: Some("Slack workspace integration".into()),
+                    action_preview: vec!["slack_send".into()],
                     routing_hint: None,
                 }])
             }
@@ -1008,15 +1010,14 @@ mod tests {
         let system_prompt = &seen[0][0].content;
         assert!(!system_prompt.contains("## Available tools (call as Python functions)"));
         assert!(system_prompt.contains("`slack` [provider]"));
-        assert!(system_prompt.contains("needs_auth"));
+        assert!(system_prompt.contains("## Activatable Integrations"));
+        assert!(system_prompt.contains("tool_activate(name=\"<integration>\")"));
         assert!(!system_prompt.contains("`telegram` [channel]"));
         assert!(system_prompt.contains("## Prior Knowledge (from completed threads)"));
         assert!(system_prompt.contains("GitHub API Skill"));
         assert!(system_prompt.contains("slash skill(s) that are not installed"));
         assert_eq!(
-            system_prompt
-                .matches("## Available capabilities (background status)")
-                .count(),
+            system_prompt.matches("## Activatable Integrations").count(),
             1
         );
         assert_eq!(
@@ -1099,6 +1100,7 @@ mod tests {
                     kind: CapabilitySummaryKind::Provider,
                     status: CapabilityStatus::NeedsAuth,
                     description: Some("Slack workspace integration".into()),
+                    action_preview: vec!["slack_send".into()],
                     routing_hint: None,
                 }])
             }
@@ -1161,7 +1163,7 @@ mod tests {
         let seen = llm.seen_messages.lock().unwrap();
         let system_prompt = &seen[0][0].content;
         assert!(system_prompt.contains("`slack` [provider]"));
-        assert!(system_prompt.contains("needs_auth"));
+        assert!(system_prompt.contains("## Activatable Integrations"));
     }
 
     #[tokio::test]

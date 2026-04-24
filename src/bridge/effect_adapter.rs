@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-
 use tokio::sync::RwLock;
 use tracing::debug;
 
@@ -31,6 +30,7 @@ use crate::bridge::router::synthetic_action_call_id;
 use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
+use crate::extensions::naming::extension_name_candidates;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::rate_limiter::RateLimiter;
@@ -80,30 +80,6 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
-    /// Short-lived cache for `list_capability_extensions` results. Keyed by
-    /// `user_id` with an expiry timestamp. Both `available_actions` and
-    /// `available_capabilities` are called in quick succession from the engine
-    /// loop; this cache eliminates the duplicate fetch.
-    extension_cache: RwLock<Option<ExtensionCacheEntry>>,
-}
-
-/// Cached extension list with a short TTL to deduplicate the fetch across
-/// `available_actions` and `available_capabilities` when called in sequence.
-struct ExtensionCacheEntry {
-    user_id: String,
-    fetched_at: Instant,
-    extensions: Vec<InstalledExtension>,
-}
-
-impl ExtensionCacheEntry {
-    /// Cache entries expire after 500ms — long enough to cover back-to-back
-    /// calls within a single system-prompt build, short enough to never serve
-    /// stale data across separate engine iterations.
-    const TTL_MS: u128 = 500;
-
-    fn is_valid_for(&self, user_id: &str) -> bool {
-        self.user_id == user_id && self.fetched_at.elapsed().as_millis() < Self::TTL_MS
-    }
 }
 
 impl EffectBridgeAdapter {
@@ -127,7 +103,6 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
-            extension_cache: RwLock::new(None),
         }
     }
 
@@ -220,18 +195,6 @@ impl EffectBridgeAdapter {
         context: &ThreadExecutionContext,
     ) -> Option<Vec<InstalledExtension>> {
         let auth_manager = auth_manager?;
-
-        // Check cache first.
-        {
-            let cache = self.extension_cache.read().await;
-            if let Some(entry) = cache.as_ref()
-                && entry.is_valid_for(&context.user_id)
-            {
-                return Some(entry.extensions.clone());
-            }
-        }
-
-        // Cache miss — fetch from auth_manager.
         let extensions = match auth_manager
             .list_capability_extensions(&context.user_id)
             .await
@@ -246,17 +209,6 @@ impl EffectBridgeAdapter {
                 Vec::new()
             }
         };
-
-        // Populate cache for the sibling projector call.
-        {
-            let mut cache = self.extension_cache.write().await;
-            *cache = Some(ExtensionCacheEntry {
-                user_id: context.user_id.clone(),
-                fetched_at: Instant::now(),
-                extensions: extensions.clone(),
-            });
-        }
-
         Some(extensions)
     }
 
@@ -275,6 +227,42 @@ impl EffectBridgeAdapter {
                 .map(|ext| (ext.name.clone(), ext))
                 .collect(),
         )
+    }
+
+    async fn tool_activate_requires_install_approval(
+        &self,
+        lookup_name: &str,
+        parameters: &serde_json::Value,
+        context: &ThreadExecutionContext,
+    ) -> bool {
+        if !matches!(lookup_name, "tool_activate" | "tool-activate") {
+            return false;
+        }
+
+        let Some(requested_name) = parameters
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+
+        let auth_manager = self.auth_manager.read().await;
+        let Some(auth_manager) = auth_manager.as_ref() else {
+            return false;
+        };
+        let Some(extensions) = self
+            .fetch_extension_list(Some(auth_manager.as_ref()), context)
+            .await
+        else {
+            return false;
+        };
+
+        extensions
+            .into_iter()
+            .find(|extension| extension_name_matches(&extension.name, requested_name))
+            .is_some_and(|extension| !extension.installed)
     }
 
     async fn sync_skill_install_result(
@@ -1274,7 +1262,14 @@ impl EffectBridgeAdapter {
                 });
             }
 
-            let requirement = tool.requires_approval(&parameters);
+            let requirement = if self
+                .tool_activate_requires_install_approval(&lookup_name, &parameters, context)
+                .await
+            {
+                ApprovalRequirement::UnlessAutoApproved
+            } else {
+                tool.requires_approval(&parameters)
+            };
             match requirement {
                 ApprovalRequirement::Always => {
                     if !approval_already_granted {
@@ -1632,6 +1627,15 @@ impl EffectBridgeAdapter {
             None => false,
         }
     }
+}
+
+fn extension_name_matches(extension_name: &str, requested_name: &str) -> bool {
+    let requested_candidates = extension_name_candidates(requested_name)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    extension_name_candidates(extension_name)
+        .into_iter()
+        .any(|candidate| requested_candidates.contains(&candidate))
 }
 
 #[async_trait::async_trait]
@@ -4455,6 +4459,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_activate_requires_approval_before_auto_installing_integration() {
+        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+        use crate::tools::builtin::extension_tools::ToolActivateTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            vec![RegistryEntry {
+                name: "web_search".to_string(),
+                display_name: "Web Search".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Search the web".to_string(),
+                keywords: vec!["search".into(), "web".into()],
+                source: ExtensionSource::WasmDownload {
+                    wasm_url: "https://example.com/web_search.wasm".to_string(),
+                    capabilities_url: None,
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
+            }],
+        ));
+        tools
+            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(ext_mgr),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "web_search"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn tool_install_post_install_auth_gate_preserves_secret_name_for_resume() {
         struct InstallTool;
 
@@ -4554,14 +4653,8 @@ mod tests {
         }
     }
 
-    /// Regression for #2883: latent provider actions (installed but not yet
-    /// ready — primarily WASM tools pending OAuth) must surface as callable
-    /// actions so the LLM can attempt them and trigger the auth-on-first-call
-    /// gate. Before the fix, unauthenticated WASM tools were invisible to the
-    /// LLM because `tool_definitions()` only returns registered tools and WASM
-    /// tools register only at activation (which requires auth first).
     #[tokio::test]
-    async fn available_actions_include_latent_inactive_provider_actions() {
+    async fn available_actions_omit_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4625,14 +4718,14 @@ mod tests {
             .await
             .expect("actions");
         assert!(
-            actions.iter().any(|action| action.name == "latent_tool"),
-            "latent WASM tool should appear in available_actions so the LLM can call it and trigger auth; got: {:?}",
+            !actions.iter().any(|action| action.name == "latent_tool"),
+            "latent WASM tool should stay out of model-facing available_actions; got: {:?}",
             actions.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
     }
 
     #[tokio::test]
-    async fn latent_action_dispatch_uses_canonical_snapshot_name() {
+    async fn available_capabilities_include_latent_provider_activation_entry() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -4691,36 +4784,24 @@ mod tests {
             )))
             .await;
 
-        let actions = adapter
-            .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
-            .await
-            .expect("actions");
-        let mut ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_latent"));
-        ctx.available_actions_snapshot = Some(actions.into());
-
         let result = adapter
-            .execute_action("latent-tool", serde_json::json!({}), &lease(), &ctx)
+            .available_capabilities(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await;
 
         match result {
-            Err(EngineError::Effect { reason }) => {
-                assert!(
-                    reason.contains("Activation failed"),
-                    "latent action should resolve through the canonical snapshot name before activation; got {reason}"
-                );
+            Ok(capabilities) => {
+                let latent = capabilities
+                    .into_iter()
+                    .find(|summary| summary.name == "latent_tool")
+                    .expect("latent tool should surface as an activatable capability");
+                assert!(matches!(
+                    latent.status,
+                    ironclaw_engine::CapabilityStatus::Inactive
+                        | ironclaw_engine::CapabilityStatus::AvailableNotInstalled
+                ));
+                assert_eq!(latent.action_preview, vec!["latent_tool".to_string()]);
             }
-            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
-                ironclaw_engine::ResumeKind::Authentication {
-                    credential_name, ..
-                } => {
-                    assert!(
-                        !credential_name.as_str().is_empty(),
-                        "latent action should resolve through canonical snapshot name"
-                    );
-                }
-                other => panic!("expected authentication resume kind, got {other:?}"),
-            },
-            other => panic!("expected latent action activation/auth path, got {other:?}"),
+            other => panic!("expected latent capability background entry, got {other:?}"),
         }
     }
 
@@ -5074,7 +5155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_capabilities_omit_latent_provider_background() {
+    async fn available_capabilities_include_latent_provider_background() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::mcp::process::McpProcessManager;
@@ -5153,10 +5234,10 @@ mod tests {
             .expect("capabilities");
 
         assert!(
-            !capabilities
+            capabilities
                 .iter()
                 .any(|summary| summary.name == "latent_tool"),
-            "latent provider tool should not appear in capability background when it is callable"
+            "latent provider tool should appear in capability background when it is activatable"
         );
     }
 

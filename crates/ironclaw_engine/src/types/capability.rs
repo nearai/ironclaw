@@ -3,6 +3,12 @@
 //! A capability bundles actions (tools), knowledge (skills), and policies
 //! (hooks) into a single installable/activatable unit. Capabilities are
 //! granted to threads via leases.
+//!
+//! Model-facing surfacing is intentionally split:
+//! - `ActionInventory` contains callable actions for the current step
+//! - `CapabilitySummary` contains background/contextual capability metadata,
+//!   including blocked integrations that belong in `Activatable Integrations`
+//!   rather than on the normal callable surface
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -248,6 +254,9 @@ pub enum CapabilityStatus {
 }
 
 /// High-level category for capability background summaries.
+///
+/// This is used for contextual capability rendering and activatable
+/// integration rendering, not for normal callable action inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySummaryKind {
@@ -259,7 +268,13 @@ pub enum CapabilitySummaryKind {
     Runtime,
 }
 
-/// Background summary for a non-callable or indirectly-callable capability.
+/// Background summary for a contextual or activatable capability.
+///
+/// Ready callable actions stay in `ActionInventory`. `CapabilitySummary`
+/// covers:
+/// - runtime/contextual information that should stay in background prompt/UI
+/// - blocked managed integrations that are shown separately and enabled via
+///   `tool_activate(name=...)`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySummary {
     /// Stable capability identifier (for example `telegram` or `slack`).
@@ -274,6 +289,13 @@ pub struct CapabilitySummary {
     /// Optional human-readable description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional preview of actions unlocked by enabling this capability.
+    ///
+    /// This is primarily for activatable integrations so the model can see
+    /// what becomes callable after enablement without dumping every action
+    /// into the default callable surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_preview: Vec<String>,
     /// Optional routing guidance such as `Usable through message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
@@ -620,6 +642,7 @@ mod tests {
             kind: CapabilitySummaryKind::Channel,
             status: CapabilityStatus::ReadyScoped,
             description: Some("Telegram messaging".to_string()),
+            action_preview: vec!["telegram_send".to_string()],
             routing_hint: Some("Usable through message".to_string()),
         };
 
@@ -629,6 +652,7 @@ mod tests {
         assert_eq!(json["kind"], "channel");
         assert_eq!(json["status"], "ready_scoped");
         assert_eq!(json["description"], "Telegram messaging");
+        assert_eq!(json["action_preview"], serde_json::json!(["telegram_send"]));
         assert_eq!(json["routing_hint"], "Usable through message");
 
         let parsed: CapabilitySummary = serde_json::from_value(json).unwrap();
@@ -643,6 +667,7 @@ mod tests {
             kind: CapabilitySummaryKind::Provider,
             status: CapabilityStatus::NeedsAuth,
             description: None,
+            action_preview: Vec::new(),
             routing_hint: None,
         };
 
@@ -652,6 +677,7 @@ mod tests {
         assert_eq!(json["status"], "needs_auth");
         assert!(json.get("display_name").is_none());
         assert!(json.get("description").is_none());
+        assert!(json.get("action_preview").is_none());
         assert!(json.get("routing_hint").is_none());
 
         let parsed: CapabilitySummary = serde_json::from_value(serde_json::json!({
