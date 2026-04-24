@@ -14,14 +14,14 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 
 fn install_requested_identifier<'a>(
-    name: &'a str,
+    name: Option<&'a str>,
     explicit_slug: Option<&'a str>,
     resolved_download_key: Option<&'a str>,
-) -> &'a str {
+) -> Option<&'a str> {
     explicit_slug
         .filter(|s| !s.is_empty())
         .or(resolved_download_key.filter(|s| !s.is_empty()))
-        .unwrap_or(name)
+        .or(name.filter(|s| !s.is_empty()))
 }
 
 fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
@@ -123,7 +123,7 @@ pub async fn skills_search_handler(
 
     let catalog = Arc::clone(state.skill_catalog.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Skill catalog not available".to_string(),
+        "ClawHub registry is not enabled (CLAWHUB_ENABLED=false)".to_string(),
     ))?);
 
     // Search ClawHub catalog
@@ -213,7 +213,8 @@ pub async fn skills_install_handler(
         ));
     }
 
-    tracing::info!(user_id = %user.user_id, skill = %req.name, "skill install requested");
+    let name = req.name.as_deref().unwrap_or("");
+    tracing::info!(user_id = %user.user_id, skill = %name, "skill install requested");
 
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
@@ -227,6 +228,14 @@ pub async fn skills_install_handler(
             ..crate::tools::builtin::skill_tools::SkillInstallPayload::default()
         }
     } else if let Some(ref url) = req.url {
+        // URL installs require ClawHub to be enabled
+        if state.skill_catalog.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "URL-based skill installs are disabled (ClawHub registry is not enabled)"
+                    .to_string(),
+            ));
+        }
         // Fetch from explicit URL (with SSRF protection)
         crate::tools::builtin::skill_tools::fetch_skill_payload(url)
             .await
@@ -234,14 +243,11 @@ pub async fn skills_install_handler(
     } else if let Some(ref catalog) = state.skill_catalog {
         let download_key = if let Some(slug) = req.slug.as_deref().filter(|s| !s.is_empty()) {
             slug.to_string()
-        } else if req.name.contains('/') {
-            req.name.clone()
+        } else if name.contains('/') {
+            name.to_string()
         } else {
-            let outcome = catalog.search(&req.name).await;
-            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(
-                &req.name,
-                &outcome.results,
-            ) {
+            let outcome = catalog.search(name).await;
+            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(name, &outcome.results) {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => {
                     let reason = outcome
@@ -251,7 +257,7 @@ pub async fn skills_install_handler(
                         StatusCode::BAD_REQUEST,
                         format!(
                             "Could not resolve skill name '{}' to a catalog slug: {}",
-                            req.name, reason
+                            name, reason
                         ),
                     ));
                 }
@@ -266,13 +272,13 @@ pub async fn skills_install_handler(
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     } else {
         return Ok(Json(ActionResponse::fail(
-            "Provide 'content' or 'url' to install a skill".to_string(),
+            "Provide 'content' to install a skill (ClawHub registry is not enabled)".to_string(),
         )));
     };
 
     let normalized = ironclaw_skills::normalize_line_endings(&install_payload.skill_md);
     let requested_identifier = install_requested_identifier(
-        &req.name,
+        req.name.as_deref(),
         req.slug.as_deref(),
         resolved_download_key.as_deref(),
     );
@@ -289,7 +295,7 @@ pub async fn skills_install_handler(
         let (skill_name, install_content) =
             ironclaw_skills::registry::SkillRegistry::resolve_install_content(
                 &normalized,
-                Some(requested_identifier),
+                requested_identifier,
             )
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -398,7 +404,15 @@ pub async fn skills_remove_handler(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use super::*;
+    use std::{path::Path, sync::Arc};
+
+    use axum::{Json, extract::State, http::HeaderMap};
+
+    use crate::channels::web::{
+        auth::{AuthenticatedUser, UserIdentity},
+        test_helpers::TestGatewayBuilder,
+    };
 
     #[test]
     fn catalog_entry_matches_installed_slug_suffix() {
@@ -448,11 +462,67 @@ mod tests {
     fn install_requested_identifier_prefers_resolved_slug_for_manual_name_installs() {
         assert_eq!(
             super::install_requested_identifier(
-                "Mortgage Calculator",
+                Some("Mortgage Calculator"),
                 None,
                 Some("finance/mortgage-calculator"),
             ),
-            "finance/mortgage-calculator"
+            Some("finance/mortgage-calculator")
+        );
+    }
+
+    #[test]
+    fn install_requested_identifier_omits_empty_name_hints() {
+        assert_eq!(super::install_requested_identifier(None, None, None), None);
+        assert_eq!(
+            super::install_requested_identifier(Some(""), None, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_install_handler_uses_manifest_name_when_request_name_is_absent() {
+        let install_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = TestGatewayBuilder::new().build();
+        Arc::get_mut(&mut state)
+            .expect("state should be uniquely owned in test")
+            .skill_registry = Some(Arc::new(std::sync::RwLock::new(
+            ironclaw_skills::SkillRegistry::new(install_dir.path().to_path_buf()),
+        )));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("static header"));
+
+        let response = super::skills_install_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "test-user".to_string(),
+                role: "owner".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            headers,
+            Json(SkillInstallRequest {
+                name: None,
+                slug: None,
+                url: None,
+                content: Some(
+                    "---\nname: manifest-only-skill\ndescription: demo\nactivation:\n  keywords: [demo]\n---\n\n# Demo\n"
+                        .to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect("handler should accept inline content without name");
+
+        assert!(response.0.success);
+        assert_eq!(response.0.message, "Skill 'manifest-only-skill' installed");
+        assert!(
+            state
+                .skill_registry
+                .as_ref()
+                .expect("registry")
+                .read()
+                .expect("lock")
+                .has("manifest-only-skill"),
+            "manifest name should be preserved when request omits name"
         );
     }
 

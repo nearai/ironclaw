@@ -522,7 +522,7 @@ mod tests {
             )),
             Box::new(SkillInstallTool::new(
                 Arc::clone(&registry),
-                Arc::clone(&catalog),
+                Some(Arc::clone(&catalog)),
             )),
             Box::new(SkillRemoveTool::new(Arc::clone(&registry))),
         ];

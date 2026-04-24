@@ -702,6 +702,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
+    clawhub_disabled: bool,
     skills_dir: Option<std::path::PathBuf>,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
@@ -731,6 +732,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
+            clawhub_disabled: false,
             skills_dir: None,
             enable_routines: false,
             http_exchanges: Vec::new(),
@@ -895,6 +897,14 @@ impl TestRigBuilder {
         self
     }
 
+    /// Disable ClawHub registry (catalog search + URL installs).
+    /// Implies `with_skills()`.
+    pub fn with_clawhub_disabled(mut self) -> Self {
+        self.enable_skills = true;
+        self.clawhub_disabled = true;
+        self
+    }
+
     /// Set a custom skills directory so the test rig loads skill files
     /// from a real path (e.g. the repo's `skills/` directory) instead of
     /// an empty temp directory. Implies `with_skills()`.
@@ -964,6 +974,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             enable_skills,
+            clawhub_disabled,
             skills_dir,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
@@ -1231,12 +1242,16 @@ impl TestRigBuilder {
                     .with_installed_dir(installed_skills_dir.clone());
                 let _loaded = registry.discover_all().await;
                 let registry = Arc::new(std::sync::RwLock::new(registry));
-                let catalog = ironclaw_skills::catalog::shared_catalog();
+                let catalog = if clawhub_disabled {
+                    None
+                } else {
+                    Some(ironclaw_skills::catalog::shared_catalog())
+                };
                 components
                     .tools
-                    .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+                    .register_skill_tools(Arc::clone(&registry), catalog.clone());
                 components.skill_registry = Some(registry);
-                components.skill_catalog = Some(catalog);
+                components.skill_catalog = catalog;
             }
 
             // Register any extra test-specific tools.

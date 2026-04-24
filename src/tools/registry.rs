@@ -752,23 +752,28 @@ impl ToolRegistry {
 
     /// Register skill management tools (list, search, install, remove).
     ///
-    /// These allow the LLM to manage prompt-level skills through conversation.
+    /// When `catalog` is `None` (ClawHub disabled), `skill_search` is not
+    /// registered and `skill_install` only accepts inline content.
     pub fn register_skill_tools(
         &self,
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
-        catalog: Arc<SkillCatalog>,
+        catalog: Option<Arc<SkillCatalog>>,
     ) {
+        let has_catalog = catalog.is_some();
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillSearchTool::new(
-            Arc::clone(&registry),
-            Arc::clone(&catalog),
-        )));
+        if let Some(ref cat) = catalog {
+            self.register_sync(Arc::new(SkillSearchTool::new(
+                Arc::clone(&registry),
+                Arc::clone(cat),
+            )));
+        }
         self.register_sync(Arc::new(SkillInstallTool::new(
             Arc::clone(&registry),
-            Arc::clone(&catalog),
+            catalog,
         )));
         self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
-        tracing::debug!("Registered 4 skill management tools");
+        let tool_count = if has_catalog { 4 } else { 3 };
+        tracing::debug!("Registered {} skill management tools", tool_count);
     }
 
     /// Register routine management tools.
