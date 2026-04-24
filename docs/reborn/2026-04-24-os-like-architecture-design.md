@@ -97,13 +97,13 @@ This design should not be presented as a canonical 3-box architecture. The 3-box
                               |
                               | narrow host API:
                               | capabilities, config, mounts,
-                              | dispatch/spawn, events, fs/auth/network
+                              | dispatch/spawn, events, fs/resources/auth/network
                               |
 +-----------------------------|--------------------------------+
 |                      ironclaw_kernel                         |
 |--------------------------------------------------------------|
 | host composition | boot | scope wiring | event bus wiring     |
-| ExtensionManager initially lives here if kept narrow         |
+| composes extensions/resources/filesystem/runtimes/auth/etc.  |
 +-----------------------------↑--------------------------------+
                               |
                               | composes system-service crates
@@ -111,10 +111,15 @@ This design should not be presented as a canonical 3-box architecture. The 3-box
         +---------------------+---------------------+
         |                     |                     |
 +-------|------+      +-------|------+      +-------|------+
-| filesystem  |      | processes    |      | auth         |
-| mounts      |      | dispatch     |      | identity     |
-| durable API |      | spawn        |      | secret refs  |
+| filesystem  |      | resources    |      | auth         |
+| mounts      |      | budgets      |      | identity     |
+| durable API |      | quotas       |      | secret refs  |
 +-------↑------+      +-------↑------+      +-------↑------+
+        |                     |                     |
+        |              +------|-------+             |
+        |              | runtimes     |             |
+        |              | wasm/mcp/scripts/processes |
+        |              +------↑-------+             |
         |                     |                     |
         |              +------|-------+             |
         |              | network      |             |
@@ -132,7 +137,8 @@ The important architectural unit is not “box 1/2/3”. The important unit is t
 - **extensions/** = executable userland and product behavior
 - **ironclaw_kernel** = composition, boot, scope wiring, and event bus wiring
 - **ironclaw_filesystem** = durable path/mount API
-- **ironclaw_processes** = live execution, dispatch/spawn, process lifecycle, sandbox execution
+- **ironclaw_resources** = resource budgets, quotas, reservations, and budget/audit events
+- **ironclaw_wasm / ironclaw_mcp / ironclaw_scripts / ironclaw_processes** = approved execution lanes and execution substrates
 - **ironclaw_auth** = identity, credentials, secret handles, short-lived injection
 - **ironclaw_network** = mediated outbound network
 - **mounted state / external world** = storage and external effects behind service boundaries
@@ -230,6 +236,7 @@ crates/
   ironclaw_wasm
   ironclaw_mcp
   ironclaw_scripts
+  ironclaw_resources
   ironclaw_auth
   ironclaw_network
   ironclaw_kernel
@@ -439,13 +446,36 @@ This crate provides the dynamic scripting lane for project-local model-generated
 
 Scripts are the creativity/discovery lane. WASM/MCP capabilities are the stabilization/reliability lanes.
 
-### 6.9 `crates/ironclaw_kernel`
+### 6.9 `crates/ironclaw_resources`
+
+This crate is the multi-tenant resource and budget governor.
+
+#### Owns
+
+- budget/resource scope model: tenant, user, project, mission, thread, sub-thread, invocation
+- reservation/reconciliation protocol for costed work
+- budget ledger and utilization thresholds
+- resource-denial and budget-approval events
+- hard invariant caps for runaway work
+- runtime quota contracts for tokens, wall clock, concurrency, output, and sandbox resources
+
+#### Does not own
+
+- LLM provider implementation
+- runtime execution
+- billing/payment collection
+- product-specific approval UI
+- progress/stuck-loop heuristics, except as optional signals supplied to the governor
+
+Every V1 runtime lane must call resource reservation before costed work and reconcile after the work completes. No LLM, WASM, MCP, script runner, mission, heartbeat, or job path should bypass this service in hosted/multi-tenant mode.
+
+### 6.10 `crates/ironclaw_kernel`
 
 This crate composes the system.
 
 #### Owns
 
-- wiring between extension manager, filesystem, WASM, MCP, scripts, processes, auth, and network
+- wiring between extension manager, filesystem, WASM, MCP, scripts, resources, processes, auth, and network
 - stable system contracts shared across services
 - user/tenant/project scope wiring
 - high-level host startup
@@ -468,11 +498,12 @@ The intended dependency direction is:
 
 ```text
 extensions -> host interface/contracts
-ironclaw_kernel -> extensions + filesystem + processes + wasm + mcp + scripts + auth + network
+ironclaw_kernel -> extensions + filesystem + processes + wasm + mcp + scripts + resources + auth + network
 ironclaw_extensions -> filesystem contracts and manifest/capability types
-ironclaw_wasm -> host ABI/contracts + filesystem/auth/network/events interfaces
-ironclaw_mcp -> processes for stdio servers + network/auth interfaces for remote servers
-ironclaw_scripts -> processes + filesystem/auth/network interfaces
+ironclaw_wasm -> host ABI/contracts + filesystem/resources/auth/network/events interfaces
+ironclaw_mcp -> resources + processes for stdio servers + network/auth interfaces for remote servers
+ironclaw_scripts -> resources + processes + filesystem/auth/network interfaces
+ironclaw_resources -> filesystem contracts + event/audit contracts + host identity/scope types
 ironclaw_processes -> filesystem contracts + auth/network/sandbox interfaces as needed
 ironclaw_auth -> filesystem contracts
 ironclaw_network -> auth handles only when explicitly injected
@@ -484,6 +515,7 @@ Hard rules:
 - `ironclaw_filesystem` must not depend on product extensions.
 - `ironclaw_processes` must not depend on extension discovery internals.
 - `ironclaw_kernel` must not parse extension manifests directly.
+- Runtime lanes must not bypass `ironclaw_resources` for costed or quota-limited work.
 - Extensions must not import kernel internals directly.
 - First-party extensions must use the same host API shape as third-party extensions, with explicit privilege levels.
 
@@ -784,11 +816,29 @@ The kernel and system services should enforce policy; capability declarations sh
 
 ## 17. Recommended filesystem namespace
 
-A namespace like this is a good starting point:
+Project, memory, engine, and system extension state are first-class filesystem roots, not side channels. A namespace like this is a good starting point:
 
 ```text
+/engine/
+  threads/
+  runs/
+  queues/
+  events/
+  audit/
+  budgets/
+
 /system/
   extensions/
+    <extension>/
+      manifest.toml
+      capabilities.json
+      skills/
+        SKILL.md
+      scripts/
+      wasm/
+      config/
+      state/
+      cache/
   auth/
   settings/
   capabilities/
@@ -799,6 +849,8 @@ A namespace like this is a good starting point:
     memory/
     auth/
     settings/
+    skills/
+    missions/
 
 /projects/
   <project>/
@@ -806,12 +858,29 @@ A namespace like this is a good starting point:
     artifacts/
     settings/
     events/
+    memory/
+    skills/
+    scripts/
+    missions/
+    learning/
 
 /memory/
-  ... mounted backend if needed ...
+  ... database-backed or remote memory mount if needed ...
 ```
 
-This keeps durable state visible and inspectable while still allowing different backends underneath via mounts.
+Canonical durable paths should usually be plural roots such as `/projects/<project>` and `/users/<user>`. Runtime scopes may expose convenient scoped aliases to extensions and scripts:
+
+```text
+/project             -> /projects/<active_project>
+/workspace           -> selected project workspace mount
+/memory              -> selected user/project memory mount
+/extension/config    -> /system/extensions/<extension>/config
+/extension/state     -> /system/extensions/<extension>/state
+/extension/cache     -> /system/extensions/<extension>/cache
+/tmp                 -> invocation-local scratch space
+```
+
+Raw host paths and raw tenant storage locations stay internal. Extensions see only scoped aliases and explicit mount views. This keeps durable state visible and inspectable while still allowing different backends underneath via mounts.
 
 ---
 
@@ -819,7 +888,7 @@ This keeps durable state visible and inspectable while still allowing different 
 
 The architecture should be enforced mechanically.
 
-### 17.1 Dependency checks
+### 18.1 Dependency checks
 
 Add checks that prevent forbidden imports, for example:
 
@@ -829,7 +898,7 @@ Add checks that prevent forbidden imports, for example:
 - outbound HTTP helpers outside `ironclaw_network` are banned or flagged
 - raw secret file reads outside `ironclaw_auth` are banned or flagged
 
-### 17.2 Contract tests
+### 18.2 Contract tests
 
 Add tests for:
 
@@ -842,7 +911,7 @@ Add tests for:
 - secret handle resolution and redaction
 - tenant/user scope propagation
 
-### 17.3 Architecture docs as ratchets
+### 18.3 Architecture docs as ratchets
 
 Each core crate should include a short crate-level doc section:
 
@@ -857,7 +926,7 @@ This prevents future contributors and agents from guessing.
 
 ## 19. Risks and mitigations
 
-### 18.1 `ironclaw_processes` becoming the new blob
+### 19.1 `ironclaw_processes` becoming the new blob
 
 Risk: it absorbs capabilities, orchestration, sandboxing, routing, events, and policy.
 
@@ -869,7 +938,7 @@ Mitigations:
 - no thread persistence semantics
 - narrow dispatch/spawn/process lifecycle API
 
-### 18.2 `ironclaw_kernel` becoming misc glue
+### 19.2 `ironclaw_kernel` becoming misc glue
 
 Risk: “puts it all together” becomes “everything complicated goes here.”
 
@@ -879,7 +948,7 @@ Mitigations:
 - smart logic moves to explicit services or extensions
 - no product workflows in kernel
 
-### 18.3 filesystem abstraction growing too wide too fast
+### 19.3 filesystem abstraction growing too wide too fast
 
 Risk: `ironclaw_filesystem` becomes POSIX + SQL + object store + search + reactive indexer.
 
@@ -889,7 +958,7 @@ Mitigations:
 - indexing/querying lives in separate services
 - watch/subscription semantics postponed until needed
 
-### 18.4 secrets leaking into extension config
+### 19.4 secrets leaking into extension config
 
 Risk: filesystem config convenience causes raw secrets to land in config folders.
 
@@ -899,7 +968,7 @@ Mitigations:
 - raw secrets mediated by `ironclaw_auth`
 - redaction tests and audit events required
 
-### 18.5 auth/network bypasses
+### 19.5 auth/network bypasses
 
 Risk: extensions directly open sockets or read credentials.
 
@@ -909,7 +978,7 @@ Mitigations:
 - forbidden-import/forbidden-call checks
 - sandbox profiles that can deny direct network
 
-### 18.6 first-party extensions become special-case internals
+### 19.6 first-party extensions become special-case internals
 
 Risk: `agent_loop`, `gateway`, and `tui` become extensions only on paper.
 
@@ -919,7 +988,7 @@ Mitigations:
 - same host API shape for first-party and third-party extensions
 - privileged APIs are declared, scoped, and audited
 
-### 18.7 event semantics diverge
+### 19.7 event semantics diverge
 
 Risk: UI events, audit logs, process events, and thread history become separate half-overlapping systems.
 
@@ -931,7 +1000,47 @@ Mitigations:
 
 ---
 
-## 20. Safe-boundary hot reload
+## 20. Resource budgets and quotas
+
+Multi-tenant resource budgeting is a host-level system service, not agent-loop behavior. The current implementation issue is tracked in GitHub issue `nearai/ironclaw#2843`; Reborn should generalize the same principle into `ironclaw_resources`.
+
+Resource scope should cascade:
+
+```text
+tenant/org -> user -> project -> mission -> thread -> sub-thread/invocation
+```
+
+USD is the primary ledgered budget for LLM spend, but V1 should also model secondary and runtime resources:
+
+- tokens
+- wall-clock
+- concurrency
+- output bytes
+- process count
+- memory, CPU, disk, and network quotas through sandbox profiles
+
+All costed or quota-limited work uses the same protocol:
+
+```text
+reserve(scope, estimate) -> execute -> reconcile(actual) / release()
+```
+
+This applies to:
+
+- LLM calls
+- WASM capability invocation when quota-limited
+- MCP calls
+- script runner jobs
+- missions and scheduled background work
+- heartbeat/routine/job invocations
+
+Budget exhaustion should be an explicit audited state: warn, approval gate, hard stop, or skipped background invocation. It should not be a silent iteration cap or hidden timeout.
+
+Progress detection remains orthogonal. A stuck loop can be stopped even with budget left, and a productive task can continue as long as budget and hard safety caps allow.
+
+---
+
+## 21. Safe-boundary hot reload
 
 V1 should support hot reload at safe boundaries.
 
@@ -956,7 +1065,7 @@ The reload rule is: new work can see new definitions; in-flight work keeps its c
 
 ---
 
-## 21. Missions and learning loops
+## 22. Missions and learning loops
 
 Missions and learning loops are first-party extensions, not kernel behavior.
 
@@ -997,12 +1106,13 @@ Clean mental model:
 
 ---
 
-## 22. V1 implementation constraints
+## 23. V1 implementation constraints
 
 V1 should be intentionally narrow.
 
 Choose exactly:
 
+- one host-level resource/budget governor
 - one installed capability runtime: WASM
 - one MCP adapter path for existing MCP servers/tools
 - one script runner capability for project-local Python/bash/JS helpers
@@ -1029,53 +1139,59 @@ The goal of V1 is to prove the OS-like shape, not recreate all current IronClaw 
 
 ---
 
-## 23. V1 implementation order
+## 24. V1 implementation order
 
 1. **`ironclaw_filesystem`**
    - define the `Filesystem` trait
    - implement local mount
-   - define mount table and minimal namespace
+   - define mount table and minimal namespace including `/engine`, `/projects`, `/users`, `/memory`, and `/system/extensions`
 
-2. **ExtensionManager**
+2. **`ironclaw_resources`**
+   - scope cascade: tenant/user/project/mission/thread/invocation
+   - reserve/reconcile/release protocol
+   - budget/audit event records
+   - V1 USD/tokens/wall-clock/concurrency model
+
+3. **`ironclaw_extensions` / ExtensionManager**
    - manifest format
    - extension discovery under `/system/extensions`
    - capability extraction
    - config/state/cache folder contract
 
-3. **`ironclaw_wasm`**
+4. **`ironclaw_wasm`**
    - WASM module loading and validation
    - host ABI/import surface
    - capability invocation
    - limits and scoped host imports
 
-4. **`ironclaw_kernel` composition**
-   - wire filesystem + extension manager + WASM runtime
+5. **`ironclaw_kernel` composition**
+   - wire filesystem + resources + extension manager + WASM runtime
    - wire auth/network service handles
    - wire event bus
 
-5. **`ironclaw_mcp`**
+6. **`ironclaw_mcp`**
    - adapt existing MCP tools into IronClaw capabilities
    - support stdio and remote MCP paths as needed
    - preserve IronClaw policy/audit/scope controls
 
-6. **`ironclaw_scripts`**
+7. **`ironclaw_scripts`**
    - `script.run`
    - project-local sandboxed Python/bash/JS helpers
    - limits, cleanup, and scoped mounts
 
-7. **event model**
+8. **event model**
    - realtime bus
    - durable audit/history path
    - runtime/domain/audit event classes
 
-8. **first-party extensions**
+9. **first-party extensions**
    - `extensions/conversation`
    - `extensions/missions`
    - `extensions/agent_loop_tools`
    - `extensions/gateway`
    - `extensions/tui`
 
-9. **`ironclaw_auth`, `ironclaw_network`, and sandbox hardening**
+10. **`ironclaw_auth`, `ironclaw_network`, and sandbox hardening**
    - make auth and network explicit services
    - move runtime lanes off implicit access paths
    - enforce script/project sandbox profiles
@@ -1084,7 +1200,7 @@ This sequencing preserves the OS-like shape early instead of reintroducing produ
 
 ---
 
-## 24. Final recommendation
+## 25. Final recommendation
 
 This revised architecture is stronger than both the earlier “smart kernel” direction and the forced 3-box framing.
 
@@ -1093,6 +1209,7 @@ It keeps the most valuable properties:
 - small kernel host
 - explicit system-service crates instead of a vague middle box
 - V1 runtime lanes: WASM, MCP, and script runner
+- host-level resource budgeting for multi-tenant safety
 - first-party extensions for agent loop, conversation, missions, gateway, and TUI
 - filesystem as the primary persistence surface
 - clear separation between extension, process, and thread
@@ -1103,6 +1220,7 @@ The main discipline required is this:
 - **ExtensionManager** knows what can run
 - **ProcessManager** knows what is running
 - **Filesystem** knows what is durable
+- **Resources** know what spend/quota is allowed
 - **Kernel** wires the system together
 - **Auth** owns credential and secret mediation
 - **Network** owns outbound network mediation

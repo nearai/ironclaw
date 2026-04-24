@@ -31,7 +31,12 @@ extensions/ userland
 The key system-service crates are:
 
 ```text
+crates/ironclaw_extensions
 crates/ironclaw_filesystem
+crates/ironclaw_resources
+crates/ironclaw_wasm
+crates/ironclaw_mcp
+crates/ironclaw_scripts
 crates/ironclaw_processes
 crates/ironclaw_auth
 crates/ironclaw_network
@@ -75,6 +80,8 @@ It wires together:
 
 - extension manager
 - filesystem
+- resource/budget governor
+- WASM/MCP/script runtime lanes
 - process manager
 - auth
 - network
@@ -328,6 +335,28 @@ It provides a mountable filesystem trait and namespace for:
 - memory
 - config
 
+Project, memory, engine, and system extension state are first-class roots. V1 should explicitly preserve roots/aliases like:
+
+```text
+/engine/
+/project              # scoped alias to active project
+/projects/<project>/
+/memory/
+/system/extensions/<extension>/
+```
+
+Extension folders can contain their own workflow and capability assets:
+
+```text
+/system/extensions/<extension>/SKILL.md
+/system/extensions/<extension>/skills/
+/system/extensions/<extension>/scripts/
+/system/extensions/<extension>/wasm/
+/system/extensions/<extension>/capabilities.json
+/system/extensions/<extension>/config/
+/system/extensions/<extension>/state/
+```
+
 V1 API should stay small:
 
 - `read`
@@ -336,11 +365,42 @@ V1 API should stay small:
 - `stat`
 - `mount`
 
-**Decision:** Filesystem is the persistence surface, not a universal query engine. Search, indexing, and rich subscriptions should be separate services on top if needed.
+**Decision:** Filesystem is the persistence surface, not a universal query engine. Search, indexing, and rich subscriptions should be separate services on top if needed. Keep project and memory roots explicit rather than hiding them in ad hoc stores.
 
 ---
 
-## 15. Where does the event bus live?
+## 15. Where do resource budgets live?
+
+Resource budgeting is a host-level system service, not agent-loop logic and not kernel magic. It should live in `crates/ironclaw_resources` or equivalent.
+
+The scope hierarchy includes tenant/org from day one, even if local V1 maps tenant to user:
+
+```text
+tenant/org -> user -> project -> mission -> thread -> sub-thread/invocation
+```
+
+V1 budget is a broader resource governor, not only USD/tokens. USD remains the primary ledgered budget for LLM spend, but the same service owns or coordinates limits for:
+
+- tokens
+- wall-clock
+- concurrency
+- output bytes
+- process count
+- sandbox CPU, memory, disk, and network quotas
+
+Costed work uses reservation and reconciliation:
+
+```text
+reserve(scope, estimate) -> execute -> reconcile(actual) / release()
+```
+
+Every LLM call, WASM capability invocation, MCP call, script run, mission tick, heartbeat, routine, and background job should go through this path when costed or quota-limited. Budget increases and denials are explicit audited events.
+
+**Decision:** Add a first-class resource/budget governor with tenant/org in the cascade. V1 budgets cover USD/tokens plus runtime quotas, with CPU/memory/disk/network initially enforced through sandbox profiles.
+
+---
+
+## 16. Where does the event bus live?
 
 The event bus is composed by `ironclaw_kernel` and produced by multiple system services.
 
@@ -362,7 +422,7 @@ Event classes:
 
 ---
 
-## 16. Where does the agent loop live?
+## 17. Where does the agent loop live?
 
 The agent loop lives in `extensions/`, not in kernel.
 
@@ -387,7 +447,7 @@ Agent loop should:
 
 ---
 
-## 17. How can the agent loop stay stateless?
+## 18. How can the agent loop stay stateless?
 
 Agent loop should be **process-stateless**, not logically stateless.
 
@@ -416,7 +476,7 @@ On each invocation, the agent loop:
 
 ---
 
-## 18. What happens if a gateway drops and reconnects?
+## 19. What happens if a gateway drops and reconnects?
 
 Gateways/channels are transport adapters, not sources of truth.
 
@@ -441,7 +501,7 @@ On reconnect, the gateway:
 
 ---
 
-## 19. What are channels?
+## 20. What are channels?
 
 Channels are extensions.
 
@@ -473,7 +533,7 @@ Channels should not own:
 
 ---
 
-## 20. How do channels interact with the agent loop?
+## 21. How do channels interact with the agent loop?
 
 Recommended flow:
 
@@ -502,7 +562,7 @@ It owns:
 
 ---
 
-## 21. Where do skills live?
+## 22. Where do skills live?
 
 Skills are filesystem-backed cognitive artifacts.
 
@@ -539,7 +599,7 @@ Skills do not directly execute privileged behavior.
 
 ---
 
-## 22. What are the V1 runtime/capability lanes?
+## 23. What are the V1 runtime/capability lanes?
 
 V1 should use three lanes:
 
@@ -585,7 +645,7 @@ Use for:
 
 ---
 
-## 23. Why not just skills and scripts?
+## 24. Why not just skills and scripts?
 
 Skills plus scripts are powerful with frontier models, but they make the system model-dependent. Smaller or cheaper models need stable capabilities.
 
@@ -602,7 +662,7 @@ Scripts are discovery and creativity. WASM/MCP capabilities are stabilization an
 
 ---
 
-## 24. What hot reload do we support?
+## 25. What hot reload do we support?
 
 Hot reload is supported only at safe boundaries in V1.
 
@@ -627,7 +687,7 @@ V1 should not support:
 
 ---
 
-## 25. What happens to missions?
+## 26. What happens to missions?
 
 Missions are not kernel.
 
@@ -661,7 +721,7 @@ skill = "github-pr-review"
 
 ---
 
-## 26. Should CodeAct/Monty be foundational?
+## 27. Should CodeAct/Monty be foundational?
 
 No.
 
@@ -685,7 +745,7 @@ extensions/agent_loop_codeact/    # optional, experimental
 
 ---
 
-## 27. Do skills replace first-party tools/extensions?
+## 28. Do skills replace first-party tools/extensions?
 
 No.
 
@@ -713,7 +773,7 @@ github skill:
 
 ---
 
-## 28. How do self-learning and self-repair work?
+## 29. How do self-learning and self-repair work?
 
 They are first-party extensions, not kernel magic.
 
@@ -750,7 +810,7 @@ Repair ladder:
 
 ---
 
-## 29. How do we get pi-mono-style scripting safely?
+## 30. How do we get pi-mono-style scripting safely?
 
 Use sandboxed real scripting, not Monty as the primary answer.
 
@@ -779,7 +839,7 @@ Execution must use:
 
 ---
 
-## 30. Can Monty scale to 10k users?
+## 31. Can Monty scale to 10k users?
 
 Only for tiny pure snippets should Monty be considered; do not bet the architecture on it.
 
@@ -801,7 +861,7 @@ It should not be used for:
 
 ---
 
-## 31. What is the recommended execution tier model?
+## 32. What is the recommended execution tier model?
 
 Use tiered execution:
 
@@ -823,7 +883,7 @@ Tier 3: strong per-job isolation
 
 ---
 
-## 32. What decisions are still open?
+## 33. What decisions are still open?
 
 Open implementation details:
 
@@ -837,12 +897,13 @@ Open implementation details:
 8. first GitHub capability scope across WASM/MCP/skills/script runner
 9. exact project sandbox lifecycle policy
 10. exact mission trigger format and scheduler semantics
+11. exact resource ledger schema, thresholds, and rollout modes
 
 These should be resolved during implementation planning, not by expanding the kernel.
 
 ---
 
-## 33. Summary of major decisions
+## 34. Summary of major decisions
 
 | Topic | Decision |
 |---|---|
@@ -850,7 +911,8 @@ These should be resolved during implementation planning, not by expanding the ke
 | Kernel | Composition/wiring, not product runtime |
 | ExtensionManager | Knows what can run |
 | ProcessManager | Knows what is running |
-| Filesystem | Durable mount/persistence surface |
+| Filesystem | Durable mount/persistence surface with explicit `/engine`, `/projects`, `/memory`, and `/system/extensions` roots |
+| Resources/Budgets | Host-level resource governor; tenant/org included in cascade; USD primary plus runtime quotas |
 | Config | Filesystem-based, extension-local, schema-versioned |
 | Secrets | Handles in config, raw material mediated by auth |
 | Network | Mediated by `ironclaw_network` |

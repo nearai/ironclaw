@@ -17,11 +17,12 @@ The goal is not to rewrite IronClaw in one pass. The goal is to build a small ve
 
 ```text
 filesystem mount
+  -> resolve tenant/user/project scope
   -> discover extension manifest
   -> register capability
+  -> reserve resource budget
   -> execute WASM capability
-  -> expose MCP capability
-  -> run script runner helper
+  -> reconcile resource budget
   -> emit realtime event
   -> write durable state
 ```
@@ -63,43 +64,45 @@ Includes:
 
 ### PR 2 — `crates/ironclaw_filesystem`
 
-Build the durable path/mount API.
+Build the durable path/mount API with explicit `/engine`, `/projects`, `/users`, `/memory`, and `/system/extensions` roots.
 
-### PR 3 — `crates/ironclaw_extensions`
+### PR 3 — `crates/ironclaw_resources`
 
-Build manifest/discovery/capability declaration logic.
+Build the host-level resource/budget governor: tenant/user/project/mission/thread/invocation scopes, reserve/reconcile/release, and audit events.
 
-This may begin inside `ironclaw_kernel` if kept narrow, but a separate crate is preferred if implementation scope grows.
+### PR 4 — `crates/ironclaw_extensions`
 
-### PR 4 — `crates/ironclaw_wasm` + WASM echo
+Build manifest/discovery/capability declaration logic in its own crate.
 
-Build the default installed capability lane and prove one tiny WASM capability.
+### PR 5 — `crates/ironclaw_wasm` + budgeted WASM echo
 
-### PR 5 — `crates/ironclaw_kernel`
+Build the default installed capability lane and prove one tiny WASM capability behind resource reservation.
 
-Wire filesystem + extensions + WASM runtime into a composition-only host.
+### PR 6 — `crates/ironclaw_kernel`
 
-### PR 6 — `crates/ironclaw_mcp`
+Wire filesystem + resources + extensions + WASM runtime into a composition-only host.
+
+### PR 7 — `crates/ironclaw_mcp`
 
 Adapt existing MCP servers/tools into IronClaw capabilities.
 
-### PR 7 — `crates/ironclaw_scripts`
+### PR 8 — `crates/ironclaw_scripts`
 
 Add `script.run` for project-local sandboxed Python/bash/JS helpers.
 
-### PR 8 — `extensions/conversation` and `extensions/missions`
+### PR 9 — `extensions/conversation` and `extensions/missions`
 
 Add normalized inbound routing, channel-to-thread mapping, inbox/outbox semantics, and mission definition execution.
 
-### PR 9 — `extensions/agent_loop_tools`
+### PR 10 — `extensions/agent_loop_tools`
 
 Move the default tool/capability agent loop into a first-party extension.
 
-### PR 10 — `extensions/gateway` and `extensions/tui`
+### PR 11 — `extensions/gateway` and `extensions/tui`
 
 Move gateway/TUI channel behavior into first-party extensions and prove reconnect/cursor/outbox flow.
 
-### PR 11 — auth/network/sandbox hardening
+### PR 12 — auth/network/sandbox hardening
 
 Add secret handles, mediated network, sandbox profile enforcement, and stronger scope propagation.
 
@@ -113,6 +116,7 @@ Suggested files:
 
 ```text
 docs/reborn/contracts/filesystem.md
+docs/reborn/contracts/resources.md
 docs/reborn/contracts/extensions.md
 docs/reborn/contracts/wasm.md
 docs/reborn/contracts/mcp.md
@@ -172,8 +176,11 @@ trait Filesystem {
 Mount manager:
 
 ```rust
+mount("/engine", db_or_local_backend)
 mount("/system/extensions", local_backend)
+mount("/users", db_or_local_backend)
 mount("/projects", local_backend)
+mount("/memory", db_or_remote_backend)
 ```
 
 ### Tests
@@ -184,6 +191,7 @@ mount("/projects", local_backend)
 - mount routing works
 - path normalization is deterministic
 - missing mount returns a typed error
+- default namespace exposes `/engine`, `/projects`, `/users`, `/memory`, and `/system/extensions` roots
 
 ### Non-goals
 
@@ -198,7 +206,65 @@ Do not add:
 
 ---
 
-## 6. Milestone 2 — `ironclaw_extensions`
+## 6. Milestone 2 — `ironclaw_resources`
+
+### Purpose
+
+Enforce multi-tenant resource budgets and quotas before runtime lanes can spend money or consume scarce host resources.
+
+### Crate
+
+```text
+crates/ironclaw_resources/
+```
+
+### Build
+
+- scope cascade: tenant/org, user, project, mission, thread, sub-thread/invocation
+- `reserve`, `reconcile`, and `release` API
+- budget/resource ledger records
+- budget warning/approval/denial events
+- hard invariant caps
+- V1 resource model: USD, tokens, wall-clock, concurrency, output bytes, process count
+- sandbox quota contract for CPU, memory, disk, and network
+
+### API sketch
+
+```rust
+async fn reserve(
+    scopes: &[ResourceScope],
+    estimate: ResourceEstimate,
+) -> Result<ResourceReservation, ResourceDenial>;
+
+async fn reconcile(
+    reservation: ResourceReservation,
+    actual: ResourceUsage,
+) -> Result<()>;
+
+async fn release(reservation: ResourceReservation) -> Result<()>;
+```
+
+### Tests
+
+- reservation denied when tenant/user/project is exhausted
+- reservation succeeds only if every scope has capacity
+- reconciliation releases over-reservation
+- release does not record spend
+- concurrent reservations cannot oversubscribe one scope
+- zero-dollar/local model still respects token and runtime quota limits
+
+### Non-goals
+
+Do not add:
+
+- billing/payment integration
+- LLM provider implementation
+- product UI
+- progress/stuck-loop heuristics as budget substitutes
+
+---
+
+## 7. Milestone 3 — `ironclaw_extensions`
 
 ### Purpose
 
@@ -264,7 +330,7 @@ Do not add:
 
 ---
 
-## 7. Milestone 3 — `ironclaw_wasm`
+## 8. Milestone 4 — `ironclaw_wasm`
 
 ### Purpose
 
@@ -316,7 +382,7 @@ Do not add:
 
 ---
 
-## 8. Milestone 4 — `ironclaw_kernel`
+## 9. Milestone 5 — `ironclaw_kernel`
 
 ### Purpose
 
@@ -331,7 +397,7 @@ crates/ironclaw_kernel/
 ### Build
 
 - system builder
-- filesystem + extension manager + WASM runtime wiring
+- filesystem + resources + extension manager + WASM runtime wiring
 - event bus composition
 - boot namespace
 - extension capability registration into host dispatch table
@@ -341,6 +407,7 @@ crates/ironclaw_kernel/
 ```rust
 let kernel = KernelBuilder::new()
     .with_filesystem(fs)
+    .with_resource_governor(resources)
     .with_extension_manager(extensions)
     .with_wasm_runtime(wasm)
     .build()
@@ -369,9 +436,9 @@ Do not add:
 
 ---
 
-## 9. Milestone 5 — MCP and script runner lanes
+## 10. Milestone 6 — MCP and script runner lanes
 
-After filesystem, extension discovery, WASM, and kernel composition work, add the other two V1 lanes.
+After filesystem, resources, extension discovery, WASM, and kernel composition work, add the other two V1 lanes.
 
 ### `crates/ironclaw_mcp`
 
@@ -392,7 +459,7 @@ Proves:
 - scoped filesystem mounts
 - no network/secrets by default
 
-## 10. Milestone 6 — first-party product/userland extensions
+## 11. Milestone 7 — first-party product/userland extensions
 
 Only after the runtime lanes work.
 
@@ -432,7 +499,7 @@ Proves:
 
 ---
 
-## 11. Milestone 7 — auth/network/sandbox hardening
+## 12. Milestone 8 — auth/network/sandbox hardening
 
 Do not start here unless the team intentionally wants to prioritize security infrastructure before proving the execution path.
 
@@ -469,12 +536,13 @@ Add stronger isolation later.
 
 ---
 
-## 12. Minimum viable vertical slice
+## 13. Minimum viable vertical slice
 
 The first meaningful proof should include:
 
 ```text
 crates/ironclaw_filesystem
+crates/ironclaw_resources
 crates/ironclaw_extensions
 crates/ironclaw_wasm
 crates/ironclaw_kernel
@@ -489,7 +557,9 @@ filesystem mount
   -> extract echo.say capability
   -> register capability with kernel host
   -> dispatch echo.say
+  -> reserve tenant/user/project/thread budget
   -> invoke WASM module
+  -> reconcile actual resource usage
   -> emit runtime event
   -> return result
   -> write durable event/history if configured
@@ -499,11 +569,12 @@ This proves the architecture without product complexity.
 
 ---
 
-## 13. Success criteria
+## 14. Success criteria
 
 The architecture is real when:
 
 - `ironclaw_kernel` has almost no product logic
+- `ironclaw_resources` is the only path for costed/quota-limited invocation accounting
 - `ironclaw_wasm` does not discover extensions
 - `ironclaw_mcp` tools are adapted into capabilities and still go through policy/audit
 - `ironclaw_scripts` is project-scoped and not a generic extension install path
@@ -515,13 +586,14 @@ The architecture is real when:
 
 ---
 
-## 14. Early architecture guardrails
+## 15. Early architecture guardrails
 
 Add guardrails as soon as the first crates exist:
 
 - dependency checks between crates
 - forbidden imports from extensions into kernel internals
 - contract tests for manifests
+- resource reservation/concurrency tests
 - WASM host ABI tests
 - MCP adapter tests
 - script runner sandbox tests
@@ -533,10 +605,10 @@ These tests are not polish. They are the mechanism that keeps the architecture f
 
 ---
 
-## 15. Final recommendation
+## 16. Final recommendation
 
 The next implementation work should be a sequence of small self-contained crates, not a broad product rewrite.
 
-Start with the durable filesystem, then extension discovery, then WASM capability execution, then kernel composition, then a tiny WASM echo capability.
+Start with the durable filesystem, then the resource/budget governor, then extension discovery, then WASM capability execution, then kernel composition, then a tiny budgeted WASM echo capability.
 
 After that path is working, add MCP and script runner as the remaining V1 lanes. Only then should the team move conversation, missions, agent loop, gateway, TUI, auth, network, sandboxing, GitHub, or self-repair into the new model.
