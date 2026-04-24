@@ -70,9 +70,11 @@
     nav.textContent = '';
     const sources = tabBar.querySelectorAll('button[data-tab]');
     sources.forEach((src) => {
-      // Skip buttons a feature-flag branch has hidden (data-v1-only/data-v2-only
-      // or an inline style="display:none" set by the engine-mode switcher).
-      if (src.offsetParent === null && getComputedStyle(src).display === 'none') return;
+      // Engine-mode switcher hides v1-only / v2-only tabs via inline
+      // `style.display = 'none'` (see surfaces/projects.js). Read the
+      // inline style directly — avoids forcing style/layout recalc from
+      // getComputedStyle() inside an observer callback.
+      if (src.style.display === 'none') return;
       const tab = src.getAttribute('data-tab');
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -89,26 +91,25 @@
     });
   }
 
-  const navObserver = new MutationObserver(rebuildNav);
-  navObserver.observe(tabBar, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ['class', 'data-active-count', 'data-v1-only', 'data-v2-only', 'hidden', 'style'],
-  });
-
   // --- thread list mirror ---
   //
-  // Copy #thread-list content into #mobile-thread-list on every change; delegate
-  // click events by looking up data-thread-id and routing through switchThread().
+  // Deep-clone each thread item into the mobile list, then strip `id`
+  // attributes from the clones to avoid duplicates in the document.
+  // (Thread items today carry only `data-thread-id`, not DOM ids, but a
+  // future change to history.js's renderer could introduce one and
+  // silently break `getElementById` elsewhere — defensive strip locks
+  // the invariant in.) Clicks on the mobile clones delegate back through
+  // `data-thread-id` → switchThread().
 
   function rebuildThreads() {
-    mobileThreadList.innerHTML = threadList.innerHTML;
+    mobileThreadList.textContent = '';
+    for (const item of threadList.children) {
+      const clone = item.cloneNode(true);
+      if (clone.id) clone.removeAttribute('id');
+      clone.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+      mobileThreadList.appendChild(clone);
+    }
   }
-
-  const threadObserver = new MutationObserver(rebuildThreads);
-  threadObserver.observe(threadList, { childList: true, subtree: true });
 
   mobileThreadList.addEventListener('click', (e) => {
     const item = e.target.closest('[data-thread-id]');
@@ -167,9 +168,40 @@
     mobileDot.classList.toggle('disconnected', sseDot.classList.contains('disconnected'));
   }
 
+  // --- observers (connected only while mobile is active) ---
+  //
+  // On desktop the drawer is never visible (display: none via CSS), so
+  // running MutationObservers for it is pure waste — every tab-indicator
+  // style mutation, every thread-list update, every SSE connect/disconnect
+  // would still trigger rebuild work nothing consumes. Observers attach
+  // in applyViewport(true) and detach in applyViewport(false).
+
+  const navObserver = new MutationObserver(rebuildNav);
+  const threadObserver = new MutationObserver(rebuildThreads);
   const dotObserver = new MutationObserver(syncDot);
-  dotObserver.observe(sseDot, { attributes: true, attributeFilter: ['class'] });
-  syncDot();
+  let observing = false;
+
+  function startObservers() {
+    if (observing) return;
+    navObserver.observe(tabBar, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'data-active-count', 'data-v1-only', 'data-v2-only', 'hidden', 'style'],
+    });
+    threadObserver.observe(threadList, { childList: true, subtree: true });
+    dotObserver.observe(sseDot, { attributes: true, attributeFilter: ['class'] });
+    observing = true;
+  }
+
+  function stopObservers() {
+    if (!observing) return;
+    navObserver.disconnect();
+    threadObserver.disconnect();
+    dotObserver.disconnect();
+    observing = false;
+  }
 
   // --- viewport breakpoint ---
 
@@ -178,8 +210,11 @@
       relocateIntoFooter();
       rebuildNav();
       rebuildThreads();
+      syncDot();
+      startObservers();
     } else {
       if (isOpen()) closeMenu();
+      stopObservers();
       restoreFromFooter();
     }
   }
