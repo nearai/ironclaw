@@ -15,3 +15,6 @@ bech32 = "0.11"
 hex = "0.4"
 elliptic-curve = { version = "0.13", features = ["sec1"] }
 ureq = { version = "2", features = ["json"] }
+tungstenite = { version = "0.21", features = ["native-tls"] }
+native-tls = "0.2"
+url = "2"
