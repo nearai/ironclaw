@@ -62,12 +62,26 @@ pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/d
 /// surface and avoid per-turn filesystem I/O.
 static ORCHESTRATOR_OVERRIDE: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| {
-        let path = std::env::var("ORCHESTRATOR_DEFAULT_PATH").ok()?;
-        let contents = std::fs::read_to_string(&path).ok()?;
-        if contents.trim().is_empty() {
-            None
-        } else {
-            Some(contents)
+        let env_var = "ORCHESTRATOR_DEFAULT_PATH";
+        let Ok(path) = std::env::var(env_var) else {
+            tracing::info!(env_var, "orchestrator override disabled: env var unset");
+            return None;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let len = contents.len();
+                if contents.trim().is_empty() {
+                    tracing::warn!(env_var, path, "orchestrator override file exists but is empty — ignoring");
+                    None
+                } else {
+                    tracing::info!(env_var, path, len, "orchestrator override loaded");
+                    Some(contents)
+                }
+            }
+            Err(e) => {
+                tracing::warn!(env_var, path, err = %e, "orchestrator override file unreadable — falling back to compiled-in default");
+                None
+            }
         }
     });
 

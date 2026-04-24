@@ -95,12 +95,25 @@ static CODEACT_POSTAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| load_override_file("CODEACT_POSTAMBLE_PATH"));
 
 fn load_override_file(env_var: &str) -> Option<String> {
-    let path = std::env::var(env_var).ok()?;
-    let contents = std::fs::read_to_string(&path).ok()?;
-    if contents.trim().is_empty() {
-        None
-    } else {
-        Some(contents)
+    let Ok(path) = std::env::var(env_var) else {
+        tracing::info!(env_var, "override disabled: env var unset");
+        return None;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let len = contents.len();
+            if contents.trim().is_empty() {
+                tracing::warn!(env_var, path, "override file exists but is empty — ignoring");
+                None
+            } else {
+                tracing::info!(env_var, path, len, "override loaded");
+                Some(contents)
+            }
+        }
+        Err(e) => {
+            tracing::warn!(env_var, path, err = %e, "override file unreadable — falling back to compiled-in default");
+            None
+        }
     }
 }
 
@@ -124,16 +137,8 @@ const MAX_PROMPT_OVERLAY_CHARS: usize = 4000;
 /// Read once at first access; changes to the file or env var after startup
 /// do not take effect until process restart. This matches the rest of the
 /// engine's config surface and avoids per-prompt filesystem I/O.
-static AGENTS_SEED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
-    let path = std::env::var("AGENTS_SEED_PATH").ok()?;
-    let contents = std::fs::read_to_string(&path).ok()?;
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-});
+static AGENTS_SEED: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| load_override_file("AGENTS_SEED_PATH").map(|s| s.trim().to_string()));
 
 /// Build the system prompt for CodeAct/RLM execution.
 ///
