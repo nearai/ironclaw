@@ -289,7 +289,10 @@ impl LocalFilesystem {
                 operation: FilesystemOperation::CreateDirAll,
                 reason: io_reason(error),
             })?;
-        ensure_contained(path, mount, &canonical_parent, false)?;
+        // `joined` is constructed from validated virtual path segments under the
+        // backend root. If its canonical parent leaves the backend root, an
+        // existing symlink in the parent chain caused the escape.
+        ensure_contained(path, mount, &canonical_parent, true)?;
         Ok(joined)
     }
 
