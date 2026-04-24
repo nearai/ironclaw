@@ -104,7 +104,10 @@ pub async fn execute_action_calls(
                     .unwrap_or("action is not callable in this execution context")
                     .to_string(),
                 duration_ms: 0,
-                params_summary: None,
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &call.parameters,
+                ),
             };
             preflight_results.push(PreflightOutcome::Error {
                 index: idx,
@@ -167,7 +170,10 @@ pub async fn execute_action_calls(
                     call_id: call.id.clone(),
                     error: reason,
                     duration_ms: 0,
-                    params_summary: None,
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
                 };
                 preflight_results.push(PreflightOutcome::Error {
                     index: idx,
@@ -1605,6 +1611,71 @@ mod tests {
                 .unwrap_or_default()
                 .contains("not callable in this execution context")
         );
+        match result.events.first() {
+            Some(EventKind::ActionFailed { params_summary, .. }) => {
+                assert_eq!(
+                    *params_summary,
+                    crate::types::event::summarize_params(
+                        "gmail_send",
+                        &serde_json::json!({"to": "person@example.com"}),
+                    )
+                );
+            }
+            other => panic!("expected ActionFailed event, got {other:?}"),
+        }
         assert!(executed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn structured_policy_denial_preserves_params_summary() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("shell")], vec![]));
+        let leases = Arc::new(LeaseManager::new());
+        let mut policy = PolicyEngine::new();
+        policy.deny_effect(EffectType::ReadLocal);
+        let policy = Arc::new(policy);
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "exec", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_policy_denied".into(),
+            action_name: "shell".into(),
+            parameters: serde_json::json!({"cmd": "ls"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].is_error);
+        match result.events.first() {
+            Some(EventKind::ActionFailed {
+                error,
+                params_summary,
+                ..
+            }) => {
+                assert!(error.contains("denied"));
+                assert_eq!(
+                    *params_summary,
+                    crate::types::event::summarize_params(
+                        "shell",
+                        &serde_json::json!({"cmd": "ls"}),
+                    )
+                );
+            }
+            other => panic!("expected ActionFailed event, got {other:?}"),
+        }
     }
 }
