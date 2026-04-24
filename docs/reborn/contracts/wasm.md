@@ -114,7 +114,35 @@ The cache key must include the module content hash so modified bytes never reuse
 
 ---
 
-## 7. Host imports
+## 7. Extension package module loading
+
+`ironclaw_extensions` remains the owner of discovery, manifest parsing, package validation, and descriptor extraction. `ironclaw_wasm` may consume a validated `ExtensionPackage` to prepare the module for one declared WASM capability.
+
+Loading flow:
+
+```text
+ExtensionPackage
+  -> verify package runtime is RuntimeKind::Wasm
+  -> find requested CapabilityDescriptor in package.capabilities
+  -> derive export name from capability suffix (`<extension>.<export>`)
+  -> resolve runtime.module under package.root
+  -> read bytes via RootFilesystem virtual path
+  -> prepare_cached(WasmModuleSpec)
+  -> PreparedWasmCapability { descriptor, module, module_path }
+```
+
+Rules:
+
+- module assets are read through `RootFilesystem` and `VirtualPath`, never raw host paths
+- runtime.module must resolve under the extension package root
+- non-WASM packages fail with `ExtensionRuntimeMismatch`
+- undeclared capabilities fail closed
+- missing/mismatched WASM exports fail before invocation
+- cache reuse is allowed only for matching provider/capability/export/content-hash/ABI-version
+
+---
+
+## 8. Host imports
 
 Initial V1 may expose no privileged imports beyond the minimal test/demo ABI.
 
@@ -139,7 +167,7 @@ Rules:
 
 ---
 
-## 8. Initial JSON ABI
+## 9. Initial JSON ABI
 
 The first structured invocation ABI is intentionally small and pointer/length based. It is not WASI and does not grant filesystem, network, secret, or process authority.
 
@@ -177,7 +205,7 @@ This ABI is a V1 compatibility layer. It can coexist with, or be replaced by, Co
 
 ---
 
-## 9. Minimum V1 API sketch
+## 10. Minimum V1 API sketch
 
 ```rust
 pub struct WasmRuntime;
@@ -199,6 +227,12 @@ pub struct WasmModuleSpec {
     pub bytes: Vec<u8>,
 }
 
+pub struct PreparedWasmCapability {
+    pub descriptor: CapabilityDescriptor,
+    pub module: Arc<PreparedWasmModule>,
+    pub module_path: VirtualPath,
+}
+
 pub struct CapabilityInvocation {
     pub input: serde_json::Value,
 }
@@ -214,6 +248,12 @@ pub struct CapabilityResult {
 impl WasmRuntime {
     pub fn prepare(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError>;
     pub fn prepare_cached(&self, spec: WasmModuleSpec) -> Result<Arc<PreparedWasmModule>, WasmError>;
+    pub async fn prepare_extension_capability<F: RootFilesystem>(
+        &self,
+        fs: &F,
+        package: &ExtensionPackage,
+        capability_id: &CapabilityId,
+    ) -> Result<PreparedWasmCapability, WasmError>;
     pub fn invoke_json(
         &self,
         module: &PreparedWasmModule,
@@ -228,16 +268,20 @@ impl WasmRuntime {
 
 ---
 
-## 10. Error contract
+## 11. Error contract
 
 Minimum errors:
 
 ```rust
 WasmError::InvalidConfig
 WasmError::Cache
+WasmError::Extension
+WasmError::Filesystem
 WasmError::InvalidModule
 WasmError::UnsupportedImport
 WasmError::DescriptorMismatch
+WasmError::ExtensionRuntimeMismatch
+WasmError::CapabilityNotDeclared
 WasmError::InvalidInvocation
 WasmError::MissingReservation
 WasmError::MissingExport
@@ -256,7 +300,7 @@ Errors must not include raw host paths or secret material.
 
 ---
 
-## 11. Minimum TDD coverage
+## 12. Minimum TDD coverage
 
 Local contract tests should prove:
 
@@ -280,20 +324,24 @@ Local contract tests should prove:
 - cache setup errors do not leak raw host paths
 - cached prepared modules reuse identical bytes and split changed content
 - cached modules still instantiate fresh per invocation
+- extension package module assets are read via `RootFilesystem` virtual paths
+- non-WASM package runtimes are rejected by the WASM lane
+- undeclared capabilities are rejected before module preparation
+- manifest-derived export mismatches are rejected before invocation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
 
 ---
 
-## 12. Non-goals
+## 13. Non-goals
 
 Do not add in this first crate:
 
 - full WASI filesystem access
 - network host imports
 - secret host imports
-- extension discovery
-- manifest parsing
+- owning extension discovery
+- owning manifest parsing or registry validation
 - Docker/script execution
 - MCP client handling
 - kernel dispatch
