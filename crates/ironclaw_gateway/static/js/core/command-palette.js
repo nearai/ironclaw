@@ -3,6 +3,7 @@
 let _paletteOpen = false;
 let _paletteResults = [];
 let _paletteSelected = -1;
+let _palettePreviouslyFocused = null;
 
 const PALETTE_TABS = [
   { id: 'chat',     label: 'Chat',     icon: '\u{1F4AC}' },
@@ -23,6 +24,7 @@ const PALETTE_ACTIONS = [
 function openCommandPalette() {
   _paletteOpen = true;
   _paletteSelected = -1;
+  _palettePreviouslyFocused = document.activeElement;
   var overlay = document.getElementById('command-palette-overlay');
   var input = document.getElementById('palette-input');
   overlay.style.display = 'flex';
@@ -51,6 +53,10 @@ function closeCommandPalette() {
   _paletteResults = [];
   var overlay = document.getElementById('command-palette-overlay');
   overlay.style.display = 'none';
+  if (_palettePreviouslyFocused && typeof _palettePreviouslyFocused.focus === 'function') {
+    _palettePreviouslyFocused.focus();
+  }
+  _palettePreviouslyFocused = null;
 }
 
 function searchPalette(query) {
@@ -66,7 +72,11 @@ function searchPalette(query) {
   for (var i = 0; i < threadMatches.length; i++) {
     var t = threadMatches[i];
     results.push({
-      category: 'Threads', icon: '\u{1F4AC}', title: t.title, desc: t.channel !== 'gateway' ? t.channel : '',
+      category: 'Threads',
+      icon: '\u{1F4AC}',
+      title: t.title,
+      desc: '',
+      badge: t.channel !== 'gateway' ? t.channel : '',
       action: (function(id) { return function() { switchThread(id); switchTab('chat'); }; })(t.id)
     });
   }
@@ -127,6 +137,7 @@ function renderPaletteResults() {
     empty.className = 'command-palette-empty';
     empty.textContent = I18n.t('palette.noResults');
     container.appendChild(empty);
+    updatePaletteAriaActive();
     return;
   }
 
@@ -146,6 +157,8 @@ function renderPaletteResults() {
     var item = document.createElement('div');
     item.className = 'command-palette-item' + (i === _paletteSelected ? ' selected' : '');
     item.setAttribute('role', 'option');
+    item.setAttribute('tabindex', '-1');
+    item.setAttribute('aria-selected', i === _paletteSelected ? 'true' : 'false');
     item.id = 'palette-item-' + i;
     item.dataset.index = String(i);
 
@@ -171,23 +184,12 @@ function renderPaletteResults() {
 
     item.appendChild(textWrap);
 
-    if (r.category === 'Threads' && r.desc) {
+    if (r.badge) {
       var badge = document.createElement('span');
       badge.className = 'command-palette-item-badge';
-      badge.textContent = r.desc;
+      badge.textContent = r.badge;
       item.appendChild(badge);
     }
-
-    (function(idx) {
-      item.addEventListener('click', function() {
-        _paletteSelected = idx;
-        executePaletteSelection();
-      });
-      item.addEventListener('mouseenter', function() {
-        _paletteSelected = idx;
-        updatePaletteHighlight();
-      });
-    })(i);
 
     container.appendChild(item);
   }
@@ -197,12 +199,19 @@ function renderPaletteResults() {
 
 function updatePaletteHighlight() {
   var items = document.querySelectorAll('.command-palette-item');
+  var active = document.activeElement;
+  var activeIsItem = active && active.classList && active.classList.contains('command-palette-item');
   for (var i = 0; i < items.length; i++) {
-    items[i].classList.toggle('selected', parseInt(items[i].dataset.index) === _paletteSelected);
+    var selected = parseInt(items[i].dataset.index, 10) === _paletteSelected;
+    items[i].classList.toggle('selected', selected);
+    items[i].setAttribute('aria-selected', selected ? 'true' : 'false');
   }
   updatePaletteAriaActive();
   var sel = document.getElementById('palette-item-' + _paletteSelected);
-  if (sel) sel.scrollIntoView({ block: 'nearest' });
+  if (sel) {
+    sel.scrollIntoView({ block: 'nearest' });
+    if (activeIsItem && active !== sel) sel.focus();
+  }
 }
 
 function updatePaletteAriaActive() {
@@ -214,6 +223,36 @@ function updatePaletteAriaActive() {
   }
 }
 
+function getPaletteFocusableElements() {
+  var input = document.getElementById('palette-input');
+  var items = Array.prototype.slice.call(document.querySelectorAll('#palette-results .command-palette-item'));
+  return [input].concat(items).filter(Boolean);
+}
+
+function focusPaletteElement(index) {
+  var input = document.getElementById('palette-input');
+  if (index <= 0) {
+    if (input) input.focus();
+    return;
+  }
+
+  var itemIndex = index - 1;
+  if (itemIndex < 0 || itemIndex >= _paletteResults.length) return;
+  _paletteSelected = itemIndex;
+  updatePaletteHighlight();
+  var item = document.getElementById('palette-item-' + itemIndex);
+  if (item) item.focus();
+}
+
+function cyclePaletteFocus(direction) {
+  var focusable = getPaletteFocusableElements();
+  if (focusable.length === 0) return;
+  var currentIndex = focusable.indexOf(document.activeElement);
+  if (currentIndex < 0) currentIndex = 0;
+  var nextIndex = (currentIndex + direction + focusable.length) % focusable.length;
+  focusPaletteElement(nextIndex);
+}
+
 function executePaletteSelection() {
   if (_paletteSelected < 0 || _paletteSelected >= _paletteResults.length) return;
   var result = _paletteResults[_paletteSelected];
@@ -221,34 +260,70 @@ function executePaletteSelection() {
   if (typeof result.action === 'function') result.action();
 }
 
+function handlePaletteKeydown(e) {
+  if (!_paletteOpen) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (_paletteResults.length > 0) {
+      _paletteSelected = (_paletteSelected + 1) % _paletteResults.length;
+      updatePaletteHighlight();
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (_paletteResults.length > 0) {
+      _paletteSelected = (_paletteSelected - 1 + _paletteResults.length) % _paletteResults.length;
+      updatePaletteHighlight();
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    executePaletteSelection();
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    cyclePaletteFocus(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+}
+
 // Wire up palette events
 (function() {
   var input = document.getElementById('palette-input');
   var overlay = document.getElementById('command-palette-overlay');
+  var results = document.getElementById('palette-results');
 
   input.addEventListener('input', function() {
     searchPalette(input.value);
   });
 
-  input.addEventListener('keydown', function(e) {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (_paletteResults.length > 0) {
-        _paletteSelected = (_paletteSelected + 1) % _paletteResults.length;
-        updatePaletteHighlight();
-      }
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (_paletteResults.length > 0) {
-        _paletteSelected = (_paletteSelected - 1 + _paletteResults.length) % _paletteResults.length;
-        updatePaletteHighlight();
-      }
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      executePaletteSelection();
-    } else if (e.key === 'Tab') {
-      e.preventDefault(); // focus trap
-    }
+  overlay.addEventListener('keydown', handlePaletteKeydown);
+
+  results.addEventListener('click', function(e) {
+    var item = e.target.closest('.command-palette-item');
+    if (!item) return;
+    var idx = parseInt(item.dataset.index, 10);
+    if (isNaN(idx)) return;
+    _paletteSelected = idx;
+    executePaletteSelection();
+  });
+
+  results.addEventListener('mouseover', function(e) {
+    var item = e.target.closest('.command-palette-item');
+    if (!item) return;
+    var idx = parseInt(item.dataset.index, 10);
+    if (isNaN(idx) || idx === _paletteSelected) return;
+    _paletteSelected = idx;
+    updatePaletteHighlight();
+  });
+
+  results.addEventListener('focusin', function(e) {
+    var item = e.target.closest('.command-palette-item');
+    if (!item) return;
+    var idx = parseInt(item.dataset.index, 10);
+    if (isNaN(idx)) return;
+    _paletteSelected = idx;
+    updatePaletteHighlight();
   });
 
   overlay.addEventListener('click', function(e) {

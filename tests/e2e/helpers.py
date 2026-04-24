@@ -38,6 +38,13 @@ SEL = {
     "message_assistant": "#chat-messages .message.assistant",
     "message_system": "#chat-messages .message.system",
     "message_attachments": "#chat-messages .message.user .message-attachments",
+    # Command palette
+    "palette_overlay": "#command-palette-overlay",
+    "palette_input": "#palette-input",
+    "palette_results": "#palette-results",
+    "palette_item": "#palette-results .command-palette-item",
+    "palette_item_badge": "#palette-results .command-palette-item-badge",
+    "palette_item_desc": "#palette-results .command-palette-item-desc",
     # Skills
     "skill_search_input": "#skill-search-input",
     "skill_search_results": "#skill-search-results",
