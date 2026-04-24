@@ -215,6 +215,7 @@ fn main() {
                         name: "echo".into(),
                         detail: Some(format!("\"{truncated}\"")),
                         call_id: None,
+                        display_hint: None,
                     })
                     .await;
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -224,6 +225,7 @@ fn main() {
                         success: true,
                         error: None,
                         call_id: None,
+                        display_hint: None,
                     })
                     .await;
                 let _ = sim_tx

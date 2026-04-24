@@ -1168,14 +1168,28 @@ mod tests {
     }
 
     #[test]
-    fn generate_display_hint_falls_back_to_humanized_name() {
+    fn generate_display_hint_ignores_unallowlisted_params() {
         let hint = generate_display_hint(
             "my_custom_tool",
             None,
             &serde_json::json!({"city": "Paris"}),
         );
 
-        assert_eq!(hint.as_deref(), Some("Running my custom tool — Paris"));
+        assert_eq!(hint.as_deref(), Some("Running my custom tool..."));
+    }
+
+    #[test]
+    fn generate_display_hint_uses_sanitized_http_summary() {
+        let hint = generate_display_hint(
+            "http",
+            Some("Fetch a URL"),
+            &serde_json::json!({"url": "https://api.example.com/search?q=secret#frag"}),
+        );
+
+        assert_eq!(
+            hint.as_deref(),
+            Some("Fetching a URL — https://api.example.com/search")
+        );
     }
 
     #[test]

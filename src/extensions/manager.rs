@@ -8242,6 +8242,79 @@ mod tests {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
     }
 
+    struct ManagerTestMcpTransport {
+        responses: std::sync::Mutex<Vec<crate::tools::mcp::McpResponse>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::mcp::transport::McpTransport for ManagerTestMcpTransport {
+        async fn send(
+            &self,
+            _request: &crate::tools::mcp::McpRequest,
+            _headers: &std::collections::HashMap<String, String>,
+        ) -> Result<crate::tools::mcp::McpResponse, crate::tools::ToolError> {
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop()
+                .ok_or_else(|| {
+                    crate::tools::ToolError::ExternalService(
+                        "no mock MCP response queued".to_string(),
+                    )
+                })
+        }
+
+        async fn shutdown(&self) -> Result<(), crate::tools::ToolError> {
+            Ok(())
+        }
+    }
+
+    fn test_injected_mcp_client(
+        server_name: &str,
+        tool_name: &str,
+    ) -> Arc<crate::tools::mcp::McpClient> {
+        let init_response = crate::tools::mcp::McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": server_name, "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = crate::tools::mcp::McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = crate::tools::mcp::McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "tools": [{
+                    "name": tool_name,
+                    "description": format!("{tool_name} tool"),
+                    "inputSchema": {"type": "object"}
+                }]
+            })),
+            error: None,
+        };
+        let transport = Arc::new(ManagerTestMcpTransport {
+            responses: std::sync::Mutex::new(vec![list_response, notification_ack, init_response]),
+        });
+
+        Arc::new(crate::tools::mcp::McpClient::new_with_transport(
+            server_name,
+            transport,
+            None,
+            None,
+            "default",
+            None,
+        ))
+    }
+
     #[tokio::test]
     async fn inject_mcp_client_partitions_cache_by_user() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8252,14 +8325,8 @@ mod tests {
             None,
         );
 
-        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_name(
-            "notion",
-            "http://localhost:3001",
-        ));
-        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_name(
-            "notion",
-            "http://localhost:3002",
-        ));
+        let client_a = test_injected_mcp_client("notion", "notion-search");
+        let client_b = test_injected_mcp_client("notion", "notion-search");
 
         manager
             .inject_mcp_client("notion".to_string(), "user-a", Arc::clone(&client_a))

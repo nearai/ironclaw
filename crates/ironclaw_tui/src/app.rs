@@ -3552,6 +3552,7 @@ mod tests {
                 name: "http".to_string(),
                 detail: Some("first".to_string()),
                 call_id: Some("call-1".to_string()),
+                display_hint: None,
             },
         )
         .await;
@@ -3561,6 +3562,7 @@ mod tests {
                 name: "http".to_string(),
                 detail: Some("second".to_string()),
                 call_id: Some("call-2".to_string()),
+                display_hint: None,
             },
         )
         .await;
@@ -3580,6 +3582,7 @@ mod tests {
                 success: true,
                 error: None,
                 call_id: Some("call-2".to_string()),
+                display_hint: None,
             },
         )
         .await;

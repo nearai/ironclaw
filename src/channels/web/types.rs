@@ -100,6 +100,9 @@ pub struct ToolCallInfo {
     pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Human-readable narration for the tool call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_hint: Option<String>,
     /// Agent's reasoning for choosing this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,

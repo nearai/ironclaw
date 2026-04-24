@@ -446,6 +446,7 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
                 result,
                 result_preview,
                 error: c["error"].as_str().map(tool_error_for_display),
+                display_hint: c["display_hint"].as_str().map(String::from),
                 rationale: c["rationale"].as_str().map(String::from),
             }
         })
@@ -894,6 +895,29 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_build_turns_preserves_display_hint() {
+        let tc_json = serde_json::json!({
+            "calls": [{
+                "name": "memory_search",
+                "display_hint": "Searching your memories — last week",
+                "result_preview": "Found 3 results"
+            }]
+        });
+        let messages = vec![
+            make_msg("user", "Search memory", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(
+            turns[0].tool_calls[0].display_hint.as_deref(),
+            Some("Searching your memories — last week")
+        );
     }
 
     #[test]

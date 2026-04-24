@@ -791,6 +791,7 @@ impl Turn {
             error: None,
             rationale: None,
             tool_call_id: None,
+            display_hint: None,
         });
     }
 
@@ -809,6 +810,7 @@ impl Turn {
             error: None,
             rationale,
             tool_call_id,
+            display_hint: None,
         });
     }
 
@@ -898,6 +900,9 @@ pub struct TurnToolCall {
     /// The tool_call_id from the LLM, for identity-based result matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Human-readable narration surfaced by the runtime/UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_hint: Option<String>,
 }
 
 #[cfg(test)]

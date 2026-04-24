@@ -1183,6 +1183,10 @@ impl Agent {
                 if let Some(ref rationale) = tc.rationale {
                     obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
                 }
+                if let Some(ref display_hint) = tc.display_hint {
+                    obj["display_hint"] =
+                        serde_json::Value::String(truncate_preview(display_hint, 200));
+                }
                 if let Some(ref tool_call_id) = tc.tool_call_id {
                     obj["tool_call_id"] =
                         serde_json::Value::String(truncate_preview(tool_call_id, 128));

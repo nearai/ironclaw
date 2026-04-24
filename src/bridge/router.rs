@@ -4334,6 +4334,24 @@ async fn persist_v2_tool_calls(
         }
     };
 
+    let display_hints_by_call_id: std::collections::HashMap<&str, &str> = thread
+        .events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ironclaw_engine::EventKind::ActionExecuted {
+                call_id,
+                display_hint: Some(display_hint),
+                ..
+            }
+            | ironclaw_engine::EventKind::ActionFailed {
+                call_id,
+                display_hint: Some(display_hint),
+                ..
+            } => Some((call_id.as_str(), display_hint.as_str())),
+            _ => None,
+        })
+        .collect();
+
     // Extract ActionResult messages from the thread's internal transcript.
     // `internal_messages` has the full execution chain including action
     // results with actual tool output. `messages` only has user/assistant.
@@ -4361,6 +4379,9 @@ async fn persist_v2_tool_calls(
         });
         if let Some(ref call_id) = msg.action_call_id {
             obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+            if let Some(display_hint) = display_hints_by_call_id.get(call_id.as_str()) {
+                obj["display_hint"] = serde_json::Value::String((*display_hint).to_string());
+            }
         }
         calls.push(obj);
     }
@@ -9854,6 +9875,14 @@ mod tests {
             "test-user",
             ironclaw_engine::ThreadConfig::default(),
         );
+        thread.add_event(ironclaw_engine::EventKind::ActionExecuted {
+            step_id: ironclaw_engine::StepId::new(),
+            action_name: "echo".to_string(),
+            call_id: "call-1".to_string(),
+            duration_ms: 12,
+            params_summary: Some("hello".to_string()),
+            display_hint: Some("Echoing hello".to_string()),
+        });
         thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
             "call-1",
             "echo",
@@ -9897,6 +9926,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["name"], "echo");
         assert_eq!(calls[0]["tool_call_id"], "call-1");
+        assert_eq!(calls[0]["display_hint"], "Echoing hello");
         assert_eq!(calls[1]["name"], "time");
         assert_eq!(calls[1]["tool_call_id"], "call-2");
     }

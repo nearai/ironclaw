@@ -1048,6 +1048,7 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                     result: tool_result_preview(tc.result.as_ref()),
                     result_preview: None,
                     error: tc.error.as_deref().map(tool_error_for_display),
+                    display_hint: tc.display_hint.clone(),
                     rationale: tc.rationale.clone(),
                 }
             })
@@ -1339,6 +1340,7 @@ mod tests {
         {
             let turn = thread.turns.last_mut().expect("turn");
             turn.record_tool_call("memory_search", serde_json::json!({"query": "notes"}));
+            turn.tool_calls[0].display_hint = Some("Searching your memories — notes".to_string());
             turn.record_tool_result(serde_json::json!("found 3 notes"));
         }
 
@@ -1350,6 +1352,10 @@ mod tests {
             info.tool_calls[0].result.as_deref(),
             Some("found 3 notes"),
             "in-memory path surfaces full result on `result`"
+        );
+        assert_eq!(
+            info.tool_calls[0].display_hint.as_deref(),
+            Some("Searching your memories — notes")
         );
         assert!(
             info.tool_calls[0].result_preview.is_none(),
@@ -1386,6 +1392,7 @@ mod tests {
                 result_preview: None,
                 result: None,
                 error: Some("HTTP 502".to_string()),
+                display_hint: None,
                 rationale: None,
             }],
             generated_images: Vec::new(),
@@ -1440,6 +1447,7 @@ mod tests {
                     result_preview: None,
                     result: None,
                     error: Some("HTTP 502 on first attempt".to_string()),
+                    display_hint: None,
                     rationale: None,
                 },
                 ToolCallInfo {
@@ -1450,6 +1458,7 @@ mod tests {
                     result_preview: Some("message_id=42".to_string()),
                     result: Some("{\"message_id\":42}".to_string()),
                     error: None,
+                    display_hint: None,
                     rationale: None,
                 },
             ],

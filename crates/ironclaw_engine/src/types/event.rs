@@ -9,53 +9,55 @@ use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
 
-/// Generate a short human-readable summary of tool parameters for display.
+/// Generate a short allowlisted summary of tool parameters for display.
 ///
-/// For `http`: shows the URL. For `web_search`: shows the query.
-/// For other tools: shows the first string argument, truncated.
-/// Returns `None` for empty or unrecognizable params.
+/// This path is intentionally conservative: only explicitly-reviewed fields
+/// are surfaced, and URLs are stripped down to origin + path so query strings,
+/// fragments, and embedded credentials do not leak into activity UIs.
+/// Returns `None` for tools whose inputs are not known-safe to summarize.
 pub fn summarize_params(action_name: &str, params: &serde_json::Value) -> Option<String> {
     let summary = match action_name {
         "http" | "web_fetch" => params
             .get("url")
             .and_then(|v| v.as_str())
-            .map(|u| truncate(u, 80)),
-        "web_search" | "llm_context" => params
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(|q| truncate(q, 60)),
-        "memory_search" => params
+            .and_then(summarize_safe_url),
+        "web_search" | "llm_context" | "memory_search" => params
             .get("query")
             .and_then(|v| v.as_str())
             .map(|q| truncate(q, 60)),
         "memory_write" => params
             .get("target")
             .and_then(|v| v.as_str())
-            .map(|t| t.to_string()),
+            .map(|t| truncate(t, 80)),
         "memory_read" => params
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|p| p.to_string()),
-        "shell" => params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|c| truncate(c, 60)),
-        "message" => params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|c| truncate(c, 40)),
-        _ => {
-            // Generic: show first string value
-            if let Some(obj) = params.as_object() {
-                obj.values()
-                    .find_map(|v| v.as_str())
-                    .map(|s| truncate(s, 50))
-            } else {
-                None
-            }
-        }
+            .map(|p| truncate(p, 80)),
+        _ => None,
     };
     summary.filter(|s| !s.is_empty())
+}
+
+fn summarize_safe_url(raw: &str) -> Option<String> {
+    let (scheme, rest) = raw.split_once("://")?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end]; // safety: find() on ASCII delimiter chars returns a valid UTF-8 boundary
+    let host = authority
+        .rsplit('@')
+        .next()
+        .filter(|host| !host.is_empty())?;
+    let path_and_more = &rest[authority_end..];
+    let path = if path_and_more.starts_with('/') {
+        path_and_more
+            .split(['?', '#'])
+            .next()
+            .filter(|path| !path.is_empty() && *path != "/")
+            .unwrap_or("")
+    } else {
+        ""
+    };
+
+    Some(truncate(&format!("{scheme}://{host}{path}"), 80))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -258,8 +260,48 @@ pub enum EventKind {
 
 #[cfg(test)]
 mod tests {
-    use super::EventKind;
+    use super::{EventKind, summarize_params};
     use crate::types::step::StepId;
+
+    #[test]
+    fn summarize_params_uses_only_allowlisted_fields() {
+        assert_eq!(
+            summarize_params(
+                "memory_search",
+                &serde_json::json!({"query": "last week", "token": "secret"}),
+            )
+            .as_deref(),
+            Some("last week")
+        );
+        assert_eq!(
+            summarize_params(
+                "http",
+                &serde_json::json!({"url": "https://api.example.com/search?q=secret#frag"}),
+            )
+            .as_deref(),
+            Some("https://api.example.com/search")
+        );
+        assert_eq!(
+            summarize_params("shell", &serde_json::json!({"command": "echo secret"})),
+            None
+        );
+        assert_eq!(
+            summarize_params("custom_tool", &serde_json::json!({"api_key": "secret"})),
+            None
+        );
+    }
+
+    #[test]
+    fn summarize_params_drops_urls_with_embedded_credentials() {
+        assert_eq!(
+            summarize_params(
+                "http",
+                &serde_json::json!({"url": "https://user:pass@example.com/private"}),
+            )
+            .as_deref(),
+            Some("https://example.com/private")
+        );
+    }
 
     #[test]
     fn action_failed_defaults_missing_duration_ms_when_deserializing_legacy_payload() {

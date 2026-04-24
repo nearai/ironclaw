@@ -740,6 +740,7 @@ mod tests {
                 detail: None,
                 call_id: None,
                 thread_id: None,
+                display_hint: None,
             },
             AppEvent::ToolCompleted {
                 name: String::new(),
@@ -749,6 +750,7 @@ mod tests {
                 call_id: None,
                 duration_ms: None,
                 thread_id: None,
+                display_hint: None,
             },
             AppEvent::ToolResult {
                 name: String::new(),
