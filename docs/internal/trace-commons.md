@@ -59,6 +59,25 @@ TRACE_COMMONS_BIND='127.0.0.1:3907' \
 cargo run --bin trace_commons_ingest
 ```
 
+Optional dark-launch storage can be enabled for internal pilots:
+
+```bash
+# Mirror corpus metadata into the configured IronClaw database.
+TRACE_COMMONS_DB_DUAL_WRITE=true \
+DATABASE_BACKEND=libsql \
+LIBSQL_PATH=/var/lib/ironclaw/ironclaw.db \
+cargo run --bin trace_commons_ingest
+
+# Store submitted redacted envelopes in the encrypted local artifact sidecar.
+TRACE_COMMONS_ARTIFACT_KEY_HEX=<ironclaw-secrets-compatible-hex-key> \
+TRACE_COMMONS_ARTIFACT_DIR=/var/lib/ironclaw/trace-artifacts \
+cargo run --bin trace_commons_ingest
+```
+
+`TRACE_COMMONS_DB_DUAL_WRITE=true` builds a `TraceCorpusStore` mirror from the normal `DATABASE_BACKEND` configuration. `DATABASE_BACKEND=postgres` requires `DATABASE_URL`; `DATABASE_BACKEND=libsql` uses `LIBSQL_PATH` with optional `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`. The mirror writes tenant-scoped submissions, object refs, derived precheck records, audit events, credit events, review state, and revocation tombstones while the API still serves from the file-backed pilot store.
+
+`TRACE_COMMONS_ARTIFACT_KEY_HEX` enables the encrypted artifact sidecar. `TRACE_COMMONS_ENCRYPTED_ARTIFACTS=true` can be used as an explicit guard, but still requires the key. When enabled, submitted redacted envelopes are encrypted with IronClaw secrets crypto, stored under a tenant-hashed artifact directory, and referenced by an `EncryptedTraceArtifactReceipt`. File-backed submission records retain the receipt so envelope reads resolve through the encrypted sidecar when present.
+
 Then opt a client into that endpoint:
 
 ```bash
@@ -101,7 +120,7 @@ On submit, the service also writes a derived redacted-only record with:
 - coverage tags for channel, tool, tool category, outcome, failure mode, and privacy risk
 - aggregate analytics by status, privacy risk, task success, tool, tool category, and coverage tag
 
-The current binary is intentionally file-backed under `TRACE_COMMONS_DATA_DIR` or `~/.ironclaw/trace_commons_ingest`. Production deployments should replace the file store with encrypted object storage, relational metadata, row-level tenant policies, and an audit-backed review/export service.
+The current API remains intentionally file-backed under `TRACE_COMMONS_DATA_DIR` or `~/.ironclaw/trace_commons_ingest` for compatibility and easy local operation. This branch also includes the first production storage bridge: optional DB dual-write metadata and optional encrypted local artifact storage. Production deployments should promote those paths into DB/object-primary reads, add row-level tenant policies, and move encrypted artifacts behind service-owned object storage before broad rollout.
 
 ## Production Hardening Roadmap
 
@@ -109,7 +128,7 @@ The current implementation is a usable MVP for local development and controlled 
 
 ### DB and Object Storage
 
-- Replace the file-backed ingestion store with relational metadata tables and encrypted object storage for redacted trace bodies.
+- Promote the current dual-write mirror into relational metadata reads and service-owned encrypted object storage for redacted trace bodies.
 - Keep metadata and object keys tenant-scoped from the auth-derived tenant id. Do not trust tenant fields in the envelope as storage partition keys.
 - Store immutable submission records, append-only credit events, revocation tombstones, review decisions, export job manifests, and processing job state as separate records.
 - Use row-level tenant policies or an equivalent authorization layer for every metadata query.
@@ -243,16 +262,16 @@ The web settings panel includes a Trace Commons tab for standing opt-in, autonom
 | Privacy Filter sidecar integration | Implemented MVP | Local command/stdin/stdout path exists; production sandboxing, canary tests, and stricter output contracts remain. |
 | Autonomous post-turn contribution | Implemented MVP | Runtime queues/flushed scoped envelopes after persisted or failed turns when policy permits. |
 | Web Trace Commons settings and preview endpoints | Implemented MVP | Authenticated gateway endpoints and UI controls exist; server-side tenant/user checks remain the trust boundary. |
-| Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, stores accepted/quarantined records, and serves review/status/export routes. |
+| Private ingestion service | Implemented MVP | Development/internal binary validates schema, reruns redaction, computes hashes/credit, stores accepted/quarantined records, and serves review/status/export routes. It can now dark-launch DB dual-write metadata and encrypted envelope artifacts. |
 | Tenant token roles | Partial | Static tenant tokens support contributor/reviewer/admin behavior. Production needs short-lived credentials, central policy, RBAC/ABAC, and row-level tenant enforcement. |
-| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist. Production needs stricter privilege policy, artifact linkage, anti-abuse review, and audit reconciliation. |
+| Contributor credit ledger and delayed credit sync | Partial | Append-only local and central credit events exist, and autonomous clients periodically notify opted-in users when submitted or later-revoked records receive ledger changes. Production needs stricter privilege policy, artifact linkage, anti-abuse review, and audit reconciliation. |
 | Quarantine/review workflow | Partial | Reviewer/admin routes can list and decide on quarantined redacted traces. Production needs durable DB state, audit, assignment, escalation, and retention/revocation gates. |
 | Replay dataset export | Partial | Approved redacted slices can be exported by reviewer/admin tokens. Production needs bulk export controls, manifests, per-trace audit, retention filters, and revocation invalidation. |
 | Analytics summary | Partial | Aggregate counts by status/risk/tool/coverage exist. Production needs tenant policy, privacy budgets if exposed broadly, and audit for privileged analytics. |
-| Production relational DB and object storage | Not implemented | File-backed storage is intentional for MVP; replace before broad deployment. |
-| Central audit log | Not implemented | Required for production review, export, credit mutation, revocation, worker processing, and trace reads. |
+| Production relational DB and encrypted object storage | Partial | V25 PostgreSQL/libSQL schema, shared `TraceCorpusStore`, both backend implementations, optional ingest DB mirror, and encrypted local artifact sidecar exist. DB-first reads, backfill, RLS/policy enforcement, and service-owned object storage remain. |
+| Central audit log | Partial | File-backed audit routes and DB-mirrored audit events cover core submit/review/credit/revoke mutations. Production still needs tamper-evident audit, trace-read/export coverage, reconciliation, and privileged reason enforcement. |
 | Retention enforcement | Not implemented | Envelope records policy metadata, but central purge/tombstone propagation jobs are still needed. |
-| Revocation propagation to derived artifacts | Not implemented | Current revocation marks local/central status; production must invalidate object, vector, benchmark, export, ranking, and worker artifacts. |
+| Revocation propagation to derived artifacts | Partial | Current revocation marks local/file status, mirrors DB status, writes tenant-scoped tombstones, and blocks file-backed replay export. Production must invalidate object, vector, benchmark, ranking, worker, and existing export artifacts. |
 | Vector duplicate/novelty index | Not implemented | MVP stores hashes and placeholder novelty fields only. |
 | Ranking/model utility pipeline | Not implemented | Delayed credit kinds are reserved; no trusted offline utility job is implemented. |
 | Benchmark conversion pipeline | Not implemented | Replay export exists, but controlled benchmark artifact conversion with manifests and consent gates is still future work. |

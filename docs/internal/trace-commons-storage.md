@@ -1,10 +1,20 @@
 # Trace Commons Production Storage Plan
 
-This document makes the migration path from the current file-backed Trace Commons ingest MVP to production storage concrete without wiring any new runtime behavior. It assumes the existing `ironclaw.trace_contribution.v1` envelope remains the upload contract, while production ingest moves trust, authorization, retention, review, export, and credit accounting into durable services.
+This document tracks the migration path from the file-backed Trace Commons ingest MVP to production storage. It assumes the existing `ironclaw.trace_contribution.v1` envelope remains the upload contract, while production ingest moves trust, authorization, retention, review, export, and credit accounting into durable services.
 
 ## Current State
 
-The MVP ingestion service stores tenant-scoped JSON files under `TRACE_COMMONS_DATA_DIR` and derives lightweight records for review, analytics, credit, and replay export. That is appropriate for local development and controlled pilots, but production needs stronger guarantees:
+The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COMMONS_DATA_DIR` and derives lightweight records for review, analytics, credit, and replay export. That remains appropriate for local development and controlled pilots.
+
+This branch now contains the first production-storage bridge:
+
+- `migrations/V25__trace_corpus_storage.sql` plus the matching libSQL incremental migration.
+- `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
+- Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
+- Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`.
+- Caller-level tests for tenant-scoped writes, review/revocation state, delayed credit events, and encrypted artifact receipts.
+
+Production still needs stronger guarantees before broad tenant rollout:
 
 - Relational metadata for tenant policy, workflow state, credit, audit, retention, and export manifests.
 - Encrypted object storage for redacted envelope bodies and large derived artifacts.
@@ -39,25 +49,25 @@ Do not put bearer tokens, raw local paths, raw sidecar spans, unredacted trace t
 
 ## Concrete DB Migration Slice
 
-This is the first production-storage slice to implement when the file-backed MVP is ready to dual-write metadata. It creates the relational control plane only: envelope payloads still belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. The migration should not wire `src/bin/trace_commons_ingest.rs` to DB writes in the same patch.
+This first production-storage slice has now been implemented as a dark-launch bridge. It creates the relational control plane only: envelope payloads belong in encrypted artifact storage, and vector payloads can stay in a vector store or backend-specific index. `src/bin/trace_commons_ingest.rs` can mirror metadata into the DB when `TRACE_COMMONS_DB_DUAL_WRITE=true`, while file-backed APIs remain the source of pilot responses until DB-first reads and reconciliation land.
 
 ### Safe Migration Naming
 
-Current local state:
+Historical local state when this slice was created:
 
 - Local PostgreSQL migrations in this worktree end at `migrations/V23__list_workspace_files_escape_like.sql`.
 - Local `src/db/libsql_migrations.rs` ends at incremental version `22`.
 - The local `origin/staging` ref already contains `migrations/V24__llm_calls_created_at_index.sql` and libSQL incremental version `24`.
 
-Highest-safe guidance:
+Completed guidance:
 
 - Before creating the migration, refresh refs with `git fetch origin` and re-check:
   - `git ls-tree --name-only origin/staging:migrations`
   - `git ls-tree --name-only origin/main:migrations`
   - `git show origin/staging:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
   - `git show origin/main:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
-- If staging/main are still highest at `V24`, name the PostgreSQL migration `migrations/V25__trace_commons_storage.sql`.
-- Add the libSQL migration as incremental version `25` named `"trace_commons_storage"`. The libSQL number does not always match PostgreSQL historically, but both staging and this planned batch would be highest at `25`.
+- Staging/main were highest at `V24`, so the PostgreSQL migration is `migrations/V25__trace_corpus_storage.sql`.
+- The libSQL migration is incremental version `25` named `"trace_corpus_storage"`. The libSQL number does not always match PostgreSQL historically, but both staging and this batch are now highest at `25`.
 - Do not add `IF NOT EXISTS` to PostgreSQL migration DDL unless the repo's refinery policy changes. PostgreSQL migrations should be one-shot and checksum-stable.
 - For libSQL, use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, and add only idempotent DDL to `INCREMENTAL_MIGRATIONS`.
 - After adding a real PostgreSQL migration, update `migrations/checksums.lock` using the repo's migration checksum workflow.
@@ -679,7 +689,7 @@ CREATE TABLE IF NOT EXISTS trace_retention_job_items (
 
 ### Rust Store Contract Shape
 
-The initial Rust contract now lives in `src/trace_corpus_storage.rs`. When this becomes active persistence, add `TraceCorpusStore` to `src/db/mod.rs` only when both PostgreSQL and libSQL implementations are in the same branch. Keep `src/bin/trace_commons_ingest.rs` on the file-backed path until dual-write verification exists.
+The initial Rust contract now lives in `src/trace_corpus_storage.rs`. `TraceCorpusStore` is part of the shared `Database` trait because both PostgreSQL and libSQL implementations exist in this branch. `src/bin/trace_commons_ingest.rs` still serves file-backed responses, but it can mirror submit/review/credit/revoke mutations into the configured DB for dark-launch verification.
 
 The first implementation-facing shape should stay close to:
 
@@ -1003,7 +1013,7 @@ Parity rules:
    - Write `trace_vector_entries` and `trace_derived_records` after checking revocation immediately before publish.
    - Keep novelty/duplicate scores advisory until reconciliation jobs are green.
 
-5. Switch reads to DB-first.
+5. Switch reads to DB-first. This remains the next major storage cutover.
    - Contributor status, credit, review queues, analytics, and exports read from DB metadata.
    - Envelope body reads resolve through `trace_object_refs`.
    - File-backed records remain a compatibility fallback for pilot data.
@@ -1039,13 +1049,13 @@ Each migration batch should verify:
 
 Implementation checklist for the first real storage migration:
 
-- Refresh `origin/staging` and `origin/main`; choose the next migration number after the highest migration present on either branch.
-- Add `migrations/VN__trace_commons_storage.sql` with the PostgreSQL DDL, and update `migrations/checksums.lock` through the repo migration checksum workflow.
-- Add a same-version `"trace_commons_storage"` entry to `INCREMENTAL_MIGRATIONS` in `src/db/libsql_migrations.rs`.
+- Refresh `origin/staging` and `origin/main`; choose the next migration number after the highest migration present on either branch. Completed for `V25`.
+- Add `migrations/VN__trace_corpus_storage.sql` with the PostgreSQL DDL, and update `migrations/checksums.lock` through the repo migration checksum workflow. Completed for `V25`.
+- Add a same-version `"trace_corpus_storage"` entry to `INCREMENTAL_MIGRATIONS` in `src/db/libsql_migrations.rs`. Completed for version `25`.
 - If the libSQL base `SCHEMA` is updated for fresh installs, keep the incremental migration idempotent and make sure fresh and upgraded databases converge to the same schema.
-- Add `TraceCorpusStore` to the `Database` trait only after both `PgBackend` and `LibSqlBackend` implementations exist.
-- Keep DB writes behind a dark-launch or dual-write flag until parity checks pass.
-- Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB.
+- Add `TraceCorpusStore` to the `Database` trait only after both `PgBackend` and `LibSqlBackend` implementations exist. Completed.
+- Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.
+- Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB. Completed for the local encrypted artifact sidecar; service-owned object storage remains future work.
 - Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events.
 - Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones.
 
@@ -1053,9 +1063,9 @@ Test checklist for the same branch:
 
 - PostgreSQL migration test applies all migrations on an empty database and on a pre-Trace-Commons database.
 - libSQL migration test applies `SCHEMA` plus `INCREMENTAL_MIGRATIONS` on an empty in-memory database and on a database initialized before the Trace Commons migration.
-- Backend parity tests insert the same logical submission, object ref, audit event, credit event, derived record, and tombstone through the shared store trait for both backends.
-- Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant.
-- Handler-level tests drive the future ingest/review/revoke/export callers, not only helper predicates, and assert each mocked DB/object/vector call receives `tenant_id`, `actor_principal_ref`, and `submission_id`.
+- Backend parity tests insert the same logical submission, object ref, audit event, credit event, derived record, and tombstone through the shared store trait for both backends. libSQL coverage exists; PostgreSQL integration coverage still needs an available test database.
+- Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant. Implemented for the libSQL store contract and ingest DB mirror path.
+- Handler-level tests drive the future ingest/review/revoke/export callers, not only helper predicates, and assert each mocked DB/object/vector call receives `tenant_id`, `actor_principal_ref`, and `submission_id`. Implemented for submit/review/credit/revoke dual-write; DB-backed export and vector paths remain future work.
 - Revocation propagation tests prove tombstone-first ordering and invalidation of submissions, derived rows, vectors, benchmark artifacts, exports, and credit settlement.
 - Retention tests run dry-run, policy-change, legal-hold, retry, and resumed-job paths before any destructive object/vector deletion path is enabled.
 - Export tests prove revoked, quarantined, rejected, expired, and out-of-scope submissions cannot enter new manifests, and existing manifests are invalidated after source revocation.
