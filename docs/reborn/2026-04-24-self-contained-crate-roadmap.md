@@ -126,6 +126,7 @@ docs/reborn/contracts/filesystem.md
 docs/reborn/contracts/resources.md
 docs/reborn/contracts/extensions.md
 docs/reborn/contracts/wasm.md
+docs/reborn/contracts/kernel-dispatch.md
 docs/reborn/contracts/mcp.md
 docs/reborn/contracts/scripts.md
 docs/reborn/contracts/processes.md
