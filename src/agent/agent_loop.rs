@@ -734,11 +734,7 @@ impl Agent {
 
             // Preflight budget check: skip the LLM fallback if the user or
             // global budget is already exhausted.
-            let budget_ok = self
-                .deps
-                .cost_guard
-                .check_allowed_for_user(user_id)
-                .await;
+            let budget_ok = self.deps.cost_guard.check_allowed_for_user(user_id).await;
             if let Err(e) = budget_ok {
                 tracing::debug!(
                     error = %e,
@@ -775,9 +771,10 @@ impl Agent {
                     else {
                         continue;
                     };
-                    if selected.iter().any(|selected_skill| {
-                        selected_skill.manifest.name == skill.manifest.name
-                    }) {
+                    if selected
+                        .iter()
+                        .any(|selected_skill| selected_skill.manifest.name == skill.manifest.name)
+                    {
                         continue;
                     }
 
@@ -804,9 +801,7 @@ impl Agent {
                     );
                 }
             } else {
-                tracing::warn!(
-                    "LLM skill fallback failed; continuing with no active skills"
-                );
+                tracing::warn!("LLM skill fallback failed; continuing with no active skills");
             }
         }
 

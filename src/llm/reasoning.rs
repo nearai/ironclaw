@@ -582,12 +582,11 @@ impl Reasoning {
             return Ok((Vec::new(), TokenUsage::default()));
         }
 
-        let skills_json = serde_json::to_string(available_skills).map_err(|e| {
-            LlmError::InvalidResponse {
+        let skills_json =
+            serde_json::to_string(available_skills).map_err(|e| LlmError::InvalidResponse {
                 provider: self.llm.model_name().to_string(),
                 reason: format!("failed to serialize skill catalog: {e}"),
-            }
-        })?;
+            })?;
         let messages = vec![
             ChatMessage::system(format!(
                 "You are a skill selector. Your ONLY task is to match user requests to \
