@@ -133,6 +133,8 @@ fn create_secret_params(
 }
 
 fn upsert_status(secret: &Secret) -> &'static str {
+    // All SecretsStore backends set `created_at == updated_at` on first insert
+    // and preserve `created_at` while advancing `updated_at` on conflict.
     if secret.created_at == secret.updated_at {
         "created"
     } else {
@@ -174,7 +176,7 @@ fn resolve_optional_settings_store(
     if let Some(ref cache) = state.settings_cache {
         Some(cache.as_ref())
     } else {
-        state.store.as_ref().map(|db| db.as_ref() as _)
+        state.store.as_ref().map(|db| db.as_ref() as _) // dispatch-exempt: secrets CRUD uses the cached settings store when present and otherwise falls back to the raw settings store until ToolDispatcher owns secret lifecycle operations
     }
 }
 

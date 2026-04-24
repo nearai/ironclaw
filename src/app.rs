@@ -867,7 +867,9 @@ impl AppBuilder {
             use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
             let ephemeral_key =
                 secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            let crypto = Arc::new(
+                SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"), // safety: generate_master_key_hex() always returns a 64-char high-entropy string, which exceeds SecretsCrypto's minimum length requirement
+            );
             tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
             Arc::new(InMemorySecretsStore::new(crypto))
         };

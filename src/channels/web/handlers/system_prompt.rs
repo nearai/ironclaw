@@ -2,6 +2,11 @@
 //!
 //! These endpoints allow admins to set a shared system prompt (`SYSTEM.md`)
 //! that is injected into every user's system prompt in multi-tenant mode.
+//!
+//! dispatch-exempt: These admin-only endpoints intentionally talk to the
+//! workspace/database layers directly because they manage shared prompt content,
+//! not tool execution. They are already gated by `AdminUser` auth and do not
+//! belong on the `ToolDispatcher` path.
 
 use std::sync::Arc;
 
@@ -18,7 +23,8 @@ pub async fn get_handler(
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<SystemPromptResponse>, (StatusCode, String)> {
     // Gate behind multi-tenant mode.
-    if state.workspace_pool.is_none() {
+    let multi_tenant_disabled = state.workspace_pool.is_none(); // dispatch-exempt: admin-only gate
+    if multi_tenant_disabled {
         return Err((
             StatusCode::NOT_FOUND,
             "System prompt management requires multi-tenant mode".to_string(),
@@ -26,6 +32,7 @@ pub async fn get_handler(
     }
 
     let db = state.store.as_ref().ok_or((
+        // dispatch-exempt: admin-only shared workspace access uses the raw DB-backed workspace
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
@@ -68,7 +75,8 @@ pub async fn put_handler(
     }
 
     // Gate behind multi-tenant mode.
-    if state.workspace_pool.is_none() {
+    let multi_tenant_disabled = state.workspace_pool.is_none(); // dispatch-exempt: admin-only gate
+    if multi_tenant_disabled {
         return Err((
             StatusCode::NOT_FOUND,
             "System prompt management requires multi-tenant mode".to_string(),
@@ -76,6 +84,7 @@ pub async fn put_handler(
     }
 
     let db = state.store.as_ref().ok_or((
+        // dispatch-exempt: admin-only shared workspace access uses the raw DB-backed workspace
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;

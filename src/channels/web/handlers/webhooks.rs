@@ -3,6 +3,10 @@
 //! `POST /api/webhooks/{path}` — matches the path against routines with
 //! `Trigger::Webhook { path, secret }`, validates the secret via constant-time
 //! comparison, and fires the matching routine through the `RoutineEngine`.
+//!
+//! dispatch-exempt: Webhook routing performs direct gateway/database lookups to
+//! locate the target routine before control transfers into the routine engine.
+//! These request-time routing guards are not `ToolDispatcher` operations.
 
 use std::sync::Arc;
 
@@ -68,7 +72,8 @@ pub async fn webhook_trigger_handler(
     // but tenant isolation requires scoping by user_id.
     // Use workspace_pool as the multi-tenant indicator — it's only set when
     // has_any_users() was true at startup (not just when a DB exists).
-    if state.workspace_pool.is_some() {
+    let multi_tenant_mode = state.workspace_pool.is_some(); // dispatch-exempt: routing guard
+    if multi_tenant_mode {
         return Err((
             StatusCode::GONE,
             "Unscoped webhooks disabled in multi-tenant mode. Use /api/webhooks/u/{user_id}/{path} instead.".to_string(),
@@ -106,6 +111,7 @@ async fn fire_webhook_inner(
     }
 
     let store = state.store.as_ref().ok_or((
+        // dispatch-exempt: webhook lookup needs the raw DB store before routine dispatch begins
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
