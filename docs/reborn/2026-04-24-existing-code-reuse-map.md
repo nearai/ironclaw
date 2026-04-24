@@ -370,7 +370,7 @@ ironclaw_kernel     = composition
 
 ### 4.7 `crates/ironclaw_scripts`
 
-**Purpose in Reborn:** dynamic creativity lane for project-local Python/bash/JS helpers.
+**Purpose in Reborn:** native software lane for existing CLIs plus dynamic project-local Python/bash/JS helpers. V1 should use one Docker/container-backed sandbox profile behind the script/CLI capability contract.
 
 **Existing sources:**
 
@@ -391,8 +391,8 @@ ironclaw_kernel     = composition
 
 **Refactor:**
 
-- expose one V1 capability such as `script.run`
-- require explicit inputs, mounts, network policy, timeout, memory/output limit, and artifact directory
+- expose one V1 capability such as `script.run` plus declared CLI capability wrappers
+- require explicit inputs, mounts, network policy, timeout, memory/output limit, artifact directory, image/backend, and command/argument allowlist
 - enforce resource reservation and sandbox quotas
 - make scripts project-scoped by default
 - treat generated scripts as artifacts that can later be promoted to WASM/MCP/stable capabilities

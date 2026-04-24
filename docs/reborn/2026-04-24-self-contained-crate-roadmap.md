@@ -23,7 +23,7 @@ filesystem mount
   -> discover extension manifest
   -> register capability
   -> reserve resource budget
-  -> execute WASM capability
+  -> execute a capability through WASM or the script runner
   -> reconcile resource budget
   -> emit realtime event
   -> write durable state
@@ -82,19 +82,19 @@ Build manifest/discovery/capability declaration logic in its own crate.
 
 ### PR 6 — `crates/ironclaw_wasm` + budgeted WASM echo
 
-Build the default installed capability lane and prove one tiny WASM capability behind resource reservation.
+Build the portable installed capability lane and prove one tiny WASM capability behind resource reservation.
 
-### PR 7 — `crates/ironclaw_kernel`
+### PR 7 — `crates/ironclaw_scripts` + Docker-backed script echo
 
-Wire host API + filesystem + resources + extensions + WASM runtime into a composition-only host.
+Add `script.run` / declared CLI capability execution for native CLIs and project-local Python/bash/JS helpers. V1 uses Docker/container as the first backend.
 
-### PR 8 — `crates/ironclaw_mcp`
+### PR 8 — `crates/ironclaw_kernel`
+
+Wire host API + filesystem + resources + extensions + WASM runtime + script runner into a composition-only host.
+
+### PR 9 — `crates/ironclaw_mcp`
 
 Adapt existing MCP servers/tools into IronClaw capabilities.
-
-### PR 9 — `crates/ironclaw_scripts`
-
-Add `script.run` for project-local sandboxed Python/bash/JS helpers.
 
 ### PR 10 — `extensions/conversation` and `extensions/missions`
 
@@ -429,7 +429,51 @@ Do not add:
 
 ---
 
-## 10. Milestone 6 — `ironclaw_kernel`
+## 10. Milestone 6 — `ironclaw_scripts`
+
+### Purpose
+
+Provide the native CLI/software lane without requiring the world's CLIs to be rebuilt in WASM.
+
+### Crate
+
+```text
+crates/ironclaw_scripts/
+```
+
+### Build
+
+- `script.run` and declared CLI capability contracts
+- Docker/container-backed V1 sandbox backend
+- command/argument/environment allowlist translation
+- scoped filesystem mount preparation
+- network deny-by-default with explicit allow rules
+- secret-handle injection through approved env/files only
+- CPU/memory/PID/wall-clock/output limits
+- artifact directory capture and cleanup
+
+### Tests
+
+- approved command runs in the configured image/backend
+- raw Docker flags cannot be requested by an extension
+- scoped filesystem mounts are passed read-only/read-write as authorized
+- network and secrets are denied by default
+- stdout/stderr/output size limits are enforced
+- artifacts are exported only from approved paths
+
+### Non-goals
+
+Do not add:
+
+- arbitrary host shell access
+- multiple sandbox backends in V1
+- Docker socket exposure to extensions
+- MCP protocol handling
+- product workflows
+
+---
+
+## 11. Milestone 7 — `ironclaw_kernel`
 
 ### Purpose
 
@@ -444,7 +488,7 @@ crates/ironclaw_kernel/
 ### Build
 
 - system builder
-- host API + filesystem + resources + extension manager + WASM runtime wiring
+- host API + filesystem + resources + extension manager + WASM runtime + script runner wiring
 - event bus composition
 - boot namespace
 - extension capability registration into host dispatch table
@@ -458,6 +502,7 @@ let kernel = KernelBuilder::new()
     .with_resource_governor(resources)
     .with_extension_manager(extensions)
     .with_wasm_runtime(wasm)
+    .with_script_runner(scripts)
     .build()
     .await?;
 ```
@@ -468,6 +513,7 @@ let kernel = KernelBuilder::new()
 - discovers extension
 - registers capabilities
 - dispatches discovered capability
+- dispatches a script/CLI capability through the same host path
 - emits realtime event
 - writes durable event/audit record if configured
 
@@ -484,11 +530,7 @@ Do not add:
 
 ---
 
-## 11. Milestone 7 — MCP and script runner lanes
-
-After filesystem, resources, extension discovery, WASM, and kernel composition work, add the other two V1 lanes.
-
-### `crates/ironclaw_mcp`
+## 12. Milestone 8 — `ironclaw_mcp`
 
 Proves:
 
@@ -497,17 +539,11 @@ Proves:
 - MCP tool to IronClaw capability mapping
 - scoped invocation and audit hooks
 
-### `crates/ironclaw_scripts`
+MCP is an adapter path for existing ecosystems; local stdio servers should reuse the same mediated process/sandbox substrate as script runner where appropriate.
 
-Proves:
+---
 
-- `script.run` capability
-- project-local Python/bash/JS helper execution
-- sandbox profile limits
-- scoped filesystem mounts
-- no network/secrets by default
-
-## 12. Milestone 8 — first-party product/userland extensions
+## 13. Milestone 9 — first-party product/userland extensions
 
 Only after the runtime lanes work.
 
@@ -547,7 +583,7 @@ Proves:
 
 ---
 
-## 13. Milestone 9 — auth/network/sandbox hardening
+## 14. Milestone 10 — auth/network/sandbox hardening
 
 Do not start here unless the team intentionally wants to prioritize security infrastructure before proving the execution path.
 
@@ -584,7 +620,7 @@ Add stronger isolation later.
 
 ---
 
-## 14. Minimum viable vertical slice
+## 15. Minimum viable vertical slice
 
 The first meaningful proof should include:
 
@@ -594,8 +630,10 @@ crates/ironclaw_filesystem
 crates/ironclaw_resources
 crates/ironclaw_extensions
 crates/ironclaw_wasm
+crates/ironclaw_scripts
 crates/ironclaw_kernel
 wasm echo capability
+script echo capability
 ```
 
 End-to-end flow:
@@ -607,7 +645,7 @@ filesystem mount
   -> register capability with kernel host
   -> dispatch echo.say
   -> reserve tenant/user/project/thread budget
-  -> invoke WASM module
+  -> invoke WASM module or Docker-backed script command
   -> reconcile actual resource usage
   -> emit runtime event
   -> return result
@@ -618,7 +656,7 @@ This proves the architecture without product complexity.
 
 ---
 
-## 15. Success criteria
+## 16. Success criteria
 
 The architecture is real when:
 
@@ -633,10 +671,11 @@ The architecture is real when:
 - `agent_loop` can be deleted or replaced without touching kernel
 - `gateway` can be deleted or replaced without touching kernel
 - WASM echo capability runs through the same path future installed WASM capabilities will use
+- script echo capability runs through the same policy/resource/audit path as existing native CLIs
 
 ---
 
-## 16. Early architecture guardrails
+## 17. Early architecture guardrails
 
 Add guardrails as soon as the first crates exist:
 
@@ -656,10 +695,10 @@ These tests are not polish. They are the mechanism that keeps the architecture f
 
 ---
 
-## 17. Final recommendation
+## 18. Final recommendation
 
 The next implementation work should be a sequence of small self-contained crates, not a broad product rewrite.
 
-Start with `ironclaw_host_api`, then the durable filesystem, then the resource/budget governor, then extension discovery, then WASM capability execution, then kernel composition, then a tiny budgeted WASM echo capability.
+Start with `ironclaw_host_api`, then the durable filesystem, then the resource/budget governor, then extension discovery, then WASM capability execution, then Docker-backed script runner execution, then kernel composition, then tiny budgeted WASM and script echo capabilities.
 
-After that path is working, add MCP and script runner as the remaining V1 lanes. Only then should the team move conversation, missions, agent loop, gateway, TUI, auth, network, sandboxing, GitHub, or self-repair into the new model.
+After those paths are working, add MCP as the required adapter lane for existing MCP servers/tools. Only then should the team move conversation, missions, agent loop, gateway, TUI, auth, network hardening, GitHub, or self-repair into the new model.

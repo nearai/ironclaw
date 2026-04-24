@@ -242,6 +242,9 @@ pub enum TrustClass {
 
 Rules:
 
+- `RuntimeKind::FirstParty` and `RuntimeKind::System` are the concrete host-lane markers for trusted first-party services in the broader `Host | WASM | Script Runner` model.
+- `RuntimeKind::Mcp` is a capability adapter lane; local stdio MCP servers may still be process/sandbox-backed internally.
+- `RuntimeKind::Script` is the native CLI/script lane. Docker/container is the V1 backend selected by policy, not a distinct public host API runtime kind.
 - `TrustClass` is an authority ceiling, not a permission grant.
 - A first-party extension still needs explicit grants/mounts/resources.
 - `System` is reserved for host-owned services and tests with explicit fixtures.
