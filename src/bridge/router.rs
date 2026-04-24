@@ -6307,7 +6307,7 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::{StreamExt, stream};
+    use futures::{FutureExt, StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
@@ -9261,6 +9261,203 @@ mod tests {
         let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
         assert!(result.is_some(), "should find thread via entry fallback");
         assert_eq!(result.unwrap().id, tid);
+    }
+
+    struct CompletedTextLlm {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_engine::LlmBackend for CompletedTextLlm {
+        async fn complete(
+            &self,
+            _messages: &[ironclaw_engine::ThreadMessage],
+            _actions: &[ironclaw_engine::ActionDef],
+            _config: &ironclaw_engine::LlmCallConfig,
+        ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+            Ok(ironclaw_engine::LlmOutput {
+                response: ironclaw_engine::LlmResponse::Text(self.text.clone()),
+                usage: ironclaw_engine::TokenUsage::default(),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "completed-text-llm"
+        }
+    }
+
+    async fn with_installed_engine_state<T, F>(state: EngineState, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+        *lock.write().await = None;
+        match outcome {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Caller-level regression: the text-based auth fallback inside
+    /// `handle_with_engine_inner()` must convert a completed thread
+    /// response containing `authentication_required` into a pending auth
+    /// gate **only when** the parsed credential name survives both the
+    /// helper parse and the credential-registry trust check.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_emits_pending_gate_for_registered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: r#"{"error":"authentication_required","credential_name":"github_pat"}"#
+                .to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (mut agent, statuses) = make_test_agent_with_status_channel("web").await;
+
+            let credential_registry = Arc::new(crate::tools::wasm::SharedCredentialRegistry::new());
+            credential_registry.add_mappings([crate::secrets::CredentialMapping::bearer(
+                "github_pat",
+                "api.github.com",
+            )]);
+            let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+                Arc::new(crate::testing::credentials::test_secrets_store());
+            agent.deps.tools = Arc::new(
+                crate::tools::ToolRegistry::new().with_credentials(credential_registry, secrets),
+            );
+
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            assert!(matches!(result, BridgeOutcome::Pending));
+
+            let statuses = statuses.lock().expect("poisoned").clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        request_id: Some(_),
+                        ..
+                    } if extension_name.as_str() == "github_pat"
+                )),
+                "expected AuthRequired with request_id, got: {statuses:?}"
+            );
+
+            let pending = pending_gates.list_for_user("alice").await;
+            assert_eq!(pending.len(), 1, "expected one pending auth gate");
+            assert_eq!(pending[0].action_name, "authentication_fallback");
+            assert_eq!(pending[0].parameters["credential_name"], "github_pat");
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("registered auth fallback should create pending gate");
+    }
+
+    /// Negative caller-level branch: if the parsed credential name is not
+    /// registered, `handle_with_engine_inner()` must NOT surface an auth
+    /// card. It must hand the original response text back to the caller.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_passthrough_for_unregistered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "no AuthRequired should be emitted when credential is unregistered"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "no pending gate should be inserted for unregistered credentials"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("unregistered auth fallback should pass through raw text");
+    }
+
+    /// Security-focused negative branch: invalid credential names must be
+    /// rejected by the helper parse and therefore never become a real auth
+    /// gate, even when the surrounding response otherwise matches the
+    /// `authentication_required` shape.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_rejects_invalid_credential_name() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github-pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "invalid credential names must not emit AuthRequired"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "invalid credential names must not create pending gates"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("invalid credential names should be rejected by caller path");
     }
 
     #[test]
