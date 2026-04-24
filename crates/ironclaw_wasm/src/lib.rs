@@ -14,10 +14,10 @@ use std::{
 use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceReservationId, ResourceUsage,
-    RuntimeKind, VirtualPath,
+    CapabilityDescriptor, CapabilityId, ExtensionId, ResourceEstimate, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeKind, VirtualPath,
 };
-use ironclaw_resources::ResourceReservation;
+use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
@@ -163,6 +163,23 @@ pub struct CapabilityResult {
     pub output_bytes: u64,
 }
 
+/// Full resource-governed execution request.
+#[derive(Debug)]
+pub struct WasmExecutionRequest<'a> {
+    pub package: &'a ExtensionPackage,
+    pub capability_id: &'a CapabilityId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+    pub invocation: CapabilityInvocation,
+}
+
+/// Full resource-governed execution result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmExecutionResult {
+    pub result: CapabilityResult,
+    pub receipt: ResourceReceipt,
+}
+
 /// WASM invocation result with usage data for resource reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmInvocationResult<T> {
@@ -184,6 +201,8 @@ pub enum WasmError {
     Extension(Box<ExtensionError>),
     #[error("filesystem error: {0}")]
     Filesystem(Box<FilesystemError>),
+    #[error("resource governor error: {0}")]
+    Resource(Box<ResourceError>),
     #[error("invalid WASM module: {reason}")]
     InvalidModule { reason: String },
     #[error("unsupported WASM import {module}.{name}; no privileged host imports are registered")]
@@ -391,6 +410,45 @@ impl WasmRuntime {
             module,
             module_path,
         })
+    }
+
+    /// Execute a WASM extension capability with resource reserve/reconcile semantics.
+    pub async fn execute_extension_json<F, G>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+    ) -> Result<WasmExecutionResult, WasmError>
+    where
+        F: RootFilesystem,
+        G: ResourceGovernor,
+    {
+        let reservation = governor
+            .reserve(request.scope, request.estimate)
+            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+
+        let prepared = match self
+            .prepare_extension_capability(fs, request.package, request.capability_id)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let result = match self.invoke_json(
+            prepared.module.as_ref(),
+            &prepared.descriptor,
+            Some(&reservation),
+            request.invocation,
+        ) {
+            Ok(result) => result,
+            Err(error) => return Err(release_after_failure(governor, reservation.id, error)),
+        };
+
+        let receipt = governor
+            .reconcile(reservation.id, result.usage.clone())
+            .map_err(|error| WasmError::Resource(Box::new(error)))?;
+        Ok(WasmExecutionResult { result, receipt })
     }
 
     /// Invoke a capability through the initial JSON pointer/length ABI.
@@ -720,6 +778,20 @@ impl ResourceLimiter for WasmRuntimeLimiter {
 
     fn memories(&self) -> usize {
         10
+    }
+}
+
+fn release_after_failure<G>(
+    governor: &G,
+    reservation_id: ResourceReservationId,
+    original: WasmError,
+) -> WasmError
+where
+    G: ResourceGovernor,
+{
+    match governor.release(reservation_id) {
+        Ok(_) => original,
+        Err(error) => WasmError::Resource(Box::new(error)),
     }
 }
 
