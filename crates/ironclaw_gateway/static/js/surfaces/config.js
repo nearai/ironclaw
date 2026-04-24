@@ -248,11 +248,14 @@ function setActiveProvider(id) {
     if (provider) openProviderConfigDialog(provider);
     return;
   }
-  const modelUpdate = () => defaultModel
-    ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
-    : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
-  apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
-    .then(() => modelUpdate())
+  // Write backend + model atomically. Two sequential PUTs would hot-reload
+  // the chain between them with the new backend but the previous model
+  // (selected_model wins over provider defaults), leaving a mixed state
+  // if the second request fails. Import writes the set and reloads once.
+  apiFetchVoid('/api/settings/import', {
+    method: 'POST',
+    body: { settings: { llm_backend: id, selected_model: defaultModel } },
+  })
     .then(() => {
       _activeLlmBackend = id;
       _selectedModel = defaultModel || '';
