@@ -56,17 +56,16 @@ fn normalize_schema(
         normalize_schema_recursive(&mut schema, strict_objects);
     }
 
-    if strict_objects {
-        if let Err(violations) =
+    if strict_objects
+        && let Err(violations) =
             crate::tools::schema_validator::validate_strict_schema(&schema, "<post-normalize>")
-        {
-            tracing::debug!(
-                violations = ?violations,
-                "normalize_schema_strict output has {} strict-mode violation(s) — \
-                 the tool is still usable but the LLM provider may reject the schema",
-                violations.len()
-            );
-        }
+    {
+        tracing::debug!(
+            violations = ?violations,
+            "normalize_schema_strict output has {} strict-mode violation(s) — \
+             the tool is still usable but the LLM provider may reject the schema",
+            violations.len()
+        );
     }
 
     schema
@@ -321,11 +320,9 @@ fn normalize_schema_recursive(schema: &mut JsonValue, strict_objects: bool) {
         for key in &all_keys {
             if let Some(prop_schema) = props.get_mut(key) {
                 normalize_schema_recursive(prop_schema, true);
-            }
-            if !current_required.contains(key)
-                && let Some(prop_schema) = props.get_mut(key)
-            {
-                make_nullable(prop_schema);
+                if !current_required.contains(key) {
+                    make_nullable(prop_schema);
+                }
             }
         }
     }
