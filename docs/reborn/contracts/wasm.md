@@ -94,11 +94,26 @@ V1 rules:
 - traps discard the instance
 - invalid modules fail closed
 
-The existing IronClaw codebase already uses Wasmtime with fuel, epoch interruption, and fresh instantiation patterns. Reborn should reuse those lessons but keep this crate narrower and contract-driven.
+The existing IronClaw codebase already uses Wasmtime with fuel, epoch interruption, memory limiting, compilation caching, and fresh instantiation patterns. Reborn should reuse those lessons but keep this crate narrower and contract-driven.
 
 ---
 
-## 6. Host imports
+## 6. Engine runtime mechanics
+
+`ironclaw_wasm` owns the Wasmtime engine mechanics that make the WASM lane safe enough to host untrusted portable code:
+
+- **Fuel:** every store receives configured fuel before guest execution.
+- **Epoch timeout:** the engine runs an epoch ticker; each invocation sets an epoch deadline derived from the configured timeout.
+- **Memory limiter:** stores attach a `ResourceLimiter`; memory growth beyond `max_memory_bytes` fails closed as `WasmError::MemoryExceeded`.
+- **Compile cache:** `prepare_cached` caches compiled modules by provider, capability, export name, ABI version, and module content hash.
+- **Persistent compilation cache:** an optional `cache_dir` may enable Wasmtime's on-disk compilation cache without changing capability authority.
+- **Fresh instance guarantee:** cached modules only reuse compiled code. Every invocation still creates a fresh store and instance, so mutable guest globals and memories do not carry across invocations.
+
+The cache key must include the module content hash so modified bytes never reuse stale compiled code. Extension/manifest reload will later decide when to clear cache entries at package boundaries.
+
+---
+
+## 7. Host imports
 
 Initial V1 may expose no privileged imports beyond the minimal test/demo ABI.
 
@@ -123,7 +138,7 @@ Rules:
 
 ---
 
-## 7. Initial JSON ABI
+## 8. Initial JSON ABI
 
 The first structured invocation ABI is intentionally small and pointer/length based. It is not WASI and does not grant filesystem, network, secret, or process authority.
 
@@ -161,10 +176,19 @@ This ABI is a V1 compatibility layer. It can coexist with, or be replaced by, Co
 
 ---
 
-## 8. Minimum V1 API sketch
+## 9. Minimum V1 API sketch
 
 ```rust
 pub struct WasmRuntime;
+
+pub struct WasmRuntimeConfig {
+    pub fuel: u64,
+    pub max_output_bytes: u64,
+    pub max_memory_bytes: u64,
+    pub timeout: std::time::Duration,
+    pub cache_compiled_modules: bool,
+    pub cache_dir: Option<std::path::PathBuf>,
+}
 
 pub struct WasmModuleSpec {
     pub provider: ExtensionId,
@@ -187,6 +211,7 @@ pub struct CapabilityResult {
 
 impl WasmRuntime {
     pub fn prepare(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError>;
+    pub fn prepare_cached(&self, spec: WasmModuleSpec) -> Result<Arc<PreparedWasmModule>, WasmError>;
     pub fn invoke_json(
         &self,
         module: &PreparedWasmModule,
@@ -201,11 +226,12 @@ impl WasmRuntime {
 
 ---
 
-## 9. Error contract
+## 10. Error contract
 
 Minimum errors:
 
 ```rust
+WasmError::Cache
 WasmError::InvalidModule
 WasmError::UnsupportedImport
 WasmError::DescriptorMismatch
@@ -217,6 +243,8 @@ WasmError::GuestAllocation
 WasmError::GuestError
 WasmError::InvalidGuestOutput
 WasmError::FuelExhausted
+WasmError::MemoryExceeded
+WasmError::Timeout
 WasmError::OutputLimitExceeded
 WasmError::Trap
 ```
@@ -225,7 +253,7 @@ Errors must not include raw host paths or secret material.
 
 ---
 
-## 10. Minimum TDD coverage
+## 11. Minimum TDD coverage
 
 Local contract tests should prove:
 
@@ -242,12 +270,16 @@ Local contract tests should prove:
 - ABI memory/allocator/output accessor exports are required
 - output byte limit is enforced
 - fuel limit stops a runaway module
+- memory growth beyond the configured limit fails closed
+- epoch timeout interrupts runaway modules even when fuel is large
+- cached prepared modules reuse identical bytes and split changed content
+- cached modules still instantiate fresh per invocation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
 
 ---
 
-## 11. Non-goals
+## 12. Non-goals
 
 Do not add in this first crate:
 
