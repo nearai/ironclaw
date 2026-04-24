@@ -79,6 +79,26 @@ ironclaw_resources.reconcile(reservation_id, actual_usage)
 
 The resource governor remains the source of truth for reservation/reconciliation.
 
+`ironclaw_wasm` now provides a convenience executor for the V1 WASM lane that owns this narrow lifecycle around a validated extension package:
+
+```text
+execute_extension_json
+  -> reserve(scope, estimate)
+  -> prepare_extension_capability(fs, package, capability)
+  -> invoke_json(..., reservation, invocation)
+  -> reconcile(reservation_id, actual_usage)
+```
+
+Failure cleanup rules:
+
+- if `reserve` fails, no module is prepared or invoked
+- if preparation fails after reservation, release the reservation
+- if invocation fails after reservation, release the reservation
+- if invocation succeeds, reconcile actual usage and return the resource receipt
+- cleanup failures are surfaced as resource-governor errors
+
+The executor is not the global dispatcher. It only coordinates the WASM lane's reservation lifecycle until `ironclaw_kernel`/dispatch owns cross-runtime routing.
+
 ---
 
 ## 5. Execution model
@@ -243,6 +263,19 @@ pub struct CapabilityResult {
     pub output_bytes: u64,
 }
 
+pub struct WasmExecutionRequest<'a> {
+    pub package: &'a ExtensionPackage,
+    pub capability_id: &'a CapabilityId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+    pub invocation: CapabilityInvocation,
+}
+
+pub struct WasmExecutionResult {
+    pub result: CapabilityResult,
+    pub receipt: ResourceReceipt,
+}
+
 impl WasmRuntime {
     pub fn prepare(&self, spec: WasmModuleSpec) -> Result<PreparedWasmModule, WasmError>;
     pub fn prepare_cached(&self, spec: WasmModuleSpec) -> Result<Arc<PreparedWasmModule>, WasmError>;
@@ -252,6 +285,12 @@ impl WasmRuntime {
         package: &ExtensionPackage,
         capability_id: &CapabilityId,
     ) -> Result<PreparedWasmCapability, WasmError>;
+    pub async fn execute_extension_json<F: RootFilesystem, G: ResourceGovernor>(
+        &self,
+        fs: &F,
+        governor: &G,
+        request: WasmExecutionRequest<'_>,
+    ) -> Result<WasmExecutionResult, WasmError>;
     pub fn invoke_json(
         &self,
         module: &PreparedWasmModule,
@@ -274,6 +313,7 @@ Minimum errors:
 WasmError::Cache
 WasmError::Extension
 WasmError::Filesystem
+WasmError::Resource
 WasmError::InvalidModule
 WasmError::UnsupportedImport
 WasmError::DescriptorMismatch
@@ -322,6 +362,9 @@ Local contract tests should prove:
 - non-WASM package runtimes are rejected by the WASM lane
 - undeclared capabilities are rejected before module preparation
 - manifest-derived export mismatches are rejected before invocation
+- executor reserves before preparation/invocation and reconciles successful usage
+- executor releases reservations on preparation or invocation failure
+- resource-denied executions fail before module preparation/invocation
 - invocation returns actual usage suitable for resource reconciliation
 - no privileged host imports are available unless explicitly registered
 
