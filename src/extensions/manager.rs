@@ -401,6 +401,8 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// Whether this manager is running in a multi-tenant deployment.
+    multi_tenant_mode: bool,
     /// When set, settings reads/writes go through this cache-backed store
     /// instead of the raw `Database`. Populated via `with_settings_store()`.
     settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
@@ -632,6 +634,7 @@ impl ExtensionManager {
         tunnel_url: Option<String>,
         user_id: String,
         store: Option<Arc<dyn crate::db::Database>>,
+        multi_tenant_mode: bool,
         catalog_entries: Vec<RegistryEntry>,
     ) -> Self {
         let registry = if catalog_entries.is_empty() {
@@ -660,6 +663,7 @@ impl ExtensionManager {
             tunnel_url,
             user_id,
             store,
+            multi_tenant_mode,
             settings_override: None,
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
@@ -1598,12 +1602,27 @@ impl ExtensionManager {
         &self,
         name: &str,
         url: Option<&str>,
+        wasm_path: Option<&str>,
+        manifest: Option<serde_json::Value>,
         kind_hint: Option<ExtensionKind>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
         let name = canonicalize_extension_name(name)?;
         let sanitized_url = url.map(sanitize_url_for_logging);
-        tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
+        tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, wasm_path = ?wasm_path, "Installing extension");
+
+        if let Some(wasm_path) = wasm_path {
+            if self.multi_tenant_mode {
+                return Err(ExtensionError::InstallFailed(
+                    "User-authored WASM tools are not supported in multi-tenant deployments yet"
+                        .to_string(),
+                ));
+            }
+            let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
+            return self
+                .install_wasm_from_local_artifact(&name, wasm_path, manifest, kind)
+                .await;
+        }
 
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
         if let Some(entry) = self.registry.get_with_kind(&name, kind_hint).await {
@@ -1646,6 +1665,12 @@ impl ExtensionManager {
         if kind_allows_local_discovery(kind_hint)
             && let Some(source_dir) = find_local_tool_source(&name)
         {
+            if self.multi_tenant_mode {
+                return Err(ExtensionError::InstallFailed(
+                    "User-authored WASM tools are not supported in multi-tenant deployments yet"
+                        .to_string(),
+                ));
+            }
             return self
                 .install_from_local_source(&name, &source_dir, kind_hint)
                 .await;
@@ -3672,6 +3697,70 @@ impl ExtensionManager {
             source_dir.display(),
         );
         Ok(result)
+    }
+
+    async fn install_wasm_from_local_artifact(
+        &self,
+        name: &str,
+        wasm_path: &str,
+        manifest: Option<serde_json::Value>,
+        kind: ExtensionKind,
+    ) -> Result<InstallResult, ExtensionError> {
+        if kind != ExtensionKind::WasmTool {
+            return Err(ExtensionError::InstallFailed(
+                "Local artifact installs currently support wasm_tool only".to_string(),
+            ));
+        }
+
+        let source = std::path::Path::new(wasm_path);
+        if !source.exists() {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM artifact '{}' does not exist",
+                source.display()
+            )));
+        }
+
+        let wasm_bytes = tokio::fs::read(source)
+            .await
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+        if wasm_bytes.len() < 4 || &wasm_bytes[..4] != b"\0asm" {
+            return Err(ExtensionError::InstallFailed(
+                "Local artifact is not a valid WASM binary (bad magic number)".to_string(),
+            ));
+        }
+
+        let manifest_value = manifest.unwrap_or_else(|| serde_json::json!({}));
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest_value)
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(&manifest_bytes)
+            .map_err(|e| ExtensionError::InstallFailed(format!("Invalid manifest JSON: {e}")))?;
+        cap_file.validate(name);
+
+        tokio::fs::create_dir_all(&self.wasm_tools_dir)
+            .await
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+        let wasm_dst = self.wasm_tools_dir.join(format!("{}.wasm", name));
+        let caps_dst = self.wasm_tools_dir.join(format!("{}.capabilities.json", name));
+
+        tokio::fs::write(&wasm_dst, &wasm_bytes)
+            .await
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+        tokio::fs::write(&caps_dst, &manifest_bytes)
+            .await
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+        self.invalidate_latent_wasm_provider_actions_cache().await;
+
+        Ok(InstallResult {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmTool,
+            message: format!(
+                "WASM tool '{}' installed from local artifact {}. Run activate to load it.",
+                name,
+                source.display(),
+            ),
+        })
     }
 
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
@@ -8186,7 +8275,14 @@ mod tests {
         channels_dir: std::path::PathBuf,
         store: Option<Arc<dyn crate::db::Database>>,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_catalog(wasm_runtime, tools_dir, channels_dir, store, Vec::new())
+        make_test_manager_with_catalog_and_mode(
+            wasm_runtime,
+            tools_dir,
+            channels_dir,
+            store,
+            false,
+            Vec::new(),
+        )
     }
 
     /// Build an ExtensionManager seeded with explicit registry catalog entries.
@@ -8203,6 +8299,24 @@ mod tests {
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
         store: Option<Arc<dyn crate::db::Database>>,
+        catalog_entries: Vec<RegistryEntry>,
+    ) -> crate::extensions::manager::ExtensionManager {
+        make_test_manager_with_catalog_and_mode(
+            wasm_runtime,
+            tools_dir,
+            channels_dir,
+            store,
+            false,
+            catalog_entries,
+        )
+    }
+
+    fn make_test_manager_with_catalog_and_mode(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+        channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
+        multi_tenant_mode: bool,
         catalog_entries: Vec<RegistryEntry>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
@@ -8231,6 +8345,7 @@ mod tests {
             None,               // tunnel_url
             "test".to_string(), // user_id
             store,
+            multi_tenant_mode,
             catalog_entries,
         )
     }
@@ -9811,6 +9926,7 @@ mod tests {
             None,
             "test".to_string(),
             None,
+            false,
             Vec::new(),
         )
     }
@@ -10049,6 +10165,7 @@ mod tests {
             None,
             "test".to_string(),
             Some(db.clone() as Arc<dyn crate::db::Database>),
+            false,
             Vec::new(),
         );
 
@@ -10176,6 +10293,7 @@ mod tests {
             None,
             "owner-1921".to_string(),
             Some(db.clone() as Arc<dyn crate::db::Database>),
+            false,
             Vec::new(),
         );
 
@@ -11304,6 +11422,7 @@ mod tests {
             tunnel_url,
             "test".to_string(),
             None,
+            false,
             vec![],
         )
     }
@@ -12937,6 +13056,83 @@ mod tests {
         assert!(
             !tools_dir.join("portfolio.wasm").exists(),
             "wasm channel should NOT land in tools dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_local_artifact_writes_manifest_sidecar() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let artifact_path = dir.path().join("builder-output.wasm");
+        std::fs::write(&artifact_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+        let manifest = serde_json::json!({
+            "description": "Read current weather from Example API",
+            "http": {
+                "allowlist": [
+                    { "host": "api.example.com", "path_prefix": "/v1/", "methods": ["GET"] }
+                ]
+            }
+        });
+
+        let result = manager
+            .install(
+                "weather_reader",
+                None,
+                Some(artifact_path.to_str().expect("utf8 path")),
+                Some(manifest.clone()),
+                Some(ExtensionKind::WasmTool),
+                "test",
+            )
+            .await
+            .expect("install local artifact");
+
+        assert_eq!(result.kind, ExtensionKind::WasmTool);
+        assert!(tools_dir.join("weather_reader.wasm").exists());
+        let saved_manifest = std::fs::read_to_string(
+            tools_dir.join("weather_reader.capabilities.json"),
+        )
+        .expect("read saved manifest");
+        let saved_value: serde_json::Value =
+            serde_json::from_str(&saved_manifest).expect("parse saved manifest");
+        assert_eq!(saved_value, manifest);
+    }
+
+    #[tokio::test]
+    async fn install_local_artifact_rejects_multi_tenant_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let artifact_path = dir.path().join("builder-output.wasm");
+        std::fs::write(&artifact_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let manager = make_test_manager_with_catalog_and_mode(
+            None,
+            tools_dir,
+            channels_dir,
+            None,
+            true,
+            Vec::new(),
+        );
+
+        let err = manager
+            .install(
+                "weather_reader",
+                None,
+                Some(artifact_path.to_str().expect("utf8 path")),
+                Some(serde_json::json!({"description": "demo"})),
+                Some(ExtensionKind::WasmTool),
+                "test",
+            )
+            .await
+            .expect_err("multi-tenant local artifact install should fail");
+
+        assert!(
+            err.to_string().contains("not supported in multi-tenant"),
+            "unexpected error: {err}"
         );
     }
 

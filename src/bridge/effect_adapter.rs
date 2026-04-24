@@ -4314,6 +4314,7 @@ mod tests {
             None,
             "test_user".to_string(),
             None,
+            false,
             vec![],
         ));
 
@@ -4413,6 +4414,7 @@ mod tests {
             None,
             "test_user".to_string(),
             None,
+            false,
             vec![],
         ));
 
@@ -4487,6 +4489,7 @@ mod tests {
             None,
             "test_user".to_string(),
             None,
+            false,
             vec![],
         ));
 

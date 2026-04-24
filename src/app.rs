@@ -984,6 +984,7 @@ impl AppBuilder {
                 self.config.tunnel.public_url.clone(),
                 self.config.owner_id.clone(),
                 self.db.clone(),
+                self.config.is_multi_tenant_deployment(),
                 catalog_entries.clone(),
             );
             if let Some(ref ss) = settings_store_override {

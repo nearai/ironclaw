@@ -308,6 +308,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Memory plugins | ✅ | ❌ | Custom backends + selectable memory slot |
 | Context-engine plugins | ✅ | ❌ | Custom context management + subagent/context hooks |
 | Tool plugins | ✅ | ✅ | WASM tools |
+| User-authored WASM tool installs | ✅ | 🚧 | Phase 1 supports local/single-user + hosted-single-tenant installs via `tool_install(name, kind, wasm_path, manifest)` with manifest-first approval. Multi-tenant isolation is still blocked on per-user ToolRegistry support. |
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
 | Provider plugins | ✅ | ❌ | |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |

@@ -148,6 +148,7 @@ mod tests {
             None,
             owner_id.to_string(),
             None,
+            false,
             Vec::new(),
         ))
     }

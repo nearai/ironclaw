@@ -179,9 +179,10 @@ impl Tool for ToolInstallTool {
 
     fn description(&self) -> &str {
         "Install an extension (channel, tool, or MCP server). \
-         Use the name from tool_search results, or provide an explicit URL. \
-         Also discovers tool source code in the working directory \
-         (tools-src/, tool-src/, or direct subdirectories with Cargo.toml)."
+         Use the name from tool_search results, provide an explicit URL, \
+         point at a locally-built WASM artifact, or let IronClaw discover tool \
+         source code in the working directory (tools-src/, tool-src/, or direct \
+         subdirectories with Cargo.toml)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -200,6 +201,14 @@ impl Tool for ToolInstallTool {
                     "type": "string",
                     "enum": ["mcp_server", "wasm_tool", "wasm_channel"],
                     "description": "Extension type (auto-detected if omitted)"
+                },
+                "wasm_path": {
+                    "type": "string",
+                    "description": "Path to a locally-built WASM artifact to install directly"
+                },
+                "manifest": {
+                    "type": "object",
+                    "description": "Capabilities/manifest JSON to store alongside a local wasm_path install"
                 }
             },
             "required": ["name"]
@@ -216,6 +225,8 @@ impl Tool for ToolInstallTool {
         let name = require_str(&params, "name")?;
 
         let url = params.get("url").and_then(|v| v.as_str());
+        let wasm_path = params.get("wasm_path").and_then(|v| v.as_str());
+        let manifest = params.get("manifest").cloned();
 
         let kind_hint = params
             .get("kind")
@@ -228,7 +239,7 @@ impl Tool for ToolInstallTool {
             });
 
         self.manager
-            .install(name, url, kind_hint, &ctx.user_id)
+            .install(name, url, wasm_path, manifest, kind_hint, &ctx.user_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
@@ -932,6 +943,8 @@ mod tests {
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
         assert!(schema["properties"].get("url").is_some());
+        assert!(schema["properties"].get("wasm_path").is_some());
+        assert!(schema["properties"].get("manifest").is_some());
     }
 
     #[test]
@@ -1131,6 +1144,7 @@ mod tests {
             None,
             "test".to_string(),
             None,
+            false,
             Vec::new(),
         ))
     }

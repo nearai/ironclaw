@@ -212,6 +212,7 @@ async fn extension_manager_with_process_manager_constructs() {
         None,
         "test".to_string(),
         None,
+        false,
         Vec::new(),
     );
 

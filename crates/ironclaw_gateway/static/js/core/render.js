@@ -44,6 +44,8 @@ function sanitizeRenderedHtml(html) {
  * Runs registered chat renderers first, then falls back to built-in JSON detection.
  */
 function upgradeStructuredData(contentEl) {
+  if (upgradeToolBuilderBlocks(contentEl)) return;
+
   // 1. Run registered chat renderers.
   //
   // Each registered renderer receives the live `.message-content` element
@@ -281,6 +283,56 @@ function _findBalancedEnd(html, start, maxLen) {
 /**
  * Build an HTML data card from a plain object.
  */
+function upgradeToolBuilderBlocks(contentEl) {
+  var blocks = contentEl.querySelectorAll('pre code.language-tool-builder, pre code.language-tool_builder');
+  if (!blocks.length) return false;
+
+  blocks.forEach(function(codeEl) {
+    var pre = codeEl.closest('pre');
+    if (!pre) return;
+    try {
+      var data = JSON.parse(codeEl.textContent || '{}');
+      pre.outerHTML = buildToolBuilderCard(data);
+    } catch (e) {
+      console.error('[IronClaw] Failed to parse tool-builder block:', e);
+    }
+  });
+
+  return true;
+}
+
+function buildToolBuilderCard(data) {
+  var stage = escapeHtml(String(data.stage || 'build'));
+  var status = escapeHtml(String(data.status || 'running'));
+  var title = escapeHtml(String(data.title || 'Tool builder'));
+  var name = data.name ? '<div class="tool-builder-name">' + escapeHtml(String(data.name)) + '</div>' : '';
+  var summary = data.summary ? '<div class="tool-builder-summary">' + escapeHtml(String(data.summary)) + '</div>' : '';
+  var artifact = data.artifact_path ? '<div class="tool-builder-meta"><span>Artifact</span><code>' + escapeHtml(String(data.artifact_path)) + '</code></div>' : '';
+  var nextStep = data.next_step ? '<div class="tool-builder-meta"><span>Next</span><span>' + escapeHtml(String(data.next_step)) + '</span></div>' : '';
+  var notes = data.notes ? '<div class="tool-builder-notes">' + escapeHtml(String(data.notes)) + '</div>' : '';
+  var manifestHtml = '';
+  if (data.manifest && typeof data.manifest === 'object') {
+    manifestHtml = '<details class="tool-builder-manifest" open>' +
+      '<summary>Manifest preview</summary>' +
+      '<pre><code>' + escapeHtml(JSON.stringify(data.manifest, null, 2)) + '</code></pre>' +
+      '</details>';
+  }
+
+  return '<div class="tool-builder-card" data-stage="' + stage + '" data-status="' + status + '">' +
+    '<div class="tool-builder-header">' +
+      '<span class="tool-builder-stage">' + stage + '</span>' +
+      '<span class="tool-builder-status">' + status + '</span>' +
+    '</div>' +
+    '<div class="tool-builder-title">' + title + '</div>' +
+    name +
+    summary +
+    artifact +
+    nextStep +
+    notes +
+    manifestHtml +
+    '</div>';
+}
+
 function buildDataCard(obj) {
   var keys = Object.keys(obj);
   if (keys.length === 0) return '';

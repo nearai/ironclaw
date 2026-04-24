@@ -361,6 +361,7 @@ pub(crate) fn test_ext_mgr(
         None,
         "test".to_string(),
         None,
+        false,
         vec![],
     ));
     (ext_mgr, wasm_tools_dir, wasm_channels_dir)
@@ -400,6 +401,7 @@ pub(crate) async fn test_ext_mgr_with_db() -> (
         None,
         "test".to_string(),
         Some(db),
+        false,
         vec![],
     ));
     (ext_mgr, wasm_tools_dir, wasm_channels_dir, db_dir)

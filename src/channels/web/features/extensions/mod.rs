@@ -297,7 +297,14 @@ pub(crate) async fn extensions_install_handler(
     });
 
     match ext_mgr
-        .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
+        .install(
+            name_str,
+            req.url.as_deref(),
+            None,
+            None,
+            kind_hint,
+            &user.user_id,
+        )
         .await
     {
         Ok(result) => {
@@ -1219,6 +1226,8 @@ mod tests {
             .install(
                 "notion",
                 Some(&server.url),
+                None,
+                None,
                 Some(crate::extensions::ExtensionKind::McpServer),
                 "test",
             )
