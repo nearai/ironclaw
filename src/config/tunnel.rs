@@ -5,7 +5,9 @@ use crate::settings::{Settings, TunnelSettings};
 /// Tunnel configuration for exposing the agent to the internet.
 ///
 /// Used by channels and tools that need public webhook endpoints.
-/// The tunnel URL is shared across all channels (Telegram, Slack, etc.).
+/// The tunnel URL is shared across webhook consumers (Telegram, Slack, etc.),
+/// but managed webhook tunnel URLs are not implicitly reused as the web
+/// gateway's OAuth/public base.
 ///
 /// Resolution priority: DB/settings > env var > default.
 ///

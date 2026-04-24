@@ -89,11 +89,11 @@ We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider 
 
 <Accordion title="⚠️ Error: Failed to start webhook server">
 
-If you encounter the error `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`, simply try setting a different HTTP port:
+If you encounter the error `Error: Channel webhook_server failed to start: Failed to bind to 127.0.0.1:8080: Address already in use (os error 98)`, simply try setting a different webhook listener port:
 
 ```
-# Change the default HTTP port to 8081
-export HTTP_PORT=8081
+# Change the default webhook listener port to 8081
+export WEBHOOK_PORT=8081
 
 # Then start the agent again
 ironclaw

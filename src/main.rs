@@ -122,6 +122,15 @@ fn prepare_sighup_reload(
     webhook_listener_addr(channels).map(|addr| (addr, rotated_secret))
 }
 
+fn gateway_public_base_url(
+    gateway: &ironclaw::config::GatewayConfig,
+    explicit_tunnel_public_url: Option<&str>,
+) -> String {
+    explicit_tunnel_public_url
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| oauth_base_url(&gateway.host, gateway.port))
+}
+
 fn normalize_persisted_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
 where
     I: IntoIterator<Item = S>,
@@ -459,6 +468,7 @@ async fn async_main() -> anyhow::Result<()> {
     .await?;
 
     let config = components.config;
+    let explicit_tunnel_public_url = config.tunnel.public_url.clone();
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
@@ -892,12 +902,11 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
-            // instead of calling open::that() on the server.
-            let gw_base = config
-                .tunnel
-                .public_url
-                .clone()
-                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
+            // instead of calling open::that() on the server. Use only an
+            // operator-configured static tunnel URL here: managed tunnels in
+            // this process target the unified webhook listener, not the gateway.
+            let gw_base =
+                gateway_public_base_url(&gw_config, explicit_tunnel_public_url.as_deref());
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1683,6 +1692,23 @@ mod tests {
         assert!(
             prepare_sighup_reload(&channels).is_err(),
             "malformed listener config must block secret rotation by failing reload preparation"
+        );
+    }
+
+    #[test]
+    fn gateway_oauth_base_defaults_to_gateway_bind_when_tunnel_public_url_came_from_managed_webhook_tunnel()
+     {
+        let gateway = test_channels_config("127.0.0.1", 9091)
+            .gateway
+            .expect("gateway config");
+
+        assert_eq!(
+            gateway_public_base_url(&gateway, None),
+            "http://10.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_public_base_url(&gateway, Some("https://gateway.example.com")),
+            "https://gateway.example.com"
         );
     }
 

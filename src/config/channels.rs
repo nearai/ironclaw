@@ -67,11 +67,18 @@ fn required_legacy_http_bind<'a>(
     legacy_http_bind: Option<&'a WebhookListenerConfig>,
     context: &str,
 ) -> Result<&'a WebhookListenerConfig, ConfigError> {
-    legacy_http_bind.ok_or_else(|| {
-        ConfigError::ParseError(format!(
-            "internal config invariant violated: missing legacy HTTP bind for {context}"
-        ))
-    })
+    legacy_http_bind
+        .ok_or_else(|| ConfigError::ParseError(format!("missing legacy HTTP bind for {context}")))
+}
+
+fn validate_listener_port(key: &str, port: u16) -> Result<u16, ConfigError> {
+    if port == 0 {
+        return Err(ConfigError::InvalidValue {
+            key: key.to_string(),
+            message: "must be between 1 and 65535".to_string(),
+        });
+    }
+    Ok(port)
 }
 
 /// Maximum allowed broadcast buffer size to prevent OOM from misconfiguration.
@@ -177,19 +184,20 @@ impl ChannelsConfig {
             legacy_http_host_from_env.is_some() || legacy_http_port_from_env.is_some();
         let legacy_http_bind_configured =
             legacy_http_enable_by_env || cs.http_host.is_some() || cs.http_port.is_some();
-        let explicit_http_enabled = if cs.http_enabled != defaults.http_enabled {
-            Some(db_first_bool(
-                cs.http_enabled,
-                defaults.http_enabled,
-                "HTTP_ENABLED",
-            )?)
+        let explicit_http_enabled = if let Some(enabled) = cs.http_enabled {
+            if optional_env("HTTP_ENABLED")?.is_some() {
+                tracing::warn!("HTTP_ENABLED from settings is overriding the environment value.");
+            }
+            Some(enabled)
         } else if optional_env("HTTP_ENABLED")?.is_some() {
-            Some(parse_bool_env("HTTP_ENABLED", defaults.http_enabled)?)
+            Some(parse_bool_env("HTTP_ENABLED", false)?)
         } else {
             None
         };
         let webhook_host = optional_env("WEBHOOK_HOST")?;
-        let webhook_port = parse_option_env("WEBHOOK_PORT")?;
+        let webhook_port = parse_option_env("WEBHOOK_PORT")?
+            .map(|port| validate_listener_port("WEBHOOK_PORT", port))
+            .transpose()?;
         let http_enabled = explicit_http_enabled == Some(true)
             || (explicit_http_enabled.is_none() && legacy_http_enable_by_env);
         let webhook_host_uses_legacy_env_fallback =
@@ -211,8 +219,9 @@ impl ChannelsConfig {
             if explicit_http_enabled.is_none() && legacy_http_enable_by_env {
                 tracing::warn!(
                     "HTTP_HOST/HTTP_PORT enabled the named HTTP webhook channel without \
-                     HTTP_ENABLED=true. This compatibility path is deprecated; set \
-                     HTTP_ENABLED=true explicitly."
+                     HTTP_ENABLED=true. This compatibility path is deprecated; move the listener \
+                     bind to WEBHOOK_HOST/WEBHOOK_PORT and set HTTP_ENABLED=true explicitly to \
+                     keep the named HTTP webhook channel enabled."
                 );
             }
             Some(HttpConfig {
@@ -231,40 +240,30 @@ impl ChannelsConfig {
             tracing::warn!(
                 "WEBHOOK_HOST and/or WEBHOOK_PORT are unset; using legacy HTTP bind settings as a \
                  compatibility fallback for the unified webhook listener. Migrate to \
-                 WEBHOOK_HOST/WEBHOOK_PORT because HTTP_* now configures the named HTTP \
-                 webhook channel."
+                 WEBHOOK_HOST/WEBHOOK_PORT, then either set HTTP_ENABLED=true to keep the named \
+                 HTTP webhook channel or HTTP_ENABLED=false to disable it explicitly."
             );
         }
-        let webhook_listener_host = match (
-            webhook_host,
-            http.as_ref(),
-            webhook_host_uses_legacy_env_fallback,
-        ) {
-            (Some(host), _, _) => host,
-            (None, Some(http), _) => http.host.clone(),
-            (None, None, true) => required_legacy_http_bind(
+        let webhook_listener_host = match (webhook_host, webhook_host_uses_legacy_env_fallback) {
+            (Some(host), _) => host,
+            (None, true) => required_legacy_http_bind(
                 legacy_http_bind.as_ref(),
                 "webhook listener host fallback",
             )?
             .host
             .clone(),
-            (None, None, false) => DEFAULT_WEBHOOK_LISTENER_HOST.to_string(),
+            (None, false) => DEFAULT_WEBHOOK_LISTENER_HOST.to_string(),
         };
-        let webhook_listener_port = match (
-            webhook_port,
-            http.as_ref(),
-            webhook_port_uses_legacy_env_fallback,
-        ) {
-            (Some(port), _, _) => port,
-            (None, Some(http), _) => http.port,
-            (None, None, true) => {
+        let webhook_listener_port = match (webhook_port, webhook_port_uses_legacy_env_fallback) {
+            (Some(port), _) => port,
+            (None, true) => {
                 required_legacy_http_bind(
                     legacy_http_bind.as_ref(),
                     "webhook listener port fallback",
                 )?
                 .port
             }
-            (None, None, false) => DEFAULT_WEBHOOK_LISTENER_PORT,
+            (None, false) => DEFAULT_WEBHOOK_LISTENER_PORT,
         };
         let webhook_listener = WebhookListenerConfig {
             host: webhook_listener_host,
@@ -561,9 +560,15 @@ fn resolve_legacy_http_bind(cs: &ChannelSettings) -> Result<WebhookListenerConfi
             .unwrap_or_else(|| DEFAULT_WEBHOOK_LISTENER_HOST.to_string()),
         port: {
             if let Some(ref db_port) = cs.http_port {
-                db_first_or_default(db_port, &DEFAULT_WEBHOOK_LISTENER_PORT, "HTTP_PORT")?
+                validate_listener_port(
+                    "HTTP_PORT",
+                    db_first_or_default(db_port, &DEFAULT_WEBHOOK_LISTENER_PORT, "HTTP_PORT")?,
+                )?
             } else {
-                parse_optional_env("HTTP_PORT", DEFAULT_WEBHOOK_LISTENER_PORT)?
+                validate_listener_port(
+                    "HTTP_PORT",
+                    parse_optional_env("HTTP_PORT", DEFAULT_WEBHOOK_LISTENER_PORT)?,
+                )?
             }
         },
     })
@@ -1075,12 +1080,55 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rejects_zero_listener_ports_for_webhook_and_legacy_fallback_sources() {
+        let _guard = lock_env();
+
+        let webhook_port_err = {
+            let settings = Settings::default();
+            set_webhook_channel_env(&[("WEBHOOK_PORT", "0")]);
+            ChannelsConfig::resolve(&settings, "owner-scope")
+                .expect_err("WEBHOOK_PORT=0 should be rejected")
+        };
+        match webhook_port_err {
+            ConfigError::InvalidValue { key, .. } => assert_eq!(key, "WEBHOOK_PORT"),
+            other => panic!("expected invalid WEBHOOK_PORT error, got {other}"),
+        }
+
+        let legacy_env_port_err = {
+            let settings = Settings::default();
+            set_webhook_channel_env(&[("HTTP_HOST", "0.0.0.0"), ("HTTP_PORT", "0")]);
+            ChannelsConfig::resolve(&settings, "owner-scope")
+                .expect_err("HTTP_PORT=0 should be rejected for legacy fallback")
+        };
+        match legacy_env_port_err {
+            ConfigError::InvalidValue { key, .. } => assert_eq!(key, "HTTP_PORT"),
+            other => panic!("expected invalid HTTP_PORT error, got {other}"),
+        }
+
+        let persisted_legacy_port_err = {
+            clear_webhook_channel_env();
+            let mut settings = Settings::default();
+            settings.channels.http_enabled = Some(false);
+            settings.channels.http_host = Some("127.0.0.9".to_string());
+            settings.channels.http_port = Some(0);
+            ChannelsConfig::resolve(&settings, "owner-scope")
+                .expect_err("persisted HTTP_PORT=0 should be rejected for legacy fallback")
+        };
+        match persisted_legacy_port_err {
+            ConfigError::InvalidValue { key, .. } => assert_eq!(key, "HTTP_PORT"),
+            other => panic!("expected invalid persisted HTTP_PORT error, got {other}"),
+        }
+
+        clear_webhook_channel_env();
+    }
+
+    #[test]
     fn resolve_persisted_legacy_http_bind_keeps_http_disabled_but_sets_webhook_listener() {
         let _guard = lock_env();
         clear_webhook_channel_env();
 
         let mut settings = Settings::default();
-        settings.channels.http_enabled = false;
+        settings.channels.http_enabled = Some(false);
         settings.channels.http_host = Some("127.0.0.9".to_string());
         settings.channels.http_port = Some(9091);
 
@@ -1095,10 +1143,34 @@ mod tests {
     }
 
     #[test]
+    fn resolve_persisted_http_enabled_false_after_db_round_trip_does_not_allow_legacy_env_reenablement()
+     {
+        let _guard = lock_env();
+
+        let mut persisted = Settings::default();
+        persisted.channels.http_enabled = Some(false);
+        let persisted = Settings::from_db_map(&persisted.to_db_map());
+
+        set_webhook_channel_env(&[("HTTP_HOST", "0.0.0.0"), ("HTTP_PORT", "8089")]);
+
+        let cfg = ChannelsConfig::resolve(&persisted, "owner-scope").expect("resolve");
+
+        assert_eq!(persisted.channels.http_enabled, Some(false));
+        assert!(
+            cfg.http.is_none(),
+            "persisted HTTP disablement must survive DB round-trip and block legacy env re-enable"
+        );
+        assert_eq!(cfg.webhook_listener.host, "0.0.0.0");
+        assert_eq!(cfg.webhook_listener.port, 8089);
+
+        clear_webhook_channel_env();
+    }
+
+    #[test]
     fn resolve_uses_settings_channel_values_with_owner_scope_user_ids() {
         let _guard = lock_env();
         let mut settings = Settings::default();
-        settings.channels.http_enabled = true;
+        settings.channels.http_enabled = Some(true);
         settings.channels.http_host = Some("127.0.0.2".to_string());
         settings.channels.http_port = Some(8181);
         settings.channels.gateway_enabled = true;

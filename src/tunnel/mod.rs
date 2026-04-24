@@ -204,7 +204,12 @@ fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16
 pub(crate) fn format_tunnel_origin(local_host: &str, local_port: u16) -> String {
     let normalized_host = local_host.trim_matches(|c| c == '[' || c == ']');
     if normalized_host.contains(':') {
-        format!("http://[{normalized_host}]:{local_port}")
+        let encoded_host = if normalized_host.contains('%') && !normalized_host.contains("%25") {
+            normalized_host.replacen('%', "%25", 1)
+        } else {
+            normalized_host.to_string()
+        };
+        format!("http://[{encoded_host}]:{local_port}")
     } else {
         format!("http://{normalized_host}:{local_port}")
     }
@@ -517,6 +522,18 @@ mod tests {
         assert_eq!(
             format_tunnel_origin("localhost", 8083),
             "http://localhost:8083"
+        );
+    }
+
+    #[test]
+    fn format_tunnel_origin_encodes_ipv6_zone_ids() {
+        assert_eq!(
+            format_tunnel_origin("fe80::1%en0", 8084),
+            "http://[fe80::1%25en0]:8084"
+        );
+        assert_eq!(
+            format_tunnel_origin("[fe80::1%eth0]", 8085),
+            "http://[fe80::1%25eth0]:8085"
         );
     }
 }

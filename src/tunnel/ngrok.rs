@@ -28,6 +28,10 @@ impl NgrokTunnel {
     }
 }
 
+fn build_local_target(local_host: &str, local_port: u16) -> String {
+    super::format_tunnel_origin(local_host, local_port)
+}
+
 #[async_trait::async_trait]
 impl Tunnel for NgrokTunnel {
     fn name(&self) -> &str {
@@ -35,7 +39,10 @@ impl Tunnel for NgrokTunnel {
     }
 
     async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
-        let mut args = vec!["http".to_string(), format!("{local_host}:{local_port}")];
+        let mut args = vec![
+            "http".to_string(),
+            build_local_target(local_host, local_port),
+        ];
         if let Some(ref domain) = self.domain {
             args.push("--domain".into());
             args.push(domain.clone());
@@ -164,6 +171,15 @@ impl Tunnel for NgrokTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ngrok_start_uses_ipv6_safe_origin_formatting() {
+        assert_eq!(build_local_target("::1", 8080), "http://[::1]:8080",);
+        assert_eq!(
+            build_local_target("[fe80::1%eth0]", 8081),
+            "http://[fe80::1%25eth0]:8081",
+        );
+    }
 
     #[test]
     fn constructor_stores_domain() {

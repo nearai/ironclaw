@@ -31,6 +31,8 @@ export HTTP_WEBHOOK_SECRET=your-secret
 
 If `WEBHOOK_HOST` / `WEBHOOK_PORT` are unset, IronClaw can still fall back to legacy `HTTP_HOST` / `HTTP_PORT` listener settings for compatibility. New deployments should set `WEBHOOK_*` explicitly.
 
+`SIGHUP` only reloads the unified listener bind and the HTTP webhook secret. Enabling or disabling the named HTTP webhook channel still requires a restart because route topology is not rebuilt on reload.
+
 ---
 
 ## Security

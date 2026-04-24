@@ -196,6 +196,8 @@ Shutdown is triggered via a `oneshot::Sender` stored on the `WebhookServer` stru
 
 Reload of the unified webhook listener is atomic for this surface: IronClaw validates the replacement listener config first, then only applies HTTP webhook secret updates if listener validation and any required rebind succeed. If the new listener config is invalid or rebinding fails, IronClaw keeps the existing listener and skips secret rotation for the HTTP webhook channel.
 
+Route-topology changes are not part of `SIGHUP` reload. Changing `HTTP_ENABLED` or other route-registration state still requires a process restart because the merged webhook router is not rebuilt on reload.
+
 **Reference:** `src/main.rs` — `prepare_sighup_reload()` and the SIGHUP handler restart/secret-update sequence
 
 ---

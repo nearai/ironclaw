@@ -396,7 +396,8 @@ pub struct ExtensionManager {
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
     pending_auth: RwLock<HashMap<PendingAuthKey, PendingAuth>>,
-    /// Tunnel URL for webhook configuration and remote OAuth callbacks.
+    /// Explicit public URL for webhook configuration and, when intentionally
+    /// configured that way, remote OAuth callbacks.
     tunnel_url: Option<String>,
     user_id: String,
     /// Optional database store for DB-backed MCP config.

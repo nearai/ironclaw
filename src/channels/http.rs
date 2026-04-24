@@ -116,7 +116,12 @@ impl HttpChannel {
             .with_state(self.state.clone())
     }
 
-    /// Return the configured host and port for this channel.
+    /// Return the channel's configured compatibility bind values.
+    ///
+    /// The named HTTP channel is actually served by the unified webhook
+    /// listener. These values reflect the legacy `HTTP_HOST` / `HTTP_PORT`
+    /// configuration path, which can differ from the listener address when
+    /// `WEBHOOK_HOST` / `WEBHOOK_PORT` are set explicitly.
     pub fn addr(&self) -> (&str, u16) {
         (&self.config.host, self.config.port)
     }
