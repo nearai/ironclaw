@@ -281,10 +281,12 @@ body {
     display: none;
   }
 
-  /* Lock body scroll while drawer is open */
+  /* Lock body scroll while drawer is open. overflow: hidden is
+     sufficient; do NOT set touch-action: none here — it would
+     propagate to descendants and block vertical pan-scroll inside
+     the drawer, making a long thread list unreachable on mobile. */
   body.mobile-menu-open {
     overflow: hidden;
-    touch-action: none;
   }
 
   /* Shift app content below the fixed header */

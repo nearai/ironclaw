@@ -7,6 +7,15 @@
   padding: var(--space-4);
 }
 
+/* 7 columns overflow a ≤768px viewport — scroll the container
+   horizontally so the table stays browsable. See routines.css for the
+   full rationale (same pattern applied uniformly to all data tables). */
+@media (max-width: 768px) {
+  .missions-container {
+    overflow-x: auto;
+  }
+}
+
 .missions-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

@@ -325,3 +325,14 @@
   .cr-cards { padding: 16px; }
   .cr-drill, .cr-detail { padding: 16px; }
 }
+
+/* The project-detail and mission-detail views render wide data tables
+   (spawned-threads missions-table has 7 columns). Allow horizontal
+   scroll on the scroll-owning containers; same pattern used for
+   .jobs-container / .missions-container / .routines-container. */
+@media (max-width: 768px) {
+  .cr-drill,
+  .cr-detail {
+    overflow-x: auto;
+  }
+}
