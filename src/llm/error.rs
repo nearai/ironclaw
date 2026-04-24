@@ -34,6 +34,8 @@ pub enum LlmError {
     #[error("Empty response from {provider}: no content returned")]
     EmptyResponse { provider: String },
 
+    // Providers surface this either natively or via provider-specific
+    // substring classification in `rig_adapter.rs` / `nearai_chat.rs`.
     #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
     ContextLengthExceeded { used: usize, limit: usize },
 
