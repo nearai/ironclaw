@@ -1590,6 +1590,7 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     await chat_input.press("Enter")
 
     thread_id = await _current_thread_id(page)
+    await _wait_for_tool_call(server["base_url"], thread_id, "gmail", timeout=60.0)
     tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
     assert tokens, "expected Gmail to hit the mock Google API after settings-first auth"
     history = await _wait_for_response_contains(
