@@ -4009,6 +4009,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_extensions"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "ironclaw_filesystem"
 version = "0.1.0"
 dependencies = [
