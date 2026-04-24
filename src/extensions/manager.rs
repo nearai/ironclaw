@@ -45,6 +45,8 @@ use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
+const MAX_LOCAL_WASM_ARTIFACT_SIZE: u64 = 50 * 1024 * 1024;
+
 /// Pending OAuth authorization state.
 struct PendingAuth {
     _name: String,
@@ -3720,6 +3722,18 @@ impl ExtensionManager {
             )));
         }
 
+        let source_meta = tokio::fs::metadata(source)
+            .await
+            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+        if source_meta.len() > MAX_LOCAL_WASM_ARTIFACT_SIZE {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM artifact '{}' is too large ({} bytes, max {} bytes)",
+                source.display(),
+                source_meta.len(),
+                MAX_LOCAL_WASM_ARTIFACT_SIZE,
+            )));
+        }
+
         let wasm_bytes = tokio::fs::read(source)
             .await
             .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
@@ -3741,7 +3755,9 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
         let wasm_dst = self.wasm_tools_dir.join(format!("{}.wasm", name));
-        let caps_dst = self.wasm_tools_dir.join(format!("{}.capabilities.json", name));
+        let caps_dst = self
+            .wasm_tools_dir
+            .join(format!("{}.capabilities.json", name));
 
         tokio::fs::write(&wasm_dst, &wasm_bytes)
             .await
@@ -8359,6 +8375,65 @@ mod tests {
 
     #[tokio::test]
     async fn inject_mcp_client_partitions_cache_by_user() {
+        use crate::tools::ToolError;
+        use crate::tools::mcp::{McpRequest, McpResponse, McpTransport};
+        use std::collections::HashMap;
+
+        struct MockTransport {
+            responses: std::sync::Mutex<Vec<McpResponse>>,
+        }
+
+        impl MockTransport {
+            fn with_empty_tool_list() -> Self {
+                Self {
+                    responses: std::sync::Mutex::new(vec![
+                        McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: Some(1),
+                            result: Some(serde_json::json!({
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "serverInfo": {"name": "test", "version": "1.0"}
+                            })),
+                            error: None,
+                        },
+                        McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: None,
+                            result: None,
+                            error: None,
+                        },
+                        McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: Some(2),
+                            result: Some(serde_json::json!({"tools": []})),
+                            error: None,
+                        },
+                    ]),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl McpTransport for MockTransport {
+            async fn send(
+                &self,
+                _request: &McpRequest,
+                _headers: &HashMap<String, String>,
+            ) -> Result<McpResponse, ToolError> {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .drain(..1)
+                    .next()
+                    .ok_or_else(|| ToolError::ExternalService("No more mock responses".to_string()))
+            }
+
+            async fn shutdown(&self) -> Result<(), ToolError> {
+                Ok(())
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = make_test_manager_with_dirs(
             None,
@@ -8367,13 +8442,21 @@ mod tests {
             None,
         );
 
-        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_transport(
             "notion",
-            "http://localhost:3001",
+            Arc::new(MockTransport::with_empty_tool_list()),
+            None,
+            None,
+            "user-a",
+            None,
         ));
-        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_transport(
             "notion",
-            "http://localhost:3002",
+            Arc::new(MockTransport::with_empty_tool_list()),
+            None,
+            None,
+            "user-b",
+            None,
         ));
 
         manager
@@ -13067,8 +13150,7 @@ mod tests {
         let artifact_path = dir.path().join("builder-output.wasm");
         std::fs::write(&artifact_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
 
-        let manager =
-            make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
         let manifest = serde_json::json!({
             "description": "Read current weather from Example API",
             "http": {
@@ -13092,10 +13174,9 @@ mod tests {
 
         assert_eq!(result.kind, ExtensionKind::WasmTool);
         assert!(tools_dir.join("weather_reader.wasm").exists());
-        let saved_manifest = std::fs::read_to_string(
-            tools_dir.join("weather_reader.capabilities.json"),
-        )
-        .expect("read saved manifest");
+        let saved_manifest =
+            std::fs::read_to_string(tools_dir.join("weather_reader.capabilities.json"))
+                .expect("read saved manifest");
         let saved_value: serde_json::Value =
             serde_json::from_str(&saved_manifest).expect("parse saved manifest");
         assert_eq!(saved_value, manifest);
@@ -13132,6 +13213,36 @@ mod tests {
 
         assert!(
             err.to_string().contains("not supported in multi-tenant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_local_artifact_rejects_oversized_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let artifact_path = dir.path().join("builder-output.wasm");
+        let file = std::fs::File::create(&artifact_path).expect("create wasm");
+        file.set_len(super::MAX_LOCAL_WASM_ARTIFACT_SIZE + 1)
+            .expect("extend wasm");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install(
+                "weather_reader",
+                None,
+                Some(artifact_path.to_str().expect("utf8 path")),
+                Some(serde_json::json!({"description": "demo"})),
+                Some(ExtensionKind::WasmTool),
+                "test",
+            )
+            .await
+            .expect_err("oversized local artifact should fail");
+
+        assert!(
+            err.to_string().contains("too large"),
             "unexpected error: {err}"
         );
     }

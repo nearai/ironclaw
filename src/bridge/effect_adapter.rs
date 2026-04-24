@@ -4269,6 +4269,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_install_local_artifact_succeeds_through_effect_adapter() {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::builtin::ToolInstallTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        struct WeatherReaderTool;
+
+        #[async_trait]
+        impl Tool for WeatherReaderTool {
+            fn name(&self) -> &str {
+                "weather_reader"
+            }
+
+            fn description(&self) -> &str {
+                "existing test provider"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({"ok": true}),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifact_path = dir.path().join("builder-output.wasm");
+        std::fs::write(&artifact_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(WeatherReaderTool)).await;
+
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            false,
+            vec![],
+        ));
+        tools
+            .register(Arc::new(ToolInstallTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(Arc::clone(&ext_mgr)),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({
+                    "name": "weather_reader",
+                    "kind": "wasm_tool",
+                    "wasm_path": artifact_path,
+                    "manifest": {"description": "demo"}
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_local_artifact_install"),
+                ),
+            )
+            .await
+            .expect("tool_install should return action result");
+
+        assert!(!result.is_error, "tool_install should succeed: {result:?}");
+        assert_eq!(result.output["name"], "weather_reader");
+        assert_eq!(result.output["status"], "ready");
+        assert!(
+            dir.path()
+                .join("tools")
+                .join("weather_reader.wasm")
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join("tools")
+                .join("weather_reader.capabilities.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_install_local_artifact_rejects_multi_tenant_through_effect_adapter() {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::builtin::ToolInstallTool;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let artifact_path = dir.path().join("builder-output.wasm");
+        std::fs::write(&artifact_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tools),
+            None,
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            "test_user".to_string(),
+            None,
+            true,
+            vec![],
+        ));
+        tools
+            .register(Arc::new(ToolInstallTool::new(Arc::clone(&ext_mgr))))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                Some(Arc::clone(&ext_mgr)),
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
+
+        let result = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({
+                    "name": "weather_reader",
+                    "kind": "wasm_tool",
+                    "wasm_path": artifact_path,
+                    "manifest": {"description": "demo"}
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_local_artifact_install_multi_tenant"),
+                ),
+            )
+            .await
+            .expect("tool_install should return action result");
+
+        assert!(
+            result.is_error,
+            "tool_install should fail in multi-tenant mode"
+        );
+        let err = result.output["error"]
+            .as_str()
+            .expect("error should be a string");
+        assert!(
+            err.contains("not supported in multi-tenant"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !dir.path()
+                .join("tools")
+                .join("weather_reader.wasm")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn available_actions_omit_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
