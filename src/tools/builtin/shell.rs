@@ -805,6 +805,8 @@ fn resolve_workdir(requested: PathBuf, sandboxed: bool) -> Result<PathBuf, ToolE
         )));
     }
 
+    // silent-ok: fallback cwd resolution — any usable path is better than
+    // returning `ExecutionFailed` here; the warn log below records the attempt.
     let fallback = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     tracing::warn!(
         requested = %requested.display(),
