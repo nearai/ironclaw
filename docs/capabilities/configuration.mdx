@@ -64,7 +64,7 @@ IronClaw uses a two-layer configuration system:
   </Card>
 
   <Card title="Skills" icon="puzzle" href="#skills">
-    SKILLS_*, catalog URL, auto-discovery
+    SKILLS_ENABLED, SKILLS_MAX_CONTEXT_TOKENS
   </Card>
 
   <Card title="Security" icon="shield" href="#security">
@@ -78,12 +78,12 @@ IronClaw uses a two-layer configuration system:
 |----------|------|---------|-------------|
 | `AGENT_NAME` | string | `ironclaw` | Agent name displayed in responses |
 | `AGENT_MAX_PARALLEL_JOBS` | int | `5` | Maximum concurrent jobs |
-| `AGENT_JOB_TIMEOUT_SECS` | int | `300` | Job timeout in seconds |
-| `AGENT_STUCK_THRESHOLD_SECS` | int | `60` | Time before job considered stuck |
-| `SELF_REPAIR_CHECK_INTERVAL_SECS` | int | `30` | Self-repair check frequency |
+| `AGENT_JOB_TIMEOUT_SECS` | int | `3600` | Job timeout in seconds (1 hour) |
+| `AGENT_STUCK_THRESHOLD_SECS` | int | `300` | Time before job considered stuck (5 min) |
+| `SELF_REPAIR_CHECK_INTERVAL_SECS` | int | `60` | Self-repair check frequency (1 min) |
 | `SELF_REPAIR_MAX_ATTEMPTS` | int | `3` | Max repair attempts per job |
 | `AGENT_USE_PLANNING` | bool | `true` | Enable planning before tool execution |
-| `SESSION_IDLE_TIMEOUT_SECS` | int | `3600` | Session idle timeout |
+| `SESSION_IDLE_TIMEOUT_SECS` | int | `604800` | Session idle timeout (7 days) |
 | `ALLOW_LOCAL_TOOLS` | bool | `false` | Allow filesystem/shell tools directly |
 | `MAX_COST_PER_DAY_CENTS` | int | — | Daily spend limit (cents, e.g., 10000 = $100) |
 | `MAX_ACTIONS_PER_HOUR` | int | — | Hourly action limit |
@@ -182,22 +182,20 @@ export LIBSQL_AUTH_TOKEN="your-auth-token"
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GATEWAY_ENABLED` | bool | `true` | Enable web UI |
-| `GATEWAY_HOST` | string | `127.0.0.1` | Bind host (`0.0.0.0` for LAN) |
+| `GATEWAY_HOST` | string | `127.0.0.1` | Bind host |
 | `GATEWAY_PORT` | int | `3000` | Port number |
 | `GATEWAY_AUTH_TOKEN` | string | random | Bearer token for auth |
-| `GATEWAY_USER_ID` | string | `default` | Default user ID |
 
 ### HTTP Webhook
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `HTTP_HOST` | string | `0.0.0.0` | Bind host |
+| `HTTP_HOST` | string | `127.0.0.1` | Bind host |
 | `HTTP_PORT` | int | `8080` | Port number |
 | `HTTP_WEBHOOK_SECRET` | string | — | Shared secret for validation |
-| `HTTP_USER_ID` | string | `http` | Default user ID |
 
 <Warning>
-The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external webhook delivery, set `HTTP_HOST=127.0.0.1`.
+The HTTP webhook binds to `127.0.0.1:8080` by default. To receive webhooks from external services, set `HTTP_HOST=0.0.0.0`.
 </Warning>
 
 ### Terminal UI
@@ -231,8 +229,8 @@ The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external 
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `EMBEDDING_ENABLED` | bool | `true` | Enable semantic search |
-| `EMBEDDING_PROVIDER` | enum | `openai` | Provider: `openai` or `nearai` |
+| `EMBEDDING_ENABLED` | bool | `false` | Enable semantic search |
+| `EMBEDDING_PROVIDER` | enum | `nearai` | Provider: `nearai` or `openai` |
 | `EMBEDDING_MODEL` | string | `text-embedding-3-small` | Embedding model |
 | `OPENAI_API_KEY` | string | — | Required if using OpenAI embeddings |
 
@@ -265,9 +263,7 @@ The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `SKILLS_ENABLED` | bool | `true` | Enable skills system |
-| `SKILLS_MAX_TOKENS` | int | `4000` | Max prompt budget |
-| `SKILLS_CATALOG_URL` | URL | `https://clawhub.dev` | ClawHub registry URL |
-| `SKILLS_AUTO_DISCOVER` | bool | `true` | Auto-scan skill directories |
+| `SKILLS_MAX_CONTEXT_TOKENS` | int | `4000` | Max prompt budget for skills |
 
 ## Heartbeat
 
@@ -275,16 +271,14 @@ The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external 
 |----------|------|---------|-------------|
 | `HEARTBEAT_ENABLED` | bool | `false` | Enable periodic execution |
 | `HEARTBEAT_INTERVAL_SECS` | int | `1800` | Interval in seconds (30 min) |
-| `HEARTBEAT_NOTIFY_CHANNEL` | string | `tui` | Notification channel |
-| `HEARTBEAT_NOTIFY_USER` | string | `default` | Notify user ID |
 
 ## Routines
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ROUTINES_ENABLED` | bool | `true` | Enable scheduled/reactive tasks |
-| `ROUTINES_CRON_INTERVAL` | int | `60` | Cron tick interval (seconds) |
-| `ROUTINES_MAX_CONCURRENT` | int | `3` | Max concurrent routines |
+| `ROUTINES_CRON_INTERVAL` | int | `15` | Cron tick interval (seconds) |
+| `ROUTINES_MAX_CONCURRENT` | int | `10` | Max concurrent routines |
 
 ## Security
 
