@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashMap,
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -15,8 +16,9 @@ use futures::executor::block_on;
 use ironclaw_extensions::{ExtensionError, ExtensionPackage, ExtensionRuntime};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, VirtualPath,
+    CapabilityDescriptor, CapabilityId, ExtensionId, MountView, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTarget, NetworkTargetPattern, ResourceEstimate, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, VirtualPath,
 };
 use ironclaw_resources::{
     ActiveResourceReservation, ResourceError, ResourceGovernor, ResourceReceipt,
@@ -40,6 +42,7 @@ const FS_READ_IMPORT: &str = "fs_read_utf8";
 const FS_WRITE_IMPORT: &str = "fs_write_utf8";
 const FS_LIST_IMPORT: &str = "fs_list_utf8";
 const FS_STAT_LEN_IMPORT: &str = "fs_stat_len";
+const HTTP_REQUEST_IMPORT: &str = "http_request_utf8";
 const MAX_LOG_ENTRIES: usize = 1_000;
 const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
 
@@ -157,6 +160,67 @@ where
         block_on(self.scoped.stat(&path))
             .map(|stat| stat.len)
             .map_err(|error| error.to_string())
+    }
+}
+
+/// Host-mediated HTTP request issued by a WASM network import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmHttpRequest {
+    pub method: NetworkMethod,
+    pub url: String,
+    pub body: String,
+}
+
+/// Host-mediated HTTP response returned to a WASM network import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmHttpResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Synchronous host HTTP surface exposed to WASM network imports.
+pub trait WasmHostHttp: Send + Sync {
+    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
+}
+
+/// Network-policy enforcing wrapper around a host-provided HTTP client.
+#[derive(Debug, Clone)]
+pub struct WasmPolicyHttpClient<C> {
+    client: C,
+    policy: NetworkPolicy,
+}
+
+impl<C> WasmPolicyHttpClient<C> {
+    pub fn new(client: C, policy: NetworkPolicy) -> Self {
+        Self { client, policy }
+    }
+
+    pub fn policy(&self) -> &NetworkPolicy {
+        &self.policy
+    }
+}
+
+impl<C> WasmHostHttp for WasmPolicyHttpClient<C>
+where
+    C: WasmHostHttp,
+{
+    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+        let target = network_target_for_url(&request.url)?;
+        if !network_policy_allows(&self.policy, &target) {
+            return Err("network target denied by policy".to_string());
+        }
+        if let Some(max) = self.policy.max_egress_bytes
+            && request.body.len() as u64 > max
+        {
+            return Err("network request exceeds egress limit".to_string());
+        }
+        let response = self.client.request_utf8(request)?;
+        if let Some(max) = self.policy.max_egress_bytes
+            && response.body.len() as u64 > max
+        {
+            return Err("network response exceeds body limit".to_string());
+        }
+        Ok(response)
     }
 }
 
@@ -623,7 +687,7 @@ impl WasmRuntime {
         reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
     ) -> Result<CapabilityResult, WasmError> {
-        self.invoke_json_inner(module, descriptor, reservation, invocation, None)
+        self.invoke_json_inner(module, descriptor, reservation, invocation, None, None)
     }
 
     pub fn invoke_json_with_filesystem(
@@ -640,6 +704,25 @@ impl WasmRuntime {
             reservation,
             invocation,
             Some(filesystem),
+            None,
+        )
+    }
+
+    pub fn invoke_json_with_network(
+        &self,
+        module: &PreparedWasmModule,
+        descriptor: &CapabilityDescriptor,
+        reservation: Option<&ActiveResourceReservation>,
+        invocation: CapabilityInvocation,
+        http: Arc<dyn WasmHostHttp>,
+    ) -> Result<CapabilityResult, WasmError> {
+        self.invoke_json_inner(
+            module,
+            descriptor,
+            reservation,
+            invocation,
+            None,
+            Some(http),
         )
     }
 
@@ -650,6 +733,7 @@ impl WasmRuntime {
         reservation: Option<&ActiveResourceReservation>,
         invocation: CapabilityInvocation,
         filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+        http: Option<Arc<dyn WasmHostHttp>>,
     ) -> Result<CapabilityResult, WasmError> {
         let reservation = reservation.ok_or(WasmError::MissingReservation)?;
         self.validate_descriptor(module, descriptor)?;
@@ -666,7 +750,7 @@ impl WasmRuntime {
             })?;
 
         let start = Instant::now();
-        let mut store = self.fueled_store_with_filesystem(filesystem)?;
+        let mut store = self.fueled_store_with_context(filesystem, http)?;
         let instance = self.instantiate_module(&mut store, module)?;
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -838,12 +922,13 @@ impl WasmRuntime {
     }
 
     fn fueled_store(&self) -> Result<Store<RuntimeStoreData>, WasmError> {
-        self.fueled_store_with_filesystem(None)
+        self.fueled_store_with_context(None, None)
     }
 
-    fn fueled_store_with_filesystem(
+    fn fueled_store_with_context(
         &self,
         filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+        http: Option<Arc<dyn WasmHostHttp>>,
     ) -> Result<Store<RuntimeStoreData>, WasmError> {
         let mut store = Store::new(
             &self.engine,
@@ -851,6 +936,7 @@ impl WasmRuntime {
                 self.config.max_memory_bytes,
                 self.config.max_output_bytes,
                 filesystem,
+                http,
             ),
         );
         store.limiter(|data| &mut data.limiter);
@@ -926,6 +1012,7 @@ struct RuntimeStoreData {
     log_bytes: u64,
     max_output_bytes: u64,
     filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+    http: Option<Arc<dyn WasmHostHttp>>,
 }
 
 impl RuntimeStoreData {
@@ -933,6 +1020,7 @@ impl RuntimeStoreData {
         memory_limit: u64,
         max_output_bytes: u64,
         filesystem: Option<Arc<dyn WasmHostFilesystem>>,
+        http: Option<Arc<dyn WasmHostHttp>>,
     ) -> Self {
         Self {
             limiter: WasmRuntimeLimiter::new(memory_limit),
@@ -940,6 +1028,7 @@ impl RuntimeStoreData {
             log_bytes: 0,
             max_output_bytes,
             filesystem,
+            http,
         }
     }
 
@@ -1063,6 +1152,7 @@ fn is_supported_core_import(module: &str, name: &str) -> bool {
                 | FS_WRITE_IMPORT
                 | FS_LIST_IMPORT
                 | FS_STAT_LEN_IMPORT
+                | HTTP_REQUEST_IMPORT
         )
 }
 
@@ -1139,6 +1229,36 @@ fn add_core_host_imports(linker: &mut Linker<RuntimeStoreData>) -> Result<(), Wa
             FS_STAT_LEN_IMPORT,
             |mut caller: Caller<'_, RuntimeStoreData>, path_ptr: i32, path_len: i32| -> i64 {
                 host_fs_stat_len(&mut caller, path_ptr, path_len)
+            },
+        )
+        .map_err(|error| WasmError::Engine {
+            reason: error.to_string(),
+        })?;
+    linker
+        .func_wrap(
+            CORE_IMPORT_MODULE,
+            HTTP_REQUEST_IMPORT,
+            |mut caller: Caller<'_, RuntimeStoreData>,
+             method: i32,
+             url_ptr: i32,
+             url_len: i32,
+             body_ptr: i32,
+             body_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                host_http_request_utf8(
+                    &mut caller,
+                    HttpImportArgs {
+                        method,
+                        url_ptr,
+                        url_len,
+                        body_ptr,
+                        body_len,
+                        out_ptr,
+                        out_cap,
+                    },
+                )
             },
         )
         .map_err(|error| WasmError::Engine {
@@ -1315,6 +1435,130 @@ fn write_guest_bytes(
         return -4;
     }
     i32::try_from(bytes.len()).unwrap_or(-6)
+}
+
+struct HttpImportArgs {
+    method: i32,
+    url_ptr: i32,
+    url_len: i32,
+    body_ptr: i32,
+    body_len: i32,
+    out_ptr: i32,
+    out_cap: i32,
+}
+
+fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpImportArgs) -> i32 {
+    let Some(method) = network_method_from_i32(args.method) else {
+        return -1;
+    };
+    let Ok(url) = read_guest_utf8(caller, args.url_ptr, args.url_len) else {
+        return -2;
+    };
+    let body = if args.body_len == 0 {
+        String::new()
+    } else {
+        match read_guest_utf8(caller, args.body_ptr, args.body_len) {
+            Ok(body) => body,
+            Err(_) => return -3,
+        }
+    };
+    let Some(http) = caller.data().http.clone() else {
+        return -10;
+    };
+    match http.request_utf8(WasmHttpRequest { method, url, body }) {
+        Ok(response) => {
+            write_guest_bytes(caller, args.out_ptr, args.out_cap, response.body.as_bytes())
+        }
+        Err(_) => -11,
+    }
+}
+
+fn network_method_from_i32(value: i32) -> Option<NetworkMethod> {
+    Some(match value {
+        0 => NetworkMethod::Get,
+        1 => NetworkMethod::Post,
+        2 => NetworkMethod::Put,
+        3 => NetworkMethod::Patch,
+        4 => NetworkMethod::Delete,
+        5 => NetworkMethod::Head,
+        _ => return None,
+    })
+}
+
+fn network_target_for_url(raw: &str) -> Result<NetworkTarget, String> {
+    let url = url::Url::parse(raw).map_err(|error| error.to_string())?;
+    let scheme = match url.scheme() {
+        "http" => NetworkScheme::Http,
+        "https" => NetworkScheme::Https,
+        other => return Err(format!("unsupported URL scheme {other}")),
+    };
+    let host = url
+        .host_str()
+        .filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| "URL host is required".to_string())?
+        .to_ascii_lowercase();
+    Ok(NetworkTarget {
+        scheme,
+        host,
+        port: url.port(),
+    })
+}
+
+fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool {
+    if policy.allowed_targets.is_empty() {
+        return false;
+    }
+    if policy.deny_private_ip_ranges
+        && let Ok(ip) = target.host.parse::<IpAddr>()
+        && is_private_or_loopback_ip(ip)
+    {
+        return false;
+    }
+    policy
+        .allowed_targets
+        .iter()
+        .any(|pattern| target_matches_pattern(target, pattern))
+}
+
+fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern) -> bool {
+    if let Some(scheme) = pattern.scheme
+        && scheme != target.scheme
+    {
+        return false;
+    }
+    if let Some(port) = pattern.port
+        && Some(port) != target.port
+    {
+        return false;
+    }
+    host_matches_pattern(&target.host, &pattern.host_pattern.to_ascii_lowercase())
+}
+
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host.ends_with(&format!(".{suffix}")) && host != suffix
+    } else {
+        host == pattern
+    }
+}
+
+fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.octets()[0] == 0
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
 }
 
 fn unix_time_ms() -> u64 {
