@@ -903,22 +903,25 @@ async fn handle_execute_code_step(
             // CodeExecutionFailed (which carries the failure classifier) and
             // the per-action events already broadcast above.
             //
-            // Cap code and stdout at `CODE_EXECUTED_MAX_CHARS` each before
-            // emission so a step that prints a large blob cannot bloat
-            // persisted thread events or flood the SSE broadcast buffer.
-            // Same cap as `scripting::OUTPUT_TRUNCATE_LEN` (8_000).
-            const CODE_EXECUTED_MAX_CHARS: usize = 8_000;
-            let return_value = match &result.return_value {
-                serde_json::Value::Null => None,
-                other => Some(other.clone()),
-            };
+            // Cap code, stdout, and return_value at `CODE_EXECUTED_MAX_BYTES`
+            // each before emission so a step that prints or returns a large
+            // blob cannot bloat persisted thread events or flood the SSE
+            // broadcast buffer. Byte-based (not `chars().count()`) to keep
+            // this O(1) even for very large payloads. `tail_chars` elsewhere
+            // in this file is left alone because its callers already run
+            // inside pre-bounded inputs (`OUTPUT_TRUNCATE_LEN`, 500-char
+            // error slices) where chars-vs-bytes is not a perf concern.
+            const CODE_EXECUTED_MAX_BYTES: usize = 8_000;
             let code_executed_event = ThreadEvent::new(
                 thread.id,
                 EventKind::CodeExecuted {
                     step_id: exec_ctx.step_id,
-                    code: tail_chars(&code, CODE_EXECUTED_MAX_CHARS),
-                    stdout: tail_chars(&result.stdout, CODE_EXECUTED_MAX_CHARS),
-                    return_value,
+                    code: tail_utf8_bytes(&code, CODE_EXECUTED_MAX_BYTES),
+                    stdout: tail_utf8_bytes(&result.stdout, CODE_EXECUTED_MAX_BYTES),
+                    return_value: bounded_return_value(
+                        &result.return_value,
+                        CODE_EXECUTED_MAX_BYTES,
+                    ),
                     duration_ms: code_start.elapsed().as_millis() as u64,
                 },
             );
@@ -2421,6 +2424,50 @@ fn tail_chars(s: &str, n: usize) -> String {
     }
 }
 
+/// Return the last `max_bytes` bytes of `s`, adjusted forward to the
+/// next UTF-8 character boundary so the slice is always valid UTF-8.
+///
+/// Byte-based (unlike [`tail_chars`]) to stay O(1)+boundary-walk on
+/// large payloads. Used by the `CodeExecuted` emission path where
+/// `code`/`stdout` can be arbitrarily large, so `chars().count()` on
+/// every step would be measurable overhead.
+fn tail_utf8_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut start = s.len() - max_bytes;
+    // Advance past mid-codepoint bytes. At most 3 iterations because
+    // UTF-8 codepoints are ≤ 4 bytes.
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_owned() // safety: `start` is validated by `is_char_boundary`
+}
+
+/// Bound the serialized size of a CodeAct return value before emission.
+///
+/// - `Null` → `None` (no change — a null return is nothing to surface).
+/// - `String` → tail-truncated via [`tail_utf8_bytes`].
+/// - Other (`Array`, `Object`, `Number`, `Bool`) → serialized length
+///   checked; returned intact if ≤ `max_bytes`, dropped otherwise.
+///
+/// Dropping (rather than truncating arbitrary JSON) is deliberate: a
+/// truncated `Array` / `Object` is unparseable on the frontend and
+/// provides no diagnostic value. Observers see a `None` return value
+/// and know the payload was omitted for size, not that it was `null`.
+fn bounded_return_value(value: &serde_json::Value, max_bytes: usize) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => {
+            Some(serde_json::Value::String(tail_utf8_bytes(s, max_bytes)))
+        }
+        other => match serde_json::to_vec(other) {
+            Ok(buf) if buf.len() <= max_bytes => Some(other.clone()),
+            _ => None,
+        },
+    }
+}
+
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
 ///
 /// The action_calls payload contains tool parameters, which can carry user
@@ -2690,6 +2737,65 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+
+    // ── CodeExecuted payload bounding ────────────────────────────
+
+    #[test]
+    fn tail_utf8_bytes_returns_input_when_already_small() {
+        assert_eq!(tail_utf8_bytes("hello", 100), "hello");
+    }
+
+    #[test]
+    fn tail_utf8_bytes_tails_ascii_at_byte_boundary() {
+        let s: String = "abcdefghij".repeat(100); // 1_000 bytes
+        let out = tail_utf8_bytes(&s, 50);
+        assert_eq!(out.len(), 50);
+        assert!(s.ends_with(&out));
+    }
+
+    #[test]
+    fn tail_utf8_bytes_advances_past_multibyte_split() {
+        // 4-byte emoji followed by ASCII; cut position lands mid-codepoint.
+        let s = format!("{}abcde", "🐍".repeat(10)); // 40 bytes of emoji + 5 ASCII = 45 bytes
+        let out = tail_utf8_bytes(&s, 9);
+        // The walk-forward must have landed on a char boundary; the
+        // resulting &str must be valid UTF-8 (implicit — String construction
+        // would panic otherwise) and end with the original tail.
+        assert!(s.ends_with(&out));
+        assert!(out.len() <= 9);
+    }
+
+    #[test]
+    fn bounded_return_value_drops_null() {
+        assert_eq!(bounded_return_value(&serde_json::Value::Null, 100), None);
+    }
+
+    #[test]
+    fn bounded_return_value_truncates_large_string() {
+        let big = "x".repeat(50_000);
+        let v = serde_json::Value::String(big);
+        let out = bounded_return_value(&v, 100).expect("string retained");
+        let s = out.as_str().expect("string variant");
+        assert_eq!(s.len(), 100);
+    }
+
+    #[test]
+    fn bounded_return_value_retains_small_structured() {
+        let v = serde_json::json!({"ok": true, "count": 42});
+        assert_eq!(bounded_return_value(&v, 1_000), Some(v));
+    }
+
+    #[test]
+    fn bounded_return_value_drops_oversized_structured() {
+        // A 10k-element array serializes well past 8 KiB.
+        let items: Vec<_> = (0..10_000).collect();
+        let v = serde_json::json!(items);
+        assert_eq!(
+            bounded_return_value(&v, 8_000),
+            None,
+            "oversized structured return_value should be dropped, not truncated"
+        );
+    }
 
     // ── Orchestrator budget / error mapping ─────────────────────
 

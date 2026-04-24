@@ -341,9 +341,17 @@ pub fn spawn_warning_bridge(
                         message: entry.message,
                         thread_id: None,
                     };
+                    // The tracing `LogBroadcaster` is a typed source log in
+                    // the sense of `.claude/rules/gateway-events.md`: every
+                    // `AppEvent::Warning` on the SSE stream projects from
+                    // exactly one `LogEntry` produced by `WebLogLayer`.
+                    // It is not yet listed in the rule's source-log table
+                    // (the current entries are engine `EventKind`, sandbox
+                    // `JobEvent`, and channel-lifecycle logs), so the
+                    // broadcast sites carry an explicit annotation below.
                     match &owner_id {
-                        Some(uid) => sse.broadcast_for_user(uid, event),
-                        None => sse.broadcast(event),
+                        Some(uid) => sse.broadcast_for_user(uid, event), // projection-exempt: log source, WARN/ERROR tracing bridge → AppEvent::Warning
+                        None => sse.broadcast(event), // projection-exempt: log source, WARN/ERROR tracing bridge → AppEvent::Warning
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
