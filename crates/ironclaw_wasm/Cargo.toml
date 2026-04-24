@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 blake3 = "1"
 ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
+futures = "0.3"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
