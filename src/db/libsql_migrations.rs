@@ -1168,6 +1168,18 @@ CREATE INDEX IF NOT EXISTS idx_trace_tombstones_effective
     ON trace_tombstones (tenant_id, effective_at DESC);
 "#,
     ),
+    (
+        26,
+        "trace_object_ref_lifecycle",
+        r#"
+ALTER TABLE trace_object_refs ADD COLUMN invalidated_at TEXT;
+ALTER TABLE trace_object_refs ADD COLUMN deleted_at TEXT;
+ALTER TABLE trace_object_refs ADD COLUMN updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+CREATE INDEX IF NOT EXISTS idx_trace_object_refs_lifecycle
+    ON trace_object_refs (tenant_id, submission_id, invalidated_at, deleted_at);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1178,6 +1190,9 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
     (22, "agent_jobs", "restart_params"),
+    (26, "trace_object_refs", "invalidated_at"),
+    (26, "trace_object_refs", "deleted_at"),
+    (26, "trace_object_refs", "updated_at"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

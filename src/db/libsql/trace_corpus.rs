@@ -7,9 +7,10 @@ use crate::db::trace_corpus_common::{
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
-    TraceAuditEventWrite, TraceAuditSafeMetadata, TraceCorpusStatus, TraceCorpusStore,
-    TraceCreditEventWrite, TraceDerivedRecordWrite, TraceObjectRefWrite, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTombstoneWrite,
+    TraceArtifactInvalidationCounts, TraceAuditEventWrite, TraceAuditSafeMetadata,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditEventWrite, TraceDerivedRecordWrite,
+    TraceDerivedStatus, TraceObjectRefWrite, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTombstoneWrite,
 };
 
 fn opt_f32(value: Option<f32>) -> libsql::Value {
@@ -264,7 +265,8 @@ impl TraceCorpusStore for LibSqlBackend {
                 encryption_key_ref = excluded.encryption_key_ref,
                 size_bytes = excluded.size_bytes,
                 compression = excluded.compression,
-                created_by_job_id = excluded.created_by_job_id",
+                created_by_job_id = excluded.created_by_job_id,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
             libsql::params![
                 object_ref.tenant_id.as_str(),
                 object_ref.submission_id.to_string(),
@@ -449,5 +451,44 @@ impl TraceCorpusStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        derived_status: TraceDerivedStatus,
+    ) -> Result<TraceArtifactInvalidationCounts, DatabaseError> {
+        let conn = self.connect().await?;
+        let derived_status = enum_to_storage(derived_status)?;
+        let object_refs_invalidated = conn
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE tenant_id = ?1
+                   AND submission_id = ?2
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                libsql::params![tenant_id, submission_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let derived_records_invalidated = conn
+            .execute(
+                "UPDATE trace_derived_records
+                 SET status = ?3,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE tenant_id = ?1
+                   AND submission_id = ?2
+                   AND status <> ?3",
+                libsql::params![tenant_id, submission_id.to_string(), derived_status],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(TraceArtifactInvalidationCounts {
+            object_refs_invalidated,
+            derived_records_invalidated,
+        })
     }
 }

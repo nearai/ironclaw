@@ -249,6 +249,12 @@ pub struct TraceTombstoneWrite {
     pub created_by_principal_ref: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TraceArtifactInvalidationCounts {
+    pub object_refs_invalidated: u64,
+    pub derived_records_invalidated: u64,
+}
+
 #[async_trait]
 pub trait TraceCorpusStore: Send + Sync {
     async fn upsert_trace_submission(
@@ -295,4 +301,11 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tombstone: TraceTombstoneWrite,
     ) -> Result<(), DatabaseError>;
+
+    async fn invalidate_trace_submission_artifacts(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        derived_status: TraceDerivedStatus,
+    ) -> Result<TraceArtifactInvalidationCounts, DatabaseError>;
 }

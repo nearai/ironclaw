@@ -164,6 +164,28 @@ mod libsql_trace_corpus_store {
             .await
             .expect("update status");
 
+        let invalidated = backend
+            .invalidate_trace_submission_artifacts(
+                tenant_id,
+                submission_id,
+                TraceDerivedStatus::Revoked,
+            )
+            .await
+            .expect("invalidate submission artifacts");
+        assert_eq!(invalidated.object_refs_invalidated, 1);
+        assert_eq!(invalidated.derived_records_invalidated, 1);
+
+        let idempotent = backend
+            .invalidate_trace_submission_artifacts(
+                tenant_id,
+                submission_id,
+                TraceDerivedStatus::Revoked,
+            )
+            .await
+            .expect("repeat artifact invalidation");
+        assert_eq!(idempotent.object_refs_invalidated, 0);
+        assert_eq!(idempotent.derived_records_invalidated, 0);
+
         backend
             .write_trace_tombstone(TraceTombstoneWrite {
                 tombstone_id: Uuid::new_v4(),

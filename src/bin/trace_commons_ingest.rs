@@ -1691,16 +1691,6 @@ async fn mirror_revocation_to_db(
         return Ok(());
     };
 
-    db.update_trace_submission_status(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceCorpusStatus::Revoked,
-        &tenant.principal_ref,
-        Some("contributor_revocation"),
-    )
-    .await
-    .context("failed to mirror trace revocation status")?;
-
     if let Some(record) = record {
         db.write_trace_tombstone(StorageTraceTombstoneWrite {
             tombstone_id: deterministic_trace_uuid("revocation-tombstone", record),
@@ -1716,6 +1706,63 @@ async fn mirror_revocation_to_db(
         })
         .await
         .context("failed to mirror trace revocation tombstone")?;
+    }
+
+    db.update_trace_submission_status(
+        &tenant.tenant_id,
+        submission_id,
+        StorageTraceCorpusStatus::Revoked,
+        &tenant.principal_ref,
+        Some("contributor_revocation"),
+    )
+    .await
+    .context("failed to mirror trace revocation status")?;
+
+    let invalidation_counts = db
+        .invalidate_trace_submission_artifacts(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceDerivedStatus::Revoked,
+        )
+        .await
+        .context("failed to mirror trace artifact invalidation")?;
+
+    if let Some(record) = record
+        && (invalidation_counts.object_refs_invalidated > 0
+            || invalidation_counts.derived_records_invalidated > 0)
+    {
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "object_refs_invalidated".to_string(),
+            invalidation_counts
+                .object_refs_invalidated
+                .min(u64::from(u32::MAX)) as u32,
+        );
+        action_counts.insert(
+            "derived_records_invalidated".to_string(),
+            invalidation_counts
+                .derived_records_invalidated
+                .min(u64::from(u32::MAX)) as u32,
+        );
+        db.append_trace_audit_event(StorageTraceAuditEventWrite {
+            audit_event_id: deterministic_trace_uuid("revocation-artifact-invalidation", record),
+            tenant_id: record.tenant_id.clone(),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
+            action: StorageTraceAuditAction::Revoke,
+            reason: Some("contributor_revocation_artifact_invalidation".to_string()),
+            request_id: None,
+            submission_id: Some(record.submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                dry_run: false,
+                action_counts,
+            },
+        })
+        .await
+        .context("failed to mirror trace artifact invalidation audit")?;
     }
 
     Ok(())
@@ -3813,6 +3860,33 @@ mod tests {
             .expect("mirrored submission remains queryable");
         assert_eq!(revoked.status, StorageTraceCorpusStatus::Revoked);
         assert!(revoked.revoked_at.is_some());
+        let conn = db.connect().await.expect("connect to mirror after revoke");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM trace_object_refs WHERE tenant_id = ?1 AND submission_id = ?2 AND invalidated_at IS NOT NULL",
+                libsql::params!["tenant-a", submission_id.to_string()],
+            )
+            .await
+            .expect("object invalidation query succeeds");
+        let row = rows
+            .next()
+            .await
+            .expect("object invalidation row fetch succeeds")
+            .expect("object invalidation count row exists");
+        assert_eq!(row.get::<i64>(0).expect("object count reads"), 1);
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM trace_derived_records WHERE tenant_id = ?1 AND submission_id = ?2 AND status = ?3",
+                libsql::params!["tenant-a", submission_id.to_string(), "revoked"],
+            )
+            .await
+            .expect("derived invalidation query succeeds");
+        let row = rows
+            .next()
+            .await
+            .expect("derived invalidation row fetch succeeds")
+            .expect("derived invalidation count row exists");
+        assert_eq!(row.get::<i64>(0).expect("derived count reads"), 1);
     }
 
     #[tokio::test]

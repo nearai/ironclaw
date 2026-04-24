@@ -8,7 +8,7 @@ The MVP ingestion service still serves tenant-scoped JSON files under `TRACE_COM
 
 This branch now contains the first production-storage bridge:
 
-- `migrations/V25__trace_corpus_storage.sql` plus the matching libSQL incremental migration.
+- `migrations/V25__trace_corpus_storage.sql`, `migrations/V26__trace_object_ref_lifecycle.sql`, and matching libSQL incremental migrations.
 - `src/trace_corpus_storage.rs` and `TraceCorpusStore` implementations for PostgreSQL and libSQL.
 - Optional ingest-service DB dual-write behind `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Optional encrypted local artifact storage behind `TRACE_COMMONS_ARTIFACT_KEY_HEX`.
@@ -1056,6 +1056,7 @@ Implementation checklist for the first real storage migration:
 - Add `TraceCorpusStore` to the `Database` trait only after both `PgBackend` and `LibSqlBackend` implementations exist. Completed.
 - Keep DB writes behind a dark-launch or dual-write flag until parity checks pass. Completed with `TRACE_COMMONS_DB_DUAL_WRITE=true`.
 - Keep object payloads in encrypted artifact/object storage; write only object refs and hashes into DB. Completed for the local encrypted artifact sidecar; service-owned object storage remains future work.
+- Propagate revocation to DB metadata before DB-first reads. Completed for submission status, tombstones, object-ref invalidation, derived-record invalidation, and an audit event for invalidation counts.
 - Add a backfill tool that reads the file-backed tenant directories, validates envelopes, recomputes redaction and summary hashes, writes metadata, and emits audit import events.
 - Add a reconciliation command that compares file-backed responses with DB-backed metadata for status, review queues, credit, analytics, replay export, object refs, and tombstones.
 
@@ -1066,7 +1067,7 @@ Test checklist for the same branch:
 - Backend parity tests insert the same logical submission, object ref, audit event, credit event, derived record, and tombstone through the shared store trait for both backends. libSQL coverage exists; PostgreSQL integration coverage still needs an available test database.
 - Tenant-isolation tests seed duplicate `submission_id`, `trace_id`, `canonical_summary_hash`, and contributor pseudonym under two tenants and prove all public store methods filter by tenant. Implemented for the libSQL store contract and ingest DB mirror path.
 - Handler-level tests drive the future ingest/review/revoke/export callers, not only helper predicates, and assert each mocked DB/object/vector call receives `tenant_id`, `actor_principal_ref`, and `submission_id`. Implemented for submit/review/credit/revoke dual-write; DB-backed export and vector paths remain future work.
-- Revocation propagation tests prove tombstone-first ordering and invalidation of submissions, derived rows, vectors, benchmark artifacts, exports, and credit settlement.
+- Revocation propagation tests prove tombstone-first ordering and invalidation of submissions, derived rows, vectors, benchmark artifacts, exports, and credit settlement. Current coverage verifies DB tombstone/status plus object-ref and derived-row invalidation; vector/benchmark/export settlement tests remain future work.
 - Retention tests run dry-run, policy-change, legal-hold, retry, and resumed-job paths before any destructive object/vector deletion path is enabled.
 - Export tests prove revoked, quarantined, rejected, expired, and out-of-scope submissions cannot enter new manifests, and existing manifests are invalidated after source revocation.
 - Security tests verify PostgreSQL RLS with `app.tenant_id` and libSQL query scoping with same ids across tenants.
