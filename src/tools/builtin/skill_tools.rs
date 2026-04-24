@@ -748,7 +748,7 @@ impl Tool for SkillInstallTool {
         if self.catalog.is_some() {
             "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
         } else {
-            "Install a skill from inline SKILL.md content."
+            "Install a skill from inline SKILL.md content, or reference an already-loaded skill by name."
         }
     }
 
@@ -787,14 +787,14 @@ impl Tool for SkillInstallTool {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Skill name for the installed content"
+                        "description": "Already-loaded skill name for idempotency or companion dependency reporting when ClawHub is disabled"
                     },
                     "content": {
                         "type": "string",
                         "description": "Raw SKILL.md content to install directly"
                     }
                 },
-                "required": ["content"]
+                "minProperties": 1
             })
         }
     }
@@ -2027,12 +2027,14 @@ mod tests {
     fn test_skill_install_schema_without_catalog() {
         let tool = SkillInstallTool::new(test_registry(), None);
         let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("name").is_some());
         assert!(schema["properties"].get("content").is_some());
         assert!(schema["properties"].get("url").is_none());
         assert!(schema["properties"].get("slug").is_none());
+        assert_eq!(schema["minProperties"], 1);
         assert!(
-            tool.description().contains("inline"),
-            "description should mention inline when catalog is disabled"
+            tool.description().contains("already-loaded skill"),
+            "description should mention the no-op name path when catalog is disabled"
         );
     }
 
@@ -2088,6 +2090,44 @@ mod tests {
             result.is_ok(),
             "content install should succeed: {:?}",
             result
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_already_loaded_succeeds_without_catalog() {
+        let registry = test_registry();
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_to_disk(
+                &dir,
+                "ceo-setup",
+                &skill_content("ceo-setup", &["dep-a"]),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
+
+        let tool = SkillInstallTool::new(Arc::clone(&registry), None);
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "ceo-setup",
+                    "install_dependencies": true,
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .expect("already-loaded skill should support dependency reporting without catalog");
+
+        assert_eq!(output.result["status"], "already_installed_with_warnings");
+        assert_eq!(
+            output.result["pending_dependency_install"],
+            serde_json::json!(["dep-a"])
         );
     }
 

@@ -45,10 +45,15 @@ function fetchGatewayStatus() {
       engineModeApplied = true;
     }
 
-    // Hide ClawHub search section when registry is disabled
+    // Hide ClawHub-only skill install surfaces when registry is disabled.
+    var hideClawHubUi = data.clawhub_enabled === false;
     var skillSearchSection = document.querySelector('.skill-search-section');
     if (skillSearchSection) {
-      skillSearchSection.style.display = data.clawhub_enabled === false ? 'none' : '';
+      skillSearchSection.style.display = hideClawHubUi ? 'none' : '';
+    }
+    var skillUrlInstallSection = document.querySelector('.skill-url-install-section');
+    if (skillUrlInstallSection) {
+      skillUrlInstallSection.style.display = hideClawHubUi ? 'none' : '';
     }
 
     var popover = document.getElementById('gateway-popover');

@@ -14,14 +14,14 @@ use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
 
 fn install_requested_identifier<'a>(
-    name: &'a str,
+    name: Option<&'a str>,
     explicit_slug: Option<&'a str>,
     resolved_download_key: Option<&'a str>,
-) -> &'a str {
+) -> Option<&'a str> {
     explicit_slug
         .filter(|s| !s.is_empty())
         .or(resolved_download_key.filter(|s| !s.is_empty()))
-        .unwrap_or(name)
+        .or(name.filter(|s| !s.is_empty()))
 }
 
 fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
@@ -277,8 +277,11 @@ pub async fn skills_install_handler(
     };
 
     let normalized = ironclaw_skills::normalize_line_endings(&install_payload.skill_md);
-    let requested_identifier =
-        install_requested_identifier(name, req.slug.as_deref(), resolved_download_key.as_deref());
+    let requested_identifier = install_requested_identifier(
+        req.name.as_deref(),
+        req.slug.as_deref(),
+        resolved_download_key.as_deref(),
+    );
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse, install_content) = {
@@ -292,7 +295,7 @@ pub async fn skills_install_handler(
         let (skill_name, install_content) =
             ironclaw_skills::registry::SkillRegistry::resolve_install_content(
                 &normalized,
-                Some(requested_identifier),
+                requested_identifier,
             )
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -401,7 +404,16 @@ pub async fn skills_remove_handler(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use super::*;
+    use std::{path::Path, sync::Arc};
+
+    use axum::{Json, extract::State, http::HeaderMap};
+
+    use crate::channels::web::{
+        auth::{AuthenticatedUser, UserIdentity},
+        platform::{state::ActiveConfigSnapshot, ws::WsConnectionTracker},
+        sse::SseManager,
+    };
 
     #[test]
     fn catalog_entry_matches_installed_slug_suffix() {
@@ -451,11 +463,114 @@ mod tests {
     fn install_requested_identifier_prefers_resolved_slug_for_manual_name_installs() {
         assert_eq!(
             super::install_requested_identifier(
-                "Mortgage Calculator",
+                Some("Mortgage Calculator"),
                 None,
                 Some("finance/mortgage-calculator"),
             ),
-            "finance/mortgage-calculator"
+            Some("finance/mortgage-calculator")
+        );
+    }
+
+    #[test]
+    fn install_requested_identifier_omits_empty_name_hints() {
+        assert_eq!(super::install_requested_identifier(None, None, None), None);
+        assert_eq!(
+            super::install_requested_identifier(Some(""), None, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_install_handler_uses_manifest_name_when_request_name_is_absent() {
+        let install_dir = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            settings_cache: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test-user".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+            llm_provider: None,
+            llm_reload: None,
+            llm_session_manager: None,
+            config_toml_path: None,
+            skill_registry: Some(Arc::new(std::sync::RwLock::new(
+                ironclaw_skills::SkillRegistry::new(install_dir.path().to_path_buf()),
+            ))),
+            skill_catalog: None,
+            auth_manager: None,
+            scheduler: None,
+            chat_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                30, 60,
+            ),
+            oauth_rate_limiter: crate::channels::web::platform::state::PerUserRateLimiter::new(
+                20, 60,
+            ),
+            webhook_rate_limiter: crate::channels::web::platform::state::RateLimiter::new(10, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: Arc::new(tokio::sync::RwLock::new(ActiveConfigSnapshot::default())),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("static header"));
+
+        let response = super::skills_install_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "test-user".to_string(),
+                role: "owner".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            headers,
+            Json(SkillInstallRequest {
+                name: None,
+                slug: None,
+                url: None,
+                content: Some(
+                    "---\nname: manifest-only-skill\ndescription: demo\nactivation:\n  keywords: [demo]\n---\n\n# Demo\n"
+                        .to_string(),
+                ),
+            }),
+        )
+        .await
+        .expect("handler should accept inline content without name");
+
+        assert!(response.0.success);
+        assert_eq!(response.0.message, "Skill 'manifest-only-skill' installed");
+        assert!(
+            state
+                .skill_registry
+                .as_ref()
+                .expect("registry")
+                .read()
+                .expect("lock")
+                .has("manifest-only-skill"),
+            "manifest name should be preserved when request omits name"
         );
     }
 
