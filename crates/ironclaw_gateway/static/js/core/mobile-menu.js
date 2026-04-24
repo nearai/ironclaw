@@ -29,8 +29,20 @@
   }
 
   // --- open/close ---
+  //
+  // Focus management: when the drawer opens, the element that had
+  // focus is captured and focus moves into the dialog (first focusable
+  // child, falling back to the dialog itself). When the drawer closes,
+  // focus is restored to the element that triggered the open — almost
+  // always the hamburger, but this works even if another caller (e.g.
+  // a routed link) opened the drawer. `inert` on the closed drawer
+  // prevents keyboard tab-into-invisible-controls; focus move/restore
+  // gives the screen-reader and keyboard user a sensible landing spot.
+
+  let previousFocus = null;
 
   function openMenu() {
+    previousFocus = document.activeElement;
     menu.classList.add('open');
     backdrop.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
@@ -38,6 +50,10 @@
     hamburger.setAttribute('aria-expanded', 'true');
     hamburger.setAttribute('aria-label', 'Close menu');
     document.body.classList.add('mobile-menu-open');
+    const firstFocusable = menu.querySelector(
+      'button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    (firstFocusable || menu).focus();
   }
 
   function closeMenu() {
@@ -48,6 +64,13 @@
     hamburger.setAttribute('aria-expanded', 'false');
     hamburger.setAttribute('aria-label', 'Open menu');
     document.body.classList.remove('mobile-menu-open');
+    if (previousFocus && typeof previousFocus.focus === 'function'
+      && document.contains(previousFocus)) {
+      previousFocus.focus();
+    } else {
+      hamburger.focus();
+    }
+    previousFocus = null;
   }
 
   function isOpen() {
@@ -224,6 +247,5 @@
   }
 
   applyViewport(mql.matches);
-  if (mql.addEventListener) mql.addEventListener('change', (e) => applyViewport(e.matches));
-  else if (mql.addListener) mql.addListener((e) => applyViewport(e.matches));
+  mql.addEventListener('change', (e) => applyViewport(e.matches));
 })();

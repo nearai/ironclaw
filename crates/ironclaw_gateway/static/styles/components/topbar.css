@@ -180,8 +180,11 @@
   white-space: nowrap;
 }
 
-/* Restart Button */
-.tab-bar .restart-btn {
+/* Restart Button — styling applies whether the button sits in its
+   original .tab-bar home OR has been relocated into the mobile drawer
+   footer by mobile-menu.js. Without :is(), restart loses its chrome
+   and disabled/spinning state styling on mobile. */
+:is(.tab-bar, .mobile-menu-footer) .restart-btn {
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -196,27 +199,27 @@
   transition: color 150ms, background-color 150ms, border-color 150ms;
 }
 
-.tab-bar .restart-btn:hover:not(:disabled) {
+:is(.tab-bar, .mobile-menu-footer) .restart-btn:hover:not(:disabled) {
   background-color: var(--accent-tee-bg);
 }
 
-.tab-bar .restart-btn:disabled {
+:is(.tab-bar, .mobile-menu-footer) .restart-btn:disabled {
   border-color: var(--border-modal);
   color: var(--text-dimmed);
   cursor: not-allowed;
 }
 
-.tab-bar .restart-btn:disabled:hover {
+:is(.tab-bar, .mobile-menu-footer) .restart-btn:disabled:hover {
   background-color: transparent;
 }
 
-.tab-bar .restart-btn svg {
+:is(.tab-bar, .mobile-menu-footer) .restart-btn svg {
   flex-shrink: 0;
   width: 13px;
   height: 13px;
 }
 
-.tab-bar .restart-btn svg.spinning {
+:is(.tab-bar, .mobile-menu-footer) .restart-btn svg.spinning {
   animation: spin-icon 1s linear infinite;
 }
 
