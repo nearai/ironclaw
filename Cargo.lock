@@ -4043,6 +4043,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_resources"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_safety"
 version = "0.2.1"
 dependencies = [
