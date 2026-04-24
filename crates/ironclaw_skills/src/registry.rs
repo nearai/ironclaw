@@ -142,6 +142,41 @@ fn normalize_install_content(
             let rendered = assemble_skill_md(&rewritten_yaml, &prompt_content);
             Ok((normalized_name, rendered))
         }
+        Err(SkillParseError::MissingFrontmatter) => {
+            // The registry skill was published as raw markdown without YAML
+            // frontmatter delimiters. Synthesize minimal frontmatter from the
+            // requested identifier so the install can succeed rather than
+            // hard-failing. Without a requested_identifier there is no safe
+            // name to derive, so we surface the parse error unchanged.
+            let skill_name = requested_identifier
+                .and_then(normalize_skill_identifier)
+                .ok_or_else(|| SkillRegistryError::ParseError {
+                    name: "(install)".to_string(),
+                    reason: "Missing YAML frontmatter delimiters (expected `---` at start of file); \
+                             provide a skill name via the identifier argument to allow recovery"
+                        .to_string(),
+                })?;
+
+            let prompt_content = normalized_content.trim();
+            if prompt_content.is_empty() {
+                return Err(SkillRegistryError::ParseError {
+                    name: skill_name,
+                    reason: "Skill content is empty".to_string(),
+                });
+            }
+
+            tracing::debug!(
+                skill_name = %skill_name,
+                requested_identifier = requested_identifier.unwrap_or(""),
+                "Synthesizing missing SKILL.md frontmatter from requested identifier during install"
+            );
+
+            let synthesized_yaml = format!("name: {}\n", skill_name);
+            let rendered = assemble_skill_md(&synthesized_yaml, prompt_content);
+            // Validate the synthesized content parses correctly before committing.
+            parse_skill_md(&rendered).map_err(|e| parse_error_for_install(&skill_name, e))?;
+            Ok((skill_name, rendered))
+        }
         Err(e) => Err(parse_error_for_install("(install)", e)),
     }
 }
@@ -1361,6 +1396,57 @@ mod tests {
 
         assert_eq!(name, "alice-mortgage-calculator");
         assert!(rewritten.contains("name: alice-mortgage-calculator"));
+    }
+
+    #[test]
+    fn test_resolve_install_content_synthesizes_frontmatter_when_missing() {
+        // Regression test for #2914: registry skills published as raw markdown
+        // (no `---` frontmatter) must install successfully when a valid
+        // requested_identifier is provided.
+        let raw_markdown = "You are a marketing strategy assistant.\n\nHelp users craft PMM plans.\n";
+
+        let (name, rewritten) =
+            SkillRegistry::resolve_install_content(raw_markdown, Some("marketing-strategy-pmm"))
+                .unwrap();
+
+        assert_eq!(name, "marketing-strategy-pmm");
+        assert!(rewritten.starts_with("---\n"), "should have frontmatter: {rewritten}");
+        assert!(rewritten.contains("name: marketing-strategy-pmm"));
+        assert!(
+            rewritten.contains("You are a marketing strategy assistant."),
+            "prompt body should be preserved: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_install_content_missing_frontmatter_without_identifier_returns_error() {
+        // Without a requested_identifier, a missing-frontmatter skill cannot be
+        // recovered (no name to derive) and must return a descriptive error.
+        let raw_markdown = "You are a marketing assistant.\n";
+
+        let err = SkillRegistry::resolve_install_content(raw_markdown, None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("Missing YAML frontmatter"),
+            "error should mention frontmatter: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_install_content_missing_frontmatter_with_namespaced_identifier() {
+        // `owner/skill-name` identifiers are normalized the same way as in the
+        // InvalidName path: slashes become hyphens.
+        let raw_markdown = "Raw skill prompt without any frontmatter.\n";
+
+        let (name, rewritten) = SkillRegistry::resolve_install_content(
+            raw_markdown,
+            Some("acme/raw-skill"),
+        )
+        .unwrap();
+
+        assert_eq!(name, "acme-raw-skill");
+        assert!(rewritten.contains("name: acme-raw-skill"));
+        assert!(rewritten.contains("Raw skill prompt without any frontmatter."));
     }
 
     #[tokio::test]
