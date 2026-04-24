@@ -87,6 +87,7 @@ pub trait EffectExecutor: Send + Sync {
     ) -> Result<ActionInventory, EngineError> {
         Ok(ActionInventory {
             inline: self.available_actions(leases, context).await?,
+            discoverable: Vec::new(),
         })
     }
 

@@ -182,7 +182,7 @@ fn build_codeact_system_prompt_inner(
         prompt.push_str(CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING);
         prompt.push('\n');
         prompt.push_str(
-            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn.\n\n",
+            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn. If you need parameter details before enabling one, call `tool_info(name=\"<tool>\", detail=\"summary\")` on one of the previewed tools.\n\n",
         );
         for capability in activatable_integrations {
             prompt.push_str(&render_activatable_integration(capability));
@@ -543,6 +543,7 @@ mod tests {
         assert!(prompt.contains("## Activatable Integrations"));
         assert!(prompt.contains("`slack` [provider]"));
         assert!(prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(prompt.contains("tool_info(name=\"<tool>\", detail=\"summary\")"));
         assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
     }
 

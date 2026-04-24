@@ -218,6 +218,7 @@ async def test_tool_activate_is_the_visible_enablement_tool(v2_activate_surface_
         timeout=45,
     )
     assert 'tool_activate(name="<integration>")' in system_prompt
+    assert 'tool_info(name="<tool>", detail="summary")' in system_prompt
     assert "tool_auth" not in system_prompt
     assert "tool_install" not in system_prompt
 
@@ -258,6 +259,7 @@ async def test_blocked_integration_surfaces_in_activatable_section(v2_activate_s
         )
         assert "## Activatable Integrations" in system_prompt
         assert 'tool_activate(name="<integration>")' in system_prompt
+        assert 'tool_info(name="<tool>", detail="summary")' in system_prompt
         assert "`gmail` [provider]" in system_prompt
         assert "tool_install" not in system_prompt
     finally:

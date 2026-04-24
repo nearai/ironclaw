@@ -540,6 +540,7 @@ impl EffectExecutor for ToolInfoCallableEffects {
 
         Ok(ActionInventory {
             inline: vec![gmail, tool_info],
+            discoverable: Vec::new(),
         })
     }
 

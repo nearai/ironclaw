@@ -41,7 +41,15 @@ impl ActionDiscovery {
         params: &serde_json::Value,
         inventory: &ActionInventory,
     ) -> Result<Option<ToolOutput>, ToolError> {
-        Self::tool_info_from_actions(params, &inventory.inline)
+        let name = require_str(params, "name")?;
+        let detail = ActionInfoDetail::parse(params)?;
+        let action = Self::resolve(&inventory.inline, name)
+            .or_else(|| Self::resolve(&inventory.discoverable, name));
+        let Some(action) = action else {
+            return Ok(None);
+        };
+
+        Ok(Some(Self::tool_output(action, detail)?))
     }
 
     pub(crate) fn tool_info_from_actions(
@@ -187,6 +195,7 @@ mod tests {
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
             &ActionInventory {
                 inline: vec![action],
+                discoverable: Vec::new(),
             },
         )
         .expect("tool_info should succeed")
@@ -204,6 +213,7 @@ mod tests {
             &serde_json::json!({"name": "mission_create", "detail": "summary"}),
             &ActionInventory {
                 inline: vec![action("mission_create")],
+                discoverable: Vec::new(),
             },
         )
         .expect("tool_info should succeed")
@@ -225,5 +235,43 @@ mod tests {
         .expect("action should resolve");
 
         assert_eq!(output.result["name"], serde_json::json!("mission_create"));
+    }
+
+    #[test]
+    fn tool_info_falls_back_to_discoverable_actions() {
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "gmail_send", "detail": "summary"}),
+            &ActionInventory {
+                inline: Vec::new(),
+                discoverable: vec![action("gmail_send")],
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("discoverable action should resolve");
+
+        assert_eq!(output.result["name"], serde_json::json!("gmail_send"));
+    }
+
+    #[test]
+    fn tool_info_prefers_inline_action_over_discoverable_duplicate() {
+        let mut inline = action("gmail_send");
+        inline.description = "Inline action".to_string();
+        let mut discoverable = action("gmail_send");
+        discoverable.description = "Discoverable action".to_string();
+
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "gmail_send"}),
+            &ActionInventory {
+                inline: vec![inline],
+                discoverable: vec![discoverable],
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("inline action should resolve");
+
+        assert_eq!(
+            output.result["description"],
+            serde_json::json!("Inline action")
+        );
     }
 }

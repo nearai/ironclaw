@@ -2190,6 +2190,7 @@ mod tests {
                         discovery: None,
                     },
                 ],
+                discoverable: Vec::new(),
             })
         }
 

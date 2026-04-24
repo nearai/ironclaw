@@ -144,15 +144,17 @@ pub struct ActionDef {
     pub discovery: Option<ActionDiscoveryMetadata>,
 }
 
-/// Model-visible callable action inventory for a single execution step.
+/// Model-visible action inventory for a single execution step.
 ///
-/// All actions in this inventory are callable. Richer schema/details remain
-/// available through `tool_info`, while non-callable runtime context belongs
-/// in capability background surfacing.
+/// `inline` actions are callable now. `discoverable` actions are not callable
+/// yet, but remain available to `tool_info` for step-scoped discovery (for
+/// example blocked actions under `Activatable Integrations`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActionInventory {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline: Vec<ActionDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discoverable: Vec<ActionDef>,
 }
 
 /// Curated discovery guidance for a callable action.

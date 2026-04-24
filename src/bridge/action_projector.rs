@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, CapabilityLease,
+    ActionDef, ActionDiscoveryMetadata, ActionDiscoverySummary, ActionInventory, CapabilityLease,
     CapabilityRegistry, CapabilityStatus, EngineError, ThreadExecutionContext,
 };
 
@@ -15,11 +15,17 @@ use crate::bridge::capability_projector::{
 use crate::bridge::tool_surface::{
     InvocationMode, SurfacePolicyInput, SurfaceSubjectKind, assign_surface,
 };
-use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
+use crate::extensions::{InstalledExtension, LatentProviderAction};
 use crate::tools::ToolRegistry;
 
 pub(crate) struct ActionProjector;
+
+struct InventoryInputs {
+    tool_defs: Vec<Arc<dyn crate::tools::Tool>>,
+    extension_statuses: Option<HashMap<String, InstalledExtension>>,
+    latent_actions: Vec<LatentProviderAction>,
+}
 
 impl ActionProjector {
     /// Project the set of available actions from the tool registry and
@@ -29,125 +35,211 @@ impl ActionProjector {
     /// instead of fetching from `auth_manager`. This allows the caller
     /// (typically `EffectBridgeAdapter`) to share a single fetch across
     /// both `ActionProjector` and `CapabilityProjector`.
-    pub(crate) async fn project_actions(
+    pub(crate) async fn project_inventory(
         tools: &ToolRegistry,
         auth_manager: Option<&AuthManager>,
         capability_registry: Option<Arc<CapabilityRegistry>>,
         leases: &[CapabilityLease],
         context: &ThreadExecutionContext,
         prefetched_extensions: Option<&HashMap<String, InstalledExtension>>,
-    ) -> Result<Vec<ActionDef>, EngineError> {
-        let tool_defs = tools.all().await;
-        let owned_statuses;
-        let extension_statuses: Option<&HashMap<String, InstalledExtension>> = if let Some(
-            prefetched,
-        ) =
-            prefetched_extensions
+    ) -> Result<ActionInventory, EngineError> {
+        let inputs =
+            load_inventory_inputs(tools, auth_manager, context, prefetched_extensions).await;
+        Ok(classify_projected_actions(
+            inputs,
+            capability_registry.as_ref(),
+            leases,
+        ))
+    }
+}
+
+async fn load_inventory_inputs(
+    tools: &ToolRegistry,
+    auth_manager: Option<&AuthManager>,
+    context: &ThreadExecutionContext,
+    prefetched_extensions: Option<&HashMap<String, InstalledExtension>>,
+) -> InventoryInputs {
+    let tool_defs = tools.all().await;
+    let extension_statuses = if let Some(prefetched) = prefetched_extensions {
+        Some(prefetched.clone())
+    } else if let Some(auth_manager) = auth_manager {
+        match auth_manager
+            .list_capability_extensions(&context.user_id)
+            .await
         {
-            Some(prefetched)
-        } else if let Some(auth_manager) = auth_manager {
-            match auth_manager
-                .list_capability_extensions(&context.user_id)
-                .await
-            {
-                Ok(extensions) => {
-                    owned_statuses = extensions
-                        .into_iter()
-                        .map(|extension| (extension.name.clone(), extension))
-                        .collect::<HashMap<_, _>>();
-                    Some(&owned_statuses)
-                }
-                Err(error) => {
-                    debug!(
-                        user_id = %context.user_id,
-                        error = %error,
-                        "failed to load extension inventory for available_actions; omitting extension-backed actions"
-                    );
-                    owned_statuses = HashMap::new();
-                    Some(&owned_statuses)
-                }
+            Ok(extensions) => Some(
+                extensions
+                    .into_iter()
+                    .map(|extension| (extension.name.clone(), extension))
+                    .collect::<HashMap<_, _>>(),
+            ),
+            Err(error) => {
+                debug!(
+                    user_id = %context.user_id,
+                    error = %error,
+                    "failed to load extension inventory for available_actions; omitting extension-backed actions"
+                );
+                Some(HashMap::new())
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
+    let latent_actions = if let Some(auth_manager) = auth_manager {
+        auth_manager.latent_provider_actions(&context.user_id).await
+    } else {
+        Vec::new()
+    };
 
-        let mut actions = Vec::with_capacity(tool_defs.len());
-        for tool in tool_defs {
-            if crate::bridge::effect_adapter::is_v1_only_tool(tool.name()) {
-                continue;
-            }
-            if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
-                continue;
-            }
-            if hidden_from_model_callable_surface(tool.name()) {
-                continue;
-            }
+    InventoryInputs {
+        tool_defs,
+        extension_statuses,
+        latent_actions,
+    }
+}
 
-            if let Some(provider_extension) = tool.provider_extension() {
-                let Some(extension_statuses) = extension_statuses else {
+fn classify_projected_actions(
+    inputs: InventoryInputs,
+    capability_registry: Option<&Arc<CapabilityRegistry>>,
+    leases: &[CapabilityLease],
+) -> ActionInventory {
+    let InventoryInputs {
+        tool_defs,
+        extension_statuses,
+        latent_actions,
+    } = inputs;
+    let mut inline = Vec::with_capacity(tool_defs.len());
+    let mut discoverable = Vec::new();
+
+    for tool in tool_defs {
+        match classify_registered_tool(tool.as_ref(), extension_statuses.as_ref()) {
+            ProjectedAction::Inline(action) => inline.push(action),
+            ProjectedAction::Discoverable(action) => discoverable.push(action),
+            ProjectedAction::Hidden => {}
+        }
+    }
+
+    let mut seen_inline: HashSet<String> =
+        inline.iter().map(|action| action.name.clone()).collect();
+
+    if let Some(registry) = capability_registry {
+        for lease in leases {
+            if lease.capability_name == "tools" {
+                continue;
+            }
+            let Some(cap) = registry.get(&lease.capability_name) else {
+                continue;
+            };
+            for action in &cap.actions {
+                if !lease.granted_actions.covers(&action.name) {
                     continue;
-                };
-                let Some(extension) =
-                    provider_extension_status(extension_statuses, provider_extension)
-                else {
+                }
+                if crate::bridge::effect_adapter::is_v1_only_tool(&action.name)
+                    || crate::bridge::effect_adapter::is_v1_auth_tool(&action.name)
+                {
                     continue;
-                };
-                let status = capability_status_for_extension(extension, false);
-                let (kind, invocation_mode) = capability_surface_subject_for_extension(extension);
+                }
                 let assignment = assign_surface(SurfacePolicyInput {
-                    kind,
-                    status,
-                    invocation_mode,
-                    leased_and_callable: false,
+                    kind: SurfaceSubjectKind::EngineNativeDirectAction,
+                    status: CapabilityStatus::Ready,
+                    invocation_mode: InvocationMode::Direct,
+                    leased_and_callable: true,
                 });
-                if !assignment.available_actions {
+                if !assignment.available_actions || !seen_inline.insert(action.name.clone()) {
                     continue;
                 }
-            }
-
-            actions.push(project_tool_action(tool.as_ref()));
-        }
-
-        let mut seen: HashSet<String> = actions.iter().map(|action| action.name.clone()).collect();
-
-        if let Some(registry) = capability_registry.as_ref() {
-            for lease in leases {
-                if lease.capability_name == "tools" {
-                    continue;
-                }
-                let Some(cap) = registry.get(&lease.capability_name) else {
-                    continue;
-                };
-                for action in &cap.actions {
-                    if !lease.granted_actions.covers(&action.name) {
-                        continue;
-                    }
-                    if crate::bridge::effect_adapter::is_v1_only_tool(&action.name)
-                        || crate::bridge::effect_adapter::is_v1_auth_tool(&action.name)
-                    {
-                        continue;
-                    }
-                    let assignment = assign_surface(SurfacePolicyInput {
-                        kind: SurfaceSubjectKind::EngineNativeDirectAction,
-                        status: CapabilityStatus::Ready,
-                        invocation_mode: InvocationMode::Direct,
-                        leased_and_callable: true,
-                    });
-                    if !assignment.available_actions || !seen.insert(action.name.clone()) {
-                        continue;
-                    }
-                    actions.push(action.clone());
-                }
+                inline.push(action.clone());
             }
         }
+    }
 
-        actions.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(actions)
+    let mut seen_discoverable: HashSet<String> = seen_inline.clone();
+    for latent in latent_actions {
+        let action = project_latent_action(latent);
+        if seen_discoverable.insert(action.name.clone()) {
+            discoverable.push(action);
+        }
+    }
+    discoverable.retain(|action| seen_inline.insert(action.name.clone()));
+
+    inline.sort_by(|a, b| a.name.cmp(&b.name));
+    discoverable.sort_by(|a, b| a.name.cmp(&b.name));
+    ActionInventory {
+        inline,
+        discoverable,
+    }
+}
+
+enum ProjectedAction {
+    Inline(ActionDef),
+    Discoverable(ActionDef),
+    Hidden,
+}
+
+fn classify_registered_tool(
+    tool: &dyn crate::tools::Tool,
+    extension_statuses: Option<&HashMap<String, InstalledExtension>>,
+) -> ProjectedAction {
+    if crate::bridge::effect_adapter::is_v1_only_tool(tool.name()) {
+        return ProjectedAction::Hidden;
+    }
+    if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
+        return ProjectedAction::Hidden;
+    }
+    if hidden_from_model_callable_surface(tool.name()) {
+        return ProjectedAction::Hidden;
+    }
+
+    if let Some(provider_extension) = tool.provider_extension() {
+        let Some(extension_statuses) = extension_statuses else {
+            return ProjectedAction::Hidden;
+        };
+        let Some(extension) = provider_extension_status(extension_statuses, provider_extension)
+        else {
+            return ProjectedAction::Hidden;
+        };
+        let status = capability_status_for_extension(extension, false);
+        let (kind, invocation_mode) = capability_surface_subject_for_extension(extension);
+        let assignment = assign_surface(SurfacePolicyInput {
+            kind,
+            status,
+            invocation_mode,
+            leased_and_callable: false,
+        });
+        let action = project_tool_action(tool);
+        if assignment.available_actions {
+            ProjectedAction::Inline(action)
+        } else if supports_pre_activation_discovery(kind, invocation_mode, status) {
+            ProjectedAction::Discoverable(action)
+        } else {
+            ProjectedAction::Hidden
+        }
+    } else {
+        ProjectedAction::Inline(project_tool_action(tool))
     }
 }
 
 fn hidden_from_model_callable_surface(tool_name: &str) -> bool {
     matches!(tool_name, "tool_install" | "tool-install")
+}
+
+fn supports_pre_activation_discovery(
+    kind: SurfaceSubjectKind,
+    invocation_mode: InvocationMode,
+    status: CapabilityStatus,
+) -> bool {
+    matches!(
+        (kind, invocation_mode, status),
+        (
+            SurfaceSubjectKind::ExtensionDirectAction
+                | SurfaceSubjectKind::AvailableNotInstalledProviderEntry,
+            InvocationMode::Direct,
+            CapabilityStatus::NeedsAuth
+                | CapabilityStatus::NeedsSetup
+                | CapabilityStatus::Inactive
+                | CapabilityStatus::AvailableNotInstalled
+        )
+    )
 }
 
 fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
@@ -180,6 +272,17 @@ fn project_tool_action(tool: &dyn crate::tools::Tool) -> ActionDef {
     }
 }
 
+fn project_latent_action(action: LatentProviderAction) -> ActionDef {
+    ActionDef {
+        name: action.action_name.replace('-', "_"),
+        description: action.description,
+        parameters_schema: action.parameters_schema,
+        effects: vec![],
+        requires_approval: false,
+        discovery: None,
+    }
+}
+
 fn provider_extension_status<'a>(
     extension_statuses: &'a HashMap<String, InstalledExtension>,
     provider_extension: &str,
@@ -207,7 +310,7 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use ironclaw_engine::ThreadExecutionContext;
+    use ironclaw_engine::{ActionInventory, ThreadExecutionContext};
 
     use super::{ActionProjector, project_tool_action, provider_extension_status};
     use crate::extensions::{ExtensionKind, InstalledExtension};
@@ -391,12 +494,12 @@ mod tests {
         }
     }
 
-    async fn projected_action_names(
+    async fn projected_inventory(
         tool_name: &'static str,
         description: &'static str,
         provider_extension: &'static str,
         extension: InstalledExtension,
-    ) -> Vec<String> {
+    ) -> ActionInventory {
         let tools = std::sync::Arc::new(ToolRegistry::new());
         tools
             .register(std::sync::Arc::new(ProviderTool {
@@ -407,7 +510,7 @@ mod tests {
             .await;
 
         let extension_map = HashMap::from([(extension.name.clone(), extension)]);
-        let actions = ActionProjector::project_actions(
+        ActionProjector::project_inventory(
             tools.as_ref(),
             None,
             None,
@@ -416,9 +519,7 @@ mod tests {
             Some(&extension_map),
         )
         .await
-        .expect("project should succeed");
-
-        actions.into_iter().map(|action| action.name).collect()
+        .expect("project should succeed")
     }
 
     fn test_context() -> ThreadExecutionContext {
@@ -502,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn needs_auth_provider_tools_omitted_from_available_actions() {
-        let actions = projected_action_names(
+        let inventory = projected_inventory(
             "gmail_send",
             "Send a Gmail message",
             "gmail",
@@ -511,14 +612,26 @@ mod tests {
         .await;
 
         assert!(
-            !actions.iter().any(|a| a == "gmail_send"),
-            "NeedsAuth provider tool should be omitted from available_actions, got: {actions:?}"
+            !inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "gmail_send"),
+            "NeedsAuth provider tool should be omitted from available_actions, got: {:?}",
+            inventory.inline
+        );
+        assert!(
+            inventory
+                .discoverable
+                .iter()
+                .any(|action| action.name == "gmail_send"),
+            "NeedsAuth provider tool should remain discoverable, got: {:?}",
+            inventory.discoverable
         );
     }
 
     #[tokio::test]
     async fn needs_setup_provider_tools_omitted_from_available_actions() {
-        let actions = projected_action_names(
+        let inventory = projected_inventory(
             "notion_search",
             "Search Notion",
             "notion",
@@ -527,14 +640,26 @@ mod tests {
         .await;
 
         assert!(
-            !actions.iter().any(|a| a == "notion_search"),
-            "NeedsSetup provider tool should be omitted from available_actions, got: {actions:?}"
+            !inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "notion_search"),
+            "NeedsSetup provider tool should be omitted from available_actions, got: {:?}",
+            inventory.inline
+        );
+        assert!(
+            inventory
+                .discoverable
+                .iter()
+                .any(|action| action.name == "notion_search"),
+            "NeedsSetup provider tool should remain discoverable, got: {:?}",
+            inventory.discoverable
         );
     }
 
     #[tokio::test]
     async fn inactive_provider_tools_omitted_from_available_actions() {
-        let actions = projected_action_names(
+        let inventory = projected_inventory(
             "github_search",
             "Search GitHub",
             "github",
@@ -543,14 +668,26 @@ mod tests {
         .await;
 
         assert!(
-            !actions.iter().any(|a| a == "github_search"),
-            "Inactive provider tool should be omitted from available_actions, got: {actions:?}"
+            !inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "github_search"),
+            "Inactive provider tool should be omitted from available_actions, got: {:?}",
+            inventory.inline
+        );
+        assert!(
+            inventory
+                .discoverable
+                .iter()
+                .any(|action| action.name == "github_search"),
+            "Inactive provider tool should remain discoverable, got: {:?}",
+            inventory.discoverable
         );
     }
 
     #[tokio::test]
     async fn routed_channel_tools_omitted_from_available_actions() {
-        let actions = projected_action_names(
+        let inventory = projected_inventory(
             "telegram_send",
             "Send a Telegram message",
             "telegram",
@@ -559,14 +696,26 @@ mod tests {
         .await;
 
         assert!(
-            !actions.iter().any(|a| a == "telegram_send"),
-            "Routed-only channel tool should be omitted from available_actions, got: {actions:?}"
+            !inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "telegram_send"),
+            "Routed-only channel tool should be omitted from available_actions, got: {:?}",
+            inventory.inline
+        );
+        assert!(
+            !inventory
+                .discoverable
+                .iter()
+                .any(|action| action.name == "telegram_send"),
+            "Routed-only channel tool should stay out of discoverable inventory, got: {:?}",
+            inventory.discoverable
         );
     }
 
     #[tokio::test]
     async fn latent_provider_tools_omitted_from_available_actions() {
-        let actions = projected_action_names(
+        let inventory = projected_inventory(
             "latent_send",
             "Send via latent provider",
             "latent_provider",
@@ -580,8 +729,20 @@ mod tests {
         .await;
 
         assert!(
-            !actions.iter().any(|a| a == "latent_send"),
-            "Not-installed provider tool should be omitted from available_actions, got: {actions:?}"
+            !inventory
+                .inline
+                .iter()
+                .any(|action| action.name == "latent_send"),
+            "Not-installed provider tool should be omitted from available_actions, got: {:?}",
+            inventory.inline
+        );
+        assert!(
+            inventory
+                .discoverable
+                .iter()
+                .any(|action| action.name == "latent_send"),
+            "Not-installed provider tool should remain discoverable, got: {:?}",
+            inventory.discoverable
         );
     }
 
@@ -599,7 +760,7 @@ mod tests {
             }))
             .await;
 
-        let actions = ActionProjector::project_actions(
+        let inventory = ActionProjector::project_inventory(
             tools.as_ref(),
             None,
             None,
@@ -609,7 +770,8 @@ mod tests {
         )
         .await
         .expect("project should succeed");
-        let action_names = actions
+        let action_names = inventory
+            .inline
             .into_iter()
             .map(|action| action.name)
             .collect::<Vec<_>>();

@@ -65,10 +65,13 @@ pub async fn execute_action_calls(
     let mut early_events = Vec::new();
     let mut early_results = Vec::new();
     let active_leases = leases.active_for_thread(thread.id).await;
-    let available_actions: Arc<[crate::types::capability::ActionDef]> = effects
-        .available_actions(&active_leases, context)
-        .await?
-        .into();
+    let available_inventory = Arc::new(
+        effects
+            .available_action_inventory(&active_leases, context)
+            .await?,
+    );
+    let available_actions: Arc<[crate::types::capability::ActionDef]> =
+        available_inventory.inline.clone().into();
 
     // ── Phase 1: Preflight (sequential) ─────────────────────────
     // Check leases and policies for every call. RequireApproval interrupts
@@ -215,9 +218,8 @@ pub async fn execute_action_calls(
     if runnable_indices.len() == 1 {
         let (idx, lease) = runnable_indices.into_iter().next().unwrap(); // safety: len()==1 checked above
         let call = &calls[idx];
-        let mut exec_ctx = context.clone();
-        exec_ctx.current_call_id = Some(call.id.clone());
-        exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+        let exec_ctx =
+            stamp_execution_context(context, &call.id, &available_actions, &available_inventory);
         let execution_start = Instant::now();
         let exec_result = effects
             .execute_action(
@@ -243,9 +245,12 @@ pub async fn execute_action_calls(
 
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
-            let mut ctx = context.clone();
-            ctx.current_call_id = Some(call.id.clone());
-            ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
+            let ctx = stamp_execution_context(
+                context,
+                &call.id,
+                &available_actions,
+                &available_inventory,
+            );
             let effects = effects.clone();
             let lease = lease.clone();
 
@@ -342,6 +347,19 @@ pub async fn execute_action_calls(
         events,
         need_approval: first_interrupt,
     })
+}
+
+fn stamp_execution_context(
+    context: &ThreadExecutionContext,
+    call_id: &str,
+    available_actions: &Arc<[crate::types::capability::ActionDef]>,
+    available_inventory: &Arc<crate::types::capability::ActionInventory>,
+) -> ThreadExecutionContext {
+    let mut exec_ctx = context.clone();
+    exec_ctx.current_call_id = Some(call_id.to_string());
+    exec_ctx.available_actions_snapshot = Some(Arc::clone(available_actions));
+    exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(available_inventory));
+    exec_ctx
 }
 
 /// Classify an execution result into an `(ActionResult, EventKind)` pair.
@@ -1255,6 +1273,30 @@ mod tests {
             Ok(vec![test_action("create_issue")])
         }
 
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: vec![test_action("create_issue")],
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "to": {"type": "string"}
+                        },
+                        "required": ["to"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    discovery: None,
+                }],
+            })
+        }
+
         async fn available_capabilities(
             &self,
             _: &[CapabilityLease],
@@ -1301,6 +1343,125 @@ mod tests {
 
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].action_name, "create_issue");
+        assert!(!result.results[0].is_error);
+    }
+
+    struct StructuredToolInfoEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for StructuredToolInfoEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            params: serde_json::Value,
+            _lease: &CapabilityLease,
+            ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let output = if name == "tool_info" {
+                let requested = params
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let discovered = ctx
+                    .available_action_inventory_snapshot
+                    .as_ref()
+                    .and_then(|inventory| {
+                        inventory
+                            .discoverable
+                            .iter()
+                            .find(|action| action.matches_name(requested))
+                    })
+                    .map(|action| action.name.clone())
+                    .unwrap_or_else(|| format!("missing_discoverable:{requested}"));
+                serde_json::json!({ "resolved": discovered })
+            } else {
+                serde_json::json!({ "ok": true })
+            };
+
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: name.replace('-', "_"),
+                output,
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![test_action("tool_info")])
+        }
+
+        async fn available_action_inventory(
+            &self,
+            _leases: &[CapabilityLease],
+            _context: &ThreadExecutionContext,
+        ) -> Result<crate::types::capability::ActionInventory, EngineError> {
+            Ok(crate::types::capability::ActionInventory {
+                inline: vec![test_action("tool_info")],
+                discoverable: vec![ActionDef {
+                    name: "gmail_send".to_string(),
+                    description: "Send an email".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    discovery: None,
+                }],
+            })
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_execution_propagates_action_inventory_snapshot_to_executor_context() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(StructuredToolInfoEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["tool_info".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_tool_info_snapshot".into(),
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({"name": "gmail_send", "detail": "summary"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(
+            result.results[0].output["resolved"],
+            serde_json::json!("gmail_send")
+        );
         assert!(!result.results[0].is_error);
     }
 }
